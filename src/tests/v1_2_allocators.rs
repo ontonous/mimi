@@ -12,7 +12,7 @@ func main() -> i32 {
     x
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -26,7 +26,7 @@ func main() -> i32 {
     result
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(10)));
 }
 
 #[test]
@@ -41,8 +41,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("inside bump".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("inside bump".to_string()))
     );
 }
 
@@ -57,7 +57,7 @@ func main() -> i32 {
     x
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(99));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(99)));
 }
 
 #[test]
@@ -74,7 +74,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(2));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(2)));
 }
 
 #[test]
@@ -89,7 +89,7 @@ func main() -> i32 {
     result
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(20));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(20)));
 }
 
 #[test]
@@ -109,7 +109,7 @@ func main() -> i32 {
     result
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -131,8 +131,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("green".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("green".to_string()))
     );
 }
 
@@ -147,8 +147,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("system".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("system".to_string()))
     );
 }
 
@@ -163,8 +163,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("arena".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("arena".to_string()))
     );
 }
 
@@ -179,8 +179,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("bump".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("bump".to_string()))
     );
 }
 
@@ -193,7 +193,7 @@ func main() -> i32 {
     r
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -203,7 +203,7 @@ func main() -> i32 {
     bump_used()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(0));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
 }
 
 #[test]
@@ -221,7 +221,7 @@ func main() -> i32 {
     result
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -237,5 +237,5 @@ func main() -> i32 {
     sum
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }

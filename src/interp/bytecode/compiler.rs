@@ -8,7 +8,6 @@ use super::instr::*;
 use super::registry;
 use crate::ast::*;
 use crate::interp::error::InterpError;
-use crate::interp::value::Value;
 use std::collections::HashMap;
 
 /// Bytecode compiler: transforms AST functions into FunctionProto.
@@ -35,6 +34,8 @@ pub struct BytecodeCompiler {
     flow_persistent: std::collections::HashMap<String, Vec<String>>,
     /// Flows with @transactional persistent fields (fault rollback).
     flow_transactional: std::collections::HashSet<String>,
+    /// Type definitions (for type_fields / type_variants).
+    type_defs: std::collections::HashMap<String, crate::ast::TypeDefKind>,
     /// Known actor names (for spawn resolution).
     actor_names: std::collections::HashSet<String>,
     /// Known extern function names (for clear error messages).
@@ -304,6 +305,7 @@ impl BytecodeCompiler {
             flow_fails_transitions: std::collections::HashSet::new(),
             flow_persistent: HashMap::new(),
             flow_transactional: std::collections::HashSet::new(),
+            type_defs: HashMap::new(),
             actor_method_funcs: HashMap::new(),
             ast_file: None,
             func_defaults: HashMap::new(),
@@ -371,8 +373,15 @@ impl BytecodeCompiler {
                     .map(|(i, _)| i as u16)
                     .collect();
             }
+            // Module functions are registered under their qualified path
+            // (Module::sub::name) so `M::f(...)` calls resolve like top-level
+            // functions (tree-walker `build_qualified_path` parity).
+            if let Item::Module(m) = item {
+                self.collect_module_funcs(m, "");
+            }
             // Collect enum variant names and newtype names for constructor resolution.
             if let Item::Type(td) = item {
+                self.type_defs.insert(td.name.clone(), td.kind.clone());
                 match &td.kind {
                     TypeDefKind::Enum(variants) => {
                         for variant in variants {
@@ -483,6 +492,9 @@ impl BytecodeCompiler {
                 let idx = self.func_table[&f.name];
                 let proto = self.compile_func(f)?;
                 self.functions[idx as usize] = proto;
+            }
+            if let Item::Module(m) = item {
+                self.compile_module_funcs(m, "")?;
             }
         }
 
@@ -618,6 +630,7 @@ impl BytecodeCompiler {
             max_children,
             flow_persistent: std::mem::take(&mut self.flow_persistent),
             flow_transactional: std::mem::take(&mut self.flow_transactional),
+            type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
         })
@@ -765,6 +778,7 @@ impl BytecodeCompiler {
             max_children: None,
             flow_persistent: std::mem::take(&mut self.flow_persistent),
             flow_transactional: std::mem::take(&mut self.flow_transactional),
+            type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
         })
@@ -774,6 +788,86 @@ impl BytecodeCompiler {
         let idx = self.builtin_names.len() as BuiltinIdx;
         self.builtin_table.insert(name.to_string(), idx);
         self.builtin_names.push(name.to_string());
+    }
+
+    /// Build a qualified path from nested Field(Ident(...), ...) expressions
+    /// (e.g. `Outer::Inner::f` → "Outer::Inner::f"). Mirrors the tree-walker
+    /// `Interpreter::build_qualified_path`.
+    fn build_qualified_path(obj: &Expr, field: &str) -> Option<String> {
+        match obj.unlocated() {
+            Expr::Ident(name) => Some(format!("{}::{}", name, field)),
+            Expr::Field(inner_obj, inner_field) => {
+                Self::build_qualified_path(inner_obj, inner_field)
+                    .map(|base| format!("{}::{}", base, field))
+            }
+            _ => None,
+        }
+    }
+
+    /// Register module functions under their qualified path (recursive).
+    fn collect_module_funcs(&mut self, module: &crate::ast::ModuleDef, prefix: &str) {
+        let current = if prefix.is_empty() {
+            module.name.clone()
+        } else {
+            format!("{}::{}", prefix, module.name)
+        };
+        for inner in &module.items {
+            match inner {
+                crate::ast::Item::Func(f) => {
+                    let qualified = format!("{}::{}", current, f.name);
+                    let idx = self.functions.len() as FuncIdx;
+                    self.func_table.insert(qualified.clone(), idx);
+                    let defaults: Vec<Option<Expr>> =
+                        f.params.iter().map(|p| p.default_value.clone()).collect();
+                    if defaults.iter().any(|d| d.is_some()) {
+                        self.func_defaults.insert(qualified.clone(), defaults);
+                    }
+                    let param_names: Vec<String> =
+                        f.params.iter().map(|p| p.name.clone()).collect();
+                    self.func_param_names.insert(qualified.clone(), param_names);
+                    self.functions
+                        .push(FunctionProto::new(qualified.clone(), f.params.len() as u16));
+                    let proto = &mut self.functions[idx as usize];
+                    proto.has_mut_params = f.params.iter().any(|p| p.mut_);
+                    proto.mut_param_indices = f
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.mut_)
+                        .map(|(i, _)| i as u16)
+                        .collect();
+                }
+                crate::ast::Item::Module(m) => self.collect_module_funcs(m, &current),
+                _ => {}
+            }
+        }
+    }
+
+    /// Compile module function bodies (recursive), replacing placeholders.
+    fn compile_module_funcs(
+        &mut self,
+        module: &crate::ast::ModuleDef,
+        prefix: &str,
+    ) -> Result<(), InterpError> {
+        let current = if prefix.is_empty() {
+            module.name.clone()
+        } else {
+            format!("{}::{}", prefix, module.name)
+        };
+        for inner in &module.items {
+            match inner {
+                crate::ast::Item::Func(f) => {
+                    let qualified = format!("{}::{}", current, f.name);
+                    if let Some(&idx) = self.func_table.get(&qualified) {
+                        let proto = self.compile_func(f)?;
+                        self.functions[idx as usize] = proto;
+                    }
+                }
+                crate::ast::Item::Module(m) => self.compile_module_funcs(m, &current)?,
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Compile a single function definition.
@@ -1055,10 +1149,14 @@ impl BytecodeCompiler {
                 }
 
                 Stmt::Alloc { body, .. } => {
-                    // Allocator block — just compile the body.
+                    // Allocator block — just compile the body (region memory is
+                    // a tree-walker-only feature; the block value flows through).
                     fc.push_scope();
-                    self.compile_block(fc, body)?;
+                    let result = self.compile_block(fc, body)?;
                     fc.pop_scope();
+                    if is_last {
+                        last_reg = result;
+                    }
                 }
 
                 Stmt::Defer(block) => {
@@ -1230,19 +1328,20 @@ impl BytecodeCompiler {
         match expr.unlocated() {
             Expr::Literal(lit) => self.compile_literal(fc, lit),
             Expr::Ident(name) => {
+                // Constants: inline the value expression.
+                if let Some(const_expr) = self.constants.get(name).cloned() {
+                    return self.compile_expr(fc, &const_expr);
+                }
+                // Local variable reference (shadows nullary constructors and
+                // builtins — e.g. `let None = 99; None` is the variable).
+                if let Some(r) = fc.lookup_var(name) {
+                    return Ok(r);
+                }
                 // Nullary variant constructors used as identifiers.
                 if name == "None" {
                     let rd = fc.proto.alloc_reg();
                     fc.emit(Op::None { rd });
                     return Ok(rd);
-                }
-                // Constants: inline the value expression.
-                if let Some(const_expr) = self.constants.get(name).cloned() {
-                    return self.compile_expr(fc, &const_expr);
-                }
-                // Local variable reference.
-                if let Some(r) = fc.lookup_var(name) {
-                    return Ok(r);
                 }
                 // First-class function reference: emit a zero-capture closure
                 // pointing to the function prototype. This enables HOF usage
@@ -1690,9 +1789,18 @@ impl BytecodeCompiler {
             }
 
             Expr::Comptime(block) => {
-                // Compile-time evaluation: compile the block as a temporary
-                // function, execute it in a sub-VM, and inline the result.
-                self.eval_comptime_at_compile_time(fc, block)
+                // Comptime blocks are evaluated at runtime like a plain block
+                // (tree-walker eval_comptime parity): statements execute in the
+                // enclosing scope and may reference enclosing locals, so they
+                // cannot be folded at compile time.
+                fc.push_scope();
+                let result = self.compile_block(fc, block)?;
+                fc.pop_scope();
+                Ok(result.unwrap_or_else(|| {
+                    let r = fc.proto.alloc_reg();
+                    fc.emit(Op::LoadUnit { rd: r });
+                    r
+                }))
             }
 
             Expr::Quote(block) => self.compile_quote_block_expr(fc, block),
@@ -1973,84 +2081,6 @@ impl BytecodeCompiler {
     /// Compiles the block as a temporary zero-param function, runs it in a
     /// sub-VM against the already-compiled function table, and inlines the
     /// result as a constant.
-    fn eval_comptime_at_compile_time(
-        &mut self,
-        fc: &mut FuncCompiler,
-        block: &Block,
-    ) -> Result<Reg, InterpError> {
-        // Compile the block into a temporary function prototype.
-        let temp_name = format!("__comptime_{}", fc.proto.name);
-        let mut temp_fc = FuncCompiler::new(temp_name.clone(), 0);
-        let last_reg = self.compile_block(&mut temp_fc, block)?;
-        if let Some(r) = last_reg {
-            temp_fc.emit(Op::Ret { ra: r });
-        } else {
-            temp_fc.emit(Op::RetUnit);
-        }
-        let temp_proto = temp_fc.proto;
-
-        // Build a temporary program: clone current functions + append temp.
-        let temp_idx = self.functions.len() as FuncIdx;
-        let mut temp_functions = self.functions.clone();
-        temp_functions.push(temp_proto);
-
-        let temp_program = BytecodeProgram {
-            functions: temp_functions,
-            entry: temp_idx,
-            builtin_names: self.builtin_names.clone(),
-            extern_names: self.extern_name_order.clone(),
-            actor_defs: std::collections::HashMap::new(),
-            flow_defs: std::collections::HashMap::new(),
-            flow_transition_funcs: std::collections::HashMap::new(),
-            flow_fails_transitions: std::collections::HashSet::new(),
-            actor_method_funcs: std::collections::HashMap::new(),
-            max_children: None,
-            flow_persistent: std::collections::HashMap::new(),
-            flow_transactional: std::collections::HashSet::new(),
-            ast: self.ast_file.clone(),
-            record_fields: std::collections::HashMap::new(),
-        };
-
-        // Execute in a sub-VM using call_function (returns precise Value).
-        let mut vm = super::vm::BytecodeVM::new(&temp_program);
-        let result = vm
-            .call_function(temp_idx, &[])
-            .map_err(|e| InterpError::new(format!("comptime evaluation failed: {}", e)))?;
-
-        // Inline the result as a constant.
-        let rd = fc.proto.alloc_reg();
-        match result {
-            Value::Int(n) => {
-                let cidx = fc.proto.add_const(ConstValue::Int(n));
-                fc.emit(Op::LoadConst { rd, idx: cidx });
-            }
-            Value::Float(f) => {
-                let cidx = fc.proto.add_const(ConstValue::Float(f));
-                fc.emit(Op::LoadConst { rd, idx: cidx });
-            }
-            Value::Bool(b) => {
-                let cidx = fc.proto.add_const(ConstValue::Bool(b));
-                fc.emit(Op::LoadConst { rd, idx: cidx });
-            }
-            Value::String(s) => {
-                let cidx = fc.proto.add_const(ConstValue::Str(s));
-                fc.emit(Op::LoadConst { rd, idx: cidx });
-            }
-            Value::Unit => {
-                fc.emit(Op::LoadUnit { rd });
-            }
-            other => {
-                // Complex values (List, Record, etc.) cannot be inlined as
-                // constants. This is a known limitation; comptime blocks that
-                // produce complex values should use quote! instead.
-                return Err(InterpError::new(format!(
-                    "comptime block produced non-constant value: {}",
-                    other
-                )));
-            }
-        }
-        Ok(rd)
-    }
 
     /// Constant folding: evaluate binary operations on literals at compile time.
     fn fold_constants(&self, op: BinOp, l: &Lit, r: &Lit) -> Option<Lit> {
@@ -2479,7 +2509,19 @@ impl BytecodeCompiler {
             }
             // Ownership operators: no-ops in value semantics.
             // &x, &mut x, *x all evaluate to the inner value at runtime.
-            UnOp::Ref | UnOp::RefMut | UnOp::Deref => {
+            UnOp::Deref => {
+                // *r reads through the borrow alias: the CURRENT value of the
+                // original place (assignments via *r already write back).
+                if let Expr::Ident(alias_name) = e.unlocated() {
+                    if let Some(place) = fc.borrow_aliases.get(alias_name).cloned() {
+                        let r_place = self.compile_expr(fc, &place)?;
+                        fc.emit(Op::Mov { rd, rs: r_place });
+                        return Ok(rd);
+                    }
+                }
+                fc.emit(Op::Mov { rd, rs: ra });
+            }
+            UnOp::Ref | UnOp::RefMut => {
                 fc.emit(Op::Mov { rd, rs: ra });
             }
         }
@@ -2756,6 +2798,50 @@ impl BytecodeCompiler {
                         rd,
                         flow: flow_idx,
                         method: method_idx,
+                        args_base,
+                        argc: args.len() as u16,
+                    });
+                    return Ok(rd);
+                }
+            }
+            // ── Module-qualified function call: Module::func(args) ──
+            // `M::f` (and `Outer::Inner::f`) parses as a Field chain; if it
+            // names a registered module function, call it like a top-level
+            // function (tree-walker `build_qualified_path` parity).
+            if let Some(qualified) = Self::build_qualified_path(obj, method) {
+                if let Some(&fidx) = self.func_table.get(&qualified) {
+                    let proto = &self.functions[fidx as usize];
+                    let mut targets: Vec<Reg> = Vec::new();
+                    for &pi in &proto.mut_param_indices {
+                        if let Some(Expr::Ident(var_name)) =
+                            args.get(pi as usize).map(|a| a.unlocated())
+                        {
+                            if let Some(reg) = fc.lookup_var(var_name) {
+                                targets.push(reg);
+                            }
+                        }
+                    }
+                    if !targets.is_empty() {
+                        let base = fc.proto.alloc_reg();
+                        for _ in 1..targets.len() {
+                            fc.proto.alloc_reg();
+                        }
+                        for (i, t) in targets.iter().enumerate() {
+                            let target = base + i as Reg;
+                            let cidx = fc.proto.add_const(ConstValue::Int(*t as i64));
+                            fc.emit(Op::LoadConst {
+                                rd: target,
+                                idx: cidx,
+                            });
+                        }
+                        fc.emit(Op::MutateSetup {
+                            regs_base: base,
+                            count: targets.len() as u16,
+                        });
+                    }
+                    fc.emit(Op::Call {
+                        rd,
+                        func: fidx,
                         args_base,
                         argc: args.len() as u16,
                     });
@@ -4448,6 +4534,11 @@ impl BytecodeCompiler {
             }
             Expr::Call(callee, args) => {
                 self.collect_free_vars_expr(callee, local_vars, free_vars);
+                for arg in args {
+                    self.collect_free_vars_expr(arg, local_vars, free_vars);
+                }
+            }
+            Expr::Turbofish(_, _, args) => {
                 for arg in args {
                     self.collect_free_vars_expr(arg, local_vars, free_vars);
                 }

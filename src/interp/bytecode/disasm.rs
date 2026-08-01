@@ -178,6 +178,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Str(v) => format!("{:?}", v),
                 ConstValue::Unit => "unit".to_string(),
                 ConstValue::Type(t) => format!("type {:?}", t),
+                ConstValue::QuoteAst(q) => format!("quote {:?}", q),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -330,6 +331,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Str(v) => format!("{:?}", v),
                 ConstValue::Unit => "unit".to_string(),
                 ConstValue::Type(t) => format!("type {:?}", t),
+                ConstValue::QuoteAst(q) => format!("quote {:?}", q),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -663,6 +665,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::Str(v) => format!("{:?}", v),
             ConstValue::Unit => "unit".to_string(),
             ConstValue::Type(t) => format!("type {:?}", t),
+            ConstValue::QuoteAst(q) => format!("quote {:?}", q),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }
