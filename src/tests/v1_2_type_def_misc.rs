@@ -10,7 +10,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(30));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(30)));
 }
 
 #[test]
@@ -23,8 +23,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("hello".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("hello".to_string()))
     );
 }
 
@@ -40,7 +40,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(31));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(31)));
 }
 
 #[test]
@@ -52,8 +52,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("i32".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("i32".to_string()))
     );
 }
 
@@ -66,8 +66,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("bool".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("bool".to_string()))
     );
 }
 
@@ -80,8 +80,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("string".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("string".to_string()))
     );
 }
 
@@ -94,8 +94,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("list".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("list".to_string()))
     );
 }
 
@@ -110,8 +110,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("Red".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("Red".to_string()))
     );
 }
 
@@ -129,8 +129,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("Point".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("Point".to_string()))
     );
 }
 
@@ -147,7 +147,7 @@ func main() -> i32 {
     len(fields)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(2));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(2)));
 }
 
 #[test]
@@ -160,7 +160,7 @@ func main() -> i32 {
     len(variants)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(3));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
 }
 
 #[test]
@@ -176,7 +176,7 @@ func main() -> i32 {
     1
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(1));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(1)));
 }
 
 #[test]
@@ -190,7 +190,7 @@ func main() -> i32 {
     double(5)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(10)));
 }
 
 #[test]
@@ -204,8 +204,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("i32".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("i32".to_string()))
     );
 }
 
@@ -218,7 +218,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 // === T401: Comptime Code Generation Tests ===
@@ -235,7 +235,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -251,7 +251,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -267,7 +267,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(6));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(6)));
 }
 
 #[test]
@@ -282,8 +282,8 @@ func main() -> string {
     ast_dump(ast)
 }
 "#;
-    let result = run_source_treewalker(src);
-    assert!(matches!(result, interp::Value::String(_)));
+    let result = run_source_bytecode_result(src);
+    assert!(matches!(result, Ok(interp::Value::String(_))));
 }
 
 #[test]
@@ -299,7 +299,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -317,7 +317,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(43));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(43)));
 }
 
 // === T402: Compile-Time Function Execution Tests ===
@@ -333,7 +333,10 @@ func main() -> f64 {
     half()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Float(0.5));
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::Float(0.5))
+    );
 }
 
 #[test]
@@ -347,7 +350,10 @@ func main() -> i32 {
     max_value()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(2147483647));
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::Int(2147483647))
+    );
 }
 
 #[test]
@@ -361,7 +367,7 @@ func main() -> i32 {
     add(3, 4)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(7));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(7)));
 }
 
 #[test]
@@ -379,7 +385,7 @@ func main() -> i32 {
     one() + two()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(3));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
 }
 
 #[test]
@@ -394,8 +400,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("hello".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("hello".to_string()))
     );
 }
 

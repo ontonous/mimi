@@ -282,12 +282,19 @@ fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     match (&args[0], &args[1], &args[2]) {
         (Value::String(s), Value::Int(start), Value::Int(end)) => {
             let chars: Vec<char> = s.chars().collect();
-            let s_idx = (*start as usize).min(chars.len());
-            let e_idx = (*end as usize).min(chars.len());
-            if s_idx > e_idx {
+            let si = *start as usize;
+            let ei = *end as usize;
+            if si > ei {
                 return Err(InterpError::new("str_substring: start > end"));
             }
-            Ok(Value::String(chars[s_idx..e_idx].iter().collect()))
+            if ei > chars.len() {
+                return Err(InterpError::new(format!(
+                    "substring: end {} out of bounds (len {})",
+                    ei,
+                    chars.len()
+                )));
+            }
+            Ok(Value::String(chars[si..ei].iter().collect()))
         }
         _ => Err(InterpError::new("str_substring expects (string, int, int)")),
     }

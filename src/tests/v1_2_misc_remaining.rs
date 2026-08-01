@@ -7,8 +7,8 @@ func main() -> string {
 }
 "#;
     assert_eq!(
-        run_source_treewalker(src),
-        interp::Value::String("hello\nworld".to_string())
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("hello\nworld".to_string()))
     );
 }
 
@@ -20,7 +20,7 @@ func main() -> i32 {
     len(result)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(0));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
 }
 
 #[test]
@@ -31,7 +31,7 @@ func main() -> i32 {
     result[2]
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(3));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
 }
 
 #[test]
@@ -42,7 +42,7 @@ func main() -> i32 {
     t.1
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(2));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(2)));
 }
 
 #[test]
@@ -55,7 +55,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(100));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(100)));
 }
 
 #[test]
@@ -69,7 +69,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(1));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(1)));
 }
 
 #[test]
@@ -88,7 +88,7 @@ func main() -> i32 {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(10)));
 }
 
 #[test]
@@ -102,7 +102,7 @@ func main() -> i32 {
     i
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(5));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(5)));
 }
 
 #[test]
@@ -115,7 +115,7 @@ func main() -> i32 {
     a
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(25));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(25)));
 }
 
 #[test]
@@ -128,7 +128,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -144,7 +144,7 @@ func main() -> i32 {
     p.x + p.y
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -156,7 +156,7 @@ func main() -> i32 {
     f(5)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -168,7 +168,7 @@ func main() -> i32 {
     f()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -194,7 +194,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -205,7 +205,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -218,7 +218,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -291,7 +291,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 // ===== T300: 泛型单态化测试 =====
@@ -305,7 +305,7 @@ func main() -> i32 {
     *r
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -318,7 +318,7 @@ func main() -> i32 {
     *r
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(10)));
 }
 
 #[test]
@@ -331,7 +331,7 @@ func main() -> i32 {
     y + *r
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(84));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(84)));
 }
 
 #[test]
@@ -345,7 +345,7 @@ func main() -> i32 {
     *r
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -409,7 +409,7 @@ func main() -> i32 {
     *r1 + *r2
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(84));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(84)));
     assert!(check_source(src).is_ok());
 }
 
@@ -423,7 +423,7 @@ func main() -> i32 {
     *(*r2)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 // ===== T303: 模块命名空间隔离测试 =====
@@ -441,7 +441,7 @@ func main() -> i32 {
     Math::add(1, 2)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(3));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
 }
 
 #[test]
@@ -462,7 +462,7 @@ func main() -> i32 {
     a + b
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
 }
 
 #[test]
@@ -480,7 +480,7 @@ func main() -> i32 {
     Outer::Inner::hello()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
 #[test]
@@ -497,7 +497,7 @@ func main() -> i32 {
 }
 "#;
     // Runtime works; type checker may not fully support qualified calls yet
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(3));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
 }
 
 // ===== T304: extern FFI 测试 =====
@@ -589,7 +589,7 @@ func main() -> i32 {
     sum(5)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(105));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(105)));
 }
 
 // === T502: Test Framework Tests ===

@@ -782,6 +782,8 @@ pub enum ConstValue {
     Unit,
     /// Type constant (quote Cast targets; 0.33 Phase F).
     Type(crate::ast::Type),
+    /// Quoted AST constant (comptime quote! results inlined at compile time).
+    QuoteAst(Box<crate::interp::value::QuotedAst>),
 }
 
 impl FunctionProto {
@@ -886,6 +888,8 @@ pub struct BytecodeProgram {
     pub flow_persistent: std::collections::HashMap<String, Vec<String>>,
     /// Flows whose root state is @transactional (rollback on fault).
     pub flow_transactional: std::collections::HashSet<String>,
+    /// Type definitions: type_name → kind (for type_fields / type_variants).
+    pub type_defs: std::collections::HashMap<String, crate::ast::TypeDefKind>,
     /// The original AST (for actor worker threads that use tree-walker internally).
     pub ast: Option<std::sync::Arc<crate::ast::File>>,
     /// Record field types: type_name → [(field_name, field_type_str)].

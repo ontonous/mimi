@@ -53,6 +53,7 @@ mod tests {
             max_children: None,
             flow_persistent: std::collections::HashMap::new(),
             flow_transactional: std::collections::HashSet::new(),
+            type_defs: std::collections::HashMap::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -106,6 +107,7 @@ mod tests {
             max_children: None,
             flow_persistent: std::collections::HashMap::new(),
             flow_transactional: std::collections::HashSet::new(),
+            type_defs: std::collections::HashMap::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -163,6 +165,7 @@ mod tests {
             max_children: None,
             flow_persistent: std::collections::HashMap::new(),
             flow_transactional: std::collections::HashSet::new(),
+            type_defs: std::collections::HashMap::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -282,6 +285,7 @@ mod tests {
             max_children: None,
             flow_persistent: std::collections::HashMap::new(),
             flow_transactional: std::collections::HashSet::new(),
+            type_defs: std::collections::HashMap::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -368,6 +372,7 @@ mod tests {
             max_children: None,
             flow_persistent: std::collections::HashMap::new(),
             flow_transactional: std::collections::HashSet::new(),
+            type_defs: std::collections::HashMap::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };

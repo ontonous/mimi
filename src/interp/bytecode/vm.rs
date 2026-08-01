@@ -1193,7 +1193,7 @@ impl<'a> BytecodeVM<'a> {
                         Some(ConstValue::Bool(v)) => Lit::Bool(*v),
                         Some(ConstValue::Str(v)) => Lit::String(v.clone()),
                         Some(ConstValue::Unit) => Lit::Unit,
-                        Some(ConstValue::Type(_)) | None => {
+                        Some(ConstValue::Type(_)) | Some(ConstValue::QuoteAst(_)) | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
                     };
@@ -2867,6 +2867,7 @@ impl<'a> BytecodeVM<'a> {
             ConstValue::Str(v) => Value::String(v.clone()),
             ConstValue::Unit => Value::Unit,
             ConstValue::Type(t) => Value::String(format!("<type {:?}>", t)),
+            ConstValue::QuoteAst(q) => Value::QuoteAst(q.clone()),
         }
     }
 

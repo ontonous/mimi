@@ -174,7 +174,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
         name: "type_fields",
         arity: 1,
         category: BuiltinCategory::System,
-        func: builtin_fields,
+        func: builtin_type_fields,
     });
     reg.register(BuiltinDesc {
         name: "type_variants",
@@ -289,6 +289,12 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_ast_eval,
     });
+    reg.register(BuiltinDesc {
+        name: "ast_dump",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_ast_dump,
+    });
     // Shadow memory
     reg.register(BuiltinDesc {
         name: "shadow_alloc",
@@ -317,27 +323,27 @@ pub fn register(reg: &mut BuiltinRegistry) {
     // Allocator (no-op in interpreter)
     reg.register(BuiltinDesc {
         name: "alloc",
-        arity: usize::MAX,
+        arity: 2,
         category: BuiltinCategory::System,
-        func: builtin_alloc_noop,
+        func: builtin_alloc,
     });
     reg.register(BuiltinDesc {
         name: "allocator_arena",
         arity: 0,
         category: BuiltinCategory::System,
-        func: builtin_alloc_noop,
+        func: builtin_allocator_arena,
     });
     reg.register(BuiltinDesc {
         name: "allocator_bump",
         arity: 0,
         category: BuiltinCategory::System,
-        func: builtin_alloc_noop,
+        func: builtin_allocator_bump,
     });
     reg.register(BuiltinDesc {
         name: "allocator_system",
         arity: 0,
         category: BuiltinCategory::System,
-        func: builtin_alloc_noop,
+        func: builtin_allocator_system,
     });
     reg.register(BuiltinDesc {
         name: "arena_reset",
@@ -347,9 +353,9 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
     reg.register(BuiltinDesc {
         name: "bump_used",
-        arity: 1,
+        arity: 0,
         category: BuiltinCategory::System,
-        func: builtin_alloc_noop,
+        func: builtin_bump_used,
     });
 }
 
@@ -1005,11 +1011,62 @@ fn builtin_fields(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     }
 }
 
-fn builtin_type_variants(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    match &args[0] {
-        Value::Variant(name, _) => Ok(Value::List(vec![Value::String(name.clone())])),
-        _ => Ok(Value::List(vec![])),
+fn resolve_type_name_arg(v: &Value) -> Result<&str, InterpError> {
+    match v {
+        Value::String(name) => Ok(name),
+        Value::Type(name) => Ok(name),
+        _ => Err(InterpError::new(
+            "expected a type name string or Type value",
+        )),
     }
+}
+
+fn builtin_type_fields(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.len() != 1 {
+        return Err(InterpError::new(
+            "type_fields expects 1 argument (a type name string)",
+        ));
+    }
+    let name = resolve_type_name_arg(&args[0])?;
+    let kind = vm
+        .program()
+        .type_defs
+        .get(name)
+        .ok_or_else(|| InterpError::new(format!("unknown type '{}'", name)))?;
+    let names: Vec<Value> = match kind {
+        crate::ast::TypeDefKind::Record(fields) => fields
+            .iter()
+            .map(|f| Value::String(f.name.clone()))
+            .collect(),
+        crate::ast::TypeDefKind::Enum(variants) => variants
+            .iter()
+            .map(|v| Value::String(v.name.clone()))
+            .collect(),
+        _ => vec![],
+    };
+    Ok(Value::List(names))
+}
+
+fn builtin_type_variants(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.len() != 1 {
+        return Err(InterpError::new(
+            "type_variants expects 1 argument (a type name string)",
+        ));
+    }
+    let name = resolve_type_name_arg(&args[0])?;
+    let kind = vm
+        .program()
+        .type_defs
+        .get(name)
+        .ok_or_else(|| InterpError::new(format!("unknown type '{}'", name)))?;
+    let names: Vec<Value> = match kind {
+        crate::ast::TypeDefKind::Enum(variants) => variants
+            .iter()
+            .map(|v| Value::String(v.name.clone()))
+            .collect(),
+        _ => vec![],
+    };
+    Ok(Value::List(names))
 }
 
 // ── C string ────────────────────────────────────────────
@@ -1383,6 +1440,40 @@ fn builtin_alloc_noop(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value
     Ok(Value::Unit)
 }
 
+fn builtin_allocator_system(
+    _vm: &mut BytecodeVM<'_>,
+    _args: &[Value],
+) -> Result<Value, InterpError> {
+    Ok(Value::Allocator(crate::interp::AllocatorKind::System))
+}
+
+fn builtin_allocator_arena(
+    _vm: &mut BytecodeVM<'_>,
+    _args: &[Value],
+) -> Result<Value, InterpError> {
+    Ok(Value::Allocator(crate::interp::AllocatorKind::Arena))
+}
+
+fn builtin_allocator_bump(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+    Ok(Value::Allocator(crate::interp::AllocatorKind::Bump))
+}
+
+fn builtin_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // alloc(allocator, value) — the bytecode VM has no region memory, so any
+    // allocator simply returns the value as-is (System semantics).
+    match (args.first(), args.get(1)) {
+        (Some(Value::Allocator(_)), Some(value)) => Ok(value.clone()),
+        _ => Err(InterpError::new(
+            "alloc expects 2 arguments (allocator, value)",
+        )),
+    }
+}
+
+fn builtin_bump_used(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+    // No arena state in the bytecode VM: always 0.
+    Ok(Value::Int(0))
+}
+
 // === Tooling / meta builtins ===
 
 fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -1419,6 +1510,18 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
         .into_owned();
     unsafe { libc::free(result_ptr as *mut libc::c_void) };
     Ok(Value::String(result))
+}
+
+fn builtin_ast_dump(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.len() != 1 {
+        return Err(InterpError::new(
+            "ast_dump expects 1 argument (a quoted AST)",
+        ));
+    }
+    match &args[0] {
+        Value::QuoteAst(q) => Ok(Value::String(format!("{:?}", q))),
+        other => Ok(Value::String(format!("Not a QuoteAst: {}", other))),
+    }
 }
 
 fn builtin_ast_eval(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
