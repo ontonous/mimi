@@ -667,7 +667,7 @@ fn builtin_assert_state(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     };
     if actual_state != expected_state {
         return Err(InterpError::new(format!(
-            "state assertion failed: expected {}, got {}",
+            "assert_state failed: expected '{}', got '{}'",
             expected_state, actual_state
         )));
     }

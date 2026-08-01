@@ -469,21 +469,6 @@ pub(crate) fn checked_run_source_result(src: &str) -> Result<interp::Value, Stri
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
-/// Tree-walker fallback for checked_run_source_result (Flow/Actor edge cases).
-pub(crate) fn checked_run_source_treewalker_result(src: &str) -> Result<interp::Value, String> {
-    let file = parse(src);
-    core::check(&file).map_err(|diags| {
-        diags
-            .iter()
-            .map(|d| format!("{}", d))
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    interp.run().map_err(|e| e.message().to_string())
-}
-
 /// H3: Run checker + codegen + native execution. Catches checker bugs that
 /// `compile_and_run` silently bypasses.
 pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {

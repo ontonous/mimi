@@ -51,6 +51,8 @@ mod tests {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -102,6 +104,8 @@ mod tests {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -157,6 +161,8 @@ mod tests {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -274,6 +280,8 @@ mod tests {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
@@ -358,6 +366,8 @@ mod tests {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
