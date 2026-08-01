@@ -175,11 +175,10 @@ fn json_get_element_middle() {
 
 #[test]
 fn json_get_element_out_of_bounds() {
-    let v = run_source(r#"func main() -> string { json_get_element("[10, 20]", 99) }"#);
-    assert_eq!(
-        v,
-        interp::Value::String("".into()),
-        "json_get_element out of bounds returns empty string"
+    let result = run_source_result(r#"func main() -> string { json_get_element("[10, 20]", 99) }"#);
+    assert!(
+        result.is_err(),
+        "json_get_element out of bounds should error (tree-walker parity)"
     );
 }
 
