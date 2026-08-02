@@ -4,9 +4,9 @@
 
 **Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.4--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4400%2B-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-4500%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -90,12 +90,12 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 | `flow` / `state` / `transition` 声明、状态负载、转移分发 | ✅ |
 | 稀疏转移图——未声明 `(state, event)` = 编译错误（`@sparse`） | ✅ |
 | 类型化 Fault——per-flow `fault ErrorType` 声明 | ✅ |
-| `become` / `stay` 显式终端关键字 | ✅ |
+| `return S{}` 终止符——唯一转移终止（become/stay 已按 ADR-001 删除） | ✅ |
 | `fails E` 可回滚路径——`?` 返回 `Err((source, error))`，source generation 归还 | ✅ |
 | Reset / Recover 系统动词（用户可覆盖） | ✅ |
 | SystemTrace 溯源（`last_state`、`unexpected_event`、快照） | ✅ |
 | 渐进模式——脚本 `main()` 通过 shell 注入（真 lowering：post-1.0） | ✅ |
-| 多目标转移（`-> A \| B`，保留 state tag） | 📋 0.31.25 |
+| 多目标转移（`-> A \| B`，保留 state tag） | 📋 0.1.4 (0.34.15-16) |
 
 ### 线性安全与所有权
 
@@ -106,8 +106,8 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 | CFG 级线性——`is_linear()` 对 Flow 状态的 dataflow 分析 | ✅ |
 | Session 端点线性——scope exit（E0425）、use-after-alias（E0426） | ✅ |
 | 线性资源的 shared/weak 包装拒绝 | ✅ |
-| View/mutate 借用（纯函数参数传递） | 📋 0.31.25 |
-| 跨 turn exactly-once 资源追踪 | 📋 |
+| View/mutate 借用（纯函数参数传递） | 📋 0.1.4 (0.34.13-14) |
+| 跨 turn exactly-once 资源追踪 | ✅ |
 | Channel/Mutex/Atomic 类型级线性 | 📋（已知限制：builtin 整数 handle） |
 
 ### 并发
@@ -134,7 +134,7 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 
 | 特性 | 状态 |
 |------|------|
-| 解释器（快速开发）+ LLVM 18 codegen（原生二进制）——L1 等价测试 | ✅ |
+| Bytecode VM 解释器（0.1.3 起唯一解释器）+ LLVM 18 codegen（原生二进制）——L1 等价测试 | ✅ |
 | Hindley-Milner 类型推断（undo trail + TypeScheme + zonk） | ✅ |
 | 泛型 `<T: Bound>`、递归类型 | ✅ |
 | 枚举 / 记录 / 元组，`match` 穷尽性，`while let` | ✅ |
@@ -149,7 +149,7 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 | LSP：补全、悬停、跳转定义、合约 lens | ✅ |
 | 包管理器：`mimi.toml`、registry、git 依赖、依赖树 | ✅ |
 | 交叉编译：`--target` 标志、共享库 `.so` 输出 | ✅ |
-| Component IR + Native ABI + Wire Schema | 📋 Phase C |
+| Component IR + Native ABI + Wire Schema | ✅（0.1.1 Phase C；SDK conformance 全绿） |
 
 ---
 
@@ -220,14 +220,14 @@ Source → Lexer → Parser → AST
   → HM 推断 → 类型检查器 → CheckedProgram
     → Typed Resolved IR（canonical 签名、目录、物化类型）
     → CFG（per-callable 控制流图）
-    → Ownership Ledger（线性资源分析）
+    → Resource Analysis（线性资源动作）
       ↓
   ┌───────────┼───────────┐
   解释器        Codegen      验证器
   (from_checked) (compile_checked) (verify_checked)
 ```
 
-**铁律**：后端不能回退 raw AST。`CheckedProgram::file()` 已收紧为 crate 内 `legacy_body_file()`——函数体 per-function dispatch 已激活（eligible 函数经 resolved emitter，ineligible 经显式 legacy arm）。全量迁移排入 0.1.2 (0.32)。
+**铁律**：后端不能回退 raw AST。声明层（签名、Flow 转移、Actor/Session、ownership、CFG）全量从 CheckedProgram 安装；函数体经 per-function dispatch 编译（resolved native emitter + 显式可观测 legacy arm）。`CheckedProgram::raw_ast()` 为 crate 内部，仅限 3 个永久 consumer（codegen 第五遍 / 解释器 / Z3 验证器）。
 
 ### 依赖主链
 
@@ -247,7 +247,7 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | **HM 统一** | `src/core/unification.rs` | Undo trail + TypeScheme + zonk；泛型调用 fresh instantiate |
 | **TypeFolder** | `src/core/type_folder.rs` | Binder-aware 类型折叠（SurfaceTy / InferTy / ZonkedTy / BackendTy） |
 | **CFG** | `src/core/cfg/` | Per-callable 控制流图，stable-ID CallableCfg |
-| **Ownership Ledger** | `src/core/ownership.rs` | 线性资源 Introduce / Move / Drop / Return + borrow 分析 |
+| **Resource Analysis** | `src/core/ownership.rs` | 线性资源 ledger（Introduce / Move / Drop / Return + borrow），canonical 动作类型 |
 | **AstNodeMeta** | `src/span.rs` | SourceId + Span + AstOrigin；NodeIdBuilder 稳定身份 |
 
 ### 编译器内部 Flow 范式
@@ -325,7 +325,7 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 
 ```
 mimi/
-├── src/                        # Rust 编译器（360 文件，~278k LOC）
+├── src/                        # Rust 编译器（366 文件，~305k LOC）
 │   ├── main.rs                 # CLI 入口（clap derive）
 │   ├── lib.rs                  # 库入口
 │   ├── ast.rs                  # AST：FlowDef, StateDef, TransitionDef, ProtocolDef, ...
@@ -344,9 +344,10 @@ mimi/
 │   │   ├── unification.rs      # HM 统一（undo trail + TypeScheme）
 │   │   ├── type_folder.rs      # Binder-aware 类型折叠
 │   │   ├── cfg/                # Per-callable 控制流图
-│   │   ├── ownership.rs        # 线性资源 ledger（分析）
+│   │   ├── ownership.rs        # 线性资源分析（canonical 动作）
 │   │   └── infer/              # HM 类型推断 + 合约推导
-│   ├── interp/                 # 解释器（from_checked）
+│   ├── interp/                 # Bytecode VM（0.1.3 起唯一解释器）
+│   │   └── bytecode/           # Bytecode 编译器 + VM + builtin 注册表
 │   ├── codegen/                # LLVM 18 codegen（compile_checked）
 │   │   └── builtins/           # 内建函数 codegen（io, string, json, ...）
 │   ├── verifier/               # Z3 合约验证器（verify_checked）
@@ -358,11 +359,11 @@ mimi/
 │   ├── lint.rs                 # 静态分析器
 │   ├── main/                   # CLI 子命令实现（24 个命令）
 │   ├── diagnostic/             # 错误码与格式化
-│   └── tests/                  # 4100+ 测试
+│   └── tests/                  # 4500+ 测试
 ├── std/                        # 标准库（24 个模块）
-├── examples/                   # 示例程序（32 个）
-├── demos/                      # 演示程序（30 个）
-├── tests/real_world/           # MCDD 真实程序双后端套件（70 个程序）
+├── examples/                   # 示例程序（28 个）
+├── demos/                      # 演示程序（23 个）
+├── tests/real_world/           # MCDD 真实程序双后端套件（69 个程序）
 ├── devdocs/                    # 设计文档、盲审报告、修正案、路线图
 ├── scripts/                    # 构建与 CI 脚本
 ├── Cargo.toml
@@ -414,29 +415,15 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ---
 
-## 路线图（0.1.1）
+## 状态与关键文档
 
-0.1.1 是长周期版本，覆盖 51 个内部 sprint（0.31.8–0.31.58）。期间不打中间 tag。Codegen per-function dispatch 已激活（eligible slice：标量/tuple/string/控制流）；全量迁移推迟到 0.1.2。
-
-| 阶段 | Sprint | 主题 |
-|------|--------|------|
-| **A** | 0.31.8–0.31.19 | Flow 核心闭环 + 地基深修：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、类型级线性、高阶交互闭环、证据同步、攻击审查 I |
-| **Perf** | 0.31.20–0.31.21 | Runtime Efficiency I/II：quick wins + Value clone 消减 + O1 修复 |
-| **Soundness** | 0.31.22–0.31.24 | Soundness 止血 + Runtime 架构升级 + 错误模型与 Stdlib |
-| **B** | 0.31.25–0.31.29 | 语言冻结：语法收敛、View/Mutate、Multi-target、type walker 合并、Verification IR fail-closed、VC artifact、攻击审查 II |
-| **C** | 0.31.30–0.31.38 | Component 边界：Component IR + ABI 生成器、Native ABI + 胖指针、稳定检查点、Wire Schema、Rust SDK conformance、XPU FFI 验证、SDK 加固 |
-| **D** | 0.31.39–0.31.44 | 工具与隔离：迁移、fmt/LSP/probes、Provenance/TyErr/Z3 翻译、experimental 隔离 |
-| **E** | 0.31.45–0.31.48 | 冻结：DEBUG + L1 强化 + Interpreter 瘦身、最终敌对审查 + Trap Tests、RC1、RC2 |
-| **F** | 0.31.49–0.31.54 | Soundness：类型系统、算术语义、Runtime、Verifier、Interpreter/Stdlib/Quote |
-| **G** | 0.31.55–0.31.56 | Completeness：Flow/Session/Actor + 系统性模式修复 + 测试基础设施 |
-| **H** | 0.31.57–0.31.58 | Release：RC1、RC2、0.1.1 tag |
-
-**下一步：0.1.2 (0.32.1–0.32.30)** — Codegen 全量迁移（`legacy_body_file()` 删除）+ 迁移后审计。
+**当前版本**：0.1.4-dev。0.1.3 已发布（Bytecode VM 成为唯一解释器，tree-walker 删除）。0.1.4（内部 sprint 0.34.x）聚焦语法冻结与语义裁决——见下方黄金文档与分版本路线图。
 
 ### 关键文档
 
 | 文档 | 角色 |
 |------|------|
+| [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 黄金文档：语义裁决 + sprint 规划（0.1.4 权威） |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | 权威路线图（31 项 requirement，退出条件） |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | 架构修正案：13 条款 + 10 不变量（优先于白皮书） |
 | [`devdocs/pre-1.0/`](devdocs/pre-1.0/) | Pre-1.0 设计合同：核心目标、Flow-first 模型、失败代数、Verified Core、Component Boundary |
@@ -453,7 +440,10 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 里程碑 |
 |------|--------|
-| **0.1.1-dev** | **当前**。51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |
+| **0.1.4-dev** | **当前**。语法冻结 + 语义裁决（黄金文档）：become/stay 删除（ADR-001）、multi-target（ADR-002）、`'a` 删除（ADR-004）、`desc:`/`rule:`/`mms{}` trivia 化。 |
+| **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
+| **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |
+| **0.1.1** | 51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |
 | **0.1.0** | 基线稳定：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership 分析、runtime/resolved 拆分、semver 切换、4063 测试绿 |
 | **v0.30.0** | 止血：零新特性——15 项架构债务清零（sprintf→snprintf、路径安全、malloc 检查、fmt 分词） |
 | **v0.29.0–41** | Flow 范式：编译器内部 Flow 替换（7 个模块）+ 语言级 Flow 语义 + 白皮书 38 项能力 |
