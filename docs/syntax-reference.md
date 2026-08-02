@@ -25,6 +25,17 @@
 
 ---
 
+# Mimi 语法金标准（Parser 实况转录）
+
+> **版本**：0.1.4-dev（内部 sprint 0.34.X）
+> **依据**：`src/parser/`（parse_type.rs / parse_stmt.rs / parse_expr.rs / top_level.rs / pattern.rs）与 `src/lexer/keywords.rs` 的**实际产生式**，逐条手工转录。
+> **权威性**：本文档是 parser 实况的唯一权威描述。`docs/syntax-reference.md` 是本文档的渲染副本（0.34.5 起由 golden 重新生成）。
+> **标记约定**：`[事实]` = 坐标已验证；`[裁决]` = 修正案/SD/ADR 依据；`[建议]` = 待拍板；⚠DEAD = 已废止但仍被 parser 接受的语法（删除清单见 `golden-document.md` §1.1）。
+> **坐标约定**：`file:line` 相对仓库根 `mimi/`。
+> **同步规则**：parser 产生式变更后，本文件必须同步更新；`docs/syntax-reference.md` 以本文件为源重新生成。
+
+---
+
 ## 1. 词法
 
 ### 1.1 注释
@@ -56,7 +67,7 @@ if else for fault fails in while return reset recover break continue
 match use pub drop defer await async unsafe spawn parasteps
 quote comptime failure requires ensures invariant math desc rule old mms
 flow state transition protocol delegate pinned persistent view mutate
-do become stay session dual end with loop as
+do session dual end with loop as
 true false unit i32 nothing
 ```
 
@@ -65,7 +76,7 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 - **软关键字化**：`and`/`or`/`not` 仍 tokenize 为运算符 kind，但**不是硬关键字**（绑定位置可作标识符）。
 - `delegate` 保留为硬关键字（parser 拒绝并报条款 2 诊断）。
 - [建议] 再审查：`reset`/`recover`（仅系统注入 transition 名）、`nothing`。
-- **剩余计划**：`become`/`stay` 删除（ADR-001，0.34.11-12）→ 80→78。
+- **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。当前 81 个 `=> TokenKind` 映射（83−2，含 and/or/not 软关键字映射）。
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
@@ -174,8 +185,6 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
       | 'parasteps' '{' Block '}' ';'                                        (* :108-115 *)
       | 'func' FuncDef ';'                                                   (* :116-120 *)
       | 'do' '{' Block '}'                                                   (* :121-127 *)
-      | 'become' Expr ';'                                                    (* :128-133 *)
-      | 'stay' ';'                                                           (* :134-138，仅裸形式 *)
       | 'delegate' ... — **v0.34.1 已拒绝**（条款 2 诊断，parse_stmt.rs:139-160）
       | 'pinned' '(' Expr ')' [ '|' Ident '|' ] '{' Block '}'   (* :180-216；v0.34.3 timeout 字段删除 *)
       | 'if' 'let' Pattern '=' Expr '{' Block '}' [ 'else' ( 'if' ... | '{' Block '}' ) ]  (* v0.34.3 Stmt::IfLet *)
@@ -187,7 +196,7 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
 [事实] `pinned(expr, timeout = N)` 硬错误："abolished by architecture amendment clause 10. Async FFI timeout (spawn_foreign_task) is planned for 0.2..."（parse_stmt.rs:162-168）。
 [事实] v0.34.3：`Stmt::Pinned.timeout` 字段删除（parser 恒拒绝 timeout），仅 pin + body 保留。
 [事实] v0.34.3：`if let` 为 Stmt::IfLet（非 desugar 到 match——pattern 绑定需 then 块可见），bytecode 完整执行，codegen E0700（golden-document.md §1.3）。
-[事实] `stay { payload }` 带 payload 形式**不解析**，仅裸 `stay;`（parse_stmt.rs:134-137）。
+[事实] `stay { payload }` 带 payload 形式**不解析** — **v0.34.11 整词删除**（ADR-001）：`stay`/`become` tokenize 为 Ident，语法位置使用直接解析失败。
 [事实] 复合赋值 desugar：`x += e` → `Assign(x, x + e)`，RHS 中 x 标记 Desugared（parse_stmt.rs:263-289）。
 
 ### 4.2 块内合约子句（parse_stmt.rs:803-861）
@@ -368,7 +377,7 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 | `actor runs Flow` | :849 [not-yet-implemented] | 已实现（top_level.rs:616-621） |
 | `fails E` | :803 [not-yet-implemented] | 已实现且有语料（top_level.rs:1358-1364） |
 | `do {}` | :797 [removed] | 仍在解析且是语料主流（parse_stmt.rs:121-127） |
-| `stay` | :924 [not-yet-implemented] | 已解析+求值（parse_stmt.rs:134-138） |
+| `stay` | :924 [not-yet-implemented] | **v0.34.11 已删除**（ADR-001，唯一终止符 `return S{}`） |
 | state-level `invariant` | :776 | 未实现（仅块内 invariant 子句 §4.2） |
 
 ---

@@ -505,12 +505,9 @@ pub enum Stmt {
     OnFailure(Block),
     /// Do block — marks the implementation body of a transition
     Do(Block),
-    /// Explicit transition terminal: become TargetState { ... }
-    /// Constructs the target state and ends the transition (equivalent to return).
-    Become(Expr),
-    /// Explicit transition terminal: stay
-    /// Returns the source state unchanged (self-loop terminal).
-    Stay,
+    /// v0.34.11: `become`/`stay` removed — ADR-001 (golden §1.2): unique
+    /// transition terminal is `return S{}`. Parser rejects both keywords;
+    /// no AST variants. (was: Become(Expr) / Stay, ~14 files ~30 arms)
     /// v0.34.1: `delegate` removed — 架构修正案条款 2 废止 subflow 委托
     /// (parser 拒绝，clause 2 负测试见 flow_features.rs)。AST variant 已删除。
     /// v0.34.3: `timeout` 字段删除 — 条款 10 废除同步 pinned timeout，

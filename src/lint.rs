@@ -365,9 +365,7 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         | Stmt::Desc(..)
         | Stmt::Rule(..)
         | Stmt::Continue
-        | Stmt::Stay
         | Stmt::Ellipsis => {}
-        Stmt::Become(e) => collect_refs_in_expr(e, info),
         Stmt::Do(body) => collect_refs_in_block(body, info),
         Stmt::Pinned { expr, body, .. } => {
             collect_refs_in_expr(expr, info);

@@ -5625,14 +5625,14 @@ func main() -> i32 {
 
 #[test]
 fn flow_turn_become_explicit_terminal() {
-    // FLOW-TURN-001: `become Target { ... }` is an explicit transition terminal
-    // equivalent to `return Target { ... }`.
+    // v0.34.11 (ADR-001): `become` removed — `return Target { ... }` is the
+    // unique transition terminal (was FLOW-TURN-001 become semantics).
     let src = r#"
 flow Counter {
     state Idle { count: i32 }
     state Active { count: i32 }
     transition start(Idle) -> Active {
-        do { become Active { count: self.count + 1 } }
+        do { return Active { count: self.count + 1 } }
     }
 }
 func main() -> i32 {
@@ -5647,13 +5647,14 @@ func main() -> i32 {
 
 #[test]
 fn flow_turn_become_dual_backend() {
-    // FLOW-TURN-001: `become` works in both interpreter and codegen.
+    // v0.34.11 (ADR-001): transition terminal via `return Target { ... }`
+    // works in both interpreter and codegen.
     let src = r#"
 flow Counter {
     state Idle { count: i32 }
     state Active { count: i32 }
     transition start(Idle) -> Active {
-        do { become Active { count: self.count + 1 } }
+        do { return Active { count: self.count + 1 } }
     }
 }
 func main() -> i32 {
@@ -5665,18 +5666,19 @@ func main() -> i32 {
 "#;
     let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = checked_compile_and_run(src).expect("codegen become");
+    let native = checked_compile_and_run(src).expect("codegen return transition");
     assert_eq!(native.trim(), "11");
 }
 
 #[test]
 fn flow_turn_stay_self_loop() {
-    // FLOW-TURN-001: `stay` returns the source state unchanged (self-loop).
+    // v0.34.11 (ADR-001): `stay` removed — self-loop via explicit
+    // `return Active { ... }` returning the source state.
     let src = r#"
 flow Counter {
     state Active { count: i32 }
     transition noop(Active) -> Active {
-        do { stay }
+        do { return Active { count: self.count } }
     }
 }
 func main() -> i32 {
@@ -5691,12 +5693,13 @@ func main() -> i32 {
 
 #[test]
 fn flow_turn_stay_dual_backend() {
-    // FLOW-TURN-001: `stay` works in both interpreter and codegen.
+    // v0.34.11 (ADR-001): `stay` removed — self-loop via explicit
+    // `return Active { ... }` works in both interpreter and codegen.
     let src = r#"
 flow Counter {
     state Active { count: i32 }
     transition noop(Active) -> Active {
-        do { stay }
+        do { return Active { count: self.count } }
     }
 }
 func main() -> i32 {
@@ -5708,13 +5711,14 @@ func main() -> i32 {
 "#;
     let interp_result = checked_run_source_bytecode_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = checked_compile_and_run(src).expect("codegen stay");
+    let native = checked_compile_and_run(src).expect("codegen return self-loop");
     assert_eq!(native.trim(), "42");
 }
 
 #[test]
 fn flow_turn_become_multi_target() {
-    // FLOW-TURN-001: `become` in a multi-target transition with conditional.
+    // v0.34.11 (ADR-001): `become` removed — multi-target transition with
+    // conditional uses `return Open { ... }` / `return Closed { ... }`.
     // TODO: checker does not yet support flow states as match patterns
     // (E0226 "undefined constructor"). Use unchecked run until multi-target
     // match support is implemented in the checker.
@@ -5726,9 +5730,9 @@ flow Gate {
     transition decide(Idle, threshold: i32) -> Open | Closed {
         do {
             if self.v > threshold {
-                become Open { v: self.v }
+                return Open { v: self.v }
             } else {
-                become Closed { v: self.v }
+                return Closed { v: self.v }
             }
         }
     }
@@ -5741,6 +5745,36 @@ func main() -> i32 {
 "#;
     let result = run_source_bytecode_result(src);
     assert_eq!(result, Ok(interp::Value::Int(10)));
+}
+
+#[test]
+fn flow_turn_become_stay_rejected_as_removed_keywords() {
+    // v0.34.11 (ADR-001): `become`/`stay` removed from the keyword table —
+    // they now lex as ordinary identifiers, so any use fails to parse (a bare
+    // identifier followed by a state constructor is not a valid statement).
+    for kw in ["become", "stay"] {
+        let src = format!(
+            r#"
+flow Counter {{
+    state Idle {{ count: i32 }}
+    state Active {{ count: i32 }}
+    transition start(Idle) -> Active {{
+        do {{ {kw} Active {{ count: self.count + 1 }} }}
+    }}
+}}
+func main() -> i32 {{
+    let s0 = Idle {{ count: 10 }}
+    let s1 = Counter::start(s0)
+    s1.count
+}}
+"#
+        );
+        let result = checked_run_source_bytecode_result(&src);
+        assert!(
+            result.is_err(),
+            "`{kw}` should fail to parse after v0.34.11 removal, got {result:?}"
+        );
+    }
 }
 
 #[test]

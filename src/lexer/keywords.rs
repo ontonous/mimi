@@ -85,8 +85,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::View
             | TokenKind::Mutate
             | TokenKind::Do
-            | TokenKind::Become
-            | TokenKind::Stay
             | TokenKind::Session
             | TokenKind::Dual
             | TokenKind::End
@@ -164,8 +162,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "view" => TokenKind::View,
         "mutate" => TokenKind::Mutate,
         "do" => TokenKind::Do,
-        "become" => TokenKind::Become,
-        "stay" => TokenKind::Stay,
         "session" => TokenKind::Session,
         "dual" => TokenKind::Dual,
         "end" => TokenKind::End,

@@ -1506,44 +1506,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_return(ret_type, ret_ty_ast, None, &func.name, vars, None)?;
                     return Ok(ControlFlow::Break(()));
                 }
-                Stmt::Become(expr) => {
-                    // FLOW-TURN-001: `become Target { ... }` compiles as `return expr`.
-                    let val = self.compile_expr(expr, vars)?;
-                    let val = if self.in_fails_transition {
-                        self.compile_ok_constructor(vec![val])?
-                    } else {
-                        val
-                    };
-                    let val = self.adjust_int_val(val, ret_type)?;
-                    self.pop_defer_scope(vars)?;
-                    self.emit_return(
-                        ret_type,
-                        ret_ty_ast,
-                        Some(val),
-                        &func.name,
-                        vars,
-                        Some(expr),
-                    )?;
-                    return Ok(ControlFlow::Break(()));
-                }
-                Stmt::Stay => {
-                    // FLOW-TURN-001: `stay` compiles as `return self`.
-                    let (self_ptr, self_ty) = vars.get("self").copied().ok_or_else(|| {
-                        CompileError::LlvmError(
-                            "stay used outside a transition body (no self in scope)".into(),
-                        )
-                    })?;
-                    let val = self.build_load(self_ty, self_ptr, "stay_self")?;
-                    let val = if self.in_fails_transition {
-                        self.compile_ok_constructor(vec![val])?
-                    } else {
-                        val
-                    };
-                    let val = self.adjust_int_val(val, ret_type)?;
-                    self.pop_defer_scope(vars)?;
-                    self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars, None)?;
-                    return Ok(ControlFlow::Break(()));
-                }
                 Stmt::Let {
                     pat,
                     init: Some(init),

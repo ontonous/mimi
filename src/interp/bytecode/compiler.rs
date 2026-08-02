@@ -1327,24 +1327,6 @@ impl BytecodeCompiler {
                     }
                 }
 
-                Stmt::Become(expr) => {
-                    // become TargetState { ... } — Flow transition terminal.
-                    // Compile the expression and return it.
-                    let r = self.compile_expr(fc, expr)?;
-                    fc.emit(Op::Ret { ra: r });
-                }
-
-                Stmt::Stay => {
-                    // stay — self-loop terminal: returns the source state (self)
-                    // unchanged (FLOW-TURN-001). In a transition body, `self`
-                    // lives at register 0.
-                    if let Some(self_reg) = fc.lookup_var("self") {
-                        fc.emit(Op::Ret { ra: self_reg });
-                    } else {
-                        fc.emit(Op::RetUnit);
-                    }
-                }
-
                 Stmt::Parasteps(block) => {
                     // Parallel steps — compile the block.
                     // Parallel execution semantics handled at runtime.

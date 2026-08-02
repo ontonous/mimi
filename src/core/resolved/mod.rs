@@ -375,10 +375,12 @@ pub struct ResolvedTransition {
     pub parameter_ids: Vec<NodeId>,
     pub is_fallback: bool,
     pub is_ffi_pinned: bool,
-    /// 追加 A: Silent Stay — true if this is a stay transition with no
+    /// 追加 A: Silent Transition — true if this transition has no
     /// cross-boundary operations (Channel send, FFI call, Actor event emit).
     /// When true, codegen can skip Generation increment (amendment clause 5.1).
-    pub silent_stay: bool,
+    /// v0.34.11: renamed from silent_stay — the property is about boundary ops,
+    /// not the terminal form (ADR-001 removed become/stay).
+    pub silent_transition: bool,
     pub origin: Origin,
     pub span: Span,
     pub fails: Option<Type>,
@@ -3135,7 +3137,7 @@ fn declaration_span(meta: crate::ast::AstNodeMeta, fallback: Span) -> Span {
 /// - Channel send (session_send, channel_send)
 /// - FFI call (extern function calls)
 /// - Actor event emit (emit, send_event)
-/// Used to determine if a stay transition can be "silent" (no Generation increment).
+/// Used to determine if a transition can be "silent" (no Generation increment).
 fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
     use crate::ast::{Expr, Stmt};
 
@@ -3205,7 +3207,6 @@ fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
             Stmt::Located { stmt, .. } => stmt_has_cross_boundary(stmt),
             Stmt::Expr(e) => expr_has_cross_boundary(e),
             Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => expr_has_cross_boundary(e),
-            Stmt::Become(e) => expr_has_cross_boundary(e),
             Stmt::Let { init: Some(e), .. } => expr_has_cross_boundary(e),
             Stmt::Assign { target, value } => {
                 expr_has_cross_boundary(target) || expr_has_cross_boundary(value)
@@ -4523,8 +4524,6 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::MmsBlock { content, .. } => format!("mms:{:016x}", stable_text_hash(content)),
         Stmt::Func(function) => format!("function:{}", function.name),
         Stmt::Alloc { kind, .. } => format!("alloc:{kind:?}"),
-        Stmt::Become(expr) => format!("become:{}", expr_semantic_key(expr)),
-        Stmt::Stay => "stay".into(),
         Stmt::Ellipsis => "ellipsis".into(),
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
@@ -4564,8 +4563,6 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::MmsBlock { .. } => "stmt.mms",
         Stmt::Func(_) => "stmt.function",
         Stmt::Alloc { .. } => "stmt.alloc",
-        Stmt::Become(_) => "stmt.become",
-        Stmt::Stay => "stmt.stay",
         Stmt::Ellipsis => "stmt.ellipsis",
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
@@ -5016,16 +5013,6 @@ fn collect_stmt_meta(
             out,
             errors,
         ),
-        Stmt::Become(expr) => collect_expr_meta(
-            expr,
-            owner,
-            &format!("{role}.value"),
-            fallback,
-            ids,
-            out,
-            errors,
-        ),
-        Stmt::Stay => {}
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
 }
@@ -5887,8 +5874,8 @@ fn collect_flow(
                 .collect(),
             is_fallback: transition.is_fallback,
             is_ffi_pinned: transition.is_ffi_pinned,
-            // 追加 A: Silent Stay — detect stay transitions with no cross-boundary ops
-            silent_stay: {
+            // 追加 A: Silent Transition — detect transitions with no cross-boundary ops
+            silent_transition: {
                 // A stay transition targets only the source state
                 let is_stay = transition.to_states.len() == 1
                     && transition.to_states[0] == transition.from_state;
