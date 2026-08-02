@@ -399,6 +399,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let is_fallback = t.is_fallback;
         let enters_fault = is_fallback || t.to_states.iter().any(|s| s == "Fault");
+        // Captured before the mutable compile_expr borrows below (t borrows
+        // self.flow_defs immutably; using t after a &mut self call would be E0502).
+        let is_multi_target = t.to_states.len() > 1;
         let fn_name = CodeGenerator::transition_fn_name(flow_name, &t.name, &t.from_state);
         let function = self.module.get_function(&fn_name).ok_or_else(|| {
             CompileError::Generic(format!(
@@ -429,6 +432,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         let call = self.build_call(function, &metadata_args, "flow_transition")?;
         let result = call_try_basic_value(&call)
             .unwrap_or(self.context.i64_type().const_int(0, false).into());
+
+        // L6 fix (multi-target): a multi-target transition result is the
+        // synthetic `__MultiTarget` tagged union {i32 tag, i64 payload}; the
+        // i64 payload is a ptrtoint-encoded heap box allocated by
+        // wrap_multi_target_value (codegen/mod.rs). Register the box in
+        // heap_allocs (single-owner scope-RAII — the same model codegen uses
+        // for string/list data buffers) so free_heap_allocs releases it at
+        // scope exit. The match decode (inttoptr+load) copies the fields out
+        // and does NOT free; the box is owned by this call's scope, so
+        // re-matching or shallow-copying the result reads the same box without
+        // double-free (it is freed exactly once, at scope exit). Copies bound
+        // via `let r2 = r` are Ident expressions, not transition calls, so they
+        // do not re-register.
+        if is_multi_target {
+            if let BasicValueEnum::StructValue(sv) = result {
+                if sv.get_type().count_fields() == 2 {
+                    let payload = self
+                        .builder
+                        .build_extract_value(sv, 1, "mt_box_i64")
+                        .map_err(|e| CompileError::LlvmError(format!("mt box extract: {e}")))?;
+                    // Only the bare __MultiTarget {i32,i64} shape carries a box
+                    // here. A fails-wrapped Result<__MultiTarget, E> has a
+                    // non-i64 field 1 and is left to its own (separate) handling.
+                    if let BasicValueEnum::IntValue(iv) = payload {
+                        if iv.get_type().get_bit_width() == 64 {
+                            let box_ptr = self.build_int_to_ptr(
+                                iv,
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
+                                "mt_box_recover",
+                            )?;
+                            self.register_heap_alloc(box_ptr);
+                        }
+                    }
+                }
+            }
+        }
 
         // v0.29.11 / H1: Fault absorption — short-circuit mailboxes of any Actor
         // handles in the from-state payload (bare handle or nested in records).

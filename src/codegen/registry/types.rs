@@ -301,6 +301,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .i64_type()
                                         .const_int(std::cmp::max(payload_size, 1), false);
                                     // B4: NULL-checked malloc.
+                                    // TODO(L6): this Packed payload box is never freed →
+                                    // one leak per boxed-enum construction (struct / multi-arg
+                                    // variant payload). Registering it at the ctor CALL site
+                                    // (simple.rs enum_ctor) is UNSOUND: a boxed enum returned
+                                    // from the enclosing function (`func f() -> Shape { Rect(..) }`)
+                                    // would be freed at that function's return yet escape to the
+                                    // caller → double-free/UAF (verified empirically). A sound fix
+                                    // needs the string-style return-claim: deep-copy the box on
+                                    // return + caller re-registers (mirror claim_string_return_value
+                                    // / track_string_return_lifetime). Multi-target boxes ARE fixed
+                                    // (compile_flow_transition_call registers in the caller; flow
+                                    // states can't be returned from wrappers, so no claim needed).
                                     let malloc_result =
                                         self.malloc_or_abort(size_val, "payload_malloc")?;
                                     let typed_ptr = self
