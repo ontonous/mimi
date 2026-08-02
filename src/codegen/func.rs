@@ -1483,7 +1483,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                     last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
                 }
                 Stmt::Return(Some(expr)) => {
-                    let val = self.compile_expr(expr, vars)?;
+                    let mut val = self.compile_expr(expr, vars)?;
+                    // v0.34.16 (ADR-002): multi-target transition return —
+                    // wrap the target state struct into the synthetic
+                    // {i32 tag, i64 payload} union (payload = ptrtoint boxed
+                    // state struct). Tag = the state's sorted ordinal (must
+                    // match register_type_def's Enum variant ordering).
+                    if self.in_multi_target_transition {
+                        let state_name = match expr.unlocated() {
+                            Expr::Record { ty: Some(ty_name), .. } => ty_name.clone(),
+                            Expr::Located { expr: inner, .. } => {
+                                match inner.unlocated() {
+                                    Expr::Record { ty: Some(ty_name), .. } => ty_name.clone(),
+                                    _ => {
+                                        return Err(CompileError::LlvmError(
+                                            "multi-target transition return must construct a target state record (e.g. `return TargetState { ... }`)".to_string(),
+                                        ))
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError::LlvmError(
+                                    "multi-target transition return must construct a target state record (e.g. `return TargetState { ... }`)".to_string(),
+                                ))
+                            }
+                        };
+                        let mut sorted_states = self.multi_target_states.clone();
+                        sorted_states.sort();
+                        let tag = sorted_states
+                            .iter()
+                            .position(|s| s == &state_name)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "returned state '{state_name}' is not a target of this multi-target transition (targets: {:?})",
+                                    self.multi_target_states
+                                ))
+                            })? as u64;
+                        let state_ty = self.type_llvm.get(&state_name).copied();
+                        val = self.wrap_multi_target_value(val, tag, state_ty)?;
+                    }
                     let val = if self.in_fails_transition {
                         self.compile_ok_constructor(vec![val])?
                     } else {

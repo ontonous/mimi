@@ -260,6 +260,86 @@ impl<'ctx> CodeGenerator<'ctx> {
                     for (_, inner_pat) in inner_patterns {
                         match &inner_pat.kind {
                             PatternKind::Variable(bind_name) => {
+                                // v0.34.16 (ADR-002): Record-style constructor
+                                // fields (`B { message }`) name the field —
+                                // extract it from the decoded payload struct
+                                // instead of binding the whole payload. Tuple
+                                // fields (`Ok(x)` → `_0`) bind the payload
+                                // itself (existing behavior).
+                                let is_named_field = !bind_name.starts_with('_');
+                                if is_named_field {
+                                    if let BasicValueEnum::StructValue(sv) = payload {
+                                        let payload_ptr =
+                                            self.build_alloca(payload_ty, "named_field_alloca")?;
+                                        self.build_store(payload_ptr, sv)?;
+                                        // Field index from the owning Record
+                                        // type definition (declaration order).
+                                        let field_idx = variant_owner
+                                            .as_ref()
+                                            .and_then(|(owner, _)| {
+                                                self.type_defs.get(owner).and_then(|td| {
+                                                    if let TypeDefKind::Enum(variants) = &td.kind {
+                                                        variants
+                                                            .iter()
+                                                            .find(|v| v.name == *name)
+                                                            .and_then(|v| match &v.payload {
+                                                                Some(VariantPayload::Tuple(
+                                                                    types,
+                                                                )) if types.len() == 1 => {
+                                                                    self.record_fields_of(&types[0])
+                                                                }
+                                                                _ => None,
+                                                            })
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                            })
+                                            .and_then(|fields| {
+                                                fields
+                                                    .iter()
+                                                    .position(|f| f == bind_name)
+                                                    .map(|i| i as u32)
+                                            });
+                                        if let Some(idx) = field_idx {
+                                            let elem_ty = match payload_ty {
+                                                BasicTypeEnum::StructType(st) => st
+                                                    .get_field_type_at_index(idx)
+                                                    .unwrap_or(BasicTypeEnum::IntType(
+                                                        self.context.i64_type(),
+                                                    )),
+                                                _ => {
+                                                    BasicTypeEnum::IntType(self.context.i64_type())
+                                                }
+                                            };
+                                            let gep = self
+                                                .gep()
+                                                .build_struct_gep(
+                                                    payload_ty,
+                                                    payload_ptr,
+                                                    idx,
+                                                    bind_name,
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "named field gep: {e}"
+                                                    ))
+                                                })?;
+                                            let val = self.build_load(
+                                                elem_ty,
+                                                gep,
+                                                &format!("field_{bind_name}"),
+                                            )?;
+                                            self.bind_pattern_var(
+                                                &mut local_vars,
+                                                bind_name,
+                                                val,
+                                                elem_ty,
+                                            )?;
+                                            continue;
+                                        }
+                                    }
+                                }
                                 self.bind_pattern_var(
                                     &mut local_vars,
                                     bind_name,

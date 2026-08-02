@@ -313,7 +313,10 @@ flow Door {
 }
 
 #[test]
-fn native_capability_gate_rejects_multi_target() {
+fn native_capability_gate_accepts_multi_target_after_tagged_abi() {
+    // v0.34.16 (ADR-002): Native gained the tagged-state-union ABI
+    // (synthetic __MultiTarget enum + boxed payload) — validate_backend must
+    // now ACCEPT multi-target flows (was: FLOW-MULTI-001 rejection).
     let file = parse(
         r#"
 flow Decision {
@@ -325,12 +328,12 @@ flow Decision {
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
-    let diagnostics = program
-        .validate_backend(BackendProfile::Native)
-        .expect_err("native must reject multi-target");
-    assert!(diagnostics[0].message.contains("FLOW-MULTI-001"));
-    assert!(diagnostics[0].message.contains("flow.multi_target"));
-    assert_eq!(diagnostics[0].span.start_line, 6);
+    let result = program.validate_backend(BackendProfile::Native);
+    assert!(
+        result.is_ok(),
+        "native must accept multi-target after tagged-state-union ABI: {:?}",
+        result.err()
+    );
 }
 
 #[test]

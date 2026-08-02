@@ -1123,6 +1123,9 @@ flow BadFlow {
 
 #[test]
 fn flow_codegen_multi_target_fails_closed() {
+    // v0.34.16 (ADR-002): the tagged-state-union ABI landed — native codegen
+    // now compiles multi-target transitions (was: fail-closed rejection with
+    // "tagged-state-union ABI"). Renamed intent preserved for history.
     let src = r#"
 flow Decision {
     state Pending { value: i32 }
@@ -1136,11 +1139,12 @@ flow Decision {
 
 func main() -> i32 { 0 }
 "#;
-    let error = compile_and_run(src).expect_err("native multi-target must fail closed");
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let result = compile_and_run(src);
     assert!(
-        error.contains("tagged-state-union ABI"),
-        "unexpected native capability error: {}",
-        error
+        result.is_ok(),
+        "native multi-target must compile after tagged-state-union ABI: {:?}",
+        result.err()
     );
 }
 
@@ -5222,13 +5226,10 @@ func main() -> i32 {
         Ok(interp::Value::Int(0)),
         "runtime dispatch by state tag"
     );
-    // codegen: fail-closed until the tagged-state-union ABI lands (0.34.16).
-    let err = compile_and_run(src).expect_err("codegen multi-target must fail closed");
-    assert!(
-        err.contains("tagged-state-union") || err.contains("unsupported"),
-        "unexpected codegen error: {}",
-        err
-    );
+    // v0.34.16 (ADR-002): the tagged-state-union ABI landed — codegen
+    // dispatches by tag across differing layouts (no more fail-closed).
+    let out = compile_and_run(src).expect("codegen multi-target differing layouts");
+    assert_eq!(out.trim(), "1");
 }
 
 #[test]
@@ -5297,6 +5298,74 @@ func main() -> i32 {
     let (result, out) = run_source_bytecode_with_stdout(src);
     assert_eq!(result, interp::Value::Int(0));
     assert_eq!(out.trim(), "110\n15\n1\n2");
+}
+
+#[test]
+fn multi_target_codegen_dual_backend_tag_dispatch() {
+    // v0.34.16 (ADR-002): L1 — codegen tagged-state-union ABI must agree
+    // with bytecode across same-layout and differing-layout target sets
+    // (match dispatch by tag + boxed payload decode).
+    let src = r#"
+flow Checker {
+    state Small { v: i32 }
+    state Large { v: i32 }
+    transition classify(Small, amount: i32) -> Small | Large {
+        do {
+            if self.v + amount > 50 {
+                return Large { v: self.v + amount }
+            } else {
+                return Small { v: self.v + amount }
+            }
+        }
+    }
+}
+flow C {
+    state A { v: i32 }
+    state B { message: string }
+    transition go(A) -> B | A {
+        do {
+            if self.v > 0 { return B { message: "positive" } }
+            return A { v: 0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s1 = Small { v: 10 }
+    let r1 = Checker::classify(s1, 100)
+    let s2 = Small { v: 10 }
+    let r2 = Checker::classify(s2, 5)
+    let t1 = match r1 {
+        Small { v } => v,
+        Large { v } => v
+    }
+    let t2 = match r2 {
+        Small { v } => v,
+        Large { v } => v
+    }
+    let s3 = A { v: 5 }
+    let r3 = C::go(s3)
+    let t3 = match r3 {
+        B { message } => 1,
+        A { v } => 2
+    }
+    let s4 = A { v: -1 }
+    let r4 = C::go(s4)
+    let t4 = match r4 {
+        B { message } => 1,
+        A { v } => 2
+    }
+    println(t1)
+    println(t2)
+    println(t3)
+    println(t4)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bytecode_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bytecode_out.trim(), "110\n15\n1\n2");
+    let native = compile_and_run(src).expect("codegen multi-target dual backend");
+    assert_eq!(native.trim(), "110\n15\n1\n2");
 }
 
 #[test]
