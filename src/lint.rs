@@ -200,8 +200,10 @@ fn collect_decls_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
     match stmt.unlocated() {
         Stmt::Let { pat, .. } => collect_decls_in_pat(pat, info),
         Stmt::For { var, body, .. } => {
-            if var != "_" {
-                info.declared.insert(var.clone());
+            if let Some(name) = var.single_var_name() {
+                if name != "_" {
+                    info.declared.insert(name.to_string());
+                }
             }
             collect_decls_in_block(body, info);
         }
@@ -337,16 +339,8 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         | Stmt::Ellipsis => {}
         Stmt::Become(e) => collect_refs_in_expr(e, info),
         Stmt::Do(body) => collect_refs_in_block(body, info),
-        Stmt::Pinned {
-            expr,
-            timeout,
-            body,
-            ..
-        } => {
+        Stmt::Pinned { expr, body, .. } => {
             collect_refs_in_expr(expr, info);
-            if let Some(timeout) = timeout {
-                collect_refs_in_expr(timeout, info);
-            }
             collect_refs_in_block(body, info);
         }
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),

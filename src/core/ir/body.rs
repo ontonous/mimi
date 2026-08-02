@@ -500,7 +500,6 @@ pub enum ResolvedStmtKind {
     },
     Pinned {
         value: ResolvedExpr,
-        timeout: Option<ResolvedExpr>,
         binding: Option<ResolvedLocalId>,
         body: ResolvedBlock,
     },
@@ -801,14 +800,10 @@ impl BodyValidator<'_> {
             ResolvedStmtKind::Scope { body, .. } => self.visit_block(body),
             ResolvedStmtKind::Pinned {
                 value,
-                timeout,
                 binding,
                 body,
             } => {
                 self.visit_expr(value);
-                if let Some(timeout) = timeout {
-                    self.visit_expr(timeout);
-                }
                 if let Some(binding) = binding {
                     self.require_local(&statement.node_id, binding);
                 }

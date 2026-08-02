@@ -535,16 +535,8 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             }
             remap_expr_spans(init, remap)
         }
-        Stmt::Pinned {
-            expr,
-            timeout,
-            body,
-            ..
-        } => {
+        Stmt::Pinned { expr, body, .. } => {
             remap_expr_spans(expr, remap)?;
-            if let Some(timeout) = timeout {
-                remap_expr_spans(timeout, remap)?;
-            }
             remap_block_spans(body, remap)
         }
         Stmt::MmsBlock { span, .. } => remap_span_source(span, remap),

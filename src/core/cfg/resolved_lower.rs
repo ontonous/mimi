@@ -424,14 +424,10 @@ impl<'a> ResolvedCfgLowerer<'a> {
             ResolvedStmtKind::Scope { body, .. } => self.lower_block(body, Some(current)),
             ResolvedStmtKind::Pinned {
                 value,
-                timeout,
                 binding,
                 body,
             } => {
-                let mut current = self.lower_expr(value, current, CfgPointKind::Expression)?;
-                if let Some(timeout) = timeout {
-                    current = self.lower_expr(timeout, current, CfgPointKind::Expression)?;
-                }
+                let current = self.lower_expr(value, current, CfgPointKind::Expression)?;
                 if let Some(binding) = binding {
                     self.point(
                         &current,

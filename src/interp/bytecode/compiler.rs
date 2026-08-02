@@ -2065,13 +2065,19 @@ impl BytecodeCompiler {
                 body,
             } => {
                 self.compile_quote_expr(fc, iterable, shadowed)?;
-                shadowed.insert(var.clone());
+                let var_name = var
+                    .single_var_name()
+                    .ok_or_else(|| {
+                        InterpError::new("quote for-loop must bind a single identifier")
+                    })?
+                    .to_string();
+                shadowed.insert(var_name.clone());
                 self.compile_quote_block(fc, body, shadowed)?;
                 fc.emit(Op::QuoteBlock {
                     n: body.len() as u16,
                 });
-                shadowed.remove(var);
-                let var_idx = fc.proto.add_const(ConstValue::Str(var.clone()));
+                shadowed.remove(&var_name);
+                let var_idx = fc.proto.add_const(ConstValue::Str(var_name.clone()));
                 fc.emit(Op::QuoteFor { var_idx });
             }
             Stmt::Assign { target, value } => {
@@ -3997,10 +4003,12 @@ impl BytecodeCompiler {
     fn compile_for(
         &mut self,
         fc: &mut FuncCompiler,
-        var: &str,
+        var: &Pattern,
         iter: &Expr,
         body: &Block,
     ) -> Result<Reg, InterpError> {
+        // v0.34.3: for-loop patterns — single identifier binds the element;
+        // tuple/constructor patterns destructure it via bind_pattern.
         // Detect `range(start, end)` pattern → compile as counter loop.
         if let Expr::Call(callee, args) = iter {
             if let Expr::Ident(name) = callee.as_ref() {
@@ -4049,13 +4057,14 @@ impl BytecodeCompiler {
 
         // Push scope for loop variable (prevents leak to outer scope).
         fc.push_scope();
-        // var = iter[idx]
-        let r_var = fc.bind_var(var);
+        // element = iter[idx]; bind via pattern (single ident or destructure).
+        let r_elem = fc.proto.alloc_reg();
         fc.emit(Op::ListGet {
-            rd: r_var,
+            rd: r_elem,
             ra: r_iter,
             rb: r_idx,
         });
+        self.bind_pattern(fc, var, r_elem);
 
         let body_result = self.compile_block(fc, body)?;
         fc.pop_scope();
@@ -4116,7 +4125,7 @@ impl BytecodeCompiler {
     fn compile_for_range(
         &mut self,
         fc: &mut FuncCompiler,
-        var: &str,
+        var: &Pattern,
         start_expr: &Expr,
         end_expr: &Expr,
         body: &Block,
@@ -4160,13 +4169,14 @@ impl BytecodeCompiler {
             ra: r_cmp,
         });
 
-        // Bind loop variable directly to counter (no ListGet needed).
+        // Bind loop variable to the counter (range element is an i32 value).
         fc.push_scope();
-        let r_var = fc.bind_var(var);
+        let r_elem = fc.proto.alloc_reg();
         fc.emit(Op::Mov {
-            rd: r_var,
+            rd: r_elem,
             rs: r_idx,
         });
+        self.bind_pattern(fc, var, r_elem);
 
         let body_result = self.compile_block(fc, body)?;
         fc.pop_scope();
@@ -4796,7 +4806,9 @@ impl BytecodeCompiler {
                 body,
             } => {
                 self.collect_free_vars_expr(iterable, local_vars, free_vars);
-                local_vars.insert(var.clone());
+                if let Some(var_name) = var.single_var_name() {
+                    local_vars.insert(var_name.to_string());
+                }
                 self.collect_free_vars_block(body, local_vars, free_vars);
             }
             Stmt::Return(e) => {
@@ -5414,7 +5426,10 @@ fn quoted_ast_to_stmt(
             Stmt::Loop(quoted_ast_to_block(body, interp_counter, interp_values))
         }
         QuotedAst::For(var, iter, body) => Stmt::For {
-            var: var.clone(),
+            var: Pattern::synthetic(
+                PatternKind::Variable(var.clone()),
+                crate::ast::AstOrigin::User,
+            ),
             iterable: quoted_ast_to_expr(iter, interp_counter, interp_values),
             body: quoted_ast_to_block(body, interp_counter, interp_values),
         },

@@ -880,37 +880,22 @@ impl BodyLowerer<'_> {
                 let iterable = self.lower_expr(iterable, &format!("{role}.iterable"))?;
                 let element_ty = self.iterable_element_type(&node_id, &iterable.ty)?;
                 let pattern_id = NodeId(format!("{}/for-pattern", node_id.0));
-                let local_id = ResolvedLocalId(NodeId(format!("{}/local", pattern_id.0)));
                 let pattern_origin = Origin::Desugared {
                     parent: node_id.clone(),
                     rule: "resolved_body.for_binding".into(),
                     span: origin.user_span(),
                 };
                 self.scopes.push(BTreeMap::new());
-                self.insert_local(
-                    var.clone(),
-                    ResolvedLocal {
-                        id: local_id.clone(),
-                        display_name: var.clone(),
-                        ty: element_ty.clone(),
-                        mutable: false,
-                        origin: pattern_origin.clone(),
-                    },
-                    &pattern_id,
-                )?;
+                // v0.34.3: lower the for-loop pattern. Single identifier →
+                // Binding; tuple pattern → Tuple of Bindings (each element gets
+                // its own local + sub-type from the element tuple type).
+                let pattern =
+                    self.lower_for_pattern(var, &element_ty, &pattern_id, &pattern_origin)?;
                 let lowered_body =
                     self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false);
                 self.scopes.pop();
                 ResolvedStmtKind::For {
-                    pattern: ResolvedPattern {
-                        node_id: pattern_id,
-                        origin: pattern_origin,
-                        ty: element_ty,
-                        kind: ResolvedPatternKind::Binding {
-                            local: local_id,
-                            by_reference: None,
-                        },
-                    },
+                    pattern,
                     iterable,
                     body: lowered_body?,
                 }
@@ -1092,17 +1077,8 @@ impl BodyLowerer<'_> {
                     initializer: Some(initializer),
                 }
             }
-            Stmt::Pinned {
-                expr,
-                timeout,
-                var,
-                body,
-            } => {
+            Stmt::Pinned { expr, var, body } => {
                 let value = self.lower_expr(expr, &format!("{role}.expression"))?;
-                let timeout = timeout
-                    .as_ref()
-                    .map(|timeout| self.lower_expr(timeout, &format!("{role}.timeout")))
-                    .transpose()?;
                 self.scopes.push(BTreeMap::new());
                 let binding = var.as_ref().map(|name| {
                     let binding_id = NodeId(format!("{}/pinned-binding", node_id.0));
@@ -1135,7 +1111,6 @@ impl BodyLowerer<'_> {
                 let (binding, body) = lowered?;
                 ResolvedStmtKind::Pinned {
                     value,
-                    timeout,
                     binding,
                     body,
                 }
@@ -3703,6 +3678,26 @@ impl BodyLowerer<'_> {
             .collect()
     }
 
+    /// v0.34.3: lower a for-loop binding pattern. Delegates to the generic
+    /// `lower_binding_pattern`, which handles single identifiers (Binding),
+    /// tuples (Tuple of Bindings — each element gets a typed local from the
+    /// canonical element type), arrays and slices.
+    fn lower_for_pattern(
+        &mut self,
+        pattern: &Pattern,
+        element_ty: &ResolvedTypeId,
+        node_id: &NodeId,
+        origin: &Origin,
+    ) -> Result<ResolvedPattern, Vec<ResolvedBodyError>> {
+        let _ = origin;
+        self.lower_binding_pattern(
+            pattern,
+            &format!("{}/for", node_id.0),
+            element_ty.clone(),
+            false,
+        )
+    }
+
     fn lower_place(
         &mut self,
         expr: &Expr,
@@ -5717,7 +5712,6 @@ mod tests {
         let statement = &body.root.statements[1];
         let ResolvedStmtKind::Pinned {
             value,
-            timeout,
             binding: Some(binding),
             body: pinned_body,
         } = &statement.kind
@@ -5725,10 +5719,7 @@ mod tests {
             panic!("pinned statement expected");
         };
         assert_eq!(body.locals[binding].ty, value.ty);
-        assert!(
-            timeout.is_none(),
-            "timeout abolished by amendment clause 10"
-        );
+        assert!(!pinned_body.statements.is_empty());
         let ResolvedStmtKind::Assign { value, .. } = &pinned_body.statements[0].kind else {
             panic!("pinned body assignment expected");
         };

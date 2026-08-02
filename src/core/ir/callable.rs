@@ -100,16 +100,8 @@ fn collect_contracts(block: &ResolvedBlock, out: &mut Vec<ResolvedContract>) {
             ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
                 collect_contracts(body, out);
             }
-            ResolvedStmtKind::Pinned {
-                value,
-                timeout,
-                body,
-                ..
-            } => {
+            ResolvedStmtKind::Pinned { value, body, .. } => {
                 collect_expr_contracts(value, out);
-                if let Some(timeout) = timeout {
-                    collect_expr_contracts(timeout, out);
-                }
                 collect_contracts(body, out);
             }
             ResolvedStmtKind::Bind { initializer, .. } => {

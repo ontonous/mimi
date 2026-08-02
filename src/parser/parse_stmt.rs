@@ -181,12 +181,7 @@ impl Parser {
                 self.skip_newlines();
                 self.expect(TokenKind::LBrace, "`{`")?;
                 let body = self.parse_block()?;
-                Ok(Stmt::Pinned {
-                    expr,
-                    timeout: None, // abolished by amendment clause 10
-                    var,
-                    body,
-                })
+                Ok(Stmt::Pinned { expr, var, body })
             }
             TokenKind::Ident(s) if s == "on" => {
                 self.advance();
@@ -597,7 +592,9 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::For, "`for`")?;
-        let var = self.expect_ident()?;
+        // v0.34.3: `for (k, v) in m` destructuring — parse a full pattern.
+        // Single identifiers still parse as Pattern::Variable.
+        let var = self.parse_pattern()?;
         self.expect(TokenKind::In, "`in`")?;
         let iterable = self.parse_expr(0)?;
         self.skip_newlines();
