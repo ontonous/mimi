@@ -421,18 +421,6 @@ impl<'a> Lowerer<'a> {
                 );
                 Some(current)
             }
-            Stmt::Delegate { expr, .. } => {
-                let current = self
-                    .lower_expr(expr, current, &format!("{role}.delegate"))
-                    .unwrap_or_else(|| self.new_block(meta, "unreachable.delegate"));
-                self.point(
-                    &current,
-                    meta,
-                    CfgPointKind::ResourceAction,
-                    "stmt.delegate",
-                );
-                Some(current)
-            }
             Stmt::Pinned {
                 expr,
                 timeout,

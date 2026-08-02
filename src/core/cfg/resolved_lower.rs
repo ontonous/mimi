@@ -422,22 +422,6 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 current
             }
             ResolvedStmtKind::Scope { body, .. } => self.lower_block(body, Some(current)),
-            ResolvedStmtKind::Delegate { source, .. } => {
-                let current = self.lower_place_inputs(source, current)?;
-                self.point(
-                    &current,
-                    &statement.node_id,
-                    &statement.origin,
-                    CfgPointKind::ResourceAction,
-                    PointAccesses {
-                        uses: vec![self.local_name(&source.base)],
-                        reads: vec![self.place_spelling(source)],
-                        read_places: vec![self.canonical_place(source)],
-                        ..PointAccesses::default()
-                    },
-                );
-                Some(current)
-            }
             ResolvedStmtKind::Pinned {
                 value,
                 timeout,

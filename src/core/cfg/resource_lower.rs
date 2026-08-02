@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
-    DelegateTarget, MatchArm, Permission, ResolvedBlock, ResolvedExpr, ResolvedExprKind,
-    ResolvedFStringPart, ResolvedIndex, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
-    ResolvedProjection, ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
-    ResolvedValueProjection,
+    MatchArm, Permission, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
+    ResolvedIndex, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
+    ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::{
     CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan, LoanId,
@@ -274,7 +273,6 @@ impl<'a> ActionEmitter<'a> {
                 }
                 ResolvedStmtKind::Continue
                 | ResolvedStmtKind::Drop(_)
-                | ResolvedStmtKind::Delegate { .. }
                 | ResolvedStmtKind::NestedCallable(_) => {}
             }
         }
@@ -533,29 +531,6 @@ impl<'a> ActionEmitter<'a> {
             ResolvedStmtKind::Math(expressions) => {
                 for expression in expressions {
                     self.visit_expr(expression, None);
-                }
-            }
-            ResolvedStmtKind::Delegate {
-                permission,
-                source,
-                target,
-            } => {
-                if let DelegateTarget::Local(local) = target {
-                    let _ = self.resource_for_local(local);
-                }
-                if *permission == Permission::Consume {
-                    let place = self.canonical_place(source);
-                    self.push_action(
-                        &statement.node_id,
-                        &statement.origin,
-                        ActionDraft {
-                            kind: CanonicalActionKind::DelegateConsume,
-                            resource: self.resource_for_place(&place),
-                            source: Some(place),
-                            target: None,
-                            loan: None,
-                        },
-                    );
                 }
             }
             ResolvedStmtKind::Pinned {

@@ -1036,7 +1036,6 @@ impl Parser {
         let mut transitions = Vec::new();
         let mut impl_protocols = Vec::new();
         let mut persistent_fields = Vec::new();
-        let mut transactional_fields = Vec::new();
         let mut fault_type: Option<crate::ast::Type> = None;
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
@@ -1052,40 +1051,43 @@ impl Parser {
                 impl_protocols.push(proto);
                 continue;
             }
-            // DEAD: 架构修正案条款 3 废止 WAL/@transactional。待清理。
-            // Check for `persistent` modifier or `@` annotation
-            // `@transactional` may appear without `()` before `persistent state`.
-            let mut state_all_transactional = false;
+            // v0.34.1: `@transactional` abolished by amendment clause 3 (WAL).
+            // Check for `persistent` modifier or `@` annotation.
             if self.at(&TokenKind::At) {
-                // Peek: @transactional without paren → field/state attribute
+                // Peek annotation name; reject @transactional outright.
                 let saved = self.pos;
                 self.advance();
                 let ann_name = self.expect_ident()?;
-                if ann_name == "transactional" && !self.at(&TokenKind::LParen) {
-                    state_all_transactional = true;
-                    self.skip_newlines();
-                    // fall through to persistent/state parsing
-                } else {
-                    // Restore and parse as flow annotation @name(...)
-                    self.pos = saved;
-                    let annotation_start = self.pos;
-                    self.advance();
-                    let ann_name = self.expect_ident()?;
-                    self.expect(TokenKind::LParen, "`(`")?;
-                    let kind = match ann_name.as_str() {
-                        "mailbox" => {
-                            if matches!(self.peek_kind(), TokenKind::Ident(_))
-                                && self.pos + 1 < self.tokens.len()
-                                && self.tokens[self.pos + 1].kind == TokenKind::Eq
-                            {
-                                self.expect_ident()?;
-                                self.expect(TokenKind::Eq, "`=`")?;
-                            }
-                            if let TokenKind::Int(s) = &self.peek().kind {
-                                // PR-C1: parse failure is a hard error, not silent default.
-                                let tok = self.peek();
-                                let (line, col) = (tok.line, tok.col);
-                                let depth = s.parse::<usize>().map_err(|_| {
+                if ann_name == "transactional" {
+                    let tok = self.tokens[self.pos.saturating_sub(1)].clone();
+                    return Err(ParseError::new(
+                        "`@transactional` was abolished by architecture amendment clause 3 \
+                         (WAL/@transactional removed). Remove the attribute; persistent fields \
+                         still survive Fault via recover→reset.",
+                        tok.line,
+                        tok.col,
+                    ));
+                }
+                // Restore and parse as flow annotation @name(...).
+                self.pos = saved;
+                let annotation_start = self.pos;
+                self.advance();
+                let ann_name = self.expect_ident()?;
+                self.expect(TokenKind::LParen, "`(`")?;
+                let kind = match ann_name.as_str() {
+                    "mailbox" => {
+                        if matches!(self.peek_kind(), TokenKind::Ident(_))
+                            && self.pos + 1 < self.tokens.len()
+                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                        {
+                            self.expect_ident()?;
+                            self.expect(TokenKind::Eq, "`=`")?;
+                        }
+                        if let TokenKind::Int(s) = &self.peek().kind {
+                            // PR-C1: parse failure is a hard error, not silent default.
+                            let tok = self.peek();
+                            let (line, col) = (tok.line, tok.col);
+                            let depth = s.parse::<usize>().map_err(|_| {
                                     ParseError::new(
                                         format!(
                                             "invalid @mailbox depth '{}': expected non-negative integer",
@@ -1095,30 +1097,30 @@ impl Parser {
                                         col,
                                     )
                                 })?;
-                                self.advance();
-                                FlowAnnotationKind::MailboxDepth(depth)
-                            } else {
-                                let tok = self.peek();
-                                return Err(ParseError::new(
+                            self.advance();
+                            FlowAnnotationKind::MailboxDepth(depth)
+                        } else {
+                            let tok = self.peek();
+                            return Err(ParseError::new(
                                     "expected integer depth in @mailbox(...), e.g. @mailbox(depth=2048)",
                                     tok.line,
                                     tok.col,
                                 ));
-                            }
                         }
-                        "max_children" => {
-                            if matches!(self.peek_kind(), TokenKind::Ident(_))
-                                && self.pos + 1 < self.tokens.len()
-                                && self.tokens[self.pos + 1].kind == TokenKind::Eq
-                            {
-                                self.expect_ident()?;
-                                self.expect(TokenKind::Eq, "`=`")?;
-                            }
-                            if let TokenKind::Int(s) = &self.peek().kind {
-                                // PR-C1: parse failure is a hard error, not silent default.
-                                let tok = self.peek();
-                                let (line, col) = (tok.line, tok.col);
-                                let n = s.parse::<usize>().map_err(|_| {
+                    }
+                    "max_children" => {
+                        if matches!(self.peek_kind(), TokenKind::Ident(_))
+                            && self.pos + 1 < self.tokens.len()
+                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                        {
+                            self.expect_ident()?;
+                            self.expect(TokenKind::Eq, "`=`")?;
+                        }
+                        if let TokenKind::Int(s) = &self.peek().kind {
+                            // PR-C1: parse failure is a hard error, not silent default.
+                            let tok = self.peek();
+                            let (line, col) = (tok.line, tok.col);
+                            let n = s.parse::<usize>().map_err(|_| {
                                     ParseError::new(
                                         format!(
                                             "invalid @max_children value '{}': expected non-negative integer",
@@ -1128,32 +1130,22 @@ impl Parser {
                                         col,
                                     )
                                 })?;
-                                self.advance();
-                                FlowAnnotationKind::MaxChildren(n)
-                            } else {
-                                let tok = self.peek();
-                                return Err(ParseError::new(
-                                    "expected integer in @max_children(...), e.g. @max_children(10)",
-                                    tok.line,
-                                    tok.col,
-                                ));
-                            }
-                        }
-                        "transactional" => {
-                            // PR-H3: @transactional(...) with parens is invalid —
-                            // only bare `@transactional` before state/fields is supported.
+                            self.advance();
+                            FlowAnnotationKind::MaxChildren(n)
+                        } else {
                             let tok = self.peek();
                             return Err(ParseError::new(
-                                "`@transactional(...)` takes no arguments; write bare `@transactional` before a state or fields",
+                                "expected integer in @max_children(...), e.g. @max_children(10)",
                                 tok.line,
                                 tok.col,
                             ));
                         }
-                        _ => {
-                            // PR-H2: unknown @annotations must surface as parse errors
-                            // (not eprintln!) so LSP/check can report them with span.
-                            let tok = self.peek();
-                            return Err(ParseError::new(
+                    }
+                    _ => {
+                        // PR-H2: unknown @annotations must surface as parse errors
+                        // (not eprintln!) so LSP/check can report them with span.
+                        let tok = self.peek();
+                        return Err(ParseError::new(
                         format!(
                             "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), @sparse, or @dense",
                             ann_name
@@ -1161,15 +1153,14 @@ impl Parser {
                         tok.line,
                         tok.col,
                     ));
-                        }
-                    };
-                    self.expect(TokenKind::RParen, "`)`")?;
-                    annotations.push(FlowAnnotation::new(
-                        self.consumed_meta(annotation_start, AstOrigin::User),
-                        kind,
-                    ));
-                    continue;
-                }
+                    }
+                };
+                self.expect(TokenKind::RParen, "`)`")?;
+                annotations.push(FlowAnnotation::new(
+                    self.consumed_meta(annotation_start, AstOrigin::User),
+                    kind,
+                ));
+                continue;
             }
             // Check for `persistent` modifier
             let is_persistent = self.at(&TokenKind::Persistent);
@@ -1185,12 +1176,6 @@ impl Parser {
                                 if !persistent_fields.contains(&field.name) {
                                     persistent_fields.push(field.name.clone());
                                 }
-                                // @transactional before persistent state → all fields WAL-backed
-                                if state_all_transactional
-                                    && !transactional_fields.contains(&field.name)
-                                {
-                                    transactional_fields.push(field.name.clone());
-                                }
                             }
                         }
                     }
@@ -1200,13 +1185,6 @@ impl Parser {
                     if is_persistent {
                         return Err(ParseError::new(
                             "`persistent` cannot be applied to a transition",
-                            self.peek().line,
-                            self.peek().col,
-                        ));
-                    }
-                    if state_all_transactional {
-                        return Err(ParseError::new(
-                            "`@transactional` cannot be applied to a transition",
                             self.peek().line,
                             self.peek().col,
                         ));
@@ -1245,8 +1223,6 @@ impl Parser {
             transitions,
             impl_protocols,
             persistent_fields,
-            transactional_fields,
-            metadata_shadow_fields: vec![],
             fault_type,
         })
     }
@@ -1346,7 +1322,9 @@ impl Parser {
             let target = self.expect_ident()?;
             to_states.push(target);
             self.skip_newlines();
-            if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
+            // v0.34.1: `|>` removed as a transition-target separator; only the
+            // `|` (BitOr) multi-target separator remains (ADR-002).
+            if self.at(&TokenKind::BitOr) {
                 self.advance();
                 self.skip_newlines();
             } else {

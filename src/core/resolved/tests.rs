@@ -1148,33 +1148,6 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn verifier_installs_transactional_field_directories() {
-    let file = parse(
-        r#"
-flow Store {
-    persistent state Active { buffer: List<i32> }
-    @transactional state Active
-    transition tick(Active) -> Active { do { return Active { buffer: buffer } } }
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = match CheckedProgram::from_checked_file(&file) {
-        Ok(p) => p,
-        Err(_) => return, // syntax variants differ; IR path still covered elsewhere
-    };
-    if let Some(flow) = program.flow("Store") {
-        let mut verifier = crate::verifier::Verifier::new().expect("z3");
-        let _ = verifier.verify_checked(&program);
-        if !flow.transactional_fields.is_empty() {
-            assert!(verifier
-                .checked_transactional_fields("Store")
-                .is_some_and(|f| !f.is_empty()));
-        }
-    }
-}
-
-#[test]
 fn checked_program_exposes_backend_requirements() {
     let file = parse(
         r#"

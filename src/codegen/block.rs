@@ -986,24 +986,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // also accept nested do for defensive completeness.
                     self.compile_block(body, vars)?;
                 }
-                Stmt::Delegate { kind, expr, target } => {
-                    // v0.29.15: three-tier delegate permissions.
-                    let val = self.compile_expr(expr, vars)?;
-                    if !vars.contains_key(target) {
-                        return Err(CompileError::Generic(format!(
-                            "delegate target '{}' not found in scope",
-                            target
-                        )));
-                    }
-                    match kind {
-                        DelegateKind::View => {
-                            let _ = val;
-                        }
-                        DelegateKind::Mutate | DelegateKind::Consume => {
-                            self.compile_delegate_writeback(expr, val, vars)?;
-                        }
-                    }
-                }
                 Stmt::Pinned {
                     expr,
                     timeout,
@@ -1905,53 +1887,5 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         param_types
-    }
-
-    /// v0.29.15: write delegate result back to source field.
-    /// When `expr` is `Field(obj, field_name)`, stores `val` into `obj.field_name`.
-    pub(super) fn compile_delegate_writeback(
-        &mut self,
-        expr: &Expr,
-        val: BasicValueEnum<'ctx>,
-        vars: &HashMap<String, VarEntry<'ctx>>,
-    ) -> MimiResult<()> {
-        if let Expr::Field(container, field_name) = expr.unlocated() {
-            if let Expr::Ident(name) = container.unlocated() {
-                if let Some(&(alloca, _ty)) = vars.get(name) {
-                    let obj_type = self.infer_object_type(container, vars);
-                    if let Some(td) = self.type_defs.get(&obj_type) {
-                        if let TypeDefKind::Record(fields) = &td.kind {
-                            if let Some((idx, _)) = fields
-                                .iter()
-                                .enumerate()
-                                .find(|(_, f)| &f.name == field_name)
-                            {
-                                if let Some(sty) = self.type_llvm.get(&obj_type).and_then(|t| {
-                                    if let BasicTypeEnum::StructType(s) = *t {
-                                        Some(s)
-                                    } else {
-                                        None
-                                    }
-                                }) {
-                                    let gep = self
-                                        .gep()
-                                        .build_struct_gep(
-                                            sty,
-                                            alloca,
-                                            idx as u32,
-                                            &format!("delegate_wb_{field_name}"),
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("gep: {e}"))
-                                        })?;
-                                    self.build_store(gep, val)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 }

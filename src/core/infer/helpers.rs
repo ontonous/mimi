@@ -338,7 +338,7 @@ impl<'a> Checker<'a> {
                     self.emit_code(
                         crate::diagnostic::codes::E0428,
                         format!(
-                            "`?` cannot be used on extern \"C\" function '{}' — FFI failures are Faults, not Rejected (amendment clause 10). Use spawn_foreign_task() for async FFI error handling",
+                            "`?` cannot be used on extern \"C\" function '{}' — FFI failures are Faults, not Rejected (amendment clause 10). Async FFI error handling (spawn_foreign_task) is planned for 0.2; use `fault`/`fails` modeling today",
                             name
                         ),
                     );

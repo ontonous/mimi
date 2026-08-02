@@ -151,7 +151,6 @@ impl<'a> Checker<'a> {
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis
-            | Stmt::Delegate { .. }
             | Stmt::Stay
             | Stmt::Pinned { .. } => {}
             Stmt::Become(e) => {
@@ -286,9 +285,6 @@ impl<'a> Checker<'a> {
                 for s in body {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }
-            }
-            Stmt::Delegate { expr, .. } => {
-                self.collect_shared_writes_in_expr(expr, scopes, writes);
             }
             Stmt::Pinned { expr, body, .. } => {
                 self.collect_shared_writes_in_expr(expr, scopes, writes);
@@ -1643,43 +1639,6 @@ impl<'a> Checker<'a> {
             }
             Stmt::Do(body) => {
                 self.check_block(body, ret, scopes);
-            }
-            Stmt::Delegate {
-                kind,
-                expr,
-                target: _,
-            } => {
-                self.infer_expr(expr, scopes);
-                // T-H14: static permission checks for view/mutate/consume.
-                if let Some(root) = Self::place_root_ident(expr) {
-                    match kind {
-                        crate::ast::DelegateKind::View => {
-                            // view is always allowed on view/mutate params; no write.
-                        }
-                        crate::ast::DelegateKind::Mutate => {
-                            if self.view_params.contains(root) {
-                                self.emit_code(
-                                    crate::diagnostic::codes::E0415,
-                                    format!(
-                                        "cannot delegate mutate of `view` parameter '{}' (read-only)",
-                                        root
-                                    ),
-                                );
-                            }
-                        }
-                        crate::ast::DelegateKind::Consume => {
-                            if self.view_params.contains(root) {
-                                self.emit_code(
-                                    crate::diagnostic::codes::E0415,
-                                    format!(
-                                        "cannot delegate consume of `view` parameter '{}' (read-only)",
-                                        root
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
             }
             Stmt::Pinned {
                 expr,

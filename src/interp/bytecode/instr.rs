@@ -952,8 +952,6 @@ pub struct BytecodeProgram {
     pub max_children: Option<usize>,
     /// Flow persistent fields: flow_name → field names (for Fault shadowing).
     pub flow_persistent: std::collections::HashMap<String, Vec<String>>,
-    /// Flows whose root state is @transactional (rollback on fault).
-    pub flow_transactional: std::collections::HashSet<String>,
     /// Type definitions: type_name → kind (for type_fields / type_variants).
     pub type_defs: std::collections::HashMap<String, crate::ast::TypeDefKind>,
     /// The original AST (for actor worker threads that use tree-walker internally).

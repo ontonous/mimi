@@ -2523,28 +2523,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Do(body) => {
                     self.compile_block(body, vars)?;
                 }
-                Stmt::Delegate { kind, expr, target } => {
-                    // v0.29.15: delegate with write-back semantics.
-                    // - view: evaluate expr, compile target lookup.
-                    // - mutate/consume: evaluate expr, call target, store result back.
-                    let val = self.compile_expr(expr, vars)?;
-                    if !vars.contains_key(target) {
-                        return Err(CompileError::Generic(format!(
-                            "delegate target '{}' not found in scope",
-                            target
-                        )));
-                    }
-                    match kind {
-                        DelegateKind::View => {
-                            let _ = val; // side-effect discards value (no write-back)
-                        }
-                        DelegateKind::Mutate | DelegateKind::Consume => {
-                            // Write-back: if expr is Field(obj, field_name), store
-                            // result back into obj.field_name.
-                            self.compile_delegate_writeback(expr, val, vars)?;
-                        }
-                    }
-                }
                 Stmt::Pinned {
                     expr,
                     timeout,
