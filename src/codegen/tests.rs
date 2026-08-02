@@ -254,8 +254,6 @@ fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
         transitions: vec![],
         impl_protocols: vec![],
         persistent_fields: vec![],
-        transactional_fields: vec![],
-        metadata_shadow_fields: vec![],
         fault_type: None,
     };
 

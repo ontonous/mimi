@@ -137,45 +137,18 @@ impl Parser {
                 Ok(Stmt::Stay)
             }
             TokenKind::Delegate => {
+                // v0.34.1: `delegate` abolished by amendment clause 2 (no nested
+                // Flow delegation). Reject with a clause-referencing diagnostic.
                 self.advance();
-                let kind = match self.peek_kind() {
-                    k if *k == TokenKind::View => {
-                        self.advance();
-                        DelegateKind::View
-                    }
-                    k if *k == TokenKind::Mutate => {
-                        self.advance();
-                        DelegateKind::Mutate
-                    }
-                    k if *k == TokenKind::Consume => {
-                        self.advance();
-                        DelegateKind::Consume
-                    }
-                    _ => {
-                        let tok = self.peek();
-                        return Err(ParseError::new(
-                            "expected `view`, `mutate`, or `consume` after `delegate`",
-                            tok.line,
-                            tok.col,
-                        ));
-                    }
-                };
-                self.expect(TokenKind::LParen, "`(`")?;
-                let expr = self.parse_expr(0)?;
-                self.expect(TokenKind::RParen, "`)`")?;
-                // expect "to" keyword
-                if !matches!(self.peek_kind(), TokenKind::Ident(s) if s == "to") {
-                    let tok = self.peek();
-                    return Err(ParseError::new(
-                        format!("expected `to`, found {}", tok.kind),
-                        tok.line,
-                        tok.col,
-                    ));
-                }
-                self.advance();
-                let target = self.expect_ident()?;
-                self.match_semi();
-                Ok(Stmt::Delegate { kind, expr, target })
+                let tok = self.tokens[self.pos.saturating_sub(1)].clone();
+                return Err(ParseError::new(
+                    "`delegate` was abolished by architecture amendment clause 2 \
+                     (nested Flow delegation removed). Express delegation as an explicit \
+                     transition to a target state instead. \
+                     See devdocs/v0.31/architecture-amendment-1.0.md §条款 2.",
+                    tok.line,
+                    tok.col,
+                ));
             }
             TokenKind::Pinned => {
                 self.advance();
@@ -187,7 +160,8 @@ impl Parser {
                 if self.at(&TokenKind::Comma) {
                     return Err(ParseError::new(
                         "pinned(timeout) was abolished by architecture amendment clause 10. \
-                         Use spawn_foreign_task() with async timeout instead. \
+                         Async FFI timeout (spawn_foreign_task) is planned for 0.2 — FFI calls \
+                         are synchronous today. \
                          See devdocs/v0.31/architecture-amendment-1.0.md §条款 10.",
                         self.tokens[self.pos.saturating_sub(1)].line,
                         self.tokens[self.pos.saturating_sub(1)].col,

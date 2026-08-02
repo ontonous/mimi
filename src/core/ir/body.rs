@@ -446,12 +446,6 @@ pub enum ResolvedScopeKind {
     Parallel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DelegateTarget {
-    Local(ResolvedLocalId),
-    Callable(NodeId),
-}
-
 #[derive(Debug, Clone)]
 pub struct ResolvedStmt {
     pub node_id: NodeId,
@@ -503,11 +497,6 @@ pub enum ResolvedStmtKind {
     Scope {
         kind: ResolvedScopeKind,
         body: ResolvedBlock,
-    },
-    Delegate {
-        permission: Permission,
-        source: ResolvedPlace,
-        target: DelegateTarget,
     },
     Pinned {
         value: ResolvedExpr,
@@ -810,12 +799,6 @@ impl BodyValidator<'_> {
                 }
             }
             ResolvedStmtKind::Scope { body, .. } => self.visit_block(body),
-            ResolvedStmtKind::Delegate { source, target, .. } => {
-                self.visit_place(&statement.node_id, source);
-                if let DelegateTarget::Local(local) = target {
-                    self.require_local(&statement.node_id, local);
-                }
-            }
             ResolvedStmtKind::Pinned {
                 value,
                 timeout,

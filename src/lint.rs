@@ -337,7 +337,6 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         | Stmt::Ellipsis => {}
         Stmt::Become(e) => collect_refs_in_expr(e, info),
         Stmt::Do(body) => collect_refs_in_block(body, info),
-        Stmt::Delegate { expr, .. } => collect_refs_in_expr(expr, info),
         Stmt::Pinned {
             expr,
             timeout,

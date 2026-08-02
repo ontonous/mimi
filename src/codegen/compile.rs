@@ -470,19 +470,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_persistent_fields = Some(persistent_fields);
-        let mut transactional_fields = std::collections::HashMap::new();
-        let mut metadata_shadow_fields = std::collections::HashMap::new();
-        for flow in program.flows().values() {
-            if !flow.transactional_fields.is_empty() {
-                transactional_fields.insert(flow.id.0.clone(), flow.transactional_fields.clone());
-            }
-            if !flow.metadata_shadow_fields.is_empty() {
-                metadata_shadow_fields
-                    .insert(flow.id.0.clone(), flow.metadata_shadow_fields.clone());
-            }
-        }
-        self.resolved_transactional_fields = Some(transactional_fields);
-        self.resolved_metadata_shadow_fields = Some(metadata_shadow_fields);
         let mut flow_protocols = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if !flow.impl_protocols.is_empty() {
@@ -977,12 +964,6 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Compile all transitions of a flow as ordinary LLVM functions.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
-        if !flow.transactional_fields.is_empty() {
-            return Err(CompileError::Unsupported(format!(
-                "transactional recovery for flow '{}' requires native WAL codegen",
-                flow.name
-            )));
-        }
         for t in &flow.transitions {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body

@@ -487,14 +487,8 @@ pub enum Stmt {
     /// Explicit transition terminal: stay
     /// Returns the source state unchanged (self-loop terminal).
     Stay,
-    /// DEAD: 架构修正案条款 2 废止 delegate 作为 subflow 委托。
-    /// view/mutate 借用保留为纯函数参数传递（条款 6）。清理排入后续 sprint。
-    /// Delegate resource to subflow: delegate view/mutate/consume(self.field) to target
-    Delegate {
-        kind: DelegateKind,
-        expr: Expr,
-        target: String,
-    },
+    /// v0.34.1: `delegate` removed — 架构修正案条款 2 废止 subflow 委托
+    /// (parser 拒绝，clause 2 负测试见 flow_features.rs)。AST variant 已删除。
     /// DEAD: 架构修正案条款 10 废除同步 pinned timeout。timeout 字段永远为 None。
     /// Pinned block — pin memory for FFI safety: pinned(expr) |ptr| { ... }
     Pinned {
@@ -1075,16 +1069,8 @@ pub struct FlowDef {
     pub impl_protocols: Vec<String>,
     /// Fields declared as `persistent` — survive Fault and recover
     pub persistent_fields: Vec<String>,
-    /// DEAD: 架构修正案条款 3 废止 WAL/@transactional。待清理。
-    /// Subset of `persistent_fields` marked `@transactional` — full WAL
-    /// shadow-copy on turn entry; restored on Fault (v0.29.14).
-    /// Remaining persistent fields use dirty/version check (recover→reset).
-    pub transactional_fields: Vec<String>,
-    /// v0.29.45: Fields marked `@metadata_shadow` — only metadata (length,
-    /// field count) is snapshotted, not the full data. For large buffers
-    /// where deep clone is too expensive. On restore, metadata is reset
-    /// but underlying data buffer is kept (white-paper §6.3).
-    pub metadata_shadow_fields: Vec<String>,
+    /// v0.34.1: `transactional_fields` / `metadata_shadow_fields` removed —
+    /// 架构修正案条款 3 废止 WAL/@transactional（曾随 0.1.3 RC 确认）。
     /// v0.31.10: Per-Flow typed Fault — `fault ErrorType` declaration in flow body.
     /// When set, the injected Fault state carries an additional `error: ErrorType` field.
     pub fault_type: Option<Type>,
@@ -1276,14 +1262,6 @@ pub struct ProtocolTransitionDef {
     pub to_state: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DelegateKind {
-    View,
-    Mutate,
-    Consume,
-}
-
-/// Kind of allocator for alloc blocks
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocKind {
     /// System default allocator (malloc/free)

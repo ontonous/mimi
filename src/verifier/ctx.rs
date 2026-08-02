@@ -817,8 +817,6 @@ pub struct VerifierCtx {
     pub(crate) checked_max_children: Option<usize>,
     /// Persistent field sets materialised from CheckedProgram.
     pub(crate) checked_persistent_fields: std::collections::HashMap<String, Vec<String>>,
-    pub(crate) checked_transactional_fields: std::collections::HashMap<String, Vec<String>>,
-    pub(crate) checked_metadata_shadow_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_constants: std::collections::HashSet<String>,
     pub(crate) checked_constant_values: std::collections::HashMap<String, (Option<String>, String)>,
     pub(crate) checked_flow_protocols: std::collections::HashMap<String, Vec<String>>,
@@ -1263,19 +1261,6 @@ impl Verifier {
             }
         }
         self.ctx.checked_persistent_fields = persistent_fields;
-        let mut transactional_fields = std::collections::HashMap::new();
-        let mut metadata_shadow_fields = std::collections::HashMap::new();
-        for flow in program.flows().values() {
-            if !flow.transactional_fields.is_empty() {
-                transactional_fields.insert(flow.id.0.clone(), flow.transactional_fields.clone());
-            }
-            if !flow.metadata_shadow_fields.is_empty() {
-                metadata_shadow_fields
-                    .insert(flow.id.0.clone(), flow.metadata_shadow_fields.clone());
-            }
-        }
-        self.ctx.checked_transactional_fields = transactional_fields;
-        self.ctx.checked_metadata_shadow_fields = metadata_shadow_fields;
         self.ctx.checked_constants = program
             .constants()
             .values()
@@ -1685,14 +1670,6 @@ impl Verifier {
 
     pub(crate) fn checked_persistent_fields(&self, flow_name: &str) -> Option<Vec<String>> {
         self.lookup_checked_field_set(&self.ctx.checked_persistent_fields, flow_name)
-    }
-
-    pub(crate) fn checked_transactional_fields(&self, flow_name: &str) -> Option<Vec<String>> {
-        self.lookup_checked_field_set(&self.ctx.checked_transactional_fields, flow_name)
-    }
-
-    pub(crate) fn checked_metadata_shadow_fields(&self, flow_name: &str) -> Option<Vec<String>> {
-        self.lookup_checked_field_set(&self.ctx.checked_metadata_shadow_fields, flow_name)
     }
 
     pub(crate) fn has_checked_constant(&self, name: &str) -> bool {

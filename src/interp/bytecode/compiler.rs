@@ -32,8 +32,6 @@ pub struct BytecodeCompiler {
     flow_names: std::collections::HashSet<String>,
     /// Flow persistent field names: flow_name → fields (fault shadowing).
     flow_persistent: std::collections::HashMap<String, Vec<String>>,
-    /// Flows with @transactional persistent fields (fault rollback).
-    flow_transactional: std::collections::HashSet<String>,
     /// Type definitions (for type_fields / type_variants).
     type_defs: std::collections::HashMap<String, crate::ast::TypeDefKind>,
     /// Known actor names (for spawn resolution).
@@ -330,7 +328,6 @@ impl BytecodeCompiler {
             flow_transition_funcs: HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             flow_persistent: HashMap::new(),
-            flow_transactional: std::collections::HashSet::new(),
             type_defs: HashMap::new(),
             actor_method_funcs: HashMap::new(),
             ast_file: None,
@@ -445,9 +442,6 @@ impl BytecodeCompiler {
                 if !f.persistent_fields.is_empty() {
                     self.flow_persistent
                         .insert(f.name.clone(), f.persistent_fields.clone());
-                }
-                if !f.transactional_fields.is_empty() {
-                    self.flow_transactional.insert(f.name.clone());
                 }
             }
             // Collect actor definitions.
@@ -658,7 +652,6 @@ impl BytecodeCompiler {
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children,
             flow_persistent: std::mem::take(&mut self.flow_persistent),
-            flow_transactional: std::mem::take(&mut self.flow_transactional),
             type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
@@ -806,7 +799,6 @@ impl BytecodeCompiler {
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children: None,
             flow_persistent: std::mem::take(&mut self.flow_persistent),
-            flow_transactional: std::mem::take(&mut self.flow_transactional),
             type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
@@ -1340,8 +1332,9 @@ impl BytecodeCompiler {
                     fc.pop_scope();
                 }
 
-                // DEAD: 架构修正案废止 delegate/pinned。
-                Stmt::Delegate { .. } | Stmt::Pinned { .. } => {}
+                // v0.34.1: `delegate` removed (clause 2); Pinned is still live
+                // (FFI pinning) but its timeout field is DEAD (clause 10).
+                Stmt::Pinned { .. } => {}
 
                 _ => {
                     // Remaining unsupported: Ellipsis, Located (wrapper).

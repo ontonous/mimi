@@ -106,8 +106,6 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_flow_events: Option<HashMap<String, Vec<String>>>,
     pub(in crate::interp) resolved_item_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
-    pub(in crate::interp) resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
-    pub(in crate::interp) resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
     pub(in crate::interp) resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
 }
 
@@ -555,19 +553,6 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_persistent_fields = Some(persistent_fields);
-        let mut transactional_fields = HashMap::new();
-        let mut metadata_shadow_fields = HashMap::new();
-        for flow in program.flows().values() {
-            if !flow.transactional_fields.is_empty() {
-                transactional_fields.insert(flow.id.0.clone(), flow.transactional_fields.clone());
-            }
-            if !flow.metadata_shadow_fields.is_empty() {
-                metadata_shadow_fields
-                    .insert(flow.id.0.clone(), flow.metadata_shadow_fields.clone());
-            }
-        }
-        interp.resolved_transactional_fields = Some(transactional_fields);
-        interp.resolved_metadata_shadow_fields = Some(metadata_shadow_fields);
         let mut flow_protocols = HashMap::new();
         for flow in program.flows().values() {
             if !flow.impl_protocols.is_empty() {
@@ -655,8 +640,6 @@ impl<'a> Interpreter<'a> {
             resolved_flow_events: None,
             resolved_item_kinds: None,
             resolved_persistent_fields: None,
-            resolved_transactional_fields: None,
-            resolved_metadata_shadow_fields: None,
             resolved_flow_protocols: None,
         }
     }
@@ -1087,19 +1070,6 @@ impl<'a> Interpreter<'a> {
                 .filter(|bare| *bare == flow_name)
                 .map(|_| fields.clone())
         })
-    }
-
-    pub(in crate::interp) fn effective_transactional_fields(&self, flow: &FlowDef) -> Vec<String> {
-        Self::resolved_field_set(&self.resolved_transactional_fields, &flow.name)
-            .unwrap_or_else(|| flow.transactional_fields.clone())
-    }
-
-    pub(in crate::interp) fn effective_metadata_shadow_fields(
-        &self,
-        flow: &FlowDef,
-    ) -> Vec<String> {
-        Self::resolved_field_set(&self.resolved_metadata_shadow_fields, &flow.name)
-            .unwrap_or_else(|| flow.metadata_shadow_fields.clone())
     }
 
     pub(crate) fn resolved_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {

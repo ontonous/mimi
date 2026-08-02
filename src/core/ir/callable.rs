@@ -132,7 +132,6 @@ fn collect_contracts(block: &ResolvedBlock, out: &mut Vec<ResolvedContract>) {
             | ResolvedStmtKind::Break(None)
             | ResolvedStmtKind::Continue
             | ResolvedStmtKind::Drop(_)
-            | ResolvedStmtKind::Delegate { .. }
             | ResolvedStmtKind::NestedCallable(_) => {}
         }
     }

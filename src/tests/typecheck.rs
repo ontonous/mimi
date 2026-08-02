@@ -1878,16 +1878,23 @@ func main() -> i32 { 0 }
 
 #[test]
 fn delegate_mutate_view_param_rejected() {
-    // T-H14: cannot delegate mutate of a view param.
+    // v0.34.1: `delegate` abolished by amendment clause 2 — the parser rejects
+    // it outright, so a mutate-of-view delegate never reaches the checker.
     let src = r#"
 func f(xs: view List<i32>) {
     delegate mutate(xs) to child
 }
 func main() -> i32 { 0 }
 "#;
-    let r = check_source(src);
-    // May fail parse if delegate syntax needs flow context — accept type or parse error.
-    assert!(r.is_err(), "expected error for mutate-of-view delegate");
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("`delegate` must be rejected by parser");
+    assert!(
+        err.message.contains("amendment clause 2"),
+        "error should mention amendment clause 2, got: {}",
+        err.message
+    );
 }
 
 #[test]

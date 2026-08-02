@@ -11,11 +11,11 @@ mod types;
 
 pub use body::{
     AllocatorKind, BackendRequirement, BuiltinId, CheckedConversion, CheckedConversionKind,
-    ContractKind, DelegateTarget, EffectId, MatchArm, MethodId, Permission, ResolvedArgument,
-    ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee,
-    ResolvedExpr, ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLambda,
-    ResolvedLiteral, ResolvedLocal, ResolvedLocalId, ResolvedParameterId, ResolvedPattern,
-    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedRecordField, ResolvedScopeKind,
+    ContractKind, EffectId, MatchArm, MethodId, Permission, ResolvedArgument, ResolvedBinaryOp,
+    ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee, ResolvedExpr,
+    ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLambda, ResolvedLiteral,
+    ResolvedLocal, ResolvedLocalId, ResolvedParameterId, ResolvedPattern, ResolvedPatternKind,
+    ResolvedPlace, ResolvedProjection, ResolvedRecordField, ResolvedScopeKind,
     ResolvedSessionAction, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
     ResolvedValueProjection, SessionResidualId, SessionTransition,
 };

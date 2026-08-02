@@ -429,8 +429,7 @@ fn transfer(
         }
         CanonicalActionKind::Drop
         | CanonicalActionKind::Return
-        | CanonicalActionKind::TransferChild
-        | CanonicalActionKind::DelegateConsume => {
+        | CanonicalActionKind::TransferChild => {
             reject_conflicting_loans(action, state, loans, errors);
             let fact = state
                 .resources
@@ -919,8 +918,7 @@ fn action_rank(kind: CanonicalActionKind) -> u8 {
         | CanonicalActionKind::Drop
         | CanonicalActionKind::Return
         | CanonicalActionKind::TransferSession
-        | CanonicalActionKind::TransferChild
-        | CanonicalActionKind::DelegateConsume => 5,
+        | CanonicalActionKind::TransferChild => 5,
     }
 }
 

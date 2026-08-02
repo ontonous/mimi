@@ -393,8 +393,6 @@ pub struct ResolvedFlow {
     pub max_children: Option<usize>,
     pub mailbox_depth: Option<usize>,
     pub persistent_fields: Vec<String>,
-    pub transactional_fields: Vec<String>,
-    pub metadata_shadow_fields: Vec<String>,
     pub impl_protocols: Vec<String>,
     pub origin: Origin,
 }
@@ -1828,15 +1826,13 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
     match backend {
         // Interpreter implements the current Flow surface, including experimental multi-target.
         BackendProfile::Interpreter => true,
-        // Native still lacks tagged multi-target ABI and transactional WAL.
-        BackendProfile::Native => !matches!(capability, "flow.multi_target" | "flow.transactional"),
+        // Native still lacks tagged multi-target ABI.
+        BackendProfile::Native => !matches!(capability, "flow.multi_target"),
         // Verifier proves function contracts; it does not claim Proven for Flow turns.
-        // Multi-target / transactional flows must not block unrelated contract verification.
+        // Multi-target flows must not block unrelated contract verification.
         BackendProfile::Verifier => true,
         // Component IR consumers cannot yet lower Flow runtime features.
-        BackendProfile::Component => {
-            !matches!(capability, "flow.multi_target" | "flow.transactional")
-        }
+        BackendProfile::Component => !matches!(capability, "flow.multi_target"),
     }
 }
 
@@ -3157,7 +3153,6 @@ fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
                         "emit",
                         "send_event",
                         "spawn_actor",
-                        "spawn_foreign_task",
                     ];
                     if cross_boundary_fns.contains(&name.as_str()) {
                         return true;
@@ -4505,7 +4500,6 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::SharedLet { name, .. } => format!("shared-let:{name}"),
         Stmt::OnFailure(_) => "on-failure".into(),
         Stmt::Do(_) => "do".into(),
-        Stmt::Delegate { target, .. } => format!("delegate:{target}"),
         Stmt::Pinned { var, .. } => format!("pinned:{}", var.as_deref().unwrap_or("_")),
         Stmt::Parasteps(_) => "parasteps".into(),
         Stmt::MmsBlock { content, .. } => format!("mms:{:016x}", stable_text_hash(content)),
@@ -4545,7 +4539,6 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::SharedLet { .. } => "stmt.shared_let",
         Stmt::OnFailure(_) => "stmt.on_failure",
         Stmt::Do(_) => "stmt.do",
-        Stmt::Delegate { .. } => "stmt.delegate",
         Stmt::Pinned { .. } => "stmt.pinned",
         Stmt::Parasteps(_) => "stmt.parasteps",
         Stmt::MmsBlock { .. } => "stmt.mms",
@@ -4595,8 +4588,7 @@ pub(crate) fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrec
         Stmt::Return(Some(expr))
         | Stmt::Break(Some(expr))
         | Stmt::Drop(expr)
-        | Stmt::SharedLet { init: expr, .. }
-        | Stmt::Delegate { expr, .. } => {
+        | Stmt::SharedLet { init: expr, .. } => {
             expr_span(expr).map(|span| (span, SpanPrecision::SourceAnchor))
         }
         Stmt::If { cond, .. } | Stmt::While { cond, .. } => {
@@ -4898,15 +4890,6 @@ fn collect_stmt_meta(
                 errors,
             );
         }
-        Stmt::Delegate { expr, .. } => collect_expr_meta(
-            expr,
-            owner,
-            &format!("{role}.expression"),
-            fallback,
-            ids,
-            out,
-            errors,
-        ),
         Stmt::Pinned {
             expr,
             timeout,
@@ -5780,14 +5763,6 @@ fn collect_flow(
         })
         .collect();
     let mut flow_transition_ids = Vec::with_capacity(flow.transitions.len());
-    if !flow.transactional_fields.is_empty() {
-        backend_requirements.push(CapabilityRequirement {
-            requirement_id: "FLOW-TURN-001",
-            capability: "flow.transactional",
-            flow: flow_id.clone(),
-            span: flow_span,
-        });
-    }
     for transition in &flow.transitions {
         let source = StateId {
             flow: flow_id.clone(),
@@ -5926,8 +5901,6 @@ fn collect_flow(
         max_children,
         mailbox_depth,
         persistent_fields: flow.persistent_fields.clone(),
-        transactional_fields: flow.transactional_fields.clone(),
-        metadata_shadow_fields: flow.metadata_shadow_fields.clone(),
         impl_protocols: flow.impl_protocols.clone(),
         origin: resolve_named_origin(
             ResolvedItemKind::Flow,
@@ -6459,8 +6432,7 @@ fn collect_stmt_call_sites(
         | Stmt::Requires(expr, _)
         | Stmt::Ensures(expr, _)
         | Stmt::Invariant(expr, _)
-        | Stmt::SharedLet { init: expr, .. }
-        | Stmt::Delegate { expr, .. } => {
+        | Stmt::SharedLet { init: expr, .. } => {
             let syntax_role = match stmt.unlocated() {
                 Stmt::Let { .. } | Stmt::SharedLet { .. } => "initializer",
                 Stmt::Return(_) | Stmt::Break(_) => "value",

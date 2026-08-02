@@ -56,7 +56,7 @@ struct Frame {
 
 /// Context captured when a flow transition frame is entered. Used to
 /// convert runtime panics inside the transition body into a Fault value
-/// (with persistent-field shadowing / transactional rollback).
+/// (with persistent-field shadowing; @transactional removed v0.34.1).
 struct FlowTxCtx {
     /// Flow name (for diagnostics / persistent lookups).
     flow_name: String,
@@ -66,9 +66,6 @@ struct FlowTxCtx {
     from_payload: Value,
     /// Persistent field names declared on the flow.
     persistent_fields: Vec<String>,
-    /// True when the flow is @transactional: roll back persistent fields
-    /// to the from-payload values on fault (WAL restore, v0.29.14).
-    transactional: bool,
 }
 
 /// The bytecode VM.
@@ -265,7 +262,7 @@ impl<'a> BytecodeVM<'a> {
         let Some(idx) = self.stack.iter().rposition(|f| f.flow_tx.is_some()) else {
             return false;
         };
-        let (from_state, from_payload, persistent, transactional) = {
+        let (from_state, from_payload, persistent) = {
             let ctx = self.stack[idx].flow_tx.as_ref().expect("checked above");
             if ctx.from_state == "Fault" {
                 return false;
@@ -274,25 +271,21 @@ impl<'a> BytecodeVM<'a> {
                 ctx.from_state.clone(),
                 ctx.from_payload.clone(),
                 ctx.persistent_fields.clone(),
-                ctx.transactional,
             )
         };
         if !is_runtime_panic(e) {
             return false;
         }
         // Draft = the transition's `self` (register 0) — mutated in place by
-        // the body. @transactional rolls back to the from-payload snapshot.
-        let draft = self.stack[idx].regs.first().cloned().unwrap_or(Value::Unit);
-        let mut restored = if transactional {
-            from_payload.clone()
-        } else {
-            draft
-        };
-        // v0.29.13/14: recover degrades to reset when non-transactional
-        // persistent fields were dirtied during the turn that produced this
-        // Fault. Zero them in the Fault shadow so the injected recover verb
-        // restores defaults instead of the dirty draft.
-        if !transactional && !persistent.is_empty() {
+        // the body. Non-transactional (all flows, since @transactional was
+        // abolished in v0.34.1): the draft survives; only dirty persistent
+        // fields are zeroed below so recover→reset restores defaults.
+        let mut restored = self.stack[idx].regs.first().cloned().unwrap_or(Value::Unit);
+        // v0.29.13/14: recover degrades to reset when persistent fields
+        // were dirtied during the turn that produced this Fault. Zero them
+        // in the Fault shadow so the injected recover verb restores defaults
+        // instead of the dirty draft.
+        if !persistent.is_empty() {
             let entry_fields = record_fields_of(&from_payload);
             let draft_fields = record_fields_of(&restored);
             let dirty = persistent.iter().any(|name| {
@@ -2463,14 +2456,12 @@ impl<'a> BytecodeVM<'a> {
                     // (runtime panics → Fault value, v0.29.12).
                     {
                         let persistent = self.program.flow_persistent.get(&flow_name).cloned();
-                        let transactional = self.program.flow_transactional.contains(&flow_name);
                         let frame = self.cur_frame_mut();
                         frame.flow_tx = Some(FlowTxCtx {
                             flow_name,
                             from_state,
                             from_payload,
                             persistent_fields: persistent.unwrap_or_default(),
-                            transactional,
                         });
                     }
                 }

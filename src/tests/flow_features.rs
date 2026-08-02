@@ -330,9 +330,28 @@ protocol Sensor {
     }
 }
 
+// ===================== Removed syntax negative tests =====================
+// Architecture amendment clause 2 abolished `delegate view/mutate/consume`
+// (nested Flow delegation). The parser must reject it with a clause-referencing
+// diagnostic — see golden-document.md §9.2 (Removed 拒绝测试).
+
+fn assert_delegate_rejected_by_clause_2(src: &str) {
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("`delegate` must be rejected by parser");
+    assert!(
+        err.message.contains("amendment clause 2"),
+        "error should mention amendment clause 2, got: {}",
+        err.message
+    );
+}
+
 #[test]
 fn flow_parse_delegate() {
-    let src = r#"
+    // v0.34.1: `delegate view(...)` is rejected (amendment clause 2).
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow Parent {
     state Active
 
@@ -343,30 +362,15 @@ flow Parent {
         }
     }
 }
-"#;
-    let file = parse(src);
-    match &file.items[0] {
-        Item::Flow(f) => {
-            let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match body[0].unlocated() {
-                Stmt::Do(b) => b,
-                _ => body,
-            };
-            assert!(matches!(
-                do_body[0].unlocated(),
-                Stmt::Delegate {
-                    kind: DelegateKind::View,
-                    ..
-                }
-            ));
-        }
-        _ => panic!("expected Item::Flow"),
-    }
+"#,
+    );
 }
 
 #[test]
 fn flow_parse_delegate_mutate_consume() {
-    let src = r#"
+    // v0.34.1: `delegate mutate/consume(...)` are rejected too (clause 2).
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow Parent {
     state Active
 
@@ -378,32 +382,8 @@ flow Parent {
         }
     }
 }
-"#;
-    let file = parse(src);
-    match &file.items[0] {
-        Item::Flow(f) => {
-            let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match body[0].unlocated() {
-                Stmt::Do(b) => b,
-                _ => body,
-            };
-            assert!(matches!(
-                do_body[0].unlocated(),
-                Stmt::Delegate {
-                    kind: DelegateKind::Mutate,
-                    ..
-                }
-            ));
-            assert!(matches!(
-                do_body[1].unlocated(),
-                Stmt::Delegate {
-                    kind: DelegateKind::Consume,
-                    ..
-                }
-            ));
-        }
-        _ => panic!("expected Item::Flow"),
-    }
+"#,
+    );
 }
 
 #[test]
@@ -1165,21 +1145,23 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn flow_codegen_transactional_fails_closed() {
+fn transactional_syntax_rejected_by_amendment_clause_3() {
+    // Architecture amendment clause 3 abolished @transactional / WAL.
+    // The parser must reject `@transactional` with a clause-referencing diagnostic.
     let src = r#"
 flow Tx {
     @transactional persistent state Active { value: i32 }
-    transition hold(Active) -> Active {
-        do { return Active { value: self.value } }
-    }
 }
 func main() -> i32 { 0 }
 "#;
-    let error = compile_and_run(src).expect_err("native transactional Flow must fail closed");
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("@transactional must be rejected by parser");
     assert!(
-        error.contains("native WAL codegen") || error.contains("flow.transactional"),
-        "unexpected native capability error: {}",
-        error
+        err.message.contains("amendment clause 3"),
+        "error should mention amendment clause 3, got: {}",
+        err.message
     );
 }
 
@@ -1628,11 +1610,13 @@ flow GoodFlow {
     );
 }
 
-// ===================== Delegate execution tests =====================
+// ===================== Removed delegate execution syntax =====================
 
 #[test]
 fn flow_exec_delegate_view() {
-    let src = r#"
+    // v0.34.1: `delegate view` abolished (amendment clause 2) — parse-level rejection.
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow MyFlow {
     state Active { val: i32 }
 
@@ -1651,22 +1635,15 @@ func main() -> i32 {
     println(r.val)
     0
 }
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+"#,
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "10");
 }
 
 #[test]
 fn flow_exec_delegate_consume() {
-    // v0.29.15: delegate consume returns the target's replacement value.
-    // Plain value target → identity write-back.
-    let src = r#"
+    // v0.34.1: `delegate consume` abolished (amendment clause 2) — parse-level rejection.
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow MyFlow {
     state Active { val: i32 }
 
@@ -1685,21 +1662,15 @@ func main() -> i32 {
     println(r.val)
     0
 }
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+"#,
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "11");
 }
 
 #[test]
 fn flow_exec_delegate_view_no_mutate() {
-    // Delegate view must not mutate the source field.
-    let src = r#"
+    // v0.34.1: `delegate view` abolished (amendment clause 2) — parse-level rejection.
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow MyFlow {
     state Active { val: i32 }
 
@@ -1718,24 +1689,15 @@ func main() -> i32 {
     println(r.val)
     0
 }
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+"#,
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    // view is read-only: val stays 10
-    assert_eq!(out.trim(), "10");
 }
 
 #[test]
 fn flow_exec_delegate_mutate() {
-    // v0.29.15: delegate mutate writes back to self.field.
-    // The target `sub` is a plain i32 literal (no op); writeback is identity.
-    // The `return Active { val: self.val }` sees the mutated value in scope.
-    let src = r#"
+    // v0.34.1: `delegate mutate` abolished (amendment clause 2) — parse-level rejection.
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow MyFlow {
     state Active { val: i32 }
 
@@ -1754,25 +1716,16 @@ func main() -> i32 {
     println(r.val)
     0
 }
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+"#,
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    // mutate writes `self.val` back (identity write-back), then +1
-    assert_eq!(out.trim(), "11");
 }
 
 #[test]
 fn flow_exec_delegate_undefined_target() {
-    // v0.31 architecture amendment clause 2: `delegate view/mutate/consume`
-    // as a subflow delegation mechanism is abolished. The bytecode compiler
-    // skips Delegate statements entirely, so execution must succeed and the
-    // transition must return normally (no undefined-target error).
-    let src = r#"
+    // v0.34.1: `delegate ... to <undefined>` is also rejected at parse time —
+    // the whole construct is abolished (amendment clause 2).
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow MyFlow {
     state Active { val: i32 }
 
@@ -1789,12 +1742,7 @@ func main() -> i32 {
     let r = MyFlow::process(s)
     0
 }
-"#;
-    let result = run_source_bytecode_result(src);
-    assert!(
-        result.is_ok(),
-        "delegate is skipped per architecture amendment, got {:?}",
-        result
+"#,
     );
 }
 
@@ -2078,8 +2026,10 @@ func main() -> i32 {
 
 #[test]
 fn flow_codegen_delegate_no_op() {
-    // Delegate is currently a no-op in codegen (resource stays / is dropped).
-    let src = r#"
+    // v0.34.1: `delegate` abolished (amendment clause 2) — parse-level rejection.
+    // Codegen never sees Delegate statements anymore.
+    assert_delegate_rejected_by_clause_2(
+        r#"
 flow Parent {
     state Active { val: i32 }
 
@@ -2098,15 +2048,8 @@ func main() -> i32 {
     println(r.val)
     0
 }
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+"#,
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "11");
 }
 
 // ===================== Transfer matrix + Fault fallback (v0.29.10) =====================
@@ -2826,7 +2769,10 @@ func main() -> i32 {
 }
 
 #[test]
-fn flow_fault_rolls_back_transactional_persistent_draft() {
+fn transactional_persistent_draft_syntax_rejected_by_amendment_clause_3() {
+    // @transactional was abolished by clause 3; the parser must reject it.
+    // Non-transactional persistent-field dirty→reset semantics are covered
+    // by flow_fault_recover_uses_faulting_persistent_draft above.
     let src = r#"
 flow Svc {
     @transactional persistent state Active { value: i32 }
@@ -2847,7 +2793,15 @@ func main() -> i32 {
     recovered.value
 }
 "#;
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(7)));
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("@transactional must be rejected by parser");
+    assert!(
+        err.message.contains("amendment clause 3"),
+        "error should mention amendment clause 3, got: {}",
+        err.message
+    );
 }
 
 #[test]

@@ -398,8 +398,6 @@ pub struct CodeGenerator<'ctx> {
     resolved_item_kinds: Option<HashMap<String, String>>,
     /// Persistent field sets from CheckedProgram.
     resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
-    resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
-    resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
     resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
     /// 0.31.30: Component IR — typed ABI surface for runtime function validation.
     /// When present, get_runtime_fn validates names against the Component IR
@@ -585,8 +583,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_events: None,
             resolved_item_kinds: None,
             resolved_persistent_fields: None,
-            resolved_transactional_fields: None,
-            resolved_metadata_shadow_fields: None,
             resolved_flow_protocols: None,
             component_ir: None,
             max_children: None,

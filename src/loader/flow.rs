@@ -535,7 +535,6 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             }
             remap_expr_spans(init, remap)
         }
-        Stmt::Delegate { expr, .. } => remap_expr_spans(expr, remap),
         Stmt::Pinned {
             expr,
             timeout,
