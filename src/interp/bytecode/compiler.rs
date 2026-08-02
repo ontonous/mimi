@@ -32,6 +32,8 @@ pub struct BytecodeCompiler {
     flow_names: std::collections::HashSet<String>,
     /// Flow persistent field names: flow_name → fields (fault shadowing).
     flow_persistent: std::collections::HashMap<String, Vec<String>>,
+    /// Flow typed-fault error type: flow_name → error type name (from `fault T`).
+    flow_fault_type: std::collections::HashMap<String, String>,
     /// Type definitions (for type_fields / type_variants).
     type_defs: std::collections::HashMap<String, crate::ast::TypeDefKind>,
     /// Known actor names (for spawn resolution).
@@ -328,6 +330,7 @@ impl BytecodeCompiler {
             flow_transition_funcs: HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             flow_persistent: HashMap::new(),
+            flow_fault_type: HashMap::new(),
             type_defs: HashMap::new(),
             actor_method_funcs: HashMap::new(),
             ast_file: None,
@@ -442,6 +445,13 @@ impl BytecodeCompiler {
                 if !f.persistent_fields.is_empty() {
                     self.flow_persistent
                         .insert(f.name.clone(), f.persistent_fields.clone());
+                }
+                // Typed-fault error type (v0.34.18b): absorbed panics add a
+                // defaulted `error` field matching the codegen backend.
+                if let Some(ft) = &f.fault_type {
+                    let resolved = self.resolve_type(ft);
+                    self.flow_fault_type
+                        .insert(f.name.clone(), crate::core::fmt_type(&resolved));
                 }
             }
             // Collect actor definitions.
@@ -652,6 +662,7 @@ impl BytecodeCompiler {
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children,
             flow_persistent: std::mem::take(&mut self.flow_persistent),
+            flow_fault_type: std::mem::take(&mut self.flow_fault_type),
             type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
@@ -799,6 +810,7 @@ impl BytecodeCompiler {
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children: None,
             flow_persistent: std::mem::take(&mut self.flow_persistent),
+            flow_fault_type: std::mem::take(&mut self.flow_fault_type),
             type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),

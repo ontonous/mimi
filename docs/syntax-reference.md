@@ -328,7 +328,8 @@ Flow := 'flow' Ident generics
         '}'
 ```
 
-[事实] v0.34.1：`@transactional` **已拒绝**（条款 3 诊断，top_level.rs:1061-1070）；`metadata_shadow_fields`/`transactional_fields` FlowDef 字段删除（ast.rs）。`@dense` 保留（0.34.18 删除）。
+[事实] v0.34.1：`@transactional` **已拒绝**（条款 3 诊断，top_level.rs:1061-1070）；`metadata_shadow_fields`/`transactional_fields` FlowDef 字段删除（ast.rs）。
+[事实] v0.34.18b：`@dense` **已拒绝**（架构修正案条款 1 sparse-irreversible，top_level.rs:936-948）。N×M Fault 兜底注入从 flow_matrix.rs 删除；未声明 (state, event) 对 = 编译错误 E0211。要让转移可 fault，声明多目标返回 `-> State | Fault`，运行时 panic 由编译器兜底为 Fault（双后端等价）。`@sparse` 保留为无害的显式默认标记。
 [事实] v0.34.1：`delegate` 已拒绝（条款 2 诊断）。`|>` 转移分隔符已拒绝。
 [事实] `fault Variant { ... }` 变体块语法全仓零匹配——仅 `fault Type`（golden-document.md §3.2）。
 [事实] v0.34.3：`for` 绑定为 Pattern（`for (k, v) in m` 解构；单标识符 = Pattern::Variable）——ast.rs For.var。

@@ -56,7 +56,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_matrix -- --test-threads=1"
-evidence = "0.31.25: @sparse 翻转为 stable 默认（架构修正案条款 1）。无注解 Flow = 稀疏图（未声明对 → 编译错误），@dense 显式启用 N×M Fault 注入。Progressive Main flow 标记 @dense（脚本保持完整 Fault 路由）。per-Flow typed Fault (fault ErrorType), explicit reset/recover override."
+evidence = "0.31.25: @sparse 翻转为 stable 默认（架构修正案条款 1）。0.34.18b: @dense 已拒绝、N×M Fault 注入从 flow_matrix.rs 删除——无注解 Flow = 稀疏图（未声明对 → 编译错误 E0211），无任何 N×M 兜底。要让转移可 fault 用多目标返回 `-> State | Fault`，运行时 panic 由编译器兜底为 Fault（codegen/bytecode 字段级等价，对齐 make_fault_value）。per-Flow typed Fault (fault ErrorType), explicit reset/recover override."
 
 [[support]]
 requirement = "FLOW-MULTI-001"

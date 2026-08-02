@@ -287,12 +287,13 @@ impl<'a> BytecodeVM<'a> {
         let Some(idx) = self.stack.iter().rposition(|f| f.flow_tx.is_some()) else {
             return false;
         };
-        let (from_state, from_payload, persistent) = {
+        let (flow_name, from_state, from_payload, persistent) = {
             let ctx = self.stack[idx].flow_tx.as_ref().expect("checked above");
             if ctx.from_state == "Fault" {
                 return false;
             }
             (
+                ctx.flow_name.clone(),
                 ctx.from_state.clone(),
                 ctx.from_payload.clone(),
                 ctx.persistent_fields.clone(),
@@ -331,6 +332,15 @@ impl<'a> BytecodeVM<'a> {
         }
         let event = format!("panic:{}", e.code());
         let mut fault = crate::flow_matrix::make_fault_value(&from_state, &event, "");
+        // v0.34.18b typed-fault parity: a `fault T` flow's Fault record carries a
+        // defaulted `error: T` field. The codegen backend builds it from
+        // type_defs["Fault"]; mirror that here so absorbed panics match L1.
+        if let Some(err_ty) = self.program.flow_fault_type.get(&flow_name) {
+            let err_val = default_record_value(err_ty, &self.program.record_fields);
+            if let Value::Record(_, fields) = &mut fault {
+                fields.insert("error".to_string(), err_val);
+            }
+        }
         shadow_persistent_into_fault(&mut fault, &restored, &persistent);
         let return_reg = self.stack[idx].return_reg;
         let popped = self.stack.len() - idx;
@@ -3607,6 +3617,48 @@ fn default_value_for_runtime(sample: &Value) -> Value {
         Value::List(_) => Value::List(vec![]),
         Value::Unit => Value::Unit,
         other => other.clone(), // keep shape for complex types
+    }
+}
+
+/// Build a default record value for a named type from `record_fields` metadata
+/// (type name → [(field name, field type str)]). Used by typed-fault panic
+/// absorption to default the `error` field, matching the codegen backend
+/// (v0.34.18b). Nested record fields recurse; unknown/compound types default to
+/// Unit (error payloads are typically flat scalar records).
+fn default_record_value(
+    type_name: &str,
+    record_fields: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> Value {
+    let mut fields = std::collections::HashMap::new();
+    if let Some(field_defs) = record_fields.get(type_name) {
+        for (fname, fty) in field_defs {
+            fields.insert(
+                fname.clone(),
+                default_value_for_type_str(fty, record_fields),
+            );
+        }
+    }
+    Value::Record(Some(type_name.to_string()), fields)
+}
+
+/// Default value for a field type string (from `fmt_type`).
+fn default_value_for_type_str(
+    ty: &str,
+    record_fields: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> Value {
+    match ty {
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => Value::Int(0),
+        "f32" | "f64" | "float" => Value::Float(0.0),
+        "bool" => Value::Bool(false),
+        "string" => Value::String(String::new()),
+        "unit" => Value::Unit,
+        other => {
+            if record_fields.contains_key(other) {
+                default_record_value(other, record_fields)
+            } else {
+                Value::Unit
+            }
+        }
     }
 }
 

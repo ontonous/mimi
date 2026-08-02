@@ -929,16 +929,26 @@ impl Parser {
             self.advance();
             let ann_name = self.expect_ident()?;
             // v0.31.10: @sparse is a bare annotation (no parentheses).
-            // v0.31.25: @sparse is now the default; @dense opts into N×M completion.
-            if ann_name == "sparse" || ann_name == "dense" {
-                let kind = if ann_name == "sparse" {
-                    FlowAnnotationKind::Sparse
-                } else {
-                    FlowAnnotationKind::Dense
-                };
+            // v0.34.18b (amendment clause 1, sparse-irreversible): @dense (N×M
+            // Fault fallback injection) is repealed — an undeclared (state, event)
+            // is a compile error (E0211), not a runtime Fault. @dense is rejected;
+            // @sparse remains accepted as a harmless explicit default marker.
+            if ann_name == "dense" {
+                let tok = self.peek();
+                return Err(ParseError::new(
+                    "@dense was repealed by architecture amendment clause 1 (sparse-irreversible): \
+                     undeclared (state, event) pairs are a compile error (E0211), not a runtime \
+                     Fault. Remove @dense; declare every transition explicitly. To let a transition \
+                     fault, give it a multi-target return `-> State | Fault`."
+                        .to_string(),
+                    tok.line,
+                    tok.col,
+                ));
+            }
+            if ann_name == "sparse" {
                 annotations.push(FlowAnnotation::new(
                     self.consumed_meta(annotation_start, AstOrigin::User),
-                    kind,
+                    FlowAnnotationKind::Sparse,
                 ));
                 self.skip_newlines();
                 continue;
@@ -1147,7 +1157,7 @@ impl Parser {
                         let tok = self.peek();
                         return Err(ParseError::new(
                         format!(
-                            "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), @sparse, or @dense",
+                            "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), or @sparse",
                             ann_name
                         ),
                         tok.line,

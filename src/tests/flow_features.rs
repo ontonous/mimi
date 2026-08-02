@@ -2089,186 +2089,13 @@ func main() -> i32 {
 
 // ===================== Transfer matrix + Fault fallback (v0.29.10) =====================
 
-#[test]
-fn flow_matrix_injects_fault_and_fallback() {
-    // Only Zero+inc is user-defined. Positive+inc and Fault+inc are auto-filled.
-    let src = r#"
-flow Counter @dense {
-    state Zero { count: i32 }
-    state Positive { count: i32 }
-
-    transition inc(Zero) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
-    }
-}
-"#;
-    let file = parse(src);
-    match &file.items[0] {
-        Item::Flow(f) => {
-            assert!(f.states.iter().any(|s| s.name == "Fault"));
-            let user = user_transitions(f);
-            assert_eq!(user.len(), 1);
-            assert_eq!(user[0].from_state, "Zero");
-            let fb: Vec<_> = f.transitions.iter().filter(|t| t.is_fallback).collect();
-            // Positive+inc, Fault+inc, reset, recover
-            assert!(fb.len() >= 4, "expected ≥4 fallbacks, got {}", fb.len());
-            assert!(fb
-                .iter()
-                .any(|t| t.from_state == "Positive" && t.name == "inc"));
-            assert!(fb
-                .iter()
-                .any(|t| t.from_state == "Fault" && t.name == "inc"));
-            assert!(fb
-                .iter()
-                .any(|t| t.name == "reset" && t.from_state == "Fault"));
-            assert!(fb
-                .iter()
-                .any(|t| t.name == "recover" && t.from_state == "Fault"));
-            // Auto Fault payload has SystemTrace fields (v0.29.12)
-            let fault = f.states.iter().find(|s| s.name == "Fault").unwrap();
-            let fields: Vec<_> = fault
-                .payload
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|f| f.name.as_str())
-                .collect();
-            assert!(fields.contains(&"last_state"));
-            assert!(fields.contains(&"unexpected_event"));
-            assert!(fields.contains(&"snapshot"));
-            assert!(fields.contains(&"trace"));
-        }
-        _ => panic!("expected Flow"),
-    }
-}
-
-#[test]
-fn flow_matrix_preserves_user_fault_shape() {
-    let src = r#"
-flow Tolerant @dense {
-    state Active { data: i32 }
-    state Fault { trace: string }
-
-    transition tick(Active) -> Active {
-        do {
-            return Active { data: self.data + 1 }
-        }
-    }
-}
-"#;
-    let file = parse(src);
-    match &file.items[0] {
-        Item::Flow(f) => {
-            let fault = f.states.iter().find(|s| s.name == "Fault").unwrap();
-            let fields = fault.payload.as_ref().unwrap();
-            assert_eq!(fields.len(), 1);
-            assert_eq!(fields[0].name, "trace");
-            // Active+tick defined; Fault+tick is fallback using user Fault shape
-            assert!(f
-                .transitions
-                .iter()
-                .any(|t| t.is_fallback && t.from_state == "Fault" && t.name == "tick"));
-        }
-        _ => panic!("expected Flow"),
-    }
-}
-
-#[test]
-fn flow_matrix_undefined_event_returns_fault_interp() {
-    // Calling inc on Positive (not user-defined) hits the auto fallback → Fault.
-    let src = r#"
-flow Counter @dense {
-    state Zero { count: i32 }
-    state Positive { count: i32 }
-
-    transition inc(Zero) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
-    }
-}
-
-func main() -> i32 {
-    let s0 = Zero { count: 0 }
-    let s1 = Counter::inc(s0)
-    // s1 is Positive; Positive+inc is a fallback → Fault
-    let f = Counter::inc(s1)
-    println(f.last_state)
-    println(f.unexpected_event)
-    0
-}
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
-    );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    // Capture stdout from interp via dual path: compile_and_run only for codegen;
-    // for interp we verify field values by returning a sentinel after side-effect println.
-    // Use a pure return for field checks:
-    let src2 = r#"
-flow Counter @dense {
-    state Zero { count: i32 }
-    state Positive { count: i32 }
-
-    transition inc(Zero) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
-    }
-}
-
-func main() -> i32 {
-    let s0 = Zero { count: 0 }
-    let s1 = Counter::inc(s0)
-    let f = Counter::inc(s1)
-    if f.last_state == "Positive" {
-        if f.unexpected_event == "inc" {
-            return 1
-        }
-    }
-    0
-}
-"#;
-    assert_eq!(run_source_bytecode_result(src2), Ok(interp::Value::Int(1)));
-}
-
-#[test]
-fn flow_codegen_undefined_event_returns_fault() {
-    let src = r#"
-flow Counter @dense {
-    state Zero { count: i32 }
-    state Positive { count: i32 }
-
-    transition inc(Zero) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
-    }
-}
-
-func main() -> i32 {
-    let s0 = Zero { count: 0 }
-    let s1 = Counter::inc(s0)
-    let f = Counter::inc(s1)
-    println(f.last_state)
-    println(f.unexpected_event)
-    0
-}
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
-    );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines, vec!["Positive", "inc"], "got {:?}", lines);
-}
+// NOTE (0.34.18b): the former @dense matrix-injection tests
+// (flow_matrix_injects_fault_and_fallback, flow_matrix_preserves_user_fault_shape,
+// flow_matrix_undefined_event_returns_fault_interp,
+// flow_codegen_undefined_event_returns_fault) were removed with @dense.
+// Amendment clause 1 (sparse-irreversible) makes undeclared (state, event) a
+// compile error (E0211), not a runtime Fault; the sparse contract is locked by
+// flow_sparse_skips_fallback_injection and flow_sparse_undefined_event_rejected.
 
 #[test]
 fn flow_matrix_does_not_override_user_defined_cell() {
@@ -2308,26 +2135,31 @@ func main() -> i32 {
 
 #[test]
 fn flow_fault_absorption_drop_nested_record() {
-    // Entering Fault via fallback must succeed and leave a readable Fault payload.
-    // Nested payload resources are walked for drop (actors short-circuited).
+    // 0.34.18b: @dense fallback removed (amendment clause 1). Entering Fault now
+    // goes through a declared multi-target `-> Dead | Fault` transition whose body
+    // panics (div-by-zero) — the compiler absorbs the panic into the Fault variant.
+    // The source state carries a heap `string` field to exercise draft drop walking
+    // during absorption. Dual-backend: both backends must produce the same Fault.
     let src = r#"
-flow Holder @dense {
+flow Holder {
     state Live { tag: string, n: i32 }
     state Dead { tag: string }
 
-    transition kill(Live) -> Dead {
-        do { return Dead { tag: self.tag } }
+    transition kill(Live, d: i32) -> Dead | Fault {
+        do {
+            let x = self.n / d
+            return Dead { tag: self.tag }
+        }
     }
 }
 
 func main() -> i32 {
-    let s = Live { tag: "x", n: 7 }
-    // kill is only defined on Live; Dead+kill is fallback → Fault
-    let d = Holder::kill(s)
-    let f = Holder::kill(d)
-    if f.last_state == "Dead" {
-        if f.unexpected_event == "kill" {
-            return 1
+    let u = Holder::kill(Live { tag: "x", n: 7 }, 0)
+    match u {
+        Dead { tag } => println(tag)
+        Fault { last_state, unexpected_event, snapshot, trace } => {
+            println(last_state)
+            println(unexpected_event)
         }
     }
     0
@@ -2338,7 +2170,10 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(1)));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines, vec!["Live", "panic:E0801"], "got {:?}", lines);
 }
 
 #[test]
@@ -2390,62 +2225,31 @@ func main() -> i32 {
 
 #[test]
 fn flow_fault_absorption_codegen() {
+    // 0.34.18b: comprehensive dual-backend check that an absorbed panic produces a
+    // Fault whose flat fields AND structured trace match the bytecode reference
+    // (flow_matrix::make_fault_value) field-for-field.
     let src = r#"
-flow F @dense {
+flow F {
     state A { v: i32 }
     state B { v: i32 }
 
-    transition go(A) -> B {
-        do { return B { v: self.v + 1 } }
+    transition go(A, d: i32) -> B | Fault {
+        do { return B { v: self.v / d } }
     }
 }
 
 func main() -> i32 {
-    let a = A { v: 1 }
-    let b = F::go(a)
-    // B+go is fallback → Fault
-    let f = F::go(b)
-    println(f.last_state)
-    println(f.unexpected_event)
-    0
-}
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
-    );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines, vec!["B", "go"], "got {:?}", lines);
-}
-
-// ===================== SystemTrace (v0.29.12) =====================
-
-#[test]
-fn flow_system_trace_fields_on_fallback() {
-    // Auto-fallback fills flat fields + structured trace.
-    // (Uses println + return 0 so dual-backend / compile_and_run works.)
-    let src = r#"
-flow C @dense {
-    state Zero { n: i32 }
-    state Pos { n: i32 }
-
-    transition inc(Zero) -> Pos {
-        do { return Pos { n: self.n + 1 } }
+    let u = F::go(A { v: 1 }, 0)
+    match u {
+        B { v } => println(v)
+        Fault { last_state, unexpected_event, snapshot, trace } => {
+            println(last_state)
+            println(unexpected_event)
+            println(trace.last_state_name)
+            println(trace.unexpected_event)
+            println(trace.memory_dump.count)
+        }
     }
-}
-
-func main() -> i32 {
-    let z = Zero { n: 0 }
-    let p = C::inc(z)
-    let f = C::inc(p)
-    println(f.last_state)
-    println(f.unexpected_event)
-    println(f.trace.last_state_name)
-    println(f.trace.unexpected_event)
-    println(f.snapshot)
     0
 }
 "#;
@@ -2459,7 +2263,56 @@ func main() -> i32 {
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(
         lines,
-        vec!["Pos", "inc", "Pos", "inc", "undefined transition inc(Pos)"],
+        vec!["A", "panic:E0801", "A", "panic:E0801", "2"],
+        "got {:?}",
+        lines
+    );
+}
+
+// ===================== SystemTrace (v0.29.12) =====================
+
+#[test]
+fn flow_system_trace_fields_on_fallback() {
+    // 0.34.18b: absorbed panic fills the flat Fault fields + structured SystemTrace.
+    // snapshot is "" (matches the bytecode absorber, which passes an empty snapshot
+    // to make_fault_value). Dual-backend.
+    let src = r#"
+flow C {
+    state Zero { n: i32 }
+    state Pos { n: i32 }
+
+    transition inc(Zero, d: i32) -> Pos | Fault {
+        do { return Pos { n: self.n / d } }
+    }
+}
+
+func main() -> i32 {
+    let u = C::inc(Zero { n: 0 }, 0)
+    match u {
+        Pos { n } => println(n)
+        Fault { last_state, unexpected_event, snapshot, trace } => {
+            println(last_state)
+            println(trace.snapshot)
+            println(unexpected_event)
+            println(trace.last_state_name)
+            println(trace.unexpected_event)
+        }
+    }
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    // trace.snapshot is "" (empty middle line, preserved by lines()).
+    assert_eq!(
+        lines,
+        vec!["Zero", "", "panic:E0801", "Zero", "panic:E0801"],
         "got {:?}",
         lines
     );
@@ -2467,23 +2320,28 @@ func main() -> i32 {
 
 #[test]
 fn flow_system_trace_codegen_print() {
+    // 0.34.18b: absorbed panic populates the SystemTrace sub-records (MemoryDump,
+    // PanicPayload) identically to the bytecode reference. Dual-backend.
     let src = r#"
-flow C @dense {
+flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
-    transition inc(Zero) -> Pos {
-        do { return Pos { n: self.n + 1 } }
+    transition inc(Zero, d: i32) -> Pos | Fault {
+        do { return Pos { n: self.n / d } }
     }
 }
 
 func main() -> i32 {
-    let z = Zero { n: 0 }
-    let p = C::inc(z)
-    let f = C::inc(p)
-    println(f.trace.last_state_name)
-    println(f.trace.unexpected_event)
-    println(f.snapshot)
+    let u = C::inc(Zero { n: 0 }, 0)
+    match u {
+        Pos { n } => println(n)
+        Fault { last_state, unexpected_event, snapshot, trace } => {
+            println(trace.memory_dump.fields)
+            println(trace.memory_dump.count)
+            println(trace.panic_payload.error_type)
+        }
+    }
     0
 }
 "#;
@@ -2497,7 +2355,7 @@ func main() -> i32 {
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(
         lines,
-        vec!["Pos", "inc", "undefined transition inc(Pos)"],
+        vec!["from_state=Zero;event=panic:E0801", "2", "panic:E0801"],
         "got {:?}",
         lines
     );
@@ -2679,103 +2537,117 @@ flow C {
 
 #[test]
 fn flow_reset_rebuilds_root() {
-    // Fall into Fault, then reset → root with default payload (n=0).
+    // 0.34.18b: @dense fallback removed (amendment clause 1). Enter Fault via a
+    // single-target transition whose body panics — the bytecode VM absorbs the
+    // panic into a Fault (dynamically typed; statically still `Pos`). reset then
+    // rebuilds the root with a default payload (n=0).
+    //
+    // Bytecode-only: reset/recover on an absorbed Fault is inherently dynamic —
+    // the static type of `f` is the to-state, not `Fault`, so codegen cannot
+    // type a `reset(f)` call. This mirrors flow_fault_recover_uses_faulting_persistent_draft.
     let src = r#"
-flow C @dense {
+flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
     transition inc(Zero) -> Pos {
         do { return Pos { n: self.n + 1 } }
     }
+    transition crash(Pos) -> Pos {
+        do {
+            let x = 1 / 0
+            return Pos { n: self.n }
+        }
+    }
 }
 
 func main() -> i32 {
-    let z = Zero { n: 5 }
-    let p = C::inc(z)
-    let f = C::inc(p)
+    let p = C::inc(Zero { n: 5 })
+    let f = C::crash(p)
     let r = C::reset(f)
     println(r.n)
     0
 }
 "#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+    let (_, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        out.trim(),
+        "0",
+        "reset rebuilds root default, got {:?}",
+        out
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "0");
 }
 
 #[test]
 fn flow_recover_preserves_persistent() {
-    // persistent Config.max_retries survives Fault and is restored by recover.
+    // 0.34.18b: persistent Config.max_retries survives an absorbed-panic Fault
+    // and is restored by recover. Entry is a single-target transition whose body
+    // panics (bytecode absorbs → Fault, shadowing the clean persistent field).
+    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
     let src = r#"
-flow Svc @dense {
+flow Svc {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32, req: i32 }
 
     transition start(Config) -> Active {
         do { return Active { max_retries: self.max_retries, req: 0 } }
     }
-    transition bump(Active) -> Active {
-        do { return Active { max_retries: self.max_retries, req: self.req + 1 } }
+    transition crash(Active) -> Active {
+        do {
+            let x = 1 / 0
+            return Active { max_retries: self.max_retries, req: self.req }
+        }
     }
 }
 
 func main() -> i32 {
-    let c = Config { max_retries: 7 }
-    let a = Svc::start(c)
-    let a2 = Svc::bump(a)
-    // Active+start is fallback → Fault (shadows max_retries)
-    let f = Svc::start(a2)
+    let a = Svc::start(Config { max_retries: 7 })
+    let f = Svc::crash(a)
     let r = Svc::recover(f)
     println(r.max_retries)
     0
 }
 "#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
+    let (_, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        out.trim(),
+        "7",
+        "recover preserves persistent, got {:?}",
+        out
     );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "7");
 }
 
 #[test]
 fn flow_reset_discards_persistent() {
-    // reset always zeros non-default fields — even if persistent was shadowed.
+    // 0.34.18b: reset always zeros persistent fields — even though the absorbed
+    // Fault shadowed max_retries=7. Entry via single-target absorbed panic.
+    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
     let src = r#"
-flow Svc @dense {
+flow Svc {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32 }
 
     transition start(Config) -> Active {
         do { return Active { max_retries: self.max_retries } }
     }
+    transition crash(Active) -> Active {
+        do {
+            let x = 1 / 0
+            return Active { max_retries: self.max_retries }
+        }
+    }
 }
 
 func main() -> i32 {
-    let c = Config { max_retries: 7 }
-    let a = Svc::start(c)
-    let f = Svc::start(a)
+    let a = Svc::start(Config { max_retries: 7 })
+    let f = Svc::crash(a)
     let r = Svc::reset(f)
     println(r.max_retries)
     0
 }
 "#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
-    );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "0");
+    let (_, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(out.trim(), "0", "reset discards persistent, got {:?}", out);
 }
 
 #[test]
@@ -2841,14 +2713,22 @@ func main() -> i32 {
 
 #[test]
 fn flow_user_reset_not_overridden() {
-    // User-defined reset body wins over the injected system verb.
+    // 0.34.18b: user-defined reset(Fault) -> Zero wins over the injected system
+    // verb. Entry via single-target absorbed panic. Bytecode-only: see
+    // flow_reset_rebuilds_root note (dynamic Fault typing).
     let src = r#"
-flow C @dense {
+flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
     transition inc(Zero) -> Pos {
         do { return Pos { n: self.n + 1 } }
+    }
+    transition crash(Pos) -> Pos {
+        do {
+            let x = 1 / 0
+            return Pos { n: self.n }
+        }
     }
     transition reset(Fault) -> Zero {
         do { return Zero { n: 42 } }
@@ -2856,22 +2736,15 @@ flow C @dense {
 }
 
 func main() -> i32 {
-    let z = Zero { n: 0 }
-    let p = C::inc(z)
-    let f = C::inc(p)
+    let p = C::inc(Zero { n: 0 })
+    let f = C::crash(p)
     let r = C::reset(f)
     println(r.n)
     0
 }
 "#;
-    assert!(
-        check_source(src).is_ok(),
-        "type check: {:?}",
-        check_source(src)
-    );
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "42");
+    let (_, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(out.trim(), "42", "user reset wins, got {:?}", out);
 }
 
 // ── v0.29.17 Subflow synchronous nesting ──────────────────────────────
@@ -6435,33 +6308,44 @@ func main() -> i32 {
 
 #[test]
 fn flow_typed_fault_fallback_includes_error_field() {
-    // v0.31.10: When a fallback transition fires (calling a declared event
-    // from a state that doesn't handle it), the Fault state includes the
-    // typed error field with a default value.
+    // v0.31.10 / 0.34.18b: a `fault T` flow's absorbed-panic Fault carries the
+    // typed `error: T` field defaulted (error.code = 0). @dense fallback removed
+    // (amendment clause 1); entry is now a multi-target `-> Running | Fault`
+    // transition whose body panics. Dual-backend: both backends default `error`.
     let src = r#"
 type MyError {
     code: i32,
 }
 
-flow Svc @dense {
+flow Svc {
     state Idle { n: i32 }
     state Running { n: i32 }
     fault MyError
-    transition start(Idle) -> Running {
-        do { return Running { n: self.n + 1 } }
+    transition start(Idle, d: i32) -> Running | Fault {
+        do { return Running { n: self.n / d } }
     }
 }
 func main() -> i32 {
-    let s0 = Idle { n: 5 }
-    let s1 = Svc::start(s0)
-    let f = Svc::start(s1)
-    println(f.error.code)
+    let u = Svc::start(Idle { n: 5 }, 0)
+    match u {
+        Running { n } => println(n)
+        Fault { last_state, unexpected_event, snapshot, trace, error } => {
+            println(last_state)
+            println(error.code)
+        }
+    }
     0
 }
 "#;
-    // The fallback transition should produce a Fault with error.code = 0 (default)
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = checked_compile_and_run(src).expect("codegen typed fault absorption");
+    assert_eq!(native.trim(), "Idle\n0", "got {:?}", native);
 }
 
 #[test]
@@ -6624,65 +6508,105 @@ func main() -> i32 {
 }
 
 #[test]
-fn flow_explicit_reset_overrides_system_verb() {
-    // v0.31.10: User-defined reset(Fault) -> State overrides the auto-injected
-    // system verb. The user body is used instead of the default rebuild-root.
+fn flow_dense_annotation_rejected_by_amendment_clause_1() {
+    // 0.34.18b: @dense (N×M Fault fallback injection) was repealed by amendment
+    // clause 1 (sparse-irreversible). The parser must reject it outright.
     let src = r#"
 flow Counter @dense {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("@dense must be rejected by parser");
+    assert!(
+        err.message.contains("amendment clause 1"),
+        "error should mention amendment clause 1, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn flow_explicit_reset_overrides_system_verb() {
+    // v0.31.10 / 0.34.18b: user-defined reset(Fault) -> State overrides the
+    // auto-injected system verb. Entry via single-target absorbed panic.
+    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
+    let src = r#"
+flow Counter {
     state Zero { n: i32 }
     state Positive { n: i32 }
     transition inc(Zero) -> Positive {
         do { return Positive { n: 1 } }
+    }
+    transition crash(Positive) -> Positive {
+        do {
+            let x = 1 / 0
+            return Positive { n: self.n }
+        }
     }
     transition reset(Fault) -> Zero {
         do { return Zero { n: 42 } }
     }
 }
 func main() -> i32 {
-    let s0 = Zero { n: 0 }
-    let s1 = Counter::inc(s0)
-    let f = Counter::inc(s1)
+    let s1 = Counter::inc(Zero { n: 0 })
+    let f = Counter::crash(s1)
     let z = Counter::reset(f)
     println(z.n)
     0
 }
 "#;
     // User-defined reset returns n=42 (not the default n=0)
-    let interp_result = checked_run_source_result(src);
-    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = checked_compile_and_run(src).expect("codegen explicit reset");
-    assert_eq!(native.trim(), "42");
+    let (_, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(out.trim(), "42", "explicit reset overrides, got {:?}", out);
 }
 
 #[test]
 fn flow_explicit_recover_overrides_system_verb() {
-    // v0.31.10: User-defined recover(Fault) -> State overrides the auto-injected
-    // system verb. The user body is used instead of the default rebuild-root.
+    // v0.31.10 / 0.34.18b: user-defined recover(Fault) -> State overrides the
+    // auto-injected system verb. Entry via single-target absorbed panic.
+    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
     let src = r#"
-flow Svc @dense {
+flow Svc {
     persistent state Config { retries: i32 }
     state Running { n: i32 }
     transition start(Config) -> Running {
         do { return Running { n: self.retries } }
+    }
+    transition crash(Running) -> Running {
+        do {
+            let x = 1 / 0
+            return Running { n: self.n }
+        }
     }
     transition recover(Fault) -> Config {
         do { return Config { retries: 99 } }
     }
 }
 func main() -> i32 {
-    let s0 = Config { retries: 0 }
-    let s1 = Svc::start(s0)
-    let f = Svc::start(s1)
+    let s1 = Svc::start(Config { retries: 0 })
+    let f = Svc::crash(s1)
     let c = Svc::recover(f)
     println(c.retries)
     0
 }
 "#;
     // User-defined recover returns retries=99 (not the persistent shadow)
-    let interp_result = checked_run_source_result(src);
-    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = checked_compile_and_run(src).expect("codegen explicit recover");
-    assert_eq!(native.trim(), "99");
+    let (_, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        out.trim(),
+        "99",
+        "explicit recover overrides, got {:?}",
+        out
+    );
 }
 
 /// 追加 B: `?` after linear resource consumption is rejected (E0429).
