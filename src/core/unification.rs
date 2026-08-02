@@ -198,18 +198,24 @@ impl UnificationTable {
     /// this wrapper.
     ///
     /// T-6 (0.31.50): debug assertion fires when resolution fails silently.
-    /// In release builds the fallback is preserved for compatibility.
+    /// v0.34.9: release fallback tightened from "return the unresolved type"
+    /// to "return Type::unknown" — a silently-returned unresolved TypeVar
+    /// poisons downstream unification; unknown is at least visibly wrong and
+    /// fails subsequent checked unification (unify/constrain reject escapes).
+    /// Full migration of remaining call sites to `zonk` is tracked in the
+    /// 0.1.5 DX backlog (golden-document §10 0.34.22 登记表).
     pub fn resolve(&mut self, ty: &Type) -> Type {
         match self.resolve_infer(ty) {
             Ok(resolved) => resolved,
             Err(e) => {
-                debug_assert!(
+                mimi_debug_assert!(
                     false,
-                    "resolve() silently swallowed resolution error: {} for type {}",
+                    "resolve() silently swallowed resolution error: {} for type {} \
+                     (call site not yet migrated to zonk — 0.1.5 backlog)",
                     e,
                     crate::core::helpers::fmt_type(ty)
                 );
-                ty.clone()
+                Type::Name("unknown".into(), vec![])
             }
         }
     }
