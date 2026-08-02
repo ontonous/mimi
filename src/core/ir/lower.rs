@@ -1548,6 +1548,14 @@ impl BodyLowerer<'_> {
                     // `x.clone()` where x: T, T: Clone — copy semantics lower
                     // to a plain Load (ty/effects fixed up by the caller).
                     ResolvedExprKind::Load(place)
+                } else if let Some(kind) =
+                    self.lower_cap_method_call(&node_id, callee, arguments, role)?
+                {
+                    // Capability split/drop: interp materializes real cap
+                    // values; codegen lowers Cap to i64 (dummy). Programs
+                    // with caps leave the resolved native slice entirely
+                    // (eligibility), so a type-correct placeholder suffices.
+                    kind
                 } else {
                     ResolvedExprKind::Call(self.lower_call(
                         &node_id,
@@ -2872,6 +2880,46 @@ impl BodyLowerer<'_> {
             effects: Vec::new(),
             session: Vec::new(),
         }))
+    }
+
+    /// Capability method dispatch: `c.split()` / `c.drop()` on a capability
+    /// receiver. Interp builds real cap values from the raw AST (bytecode
+    /// NewCap + cap component split); codegen lowers Cap to i64 dummy. Such
+    /// programs leave the resolved native slice (eligibility), so lowering a
+    /// type-correct placeholder is sufficient (0.34.19 CHECKER-GAP).
+    fn lower_cap_method_call(
+        &mut self,
+        _node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedExprKind>, Vec<ResolvedBodyError>> {
+        let Expr::Field(receiver, method_name) = callee.unlocated() else {
+            return Ok(None);
+        };
+        if method_name != "split" && method_name != "drop" {
+            return Ok(None);
+        }
+        if !arguments.is_empty() {
+            return Ok(None);
+        }
+        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        if !matches!(
+            self.types.get(&receiver.ty),
+            Some(ResolvedType::Capability(_))
+        ) {
+            return Ok(None);
+        }
+        let kind = if method_name == "split" {
+            // Capability split moves the receiver into the result tuple: the
+            // single Load keeps CFG resource analysis able to consume the
+            // receiver (E0256). Programs with caps leave the resolved native
+            // slice, so interp/codegen materialize values from the raw AST.
+            ResolvedExprKind::Tuple(vec![receiver])
+        } else {
+            ResolvedExprKind::Literal(ResolvedLiteral::Unit)
+        };
+        Ok(Some(kind))
     }
 
     /// Generic bound method dispatch: `x.clone()` where `x: T` and
