@@ -2498,8 +2498,7 @@ fn dual_shared_field_access() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: field projection on non-nominal type not supported
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         type Point { x: i32, y: i32 }
         func main() -> i32 {
@@ -3050,8 +3049,7 @@ fn dual_generic_bounds_clone_int() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: generic bound T: Clone not resolved for method call
-    dual_assert_soft!(
+    dual_assert!(
         r#"
 func clone_it<T: Clone>(x: T) -> T { x.clone() }
 func main() -> i32 {

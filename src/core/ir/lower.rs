@@ -1542,7 +1542,21 @@ impl BodyLowerer<'_> {
                 self.lower_lambda(&node_id, params, body, role, &ty)?
             }
             Expr::Call(callee, arguments) => {
-                ResolvedExprKind::Call(self.lower_call(&node_id, callee, arguments, role, &[])?)
+                if let Some(place) =
+                    self.lower_bound_clone_place(&node_id, callee, arguments, role)?
+                {
+                    // `x.clone()` where x: T, T: Clone — copy semantics lower
+                    // to a plain Load (ty/effects fixed up by the caller).
+                    ResolvedExprKind::Load(place)
+                } else {
+                    ResolvedExprKind::Call(self.lower_call(
+                        &node_id,
+                        callee,
+                        arguments,
+                        role,
+                        &[],
+                    )?)
+                }
             }
             Expr::Turbofish(name, _, arguments) => {
                 let type_arguments =
@@ -2860,6 +2874,51 @@ impl BodyLowerer<'_> {
         }))
     }
 
+    /// Generic bound method dispatch: `x.clone()` where `x: T` and
+    /// `T: Clone`. Clone is assignment-copy semantics in Mimi, so the
+    /// lowering is an identity Load of the receiver (0.34.19 CHECKER-GAP:
+    /// bound methods on type parameters were unresolved in typed bodies).
+    fn lower_bound_clone_place(
+        &mut self,
+        _node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedPlace>, Vec<ResolvedBodyError>> {
+        let Expr::Field(receiver, method_name) = callee.unlocated() else {
+            return Ok(None);
+        };
+        if method_name != "clone" || !arguments.is_empty() {
+            return Ok(None);
+        }
+        let Expr::Ident(receiver_name) = receiver.unlocated() else {
+            return Ok(None);
+        };
+        let receiver_ty = self
+            .function
+            .params
+            .iter()
+            .find(|param| param.name == *receiver_name)
+            .map(|param| &param.ty);
+        let Some(receiver_ty) = receiver_ty else {
+            return Ok(None);
+        };
+        let crate::ast::Type::Name(type_param, _) = receiver_ty.unlocated() else {
+            return Ok(None);
+        };
+        let is_bound = self
+            .function
+            .generics
+            .iter()
+            .any(|gp| gp.name == *type_param && gp.bounds.iter().any(|b| b == "Clone"));
+        if !is_bound {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.lower_place(receiver, &format!("{role}.callee.inner"))?,
+        ))
+    }
+
     fn lower_variant_constructor_call(
         &mut self,
         node_id: &NodeId,
@@ -3889,6 +3948,13 @@ impl BodyLowerer<'_> {
             Some(ResolvedType::Nominal { item, .. }) | Some(ResolvedType::Newtype { item, .. }) => {
                 item
             }
+            // `shared s = Point { ... }; s.x` — field projection dereferences
+            // through the shared-ownership wrapper (0.34.19 CHECKER-GAP).
+            Some(ResolvedType::Ownership { target, .. }) => match self.types.get(target) {
+                Some(ResolvedType::Nominal { item, .. })
+                | Some(ResolvedType::Newtype { item, .. }) => item,
+                _ => return self.unsupported(node_id, "field projection on non-nominal type"),
+            },
             _ => return self.unsupported(node_id, "field projection on non-nominal type"),
         };
         let owner = NodeId(nominal.as_str().to_string());
@@ -4456,7 +4522,7 @@ impl BodyLowerer<'_> {
 
     fn lower_binary(
         &self,
-        node_id: &NodeId,
+        _node_id: &NodeId,
         op: BinOp,
     ) -> Result<ResolvedBinaryOp, Vec<ResolvedBodyError>> {
         Ok(match op {
@@ -4572,10 +4638,9 @@ impl BodyLowerer<'_> {
         // admit an identity conversion when the shapes agree (0.34.19
         // CHECKER-GAP).
         let container_payloads = match (self.types.get(from), self.types.get(to)) {
-            (
-                Some(ResolvedType::Option(from_inner)),
-                Some(ResolvedType::Option(to_inner)),
-            ) => Some((from_inner, to_inner)),
+            (Some(ResolvedType::Option(from_inner)), Some(ResolvedType::Option(to_inner))) => {
+                Some((from_inner, to_inner))
+            }
             (
                 Some(ResolvedType::Nominal {
                     item: from_item,
@@ -4588,10 +4653,7 @@ impl BodyLowerer<'_> {
                     ..
                 }),
             ) if from_item == to_item
-                && matches!(
-                    from_item.as_str(),
-                    "builtin:type:List" | "builtin:type:Set"
-                )
+                && matches!(from_item.as_str(), "builtin:type:List" | "builtin:type:Set")
                 && from_args.len() == 1
                 && to_args.len() == 1 =>
             {
@@ -6435,15 +6497,12 @@ mod tests {
         else {
             panic!("take if expected");
         };
+        // 0.34.19 切片 D：infer_slice 对 List 目标直接返回 List<T>
+        // （切片是容器语义的拷贝，E0242 len 拒绝裸 Slice），Slice expr
+        // 类型即 List<T>，无需 SliceView 转换包装。
         assert!(matches!(
             then_block.result.as_deref().map(|result| &result.kind),
-            Some(ResolvedExprKind::Cast {
-                conversion: CheckedConversion {
-                    kind: CheckedConversionKind::SliceView,
-                    ..
-                },
-                ..
-            })
+            Some(ResolvedExprKind::Slice { .. })
         ));
 
         let decode = program
