@@ -1389,3 +1389,76 @@ fn asan_toolchain_gate() {
     // Placeholder residual: full ASan/UBSan on generated objects is a
     // toolchain/CI concern (cargo test e2e_asan -- --ignored).
 }
+
+#[test]
+fn if_let_matches_then_branch() {
+    // v0.34.3: `if let Some(v) = x` binds the pattern in the then-branch.
+    let src = r#"
+func main() -> i32 {
+    let x = Some(42)
+    let mut result = -1
+    if let Some(v) = x {
+        result = v
+    } else {
+        result = -1
+    }
+    println(result)
+    result
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "if-let should type check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(crate::interp::Value::Int(42))
+    );
+}
+
+#[test]
+fn if_let_falls_to_else_branch() {
+    // v0.34.3: pattern mismatch routes to the else branch.
+    let src = r#"
+func main() -> i32 {
+    let x: Option<i32> = None
+    let mut result = -1
+    if let Some(v) = x {
+        result = v
+    } else {
+        result = 99
+    }
+    println(result)
+    result
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "if-let else should type check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(crate::interp::Value::Int(99))
+    );
+}
+
+#[test]
+fn if_let_codegen_gap_reported() {
+    // v0.34.3: native codegen does not yet lower if-let — fails closed.
+    let src = r#"
+func main() -> i32 {
+    let x = Some(42)
+    let mut result = -1
+    if let Some(v) = x {
+        result = v
+    } else {
+        result = -1
+    }
+    result
+}
+"#;
+    let err = compile_and_run(src).expect_err("if-let must fail closed in codegen");
+    assert!(err.contains("if-let"), "unexpected codegen error: {}", err);
+}

@@ -97,6 +97,18 @@ fn collect_contracts(block: &ResolvedBlock, out: &mut Vec<ResolvedContract>) {
                 collect_expr_contracts(initializer, out);
                 collect_contracts(body, out);
             }
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_expr_contracts(initializer, out);
+                collect_contracts(then_block, out);
+                if let Some(else_block) = else_block {
+                    collect_contracts(else_block, out);
+                }
+            }
             ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
                 collect_contracts(body, out);
             }

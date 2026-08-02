@@ -278,6 +278,16 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
+                Stmt::IfLet { then_, else_, .. } => {
+                    let then_returns = self.block_returns_on_all_paths(then_);
+                    let else_returns = else_
+                        .as_ref()
+                        .map(|e| self.block_returns_on_all_paths(e))
+                        .unwrap_or(false);
+                    if then_returns && else_returns {
+                        return true;
+                    }
+                }
                 Stmt::Block(inner) | Stmt::Do(inner) => {
                     if self.block_returns_on_all_paths(inner) {
                         return true;

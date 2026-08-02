@@ -2918,7 +2918,7 @@ fn collect_nested_function_records(
                     errors,
                 );
             }
-            Stmt::If { then_, else_, .. } => {
+            Stmt::IfLet { then_, else_, .. } | Stmt::If { then_, else_, .. } => {
                 collect_nested_function_records(
                     then_,
                     owner,
@@ -3211,6 +3211,16 @@ fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
             }
             Stmt::If { cond, then_, else_ } => {
                 expr_has_cross_boundary(cond)
+                    || then_.iter().any(stmt_has_cross_boundary)
+                    || else_
+                        .as_ref()
+                        .map(|b| b.iter().any(stmt_has_cross_boundary))
+                        .unwrap_or(false)
+            }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                expr_has_cross_boundary(init)
                     || then_.iter().any(stmt_has_cross_boundary)
                     || else_
                         .as_ref()
@@ -4475,6 +4485,11 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::Continue => "continue".into(),
         Stmt::Expr(expr) => format!("expr:{}", expr_semantic_key(expr)),
         Stmt::If { cond, .. } => format!("if:{}", expr_semantic_key(cond)),
+        Stmt::IfLet { pat, init, .. } => format!(
+            "if-let:{}:{}",
+            pattern_semantic_key(pat),
+            expr_semantic_key(init)
+        ),
         Stmt::While { cond, .. } => format!("while:{}", expr_semantic_key(cond)),
         Stmt::WhileLet { pat, init, .. } => format!(
             "while-let:{}:{}",
@@ -4520,6 +4535,7 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::Continue => "stmt.continue",
         Stmt::Expr(_) => "stmt.expr",
         Stmt::If { .. } => "stmt.if",
+        Stmt::IfLet { .. } => "stmt.if_let",
         Stmt::While { .. } => "stmt.while",
         Stmt::WhileLet { .. } => "stmt.while_let",
         Stmt::Loop(_) => "stmt.loop",
@@ -4594,6 +4610,7 @@ pub(crate) fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrec
         Stmt::If { cond, .. } | Stmt::While { cond, .. } => {
             expr_span(cond).map(|span| (span, SpanPrecision::SourceAnchor))
         }
+        Stmt::IfLet { init, .. } => expr_span(init).map(|span| (span, SpanPrecision::SourceAnchor)),
         Stmt::WhileLet { pat, .. } => anchored(pat.meta.span),
         Stmt::For { iterable, .. } => {
             expr_span(iterable).map(|span| (span, SpanPrecision::SourceAnchor))
@@ -4723,6 +4740,51 @@ fn collect_stmt_meta(
                 cond,
                 owner,
                 &format!("{role}.condition"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_block_meta(
+                then_,
+                owner,
+                &format!("{role}.then"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            if let Some(block) = else_ {
+                collect_block_meta(
+                    block,
+                    owner,
+                    &format!("{role}.else"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Stmt::IfLet {
+            pat,
+            init,
+            then_,
+            else_,
+        } => {
+            collect_pattern_meta(
+                pat,
+                owner,
+                &format!("{role}.pattern"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_expr_meta(
+                init,
+                owner,
+                &format!("{role}.init"),
                 fallback,
                 ids,
                 out,
@@ -6434,6 +6496,48 @@ fn collect_stmt_call_sites(
                 cond,
                 owner,
                 &format!("{role}.condition"),
+                fallback,
+                ids,
+                functions,
+                externs,
+                methods,
+                out,
+                errors,
+            );
+            collect_block_call_sites(
+                then_,
+                owner,
+                &format!("{role}.then"),
+                fallback,
+                ids,
+                functions,
+                externs,
+                methods,
+                out,
+                errors,
+            );
+            if let Some(block) = else_ {
+                collect_block_call_sites(
+                    block,
+                    owner,
+                    &format!("{role}.else"),
+                    fallback,
+                    ids,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Stmt::IfLet {
+            init, then_, else_, ..
+        } => {
+            collect_expr_call_sites(
+                init,
+                owner,
+                &format!("{role}.init"),
                 fallback,
                 ids,
                 functions,

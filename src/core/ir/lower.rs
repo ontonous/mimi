@@ -431,7 +431,7 @@ fn collect_nested_function_syntax<'a>(
                 out.insert(nested.clone(), function);
                 collect_nested_function_syntax(&function.body, &nested, out);
             }
-            Stmt::If { then_, else_, .. } => {
+            Stmt::If { then_, else_, .. } | Stmt::IfLet { then_, else_, .. } => {
                 collect_nested_function_syntax(then_, owner, out);
                 if let Some(else_) = else_ {
                     collect_nested_function_syntax(else_, owner, out);
@@ -839,6 +839,47 @@ impl BodyLowerer<'_> {
                     result_type: self.unit.clone(),
                     has_tail_result: false,
                 })?)
+            }
+            Stmt::IfLet {
+                pat,
+                init,
+                then_,
+                else_,
+            } => {
+                // v0.34.3: if-let — lower init, bind pattern in a fresh scope
+                // for the then-branch, lower else-branch (if any).
+                let initializer = self.lower_expr(init, &format!("{role}.initializer"))?;
+                self.scopes.push(BTreeMap::new());
+                let lowered = (|| {
+                    let pattern = self.lower_binding_pattern(
+                        pat,
+                        &format!("{role}.pattern"),
+                        initializer.ty.clone(),
+                        false,
+                    )?;
+                    let then_block =
+                        self.lower_block(then_, &format!("{role}.then"), self.unit.clone(), false)?;
+                    let else_block = else_
+                        .as_ref()
+                        .map(|block| {
+                            self.lower_block(
+                                block,
+                                &format!("{role}.else"),
+                                self.unit.clone(),
+                                false,
+                            )
+                        })
+                        .transpose()?;
+                    Ok::<_, Vec<ResolvedBodyError>>((pattern, then_block, else_block))
+                })();
+                self.scopes.pop();
+                let (pattern, then_block, else_block) = lowered?;
+                ResolvedStmtKind::IfLet {
+                    pattern,
+                    initializer,
+                    then_block,
+                    else_block,
+                }
             }
             Stmt::While { cond, body } => ResolvedStmtKind::While {
                 condition: self.lower_expr(cond, &format!("{role}.condition"))?,

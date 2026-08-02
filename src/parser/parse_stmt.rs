@@ -538,6 +538,39 @@ impl Parser {
 
     fn parse_if_inner(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::If, "`if`")?;
+        self.skip_newlines();
+        // v0.34.3: `if let pattern = expr { } else { }` — pattern-match guard
+        // (pattern bindings visible in the then-block).
+        if self.at(&TokenKind::Let) {
+            self.advance();
+            let pat = self.parse_pattern()?;
+            self.skip_newlines();
+            self.expect(TokenKind::Eq, "`=`")?;
+            let init = self.parse_expr(0)?;
+            self.skip_newlines();
+            self.expect(TokenKind::LBrace, "`{`")?;
+            let then_ = self.parse_block()?;
+            self.skip_newlines();
+            let else_ = if self.at(&TokenKind::Else) {
+                self.advance();
+                self.skip_newlines();
+                if self.at(&TokenKind::If) {
+                    let elif = self.parse_if()?;
+                    Some(vec![elif])
+                } else {
+                    self.expect(TokenKind::LBrace, "`{`")?;
+                    Some(self.parse_block()?)
+                }
+            } else {
+                None
+            };
+            return Ok(Stmt::IfLet {
+                pat,
+                init,
+                then_,
+                else_,
+            });
+        }
         let cond = self.parse_expr(0)?;
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;

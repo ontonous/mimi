@@ -148,6 +148,19 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                Self::collect_uses_in_expr(init, uses);
+                for s in then_ {
+                    Self::collect_uses_in_stmt(s, uses);
+                }
+                if let Some(e) = else_ {
+                    for s in e {
+                        Self::collect_uses_in_stmt(s, uses);
+                    }
+                }
+            }
             Stmt::While { cond, body } => {
                 Self::collect_uses_in_expr(cond, uses);
                 for s in body {

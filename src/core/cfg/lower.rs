@@ -369,6 +369,16 @@ impl<'a> Lowerer<'a> {
                 meta,
                 &format!("{role}.if"),
             ),
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => self.lower_if(
+                init,
+                then_,
+                else_.as_ref(),
+                current,
+                meta,
+                &format!("{role}.if_let"),
+            ),
             Stmt::While { cond, body } => {
                 self.lower_conditional_loop(cond, body, current, meta, &format!("{role}.while"))
             }
