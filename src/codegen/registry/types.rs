@@ -84,6 +84,86 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
     }
+
+    /// L6: true if the enum variant `name` carries a heap-boxed payload
+    /// (`PayloadKind::Packed` — a struct / multi-arg tuple / record that the
+    /// constructor mallocs into a box and ptrtoint-encodes into the i64 payload
+    /// slot). Single-primitive payloads (`PayloadKind::Single`) are stored
+    /// inline in the i64 slot and are NOT boxed; unit payloads (`None`) carry
+    /// no data.
+    pub(in crate::codegen) fn variant_payload_is_boxed(&self, name: &str) -> bool {
+        for td in self.type_defs.values() {
+            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                if let Some(v) = variants.iter().find(|v| v.name == name) {
+                    return matches!(
+                        self.classify_variant_payload(&v.payload),
+                        PayloadKind::Packed(_)
+                    );
+                }
+            }
+        }
+        false
+    }
+
+    /// L6: the sorted-ordinal indices of the variants of custom enum
+    /// `type_name` that carry a boxed payload (`PayloadKind::Packed`). Used to
+    /// build the runtime tag check in `HeapEntry::EnumBox`: only these ordinals
+    /// hold a heap box pointer in the i64 payload slot, so only these may be
+    /// freed. `Single`/`None` variants store inline data and must NOT be freed.
+    /// Returns an empty vec if the enum has no boxed variants (or is not a
+    /// registered enum). Ordinals match the alphabetical sort used by
+    /// `find_variant_info` / the constructor tag encoding.
+    pub(in crate::codegen) fn enum_boxed_variant_ordinals(&self, type_name: &str) -> Vec<u64> {
+        let Some(td) = self
+            .type_defs
+            .iter()
+            .find(|(key, td)| {
+                (**key == type_name || td.name == type_name)
+                    && matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+            })
+            .map(|(_, td)| td)
+        else {
+            return Vec::new();
+        };
+        let crate::ast::TypeDefKind::Enum(variants) = &td.kind else {
+            return Vec::new();
+        };
+        let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+        sorted.sort_by_key(|v| &v.name);
+        sorted
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| {
+                matches!(
+                    self.classify_variant_payload(&v.payload),
+                    PayloadKind::Packed(_)
+                )
+            })
+            .map(|(i, _)| i as u64)
+            .collect()
+    }
+
+    /// L6: if `ret_ty` names a registered custom enum, return that enum's
+    /// boxed-variant ordinals (for `HeapEntry::EnumBox`). Returns `None` for
+    /// non-enum types (records, primitives, built-in Option/Result) so callers
+    /// never mistake a `{i32, i64}`-shaped record for an enum box carrier.
+    pub(in crate::codegen) fn boxed_ordinals_for_return_type(
+        &self,
+        ret_ty: Option<&crate::ast::Type>,
+    ) -> Option<Vec<u64>> {
+        let crate::ast::Type::Name(name, _) = ret_ty?.unlocated() else {
+            return None;
+        };
+        // Must be a registered custom enum (not a record / primitive / builtin).
+        let is_enum = self.type_defs.iter().any(|(key, td)| {
+            (**key == *name || td.name == *name)
+                && matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+        });
+        if !is_enum {
+            return None;
+        }
+        Some(self.enum_boxed_variant_ordinals(name))
+    }
 }
 
 impl<'ctx> CodeGenerator<'ctx> {

@@ -5549,6 +5549,68 @@ func main() -> i32 {
 }
 
 #[test]
+fn enum_packed_payload_box_no_leak_no_double_free_dual_backend() {
+    // L6 (codegen): a custom-enum `Packed` variant payload is a heap box
+    // (malloc'd by the ctor, ptrtoint-encoded into the i64 slot). Three
+    // ownership paths must each free it exactly once:
+    //   1. local box (`let r = Rect(..)`) — registered at the ctor site
+    //      (register_heap_box), freed at scope exit; re-matching decodes
+    //      (inttoptr+load) WITHOUT freeing, so two matches ≠ double-free.
+    //   2. returned box (`func .. -> Shape { return Rect(..) }`) — the callee
+    //      claims it on return (claim_returned_enum_box) so its scope-exit free
+    //      skips it; the caller re-registers it (HeapEntry::EnumBox,
+    //      tag-conditional free) and frees it at the caller's scope exit.
+    //   3. conditional returns — a box registered in an untaken branch must
+    //      free(null) (entry-block null-init), not garbage.
+    // A wrong fix (free at decode, or no return-claim) aborts the codegen
+    // binary (double-free / use-after-free) or leaks. valgrind-clean separately
+    // ("All heap blocks were freed"). Bytecode uses Rust deep-clone Value (no
+    // box), so both backends agree on output.
+    let src = r#"
+type Point { x: i32, y: i32 }
+type Shape {
+    Circle(f64)
+    Rect(f64, f64)
+    Wrapped(Point)
+    Empty
+}
+func make_shape(kind: i32) -> Shape {
+    if kind == 0 { return Circle(1.5) }
+    if kind == 1 { return Rect(2.0, 3.0) }
+    return Wrapped(Point { x: 7, y: 8 })
+}
+func main() -> i32 {
+    let r = Rect(2.0, 3.0)
+    let a1 = match r { Circle(rad) => 1, Rect(a, b) => 2, Wrapped(p) => 3, Empty => 0 }
+    let a2 = match r { Circle(rad) => 1, Rect(a, b) => 2, Wrapped(p) => 3, Empty => 0 }
+    let s1 = make_shape(0)
+    let s2 = make_shape(1)
+    let s3 = make_shape(2)
+    let m1 = match s1 { Circle(rad) => 10, Rect(a, b) => 20, Wrapped(p) => 30, Empty => 0 }
+    let m2 = match s2 { Circle(rad) => 10, Rect(a, b) => 20, Wrapped(p) => 30, Empty => 0 }
+    let m3 = match s3 { Circle(rad) => 10, Rect(a, b) => 20, Wrapped(p) => 30, Empty => 0 }
+    println(a1 + a2)
+    println(m1 + m2 + m3)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        bc.trim(),
+        "4\n60",
+        "bytecode enum packed box reuse + return"
+    );
+    let native =
+        compile_and_run(src).expect("codegen enum packed box must not double-free or leak");
+    assert_eq!(
+        native.trim(),
+        "4\n60",
+        "codegen enum packed box reuse + return"
+    );
+}
+
+#[test]
 fn multi_target_match_accepted() {
     // A multi-target value may be moved as a whole before it is matched.
     let src2 = r#"

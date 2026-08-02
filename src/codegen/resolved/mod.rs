@@ -1121,6 +1121,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 ))
                             })
                             .and_then(|result| {
+                                // L6: when the callee returns a custom enum,
+                                // register its payload box for a tag-conditional
+                                // free at the caller's scope exit. The callee
+                                // (legacy or resolved) claimed the box on return
+                                // (claim_returned_enum_box) — ownership transfers
+                                // here. Non-enum callees pass through (detected
+                                // via the callee's return-type AST in func_defs).
+                                let result = self
+                                    .generator
+                                    .track_enum_box_return_lifetime(&symbol, result)?;
                                 // B9 (audit): when the callee returns a Mimi
                                 // closure, register its env so the caller's
                                 // scope exit releases it. The callee (legacy

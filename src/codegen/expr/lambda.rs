@@ -188,6 +188,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // doesn't free them before the caller receives them.
                     let claimed =
                         self.claim_string_return_value(v, ret_type, Some(e), lambda_vars)?;
+                    // L6: claim a returned custom-enum payload box (caller
+                    // re-registers via EnumBox). Mirrors func.rs emit_return.
+                    self.claim_returned_enum_box(claimed, ret_type)?;
                     self.flush_heap_scopes_to_boundary()?;
                     self.build_return(Some(&claimed))?;
                     returned = true;
@@ -241,6 +244,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             let last_val = self.load_return_value_if_needed(last_val)?;
             let claimed =
                 self.claim_string_return_value(last_val, ret_type, last_expr, lambda_vars)?;
+            // L6: claim a returned custom-enum payload box (caller re-registers
+            // via EnumBox). Mirrors the explicit-return path above.
+            self.claim_returned_enum_box(claimed, ret_type)?;
             self.flush_heap_scopes_to_boundary()?;
             self.build_return(Some(&claimed))?;
         } else if !returned {

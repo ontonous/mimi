@@ -998,6 +998,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// L6: when a function returns a custom-enum-shaped value `{i32 tag, i64
+    /// payload}`, claim the payload box pointer (field 1) so the callee's
+    /// scope-exit free skips it — ownership transfers to the caller, which
+    /// re-registers the box via `HeapEntry::EnumBox` (see
+    /// `track_enum_box_return_lifetime`). Reuses the `claimed_returned_envs`
+    /// pointer-compare guard (same mechanism as escaping closure envs, B9).
+    ///
+    /// Detection is by LLVM shape `{i32, i64}` — a harmless over-approximation:
+    /// a record that happens to have that layout would claim a non-heap field
+    /// value, which simply matches no registered heap slot (no-op). The precise
+    /// custom-enum check happens at the caller registration (which has the
+    /// callee's return-type AST), so records are never *freed* as enum boxes.
+    /// Multi-target results share the shape but cannot be returned (flow-state
+    /// linearity, E0421), so they never reach here.
+    pub(in crate::codegen) fn claim_returned_enum_box(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        ret_type: BasicTypeEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        let BasicTypeEnum::StructType(st) = ret_type else {
+            return Ok(());
+        };
+        let fields = st.get_field_types();
+        let is_enum_shape = fields.len() == 2
+            && matches!(fields[0], BasicTypeEnum::IntType(it) if it.get_bit_width() == 32)
+            && matches!(fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+        if !is_enum_shape {
+            return Ok(());
+        }
+        let BasicValueEnum::StructValue(sv) = val else {
+            return Ok(());
+        };
+        let payload = self
+            .builder
+            .build_extract_value(sv, 1, "enum_ret_box_i64")
+            .map_err(|e| CompileError::LlvmError(format!("enum ret box extract: {e}")))?;
+        if let BasicValueEnum::IntValue(iv) = payload {
+            let box_ptr = self.build_int_to_ptr(
+                iv,
+                self.context.ptr_type(AddressSpace::default()),
+                "enum_ret_box",
+            )?;
+            // Reuse the closure-env claim set: a generic "skip this pointer's
+            // free, the caller owns it now" mechanism (pointer-compare guard).
+            self.claim_closure_env(box_ptr);
+        }
+        Ok(())
+    }
+
     /// Heap-copy the data field of a Mimi `string` struct so the returned
     /// value is always backed by a freshly-allocated buffer. The caller (and
     /// only the caller) takes ownership. Non-string structs pass through.
@@ -1152,6 +1201,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let val = val
             .map(|v| self.claim_string_return_value(v, ret_type, expr, vars))
             .transpose()?;
+        // L6: claim a returned custom-enum payload box so the callee's
+        // scope-exit free (flush_heap_scopes_to_boundary below) skips it —
+        // ownership transfers to the caller, which re-registers the box via
+        // HeapEntry::EnumBox (track_enum_box_return_lifetime). Mirrors the
+        // claim_string_return_value above. Detection is by LLVM shape
+        // {i32, i64}; the precise custom-enum check is at the caller.
+        if let Some(v) = val {
+            self.claim_returned_enum_box(v, ret_type)?;
+        }
         self.pop_shared_scope()?;
         // B9: flush to the function boundary so function-level heap
         // registrations (closure env slots from call sites, string slots)

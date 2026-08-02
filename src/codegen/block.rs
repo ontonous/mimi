@@ -94,6 +94,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // R-C8: claim heap-backed return ownership *before* free_heap_allocs,
                     // matching the func/actor/lambda return paths.
                     val = self.claim_string_return_value(val, ret_type, Some(expr), vars)?;
+                    // L6: claim a returned custom-enum payload box so the callee's
+                    // scope-exit free skips it (caller re-registers via EnumBox).
+                    self.claim_returned_enum_box(val, ret_type)?;
                     val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
@@ -1368,6 +1371,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // P0-4: heap-copy string returns so the caller
                     // doesn't later free() a .rodata literal pointer.
                     val = self.claim_string_return_value(val, ret_type, Some(e), vars)?;
+                    // L6: claim a returned custom-enum payload box so the
+                    // callee's scope-exit free skips it (caller re-registers
+                    // via EnumBox). Mirrors the func.rs emit_return path.
+                    self.claim_returned_enum_box(val, ret_type)?;
                     val = self.load_return_value_if_needed(val)?;
                     self.flush_heap_scopes_to_boundary()?;
                     self.build_return(Some(&val))?;

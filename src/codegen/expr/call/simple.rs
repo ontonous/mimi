@@ -6411,15 +6411,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let call_args = self.maybe_pack_enum_ctor_args(&compiled_args, function)?;
                 // emit_direct_call: int width adjust + load list/record allocas
                 // when the ctor takes a by-value struct payload.
-                // L6 (enum Packed payload): the ctor mallocs a heap box for
-                // struct/multi-arg payloads. Registering it here for scope-exit
-                // free is UNSOUND: when the enum value is returned from the
-                // enclosing function (e.g. `func f() -> Shape { Rect(..) }`),
-                // the box is freed at this function's return yet escapes to the
-                // caller → double-free/UAF. A sound fix needs the string-style
-                // return-claim (deep-copy box on return + caller re-registers),
-                // tracked as a follow-up. Left leaking (not crashing) for now.
-                return self.emit_direct_call(function, &call_args, "enum_ctor");
+                let result = self.emit_direct_call(function, &call_args, "enum_ctor")?;
+                // L6: a Packed variant payload is a heap box (malloc'd by the
+                // ctor, ptrtoint-encoded into the i64 slot). Register it
+                // (HeapEntry::Ptr) so the scope-exit free releases it when the
+                // value is consumed locally. If the value is RETURNED, the
+                // return-claim (block.rs Stmt::Return) adds the box pointer to
+                // claimed_returned_envs so this registration is skipped, and the
+                // caller re-registers it via HeapEntry::EnumBox (tag-conditional
+                // free). Single/None variants are inline (not boxed) → skipped.
+                if self.variant_payload_is_boxed(name) {
+                    if let BasicValueEnum::StructValue(sv) = result {
+                        if sv.get_type().count_fields() == 2 {
+                            let payload = self
+                                .builder
+                                .build_extract_value(sv, 1, "enum_ctor_box_i64")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("enum ctor box extract: {e}"))
+                                })?;
+                            if let BasicValueEnum::IntValue(iv) = payload {
+                                let box_ptr = self.build_int_to_ptr(
+                                    iv,
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    "enum_ctor_box",
+                                )?;
+                                // register_heap_box null-inits the slot at the
+                                // entry block so a ctor in an untaken conditional
+                                // branch frees null, not garbage (see mod.rs).
+                                self.register_heap_box(box_ptr);
+                            }
+                        }
+                    }
+                }
+                return Ok(result);
             }
             return Err(format!("enum constructor '{}' not registered", ctor_name).into());
         }
@@ -6830,7 +6854,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // B9 (audit): same ownership transfer for closures — when the callee
         // returns a `func(...) -> ...` value, register its env so the
         // caller's scope exit releases it (the callee claimed it on return).
-        self.track_closure_return_lifetime(name, result)
+        let result = self.track_closure_return_lifetime(name, result)?;
+        // L6: same ownership transfer for custom-enum payload boxes — when the
+        // callee returns a custom enum, register its payload box (tag-conditional
+        // free) so the caller's scope exit releases it (the callee claimed it on
+        // return via claim_returned_enum_box).
+        self.track_enum_box_return_lifetime(name, result)
     }
 
     /// If `result` is a Mimi string struct returned by a function call, stash
@@ -6922,6 +6951,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.register_heap_slot(slot, sty, 1);
         }
         let loaded = self.build_load(sty, slot, "call_closure_load")?;
+        Ok(loaded.into_struct_value().into())
+    }
+
+    /// L6: when the callee returns a custom enum, register its payload box for a
+    /// tag-conditional free at the caller's scope exit (`HeapEntry::EnumBox`).
+    /// Mirrors `track_string_return_lifetime`: the struct is stored into an entry
+    /// alloca and registered. The free is conditional on the runtime tag (only
+    /// `PayloadKind::Packed` variants carry a box; `Single`/`None` store inline
+    /// data that must NOT be freed). The callee claimed the box on return
+    /// (`claim_returned_enum_box`), so it survives until the caller frees it.
+    /// Non-enum callees (records, primitives, built-in Option/Result) pass
+    /// through unchanged — detected via the callee's return-type AST so a
+    /// `{i32, i64}`-shaped record is never mistaken for an enum box carrier.
+    pub(in crate::codegen) fn track_enum_box_return_lifetime(
+        &self,
+        callee_name: &str,
+        result: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let ret_ty = self
+            .func_defs
+            .get(callee_name)
+            .and_then(|fd| fd.ret.as_ref());
+        let Some(boxed_ordinals) = self.boxed_ordinals_for_return_type(ret_ty) else {
+            return Ok(result);
+        };
+        let sv = match result {
+            BasicValueEnum::StructValue(sv) => sv,
+            other => return Ok(other),
+        };
+        let sty = sv.get_type();
+        if sty.count_fields() != 2 {
+            return Ok(sv.into());
+        }
+        let slot = self.build_entry_alloca(sty, "call_enum_box_slot")?;
+        self.build_store(slot, sv)?;
+        self.register_enum_box(slot, sty, boxed_ordinals);
+        let loaded = self.build_load(sty, slot, "call_enum_box_load")?;
         Ok(loaded.into_struct_value().into())
     }
 
