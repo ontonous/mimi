@@ -148,6 +148,7 @@ pub const W009: &str = "W009"; // recursion depth hint
 pub const W010: &str = "W010"; // unused import
 pub const W011: &str = "W011"; // progressive Typestate migration (script → explicit flow)
 pub const W012: &str = "W012"; // type escape hatch (`_` or `Any`) at let-binding — bypasses type checks
+pub const W013: &str = "W013"; // newtype used interchangeably with its inner type (transparent-newtype mix)
 pub const W0400: &str = "W0400"; // flow state unreachable (no transition targets to it)
 pub const W0401: &str = "W0401"; // flow state has no outgoing transitions (terminal state)
 
@@ -404,6 +405,7 @@ pub fn describe(code: &str) -> &'static str {
         W010 => "unused import",
         W011 => "progressive Typestate migration (script mode → explicit flow)",
         W012 => "type escape hatch (`_` or `Any`) bypasses static checks",
+        W013 => "newtype used interchangeably with its inner type (transparent newtype is intentional; opt-in strict mode at 1.1)",
 
         _ => "unknown error",
     }

@@ -554,21 +554,12 @@ impl UnificationTable {
             // Guard prevents cross-newtype unification: Newtype("A",_) vs Newtype("B",_)
             // only succeeds if inner of A matches B's same-name case in the recursive call.
             //
-            // SAFETY (audit §21 red line 3 — escape hatch): newtypes are a
-            // type-safety escape hatch by design — they provide nominal typing
-            // with zero runtime cost (the value IS the inner type). Strict
-            // nominal typing would require an explicit `.0` deref or cast
-            // at every call site, breaking the v0.26 transparent-newtype
-            // contract relied on by user code (see
-            // tests::typecheck::v026_newtype_transparent and
-            // tests::dual_backend::dual_newtype_pattern).
-            //
-            // Tradeoff: distinct newtypes with the same inner type are
-            // technically interchangeable here, which weakens nominal type
-            // safety. We mitigate this by emitting W012-style warnings in the
-            // linter when a `let x: UserId = ...` is later used as a raw
-            // `i32` in a function call. A future v0.31 stricter-newtype pass
-            // may add E0259 for cross-newtype coercion.
+            // v0.34.7 (golden §2.2): 1.0 keeps transparency (zero-cost
+            // interop, orchestration-core positioning). The lint mitigation
+            // claimed by the old comment (W012) does NOT exist — W012 is the
+            // _/Any escape-hatch detector, unrelated to newtype. The
+            // dedicated warning is W013 (lint module); strict-newtype opt-in
+            // evaluated at 1.1 (not committed).
             (Type::Newtype(_, inner), other) if !matches!(other, Type::Newtype(..)) => {
                 self.unify_inference_inner(inner, other)
             }
