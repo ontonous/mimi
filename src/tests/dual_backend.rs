@@ -4686,8 +4686,7 @@ fn dual_async_future_basic() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         async func foo() -> i32 {
             42
@@ -4707,8 +4706,7 @@ fn dual_async_future_with_args() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         async func add(a: i32, b: i32) -> i32 {
             a + b
@@ -4728,8 +4726,7 @@ fn dual_async_future_multiple_await() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         async func double(x: i32) -> i32 {
             x * 2
@@ -4751,8 +4748,7 @@ fn dual_async_nested_await() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         async func step1(x: i32) -> i32 {
             x + 1
@@ -4778,8 +4774,7 @@ fn dual_async_future_cooperative() {
     // Multiple async fns spawned and awaited — executor runs them cooperatively.
     // Note: without actual yielding, each async fn evaluates completely on first poll.
     // This test verifies that the executor correctly handles multiple deferred futures.
-    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         async func compute(n: i32) -> i32 {
             n * 2
@@ -4801,8 +4796,7 @@ fn dual_async_future_string() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         async func greet(name: string) -> string {
             "Hello, " + name

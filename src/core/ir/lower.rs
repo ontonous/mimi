@@ -77,6 +77,31 @@ pub fn lower_function_body(
     lower_function_body_with_captures(input, BTreeMap::new()).map(|lowered| lowered.body)
 }
 
+/// Result type a function body is checked against. Async functions present
+/// `Future<T>` to callers (the checker wraps the declared return in the
+/// signature catalog, `items.rs`), but the lowered body produces `T` directly —
+/// codegen mirrors this by compiling async bodies as `X__async_body` returning
+/// the inner type. Unwrap `Future<T>` so tail expressions and `return` statements
+/// type-check against `T` instead of demanding an implicit `T -> Future<T>`
+/// conversion (TOOL-RESOLUTION-001, 0.34.19 CHECKER-GAP).
+pub(crate) fn body_result_type(
+    signature: &ResolvedSignature,
+    function: &FuncDef,
+    types: &ResolvedTypeTable,
+) -> ResolvedTypeId {
+    if !function.is_async {
+        return signature.result.clone();
+    }
+    match types.get(&signature.result) {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) if item.as_str() == "builtin:type:Future" && arguments.len() == 1 => {
+            arguments[0].clone()
+        }
+        _ => signature.result.clone(),
+    }
+}
+
 struct LoweredFunctionBody {
     body: ResolvedBody,
     nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
@@ -146,13 +171,14 @@ fn lower_function_body_with_captures(
         scopes: vec![capture_scope],
         nested_environments: BTreeMap::new(),
         transition_fails: input.transition_fails,
+        body_result: body_result_type(input.signature, input.function, input.types),
     };
     lowerer.install_parameters()?;
     lowerer.lower_default_values()?;
     let root = lowerer.lower_block(
         &input.function.body,
         "body",
-        input.signature.result.clone(),
+        lowerer.body_result.clone(),
         true,
     )?;
     let body = ResolvedBody {
@@ -544,6 +570,10 @@ struct BodyLowerer<'a> {
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
     nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
     transition_fails: bool,
+    /// Result type the function *body* is checked against. For async functions
+    /// this is the inner `T` of the caller-facing `Future<T>` signature; for
+    /// everything else it is identical to `signature.result`.
+    body_result: ResolvedTypeId,
 }
 
 struct LambdaCaptureContext {
@@ -800,7 +830,7 @@ impl BodyLowerer<'_> {
                 let expected = if self.transition_fails {
                     self.transition_target_type()
                 } else {
-                    self.signature.result.clone()
+                    self.body_result.clone()
                 };
                 let conversion = value
                     .as_ref()
