@@ -344,7 +344,8 @@ fn require_scalar_type(
                     // are record-like types registered by the legacy emitter
                     // as flow::FlowName::StateName. Accept them — lower_type
                     // handles the actual LLVM type lookup.
-                    if item_str.starts_with("state:") {
+                    // v0.34.8: delegated to NominalTypeId single source of truth.
+                    if item.nominal_is_flow_state() {
                         for arg in arguments {
                             require_scalar_type(program, owner, arg)?;
                         }

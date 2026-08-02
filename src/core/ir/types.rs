@@ -58,6 +58,13 @@ impl NominalTypeId {
         let s = self.0.as_str();
         s.starts_with("state:") || s.ends_with("SessionChan") || s.ends_with("session_chan")
     }
+
+    /// v0.34.8 (SD-1 tail): whether the nominal identity is a Flow state
+    /// specifically (NOT SessionChan). Single source of truth for flow-state
+    /// detection — consumers must not repeat the "state:" prefix match.
+    pub fn nominal_is_flow_state(&self) -> bool {
+        self.0.as_str().starts_with("state:")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

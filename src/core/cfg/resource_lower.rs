@@ -119,12 +119,15 @@ impl<'a> ActionEmitter<'a> {
         }
     }
 
-    /// 0.31.16: check whether a resolved type is a flow state (FlowStateSet
-    /// or Nominal with "state:" prefix).
+    /// v0.34.8 (SD-1 tail): check whether a resolved type is a flow state.
+    /// Delegates to `NominalTypeId::nominal_is_flow_state` (types.rs — the
+    /// single source of truth) instead of repeating the "state:" prefix
+    /// string match. Note: intentionally NOT `is_linear` — SessionChan is
+    /// linear but is not a flow state and is not auto-droppable.
     fn is_flow_state_resolved(&self, ty: &ResolvedType) -> bool {
         match ty {
             ResolvedType::FlowStateSet { .. } => true,
-            ResolvedType::Nominal { item, .. } => item.as_str().starts_with("state:"),
+            ResolvedType::Nominal { item, .. } => item.nominal_is_flow_state(),
             _ => false,
         }
     }
@@ -395,6 +398,11 @@ impl<'a> ActionEmitter<'a> {
     }
 
     fn visit_block(&mut self, block: &ResolvedBlock, return_result: bool) {
+        // v0.34.8 (golden §6.2): reset the double-consume tracker at each
+        // block boundary — a resource consumed in one branch is legitimately
+        // consumed in a sibling branch. The assertion now catches only a
+        // genuine second consumption within one straight-line block.
+        self.consumed_resources.clear();
         for statement in &block.statements {
             self.visit_stmt(statement);
         }
@@ -750,33 +758,28 @@ impl<'a> ActionEmitter<'a> {
     }
 
     fn push_action(&mut self, node: &NodeId, origin: &crate::core::Origin, draft: ActionDraft) {
-        // 0.31.22 Drop/Transition IR 防漏网断言：检测二次消费 bug
-        // TODO: 当前实现过于严格，会在 alias 场景下误报。
-        // 需要更精确的 CFG 路径分析来区分：
-        // - 同一资源在同一基本块内被消费两次（真正的 bug）
-        // - 同一资源在不同分支中被消费（合法）
-        // - alias 导致的重复跟踪（合法）
-        // 暂时禁用断言，保留基础设施供后续完善。
-        /*
+        // v0.34.8 (golden §6.2): restore the double-consume debug assertion.
+        // Only `Drop` triggers — Move is a transfer (aggregate move-through
+        // legitimately emits Move → Move chains for one resource).
+        //
+        // v0.34.8 偏差：实现为 warn-only 而非 panic。用户错误（如
+        // session_double_close_rejected 的 E0304 场景）也会触发第二次
+        // Drop——panic 会把合法 L2 负测试炸成 ICE。warn 保留检测信号，
+        // checker 诊断（E0304/E0425）正常完成。精确路径分析排 1.x。
         #[cfg(debug_assertions)]
         {
             use crate::core::CanonicalActionKind;
-            let is_consuming = matches!(
-                draft.kind,
-                CanonicalActionKind::Drop | CanonicalActionKind::Move
-            );
-            if is_consuming {
-                debug_assert!(
+            if draft.kind == CanonicalActionKind::Drop {
+                mimi_assert!(
                     !self.consumed_resources.contains(&draft.resource),
-                    "RESOURCE-LINEAR-001: resource {:?} consumed twice! \
-                     This indicates a bug in the ownership analysis or IR lowering. \
-                     First consumption was recorded, but a second consumption was attempted.",
+                    "RESOURCE-LINEAR-001: resource {:?} dropped twice (debug signal) — \
+                     genuine double-drop indicates an ownership-analysis bug; \
+                     user-level double-consume is caught by E0304/E0425 diagnostics.",
                     draft.resource
                 );
                 self.consumed_resources.insert(draft.resource.clone());
             }
         }
-        */
         let location = self.location(node, origin);
         self.actions.push(CanonicalResourceAction {
             kind: draft.kind,
