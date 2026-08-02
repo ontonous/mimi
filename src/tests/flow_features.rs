@@ -6145,3 +6145,18 @@ func main() -> i32 {
         errors
     );
 }
+
+#[test]
+fn explicit_lifetime_annotation_rejected_by_adr004() {
+    // v0.34.4 (ADR-004): explicit lifetime annotations `&'a T` removed.
+    // The lexer rejects `'` outright — it has no other use in the language.
+    let src = r#"
+func f(x: &'a i32) -> i32 { *x }
+func main() -> i32 { 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
+    assert!(
+        tokens.is_err(),
+        "lexer must reject `'a` lifetime syntax (ADR-004)"
+    );
+}
