@@ -1559,26 +1559,15 @@ fn builtin_ast_eval(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
             )))
         }
     };
-    // 0.33 Phase F: evaluate the quoted AST with a temporary tree-walker
-    // interpreter whose env is seeded from the VM's QuoteCapture table
-    // (free identifiers of the quote!, e.g. `n` in `quote! { n * 2 }`).
+    // 0.33 Phase F: evaluate the quoted AST via bytecode VM.
+    // The VM's QuoteCapture table seeds free identifiers (e.g. `n` in `quote! { n * 2 }`).
     let file = vm
         .program()
         .ast
         .clone()
         .ok_or_else(|| InterpError::new("ast_eval: no program AST in BytecodeVM"))?;
-    let mut interp = crate::interp::Interpreter::new(file.as_ref());
-    interp.verify_contracts = false;
-    // Clone (not drain): a quoted AST can be evaluated multiple times, and
-    // each eval must resolve its free identifiers the same way. Stale names
-    // are harmless (extra bindings are shadowed by fresh QuoteCapture).
-    for (name, value) in vm.quote_captures.clone() {
-        interp
-            .scope_env
-            .bind(&name, value)
-            .map_err(|e| InterpError::new(e.to_string()))?;
-    }
-    interp
-        .eval_quoted_ast(&qa)
-        .map_err(|e| InterpError::new(e.to_string()))
+    // Clone (not drain): a quoted AST can be evaluated multiple times.
+    let captures = vm.quote_captures.clone();
+    crate::interp::bytecode::compiler::eval_quoted_ast_bytecode(file.as_ref(), &qa, &captures)
+        .map_err(|e| InterpError::new(e))
 }

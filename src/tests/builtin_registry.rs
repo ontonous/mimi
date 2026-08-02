@@ -154,8 +154,26 @@ mod tests {
     #[test]
     fn test_builtin_registry_interp_and_typecheck_layers() {
         let manifest = env!("CARGO_MANIFEST_DIR");
-        let call_src = std::fs::read_to_string(format!("{}/src/interp/call.rs", manifest))
-            .expect("read interp/call.rs");
+        // 0.33 Phase F: the bytecode VM is the only interpreter. Builtin
+        // registrations live under src/interp/bytecode/builtins/ (registry.rs
+        // dispatch table + per-module `name:` descriptors).
+        let bytecode_dir = format!("{}/src/interp/bytecode/builtins", manifest);
+        let mut bytecode_src = String::new();
+        for entry in std::fs::read_dir(&bytecode_dir).expect("read bytecode builtins dir") {
+            let p = entry.expect("builtin entry").path();
+            if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                if let Ok(s) = std::fs::read_to_string(&p) {
+                    bytecode_src.push_str(&s);
+                    bytecode_src.push('\n');
+                }
+            }
+        }
+        let registry_src = std::fs::read_to_string(format!(
+            "{}/src/interp/bytecode/registry.rs",
+            manifest
+        ))
+        .expect("read bytecode/registry.rs");
+        let interp_src = format!("{bytecode_src}\n{registry_src}\n");
         // Type inference for builtins lives under infer/call/simple.rs (and helpers).
         let infer_dir = format!("{}/src/core/infer", manifest);
         let mut infer_src = String::new();
@@ -187,9 +205,9 @@ mod tests {
         let mut failures = Vec::new();
         for &(name, _codegen, interp, typecheck) in ALL {
             let lit = format!("\"{}\"", name);
-            if interp && !call_src.contains(&lit) {
+            if interp && !interp_src.contains(&lit) {
                 failures.push(format!(
-                    "'{}' marked I=true but not found as string literal in interp/call.rs",
+                    "'{}' marked I=true but not found as string literal in bytecode builtins/registry",
                     name
                 ));
             }
