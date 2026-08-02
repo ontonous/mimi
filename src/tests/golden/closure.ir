@@ -759,9 +759,8 @@ entry:
   %add_closure = load { ptr, ptr }, ptr %add, align 8
   %fn_ptr = extractvalue { ptr, ptr } %add_closure, 0
   %env_ptr = extractvalue { ptr, ptr } %add_closure, 1
-  %closure_call = call i64 %fn_ptr(ptr %env_ptr, i64 3, i64 4)
-  %trunc = trunc i64 %closure_call to i32
-  ret i32 %trunc
+  %closure_call = call i32 %fn_ptr(ptr %env_ptr, i64 3, i64 4)
+  ret i32 %closure_call
 }
 
 define {} @Main__run__from_Single({} %0) {

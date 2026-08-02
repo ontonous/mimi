@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::codegen::expr::lambda::{lambda_fn_type, lambda_ret_type};
+use crate::codegen::expr::lambda::lambda_fn_type;
 use crate::codegen::types;
 use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
@@ -1152,7 +1152,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .get(1)
                     .and_then(|p| self.llvm_type_for(&p.ty))
                     .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                let ret_ty = lambda_ret_type(self.context, ret);
+                let ret_ty = self.lambda_ret_type(ret);
                 ReduceCallee::Indirect {
                     fn_ptr,
                     env_ptr,

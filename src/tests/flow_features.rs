@@ -5611,6 +5611,52 @@ func main() -> i32 {
 }
 
 #[test]
+fn lambda_returning_boxed_enum_dual_backend() {
+    // A let-bound lambda declared `-> Shape` must compile its function with the
+    // enum's real `{i32 tag, i64 payload}` layout (lambda_ret_type consults
+    // type_llvm), NOT the standalone i64 fallback. Three pieces cooperate:
+    //   1. lambda_ret_type resolves the custom-enum return → {i32,i64} signature;
+    //   2. the let-binding records the closure's Func type in var_types so the
+    //      indirect call site knows the return type (closure_return_llvm_type);
+    //   3. the closure call registers the returned Packed box (EnumBox) for a
+    //      tag-conditional free at the caller's scope exit, while the lambda
+    //      claimed it on return.
+    // Before the fix the lambda was `define i64` returning a `{i32,i64}` value
+    // and the caller called it as i64 — a signature/body mismatch that segfaulted
+    // (use-after-free of the misread box pointer). Boxed (Rect) variants allocate
+    // a box that must be freed exactly once; inline (Circle) and unit (Empty)
+    // variants carry no box. valgrind-clean separately. Both backends agree.
+    let src = r#"
+type Point { x: i32, y: i32 }
+type Shape {
+    Circle(f64)
+    Rect(f64, f64)
+    Wrapped(Point)
+    Empty
+}
+func main() -> i32 {
+    let mk_rect = fn() -> Shape { Rect(2.0, 3.0) }
+    let mk_circle = fn() -> Shape { Circle(9.0) }
+    let mk_empty = fn() -> Shape { Empty }
+    let r = mk_rect()
+    let c = mk_circle()
+    let e = mk_empty()
+    let mr = match r { Circle(rad) => 1, Rect(a, b) => 2, Wrapped(p) => 3, Empty => 0 }
+    let mc = match c { Circle(rad) => 1, Rect(a, b) => 2, Wrapped(p) => 3, Empty => 0 }
+    let me = match e { Circle(rad) => 1, Rect(a, b) => 2, Wrapped(p) => 3, Empty => 0 }
+    println(mr + mc + me)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "3", "bytecode lambda-returned boxed enum");
+    let native =
+        compile_and_run(src).expect("codegen lambda-returned boxed enum must not crash or leak");
+    assert_eq!(native.trim(), "3", "codegen lambda-returned boxed enum");
+}
+
+#[test]
 fn multi_target_match_accepted() {
     // A multi-target value may be moved as a whole before it is matched.
     let src2 = r#"

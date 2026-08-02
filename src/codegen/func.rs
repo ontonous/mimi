@@ -1770,6 +1770,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
+                        } else if let Expr::Lambda { params, ret, .. } = init.unlocated() {
+                            // Record the closure's Func type so a subsequent call
+                            // (closure_return_llvm_type) can determine the real
+                            // return type — e.g. a custom enum → {i32,i64} — instead
+                            // of defaulting the indirect call to i64. Without this,
+                            // a let-bound `fn() -> Shape { .. }` is called as i64
+                            // while the lambda body returns {i32,i64}, miscompiling
+                            // the call and the match on its result.
+                            let param_tys: Vec<Type> =
+                                params.iter().map(|p| p.ty.clone()).collect();
+                            let ret_ty = ret
+                                .clone()
+                                .unwrap_or_else(|| Type::Name("unit".to_string(), vec![]));
+                            self.var_types
+                                .insert(name.clone(), Type::Func(param_tys, Box::new(ret_ty)));
                         } else if let Expr::Record {
                             ty: Some(tn),
                             fields,
