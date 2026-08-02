@@ -36,7 +36,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             PatternKind::Variable(name) => {
                 // Uppercase identifiers that name enum variants are treated as
                 // unit constructor patterns, not variable bindings.
-                if self.find_variant_ordinal(name).is_ok() {
+                if self
+                    .find_variant_ordinal_scoped(name, scrutinee_type)
+                    .is_ok()
+                {
                     return Ok(local_vars);
                 }
                 let (val, ty) = if let Some(iv) = scrutinee_iv {
@@ -1059,20 +1062,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut incoming_vals = Vec::new();
         let mut incoming_bbs = Vec::new();
 
+        // v0.34.18a: compute the scrutinee type once so arm dispatch can scope
+        // variant-ordinal resolution to the scrutinee's enum (disambiguates the
+        // shared `Fault` variant across per-flow __MultiTarget unions).
+        let scrutinee_type = self.expr_type_of(scrutinee, vars);
+
         // Build if-else chain for each arm
         for (i, arm) in arms.iter().enumerate() {
-            let (arm_bb, next_else_bb) =
-                self.compile_match_arm_dispatch(i, arm, scrutinee_val, scrutinee_iv, else_bb)?;
+            let (arm_bb, next_else_bb) = self.compile_match_arm_dispatch(
+                i,
+                arm,
+                scrutinee_val,
+                scrutinee_iv,
+                else_bb,
+                scrutinee_type.as_ref(),
+            )?;
             // Guard failure must continue to the next arm's dispatch block, so
             // update else_bb before compiling the arm body.
             else_bb = next_else_bb;
-            let scrutinee_type = self.expr_type_of(scrutinee, vars);
             let env = MatchArmEnv {
                 scrutinee_val,
                 scrutinee_iv,
                 merge_bb,
                 else_bb,
-                scrutinee_type,
+                scrutinee_type: scrutinee_type.clone(),
             };
             let (arm_val, body_bb) = self.compile_match_arm_body(i, arm, arm_bb, vars, &env)?;
             incoming_vals.push(arm_val);
@@ -1108,6 +1121,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         scrutinee_val: BasicValueEnum<'ctx>,
         scrutinee_iv: Option<IntValue<'ctx>>,
         else_bb: BasicBlock<'ctx>,
+        scrutinee_type: Option<&crate::ast::Type>,
     ) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>), CompileError> {
         let function = else_bb.get_parent().ok_or_else(|| {
             CompileError::LlvmError("match arm dispatch has no parent function".to_string())
@@ -1122,7 +1136,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // If the variable name is actually an enum variant, treat it as a
                 // unit constructor pattern and compare the tag.
                 let is_variant = if let PatternKind::Variable(name) = &arm.pat.kind {
-                    self.find_variant_ordinal(name).is_ok()
+                    self.find_variant_ordinal_scoped(name, scrutinee_type)
+                        .is_ok()
                 } else {
                     false
                 };
@@ -1133,11 +1148,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })?;
                     let ordinal = self
-                        .find_variant_ordinal(if let PatternKind::Variable(name) = &arm.pat.kind {
-                            name
-                        } else {
-                            ""
-                        })
+                        .find_variant_ordinal_scoped(
+                            if let PatternKind::Variable(name) = &arm.pat.kind {
+                                name
+                            } else {
+                                ""
+                            },
+                            scrutinee_type,
+                        )
                         .map_err(|e| {
                             CompileError::LlvmError(format!("match arm variant lookup: {}", e))
                         })?;
@@ -1268,10 +1286,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "constructor match arm requires an enum scrutinee".to_string(),
                     )
                 })?;
-                // Look up the variant ordinal index from type definitions
-                let ordinal = self.find_variant_ordinal(name).map_err(|e| {
-                    CompileError::LlvmError(format!("match arm variant lookup: {}", e))
-                })?;
+                // Look up the variant ordinal index from type definitions,
+                // scoped to the scrutinee's enum (v0.34.18a: disambiguates the
+                // shared `Fault` variant across per-flow __MultiTarget unions).
+                let ordinal = self
+                    .find_variant_ordinal_scoped(name, scrutinee_type)
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("match arm variant lookup: {}", e))
+                    })?;
                 let tag_val = self.context.i64_type().const_int(ordinal, false);
                 let cmp = self
                     .builder

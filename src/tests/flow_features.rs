@@ -6494,6 +6494,110 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_panic_absorption_div_zero_dual_backend() {
+    // v0.34.18a (amendment clause 1): a transition that declares it can fault
+    // (`-> S | Fault`) absorbs a runtime panic (division by zero) into the
+    // `Fault` variant instead of aborting — the compiler bottoms out the Fault
+    // payload. Mirrors the bytecode VM's absorb_flow_fault; dual-backend parity.
+    let src = r#"
+flow Calc {
+    state Ready { v: i32 }
+    transition div(Ready, d: i32) -> Ready | Fault {
+        do { return Ready { v: self.v / d } }
+    }
+}
+func main() -> i32 {
+    let r = Calc::div(Ready { v: 10 }, 0)
+    match r {
+        Ready { v } => println(v)
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
+            println(last_state)
+            println(unexpected_event)
+        }
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        bc.trim(),
+        "Ready\npanic:E0801",
+        "bytecode absorbed div-by-zero"
+    );
+    let native = compile_and_run(src).expect("codegen must absorb div-by-zero, not abort");
+    assert_eq!(
+        native.trim(),
+        "Ready\npanic:E0801",
+        "codegen absorbed div-by-zero"
+    );
+}
+
+#[test]
+fn flow_panic_absorption_normal_path_returns_state_dual_backend() {
+    // v0.34.18a: when no panic occurs, the `-> S | Fault` transition returns the
+    // state variant normally (the absorption path is not taken).
+    let src = r#"
+flow Calc {
+    state Ready { v: i32 }
+    transition div(Ready, d: i32) -> Ready | Fault {
+        do { return Ready { v: self.v / d } }
+    }
+}
+func main() -> i32 {
+    let r = Calc::div(Ready { v: 10 }, 2)
+    match r {
+        Ready { v } => println(v)
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => println(last_state)
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "5", "bytecode normal path");
+    let native = compile_and_run(src).expect("codegen normal path");
+    assert_eq!(native.trim(), "5", "codegen normal path");
+}
+
+#[test]
+fn flow_panic_absorption_multi_flow_match_dispatch_dual_backend() {
+    // v0.34.18a: with two fallible flows, each flow's `__MultiTarget` union has
+    // its own `Fault` variant. The match dispatch must resolve `Fault` scoped to
+    // the scrutinee's flow (not globally — the shared `Fault` name is otherwise
+    // ambiguous across flows' synthetic enums, mis-tagging the arms and aborting
+    // with a non-exhaustive match). Both flows absorb a div-by-zero here.
+    let src = r#"
+flow A {
+    state S { v: i32 }
+    transition go(S, d: i32) -> S | Fault { do { return S { v: self.v / d } } }
+}
+flow B {
+    state T { v: i32 }
+    transition go(T, d: i32) -> T | Fault { do { return T { v: self.v / d } } }
+}
+func main() -> i32 {
+    let ra = A::go(S { v: 1 }, 0)
+    match ra {
+        S { v } => println(v)
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => println(last_state)
+    }
+    let rb = B::go(T { v: 2 }, 0)
+    match rb {
+        T { v } => println(v)
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => println(last_state)
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "S\nT", "bytecode multi-flow fault dispatch");
+    let native = compile_and_run(src).expect("codegen multi-flow fault dispatch must not abort");
+    assert_eq!(native.trim(), "S\nT", "codegen multi-flow fault dispatch");
+}
+
+#[test]
 fn flow_sparse_undefined_event_rejected() {
     // v0.31.10: In a @sparse flow, calling a declared event from a state
     // that doesn't handle it is a compile-time error (no fallback to Fault).
