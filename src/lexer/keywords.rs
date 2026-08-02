@@ -53,7 +53,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Pub
             | TokenKind::Drop
             | TokenKind::Defer
-            | TokenKind::Steps
             | TokenKind::Parasteps
             | TokenKind::Failure
             | TokenKind::Requires
@@ -65,9 +64,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Old
             | TokenKind::Mms
             | TokenKind::With
-            | TokenKind::And
-            | TokenKind::Or
-            | TokenKind::Not
             | TokenKind::Async
             | TokenKind::Comptime
             | TokenKind::Spawn
@@ -88,11 +84,9 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Persistent
             | TokenKind::View
             | TokenKind::Mutate
-            | TokenKind::Consume
             | TokenKind::Do
             | TokenKind::Become
             | TokenKind::Stay
-            | TokenKind::Subflow
             | TokenKind::Session
             | TokenKind::Dual
             | TokenKind::End
@@ -148,7 +142,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "async" => TokenKind::Async,
         "unsafe" => TokenKind::Unsafe,
         "spawn" => TokenKind::Spawn,
-        "steps" => TokenKind::Steps,
         "parasteps" => TokenKind::Parasteps,
         "quote" => TokenKind::Quote,
         "comptime" => TokenKind::Comptime,
@@ -170,11 +163,9 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "persistent" => TokenKind::Persistent,
         "view" => TokenKind::View,
         "mutate" => TokenKind::Mutate,
-        "consume" => TokenKind::Consume,
         "do" => TokenKind::Do,
         "become" => TokenKind::Become,
         "stay" => TokenKind::Stay,
-        "subflow" => TokenKind::Subflow,
         "session" => TokenKind::Session,
         "dual" => TokenKind::Dual,
         "end" => TokenKind::End,
@@ -241,5 +232,29 @@ mod tests {
         assert!(is_keyword_kind(&TokenKind::Fault));
         assert!(is_keyword_kind(&TokenKind::Reset));
         assert!(is_keyword_kind(&TokenKind::Recover));
+    }
+
+    #[test]
+    fn dead_keywords_tokenize_as_identifiers() {
+        // v0.34.2: subflow/steps/consume are no longer keywords.
+        // - subflow: abolished (amendment clause 2, no nested Flow delegation)
+        // - steps: MimiSpec-only, no parser arm
+        // - consume: only used by the removed `delegate` construct
+        assert!(matches!(keyword_or_ident("subflow"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("steps"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("consume"), TokenKind::Ident(_)));
+    }
+
+    #[test]
+    fn and_or_not_are_soft_keywords() {
+        // v0.34.2: and/or/not still tokenize as operator kinds (expression
+        // position), but are NOT hard keywords — binding position may use
+        // them as identifiers.
+        assert!(matches!(keyword_or_ident("and"), TokenKind::And));
+        assert!(matches!(keyword_or_ident("or"), TokenKind::Or));
+        assert!(matches!(keyword_or_ident("not"), TokenKind::Not));
+        assert!(!is_keyword_kind(&TokenKind::And));
+        assert!(!is_keyword_kind(&TokenKind::Or));
+        assert!(!is_keyword_kind(&TokenKind::Not));
     }
 }

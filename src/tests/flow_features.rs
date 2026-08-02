@@ -477,11 +477,14 @@ flow ResilientService {
 #[test]
 fn flow_lexer_keywords() {
     use crate::lexer::TokenKind;
-    // Verify all new flow-related keywords are tokenized correctly
-    let src = "flow state transition protocol delegate pinned fault reset recover persistent view mutate consume do subflow session dual end";
+    // Verify all new flow-related keywords are tokenized correctly.
+    // v0.34.2: consume/subflow no longer keywords (dead syntax) → Ident.
+    let src = "flow state transition protocol delegate pinned fault reset recover persistent view mutate consume do subflow session dual end and or not";
     let tokens = crate::lexer::Lexer::new(src)
         .tokenize()
         .expect("lexer failed");
+    // In-source order: soft keywords (fault/reset/recover) tokenize as dedicated
+    // kinds or Ident; dead keywords (consume/subflow) are plain Ident.
     let expected_all: Vec<(&str, TokenKind)> = vec![
         ("flow", TokenKind::Flow),
         ("state", TokenKind::State),
@@ -492,12 +495,15 @@ fn flow_lexer_keywords() {
         ("persistent", TokenKind::Persistent),
         ("view", TokenKind::View),
         ("mutate", TokenKind::Mutate),
-        ("consume", TokenKind::Consume),
+        ("consume", TokenKind::Ident("consume".into())),
         ("do", TokenKind::Do),
-        ("subflow", TokenKind::Subflow),
+        ("subflow", TokenKind::Ident("subflow".into())),
         ("session", TokenKind::Session),
         ("dual", TokenKind::Dual),
         ("end", TokenKind::End),
+        ("and", TokenKind::And),
+        ("or", TokenKind::Or),
+        ("not", TokenKind::Not),
     ];
     let expected_soft: Vec<&str> = vec!["fault", "reset", "recover"];
     let kinds: Vec<&TokenKind> = tokens

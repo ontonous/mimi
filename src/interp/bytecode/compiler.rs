@@ -1567,13 +1567,6 @@ impl BytecodeCompiler {
             Expr::Match(subject, arms) => self.compile_match(fc, subject, arms),
 
             // ── Phase B: Expr 补全 ──────────────────────────
-            Expr::Range { start, end } => {
-                // start..end → list [start, start+1, ..., end-1]
-                let r_start = self.compile_expr(fc, start)?;
-                let r_end = self.compile_expr(fc, end)?;
-                self.compile_range_loop(fc, r_start, r_end)
-            }
-
             Expr::Comprehension {
                 expr,
                 var,
@@ -4942,10 +4935,6 @@ impl BytecodeCompiler {
                 if let Some(e) = end {
                     self.collect_free_vars_expr(e, local_vars, free_vars);
                 }
-            }
-            Expr::Range { start, end } => {
-                self.collect_free_vars_expr(start, local_vars, free_vars);
-                self.collect_free_vars_expr(end, local_vars, free_vars);
             }
             Expr::MapLiteral { entries } => {
                 for (k, v) in entries {

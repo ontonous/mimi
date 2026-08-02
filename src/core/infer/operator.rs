@@ -222,13 +222,6 @@ impl<'a> Checker<'a> {
                 );
                 Type::Name("unknown".into(), vec![])
             }
-            BinOp::Assign => {
-                self.emit_code(
-                    crate::diagnostic::codes::E0224,
-                    "assignment is not a valid expression in v0.2",
-                );
-                Type::Name("unknown".into(), vec![])
-            }
         }
     }
 }

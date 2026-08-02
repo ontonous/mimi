@@ -273,33 +273,6 @@ impl<'a> Checker<'a> {
         Type::Slice(Box::new(target_ty))
     }
 
-    pub(in crate::core) fn infer_range(
-        &mut self,
-        start: &Expr,
-        end: &Expr,
-        scopes: &mut Vec<HashMap<String, Type>>,
-    ) -> Type {
-        // T-3 (0.31.49): validate range bounds are integers.
-        let start_ty = self.infer_expr(start, scopes);
-        if !is_int(&start_ty) && !matches!(start_ty.unlocated(), Type::TypeVar(_) | Type::Infer) {
-            self.emit_code(
-                crate::diagnostic::codes::E0242,
-                format!(
-                    "range start must be an integer, found {}",
-                    fmt_type(&start_ty)
-                ),
-            );
-        }
-        let end_ty = self.infer_expr(end, scopes);
-        if !is_int(&end_ty) && !matches!(end_ty.unlocated(), Type::TypeVar(_) | Type::Infer) {
-            self.emit_code(
-                crate::diagnostic::codes::E0242,
-                format!("range end must be an integer, found {}", fmt_type(&end_ty)),
-            );
-        }
-        Type::Name("Range".into(), vec![])
-    }
-
     pub(in crate::core) fn infer_await(
         &mut self,
         inner: &Expr,

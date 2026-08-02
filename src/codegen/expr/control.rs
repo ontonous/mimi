@@ -99,67 +99,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(phi.as_basic_value())
     }
 
-    pub(in crate::codegen) fn compile_range_expr(
-        &mut self,
-        start: &Expr,
-        end: &Expr,
-        vars: &HashMap<String, VarEntry<'ctx>>,
-    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let start_val = self.compile_expr(start, vars)?;
-        let end_val = self.compile_expr(end, vars)?;
-        let start_iv = match start_val {
-            BasicValueEnum::IntValue(iv) => iv,
-            _ => return Err("range start must be i64".into()),
-        };
-        let end_iv = match end_val {
-            BasicValueEnum::IntValue(iv) => iv,
-            _ => return Err("range end must be i64".into()),
-        };
-        // A1: widen i32 to i64 — range struct stores {i64, i64}.
-        let i64_ty = self.context.i64_type();
-        let start_iv = if start_iv.get_type().get_bit_width() < 64 {
-            self.builder
-                .build_int_s_extend(start_iv, i64_ty, "range_start_sext")
-                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else {
-            start_iv
-        };
-        let end_iv = if end_iv.get_type().get_bit_width() < 64 {
-            self.builder
-                .build_int_s_extend(end_iv, i64_ty, "range_end_sext")
-                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else {
-            end_iv
-        };
-        // Create a range struct { start: i64, end: i64 }
-        let range_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(self.context.i64_type()),
-                BasicTypeEnum::IntType(self.context.i64_type()),
-            ],
-            false,
-        );
-        let alloca = self
-            .builder
-            .build_alloca(range_ty, "range")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let start_gep = self
-            .gep()
-            .build_struct_gep(range_ty, alloca, 0, "range_start")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(start_gep, start_iv)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let end_gep = self
-            .gep()
-            .build_struct_gep(range_ty, alloca, 1, "range_end")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(end_gep, end_iv)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(alloca.into())
-    }
-
     pub(in crate::codegen) fn compile_slice_expr(
         &mut self,
         target: &Expr,

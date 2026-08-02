@@ -308,7 +308,6 @@ impl<'a> Checker<'a> {
             Expr::SliceExpr { target, start, end } => {
                 self.infer_slice(target, start.as_deref(), end.as_deref(), scopes)
             }
-            Expr::Range { start, end } => self.infer_range(start, end, scopes),
             Expr::TypeInfo(_) => Type::Name("TypeInfo".into(), vec![]),
             Expr::Old(expr) => self.infer_expr(expr, scopes),
             Expr::Lambda { params, ret, body } => {

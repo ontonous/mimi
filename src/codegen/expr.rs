@@ -38,7 +38,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Tuple(elems) => self.compile_tuple_expr(elems, vars),
             Expr::TupleIndex(tuple_expr, index) => self.compile_tuple_index_expr(tuple_expr, *index, vars),
             Expr::If { cond, then_, else_ } => self.compile_if_expr(cond, then_, else_, vars),
-            Expr::Range { start, end } => self.compile_range_expr(start, end, vars),
             Expr::SliceExpr { target, start, end } => self.compile_slice_expr(target, start, end, vars),
             Expr::Lambda { params, ret, body } => self.compile_lambda_expr(params, ret, body, vars),
             Expr::Comprehension { expr: comp_expr, var, iter, guard } => self.compile_comprehension_expr(comp_expr, var, iter, guard, vars),

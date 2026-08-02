@@ -685,10 +685,6 @@ fn remap_expr_spans(expr: &mut Expr, remap: &SourceIdRemap) -> Result<(), String
             }
             Ok(())
         }
-        Expr::Range { start, end } => {
-            remap_expr_spans(start, remap)?;
-            remap_expr_spans(end, remap)
-        }
         Expr::Turbofish(_, type_args, args) => {
             for ty in type_args {
                 remap_type_spans(ty, remap)?;

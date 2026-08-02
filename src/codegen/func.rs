@@ -120,10 +120,6 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
         Expr::Spawn(e) => collect_old_idents_walker(e, out),
         Expr::Await(e) => collect_old_idents_walker(e, out),
         Expr::TypeOf(e) => collect_old_idents_walker(e, out),
-        Expr::Range { start, end } => {
-            collect_old_idents_walker(start, out);
-            collect_old_idents_walker(end, out);
-        }
         Expr::SliceExpr { target, start, end } => {
             collect_old_idents_walker(target, out);
             if let Some(s) = start {
@@ -295,10 +291,6 @@ fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, dept
         | Expr::Old(e)
         | Expr::QuoteInterpolate(e)
         | Expr::NamedArg(_, e) => collect_all_idents_depth(e, out, d),
-        Expr::Range { start, end } => {
-            collect_all_idents_depth(start, out, d);
-            collect_all_idents_depth(end, out, d);
-        }
         Expr::SliceExpr { target, start, end } => {
             collect_all_idents_depth(target, out, d);
             if let Some(s) = start {

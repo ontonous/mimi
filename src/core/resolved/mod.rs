@@ -5000,7 +5000,6 @@ fn expr_semantic_key(expr: &Expr) -> String {
         Expr::Lambda { params, .. } => format!("lambda:{}", params.len()),
         Expr::Old(_) => "old".into(),
         Expr::SliceExpr { .. } => "slice".into(),
-        Expr::Range { .. } => "range".into(),
         Expr::Turbofish(name, types, _) => format!("turbofish:{name}:{}", types.len()),
         Expr::TupleIndex(_, index) => format!("tuple-index:{index}"),
         Expr::Arena(_) => "arena".into(),
@@ -5040,7 +5039,6 @@ pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
         Expr::Lambda { .. } => "expr.lambda",
         Expr::Old(_) => "expr.old",
         Expr::SliceExpr { .. } => "expr.slice",
-        Expr::Range { .. } => "expr.range",
         Expr::Turbofish(_, _, _) => "expr.turbofish",
         Expr::TupleIndex(_, _) => "expr.tuple_index",
         Expr::Arena(_) => "expr.arena",
@@ -5460,26 +5458,6 @@ fn collect_expr_meta(
                     errors,
                 );
             }
-        }
-        Expr::Range { start, end } => {
-            collect_expr_meta(
-                start,
-                owner,
-                &format!("{role}.start"),
-                fallback,
-                ids,
-                out,
-                errors,
-            );
-            collect_expr_meta(
-                end,
-                owner,
-                &format!("{role}.end"),
-                fallback,
-                ids,
-                out,
-                errors,
-            );
         }
         Expr::Turbofish(_, types, args) => {
             for index in 0..types.len() {
@@ -7062,32 +7040,6 @@ fn collect_expr_call_sites(
                     errors,
                 );
             }
-        }
-        Expr::Range { start, end } => {
-            collect_expr_call_sites(
-                start,
-                owner,
-                &format!("{role}.start"),
-                fallback,
-                ids,
-                functions,
-                externs,
-                methods,
-                out,
-                errors,
-            );
-            collect_expr_call_sites(
-                end,
-                owner,
-                &format!("{role}.end"),
-                fallback,
-                ids,
-                functions,
-                externs,
-                methods,
-                out,
-                errors,
-            );
         }
         Expr::Turbofish(name, _, args) => {
             record_expr_call_site(

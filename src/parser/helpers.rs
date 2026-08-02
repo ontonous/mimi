@@ -175,13 +175,16 @@ impl Parser {
             TokenKind::Old => "old".to_string(),
             TokenKind::View => "view".to_string(),
             TokenKind::Mutate => "mutate".to_string(),
-            TokenKind::Consume => "consume".to_string(),
             TokenKind::Do => "do".to_string(),
             TokenKind::Persistent => "persistent".to_string(),
-            TokenKind::Subflow => "subflow".to_string(),
             TokenKind::Session => "session".to_string(),
             TokenKind::Dual => "dual".to_string(),
             TokenKind::End => "end".to_string(),
+            // v0.34.2: and/or/not are soft keywords — binding position may use
+            // them as identifiers (expression position still operator).
+            TokenKind::And => "and".to_string(),
+            TokenKind::Or => "or".to_string(),
+            TokenKind::Not => "not".to_string(),
             // F-H7: fault/reset/recover are soft keywords (transition names, states).
             TokenKind::Fault => "fault".to_string(),
             TokenKind::Reset => "reset".to_string(),

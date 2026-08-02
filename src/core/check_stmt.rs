@@ -307,7 +307,7 @@ impl<'a> Checker<'a> {
             Expr::Ident(name) => {
                 self.collect_shared_write(name, scopes, writes);
             }
-            Expr::Binary(_, l, r) | Expr::Range { start: l, end: r } => {
+            Expr::Binary(_, l, r) => {
                 self.collect_shared_writes_in_expr(l, scopes, writes);
                 self.collect_shared_writes_in_expr(r, scopes, writes);
             }
@@ -555,10 +555,6 @@ impl<'a> Checker<'a> {
                 if let Some(e) = end {
                     self.check_expr_parasteps_safe(e, scopes);
                 }
-            }
-            Expr::Range { start, end } => {
-                self.check_expr_parasteps_safe(start, scopes);
-                self.check_expr_parasteps_safe(end, scopes);
             }
             Expr::Arena(block) => {
                 for s in block {
