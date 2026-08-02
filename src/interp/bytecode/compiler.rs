@@ -5094,12 +5094,22 @@ pub fn eval_comptime_block_bytecode(
 
     // Build a synthetic file: original items + a wrapper function.
     let mut synth = file.clone();
+    // Unique wrapper name: nested evaluations (ast_eval inside a comptime
+    // fold) reuse the caller's file, which may already contain a
+    // `__comptime_eval` wrapper. A duplicate name would make
+    // `function_index` resolve to the first (stale/empty) proto.
+    static COMPTIME_EVAL_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let wrapper_name = format!(
+        "__comptime_eval_{}",
+        COMPTIME_EVAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let wrapper = FuncDef {
         meta: AstNodeMeta::inherited(
             Span::UNKNOWN,
             AstOrigin::Desugared("bytecode.comptime_eval"),
         ),
-        name: "__comptime_eval".to_string(),
+        name: wrapper_name.clone(),
         pub_: false,
         params: vec![],
         ret: None,
@@ -5134,7 +5144,7 @@ pub fn eval_comptime_block_bytecode(
     let mut compiler = BytecodeCompiler::new();
     let prog = match compiler.compile_file(&synth) {
         Ok(p) => p,
-        Err(_) => {
+        Err(_first_err) => {
             // Retry with filtered file: only comptime funcs + types + consts.
             // Non-comptime functions may have unsupported constructs (ast_eval, quote!).
             let mut filtered = File {
@@ -5175,8 +5185,8 @@ pub fn eval_comptime_block_bytecode(
         }
     };
     let fidx = prog
-        .function_index("__comptime_eval")
-        .ok_or_else(|| "comptime wrapper function not found".to_string())?;
+        .function_index(&wrapper_name)
+        .ok_or_else(|| format!("comptime wrapper function '{wrapper_name}' not found"))?;
     let mut vm = super::vm::BytecodeVM::new(&prog);
     vm.verify_contracts = false;
     vm.call_function(fidx, &[])
@@ -5194,14 +5204,59 @@ pub fn eval_expr_bytecode(
 }
 
 /// Convert a runtime Value back to a const Expr for injection as a top-level constant.
+///
+/// Supports scalar literals plus the composite shapes the bytecode VM can
+/// rebuild: variants (constructor call), tuples, lists, sets, records,
+/// and newtypes. Anything else falls back to a string literal encoding
+/// (best-effort for comptime seeding).
 fn value_to_const_expr(value: &crate::interp::Value) -> Expr {
     use crate::interp::Value;
+    let origin = AstOrigin::Desugared("bytecode.comptime_const");
+    let synth = |e: Expr| e.synthetic_with_origin(origin);
     match value {
         Value::Int(n) => Expr::Literal(Lit::Int(*n)),
         Value::Float(f) => Expr::Literal(Lit::Float(*f)),
         Value::Bool(b) => Expr::Literal(Lit::Bool(*b)),
         Value::String(s) => Expr::Literal(Lit::String(s.clone())),
         Value::Unit => Expr::Literal(Lit::Unit),
+        // Enum/newtype variant: reconstruct via constructor call, e.g.
+        // `Some(42)` → Some(42). Zero-arity variants fall back to a bare
+        // identifier (the compiler resolves nullary constructors as idents).
+        Value::Variant(tag, args) => {
+            if args.is_empty() {
+                synth(Expr::Ident(tag.clone()))
+            } else {
+                synth(Expr::Call(
+                    Box::new(synth(Expr::Ident(tag.clone()))),
+                    args.iter().map(value_to_const_expr).collect(),
+                ))
+            }
+        }
+        Value::Tuple(elems) => synth(Expr::Tuple(
+            elems.iter().map(value_to_const_expr).collect(),
+        )),
+        Value::List(elems) => synth(Expr::List(
+            elems.iter().map(value_to_const_expr).collect(),
+        )),
+        Value::Set(elems) => synth(Expr::SetLiteral(
+            elems.iter().map(value_to_const_expr).collect(),
+        )),
+        Value::Record(ty, fields) => {
+            let ty = ty.clone();
+            let fields = fields
+                .iter()
+                .map(|(name, v)| RecordFieldExpr {
+                    meta: AstNodeMeta::inherited(crate::span::Span::UNKNOWN, origin),
+                    name: name.clone(),
+                    value: value_to_const_expr(v),
+                })
+                .collect();
+            Expr::Record { ty, fields }
+        }
+        Value::Newtype(name, inner) => synth(Expr::Call(
+            Box::new(synth(Expr::Ident(name.clone()))),
+            vec![value_to_const_expr(inner)],
+        )),
         // Complex values: encode as string literal (best-effort for comptime seeding).
         other => Expr::Literal(Lit::String(format!("{}", other))),
     }
@@ -5305,4 +5360,351 @@ fn resolve_expr_interpolations(expr: &Expr) -> Expr {
         // Leaf nodes and everything else: pass through.
         _ => expr.clone(),
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 0.33 Phase F: QuotedAst → Block converter (tree-walker removal)
+//
+// Converts a QuotedAst (produced by quote! at runtime) back into a standard
+// AST Block so it can be evaluated via eval_comptime_block_bytecode.
+// Interpolated values (QuotedAst::Interpolate) are collected into a side map
+// and injected as comptime constants by the caller.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Convert a QuotedAst node into a Block (Vec<Stmt>).
+///
+/// `interp_counter` is a mutable counter for generating unique names for
+/// interpolated values. `interp_values` accumulates the interpolated runtime
+/// values keyed by their generated identifier names.
+pub fn quoted_ast_to_block(
+    qa: &crate::interp::value::QuotedAst,
+    interp_counter: &mut usize,
+    interp_values: &mut HashMap<String, crate::interp::Value>,
+) -> Block {
+    use crate::interp::value::QuotedAst;
+    match qa {
+        QuotedAst::Block(stmts) => stmts
+            .iter()
+            .map(|s| quoted_ast_to_stmt(s, interp_counter, interp_values))
+            .collect(),
+        // A single expression node becomes a one-statement block.
+        other => vec![Stmt::Expr(quoted_ast_to_expr(other, interp_counter, interp_values))],
+    }
+}
+
+fn quoted_ast_to_stmt(
+    qa: &crate::interp::value::QuotedAst,
+    interp_counter: &mut usize,
+    interp_values: &mut HashMap<String, crate::interp::Value>,
+) -> Stmt {
+    use crate::interp::value::QuotedAst;
+    match qa {
+        QuotedAst::Let { name, value } => Stmt::Let {
+            pat: Pattern::synthetic(
+                PatternKind::Variable(name.clone()),
+                AstOrigin::Desugared("quoted_ast"),
+            ),
+            ty: None,
+            init: Some(quoted_ast_to_expr(value, interp_counter, interp_values)),
+            mut_: false,
+            ref_: false,
+        },
+        QuotedAst::ExprStmt(e) => {
+            Stmt::Expr(quoted_ast_to_expr(e, interp_counter, interp_values))
+        }
+        QuotedAst::Return(e) => Stmt::Return(
+            e.as_ref()
+                .map(|inner| quoted_ast_to_expr(inner, interp_counter, interp_values)),
+        ),
+        QuotedAst::Break(e) => Stmt::Break(
+            e.as_ref()
+                .map(|inner| quoted_ast_to_expr(inner, interp_counter, interp_values)),
+        ),
+        QuotedAst::Continue => Stmt::Continue,
+        QuotedAst::While(cond, body) => Stmt::While {
+            cond: quoted_ast_to_expr(cond, interp_counter, interp_values),
+            body: quoted_ast_to_block(body, interp_counter, interp_values),
+        },
+        QuotedAst::WhileLet { pat, init, body } => Stmt::WhileLet {
+            pat: pat.clone(),
+            init: quoted_ast_to_expr(init, interp_counter, interp_values),
+            body: quoted_ast_to_block(body, interp_counter, interp_values),
+        },
+        QuotedAst::Loop(body) => {
+            Stmt::Loop(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
+        QuotedAst::For(var, iter, body) => Stmt::For {
+            var: var.clone(),
+            iterable: quoted_ast_to_expr(iter, interp_counter, interp_values),
+            body: quoted_ast_to_block(body, interp_counter, interp_values),
+        },
+        QuotedAst::Assign(target, value) => Stmt::Assign {
+            target: quoted_ast_to_expr(target, interp_counter, interp_values),
+            value: quoted_ast_to_expr(value, interp_counter, interp_values),
+        },
+        QuotedAst::Arena(body) => {
+            Stmt::Arena(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
+        QuotedAst::Unsafe(body) => {
+            Stmt::Unsafe(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
+        QuotedAst::Drop(e) => {
+            Stmt::Drop(quoted_ast_to_expr(e, interp_counter, interp_values))
+        }
+        QuotedAst::Defer(body) => {
+            Stmt::Defer(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
+        QuotedAst::SharedLet { kind, name, init } => Stmt::SharedLet {
+            kind: *kind,
+            name: name.clone(),
+            ty: None,
+            init: quoted_ast_to_expr(init, interp_counter, interp_values),
+        },
+        QuotedAst::OnFailure(body) => {
+            Stmt::OnFailure(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
+        QuotedAst::Parasteps(body) => {
+            Stmt::Parasteps(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
+        QuotedAst::Alloc { kind, body } => Stmt::Alloc {
+            kind: *kind,
+            body: quoted_ast_to_block(body, interp_counter, interp_values),
+        },
+        QuotedAst::Block(stmts) => Stmt::Block(
+            stmts
+                .iter()
+                .map(|s| quoted_ast_to_stmt(s, interp_counter, interp_values))
+                .collect(),
+        ),
+        // Everything else is an expression statement.
+        other => Stmt::Expr(quoted_ast_to_expr(other, interp_counter, interp_values)),
+    }
+}
+
+fn quoted_ast_to_expr(
+    qa: &crate::interp::value::QuotedAst,
+    interp_counter: &mut usize,
+    interp_values: &mut HashMap<String, crate::interp::Value>,
+) -> Expr {
+    use crate::interp::value::QuotedAst;
+    match qa {
+        QuotedAst::Literal(l) => Expr::Literal(l.clone()),
+        QuotedAst::Ident(name) => Expr::Ident(name.clone()),
+        QuotedAst::Binary(op, l, r) => Expr::Binary(
+            *op,
+            Box::new(quoted_ast_to_expr(l, interp_counter, interp_values)),
+            Box::new(quoted_ast_to_expr(r, interp_counter, interp_values)),
+        ),
+        QuotedAst::Unary(op, e) => Expr::Unary(
+            *op,
+            Box::new(quoted_ast_to_expr(e, interp_counter, interp_values)),
+        ),
+        QuotedAst::Call(callee, args) => Expr::Call(
+            Box::new(quoted_ast_to_expr(callee, interp_counter, interp_values)),
+            args.iter()
+                .map(|a| quoted_ast_to_expr(a, interp_counter, interp_values))
+                .collect(),
+        ),
+        QuotedAst::Field(obj, name) => Expr::Field(
+            Box::new(quoted_ast_to_expr(obj, interp_counter, interp_values)),
+            name.clone(),
+        ),
+        QuotedAst::Index(obj, idx) => Expr::Index(
+            Box::new(quoted_ast_to_expr(obj, interp_counter, interp_values)),
+            Box::new(quoted_ast_to_expr(idx, interp_counter, interp_values)),
+        ),
+        QuotedAst::Tuple(elems) => Expr::Tuple(
+            elems
+                .iter()
+                .map(|e| quoted_ast_to_expr(e, interp_counter, interp_values))
+                .collect(),
+        ),
+        QuotedAst::List(elems) => Expr::List(
+            elems
+                .iter()
+                .map(|e| quoted_ast_to_expr(e, interp_counter, interp_values))
+                .collect(),
+        ),
+        QuotedAst::Match(subject, arms) => {
+            let converted_arms: Vec<MatchArm> = arms
+                .iter()
+                .map(|arm| MatchArm {
+                    meta: AstNodeMeta::synthetic(AstOrigin::Desugared("quoted_ast")),
+                    pat: arm.pat.clone(),
+                    guard: arm
+                        .guard
+                        .as_ref()
+                        .map(|g| quoted_ast_to_expr(g, interp_counter, interp_values)),
+                    body: quoted_ast_to_expr(&arm.body, interp_counter, interp_values),
+                })
+                .collect();
+            Expr::Match(
+                Box::new(quoted_ast_to_expr(subject, interp_counter, interp_values)),
+                converted_arms,
+            )
+        }
+        QuotedAst::If(cond, then_, else_) => Expr::If {
+            cond: Box::new(quoted_ast_to_expr(cond, interp_counter, interp_values)),
+            then_: quoted_ast_to_block(then_, interp_counter, interp_values),
+            else_: else_
+                .as_ref()
+                .map(|e| quoted_ast_to_block(e, interp_counter, interp_values)),
+        },
+        QuotedAst::Record { ty, fields } => {
+            let converted_fields: Vec<RecordFieldExpr> = fields
+                .iter()
+                .map(|f| RecordFieldExpr {
+                    meta: AstNodeMeta::synthetic(AstOrigin::Desugared("quoted_ast")),
+                    name: f.name.clone(),
+                    value: quoted_ast_to_expr(&f.value, interp_counter, interp_values),
+                })
+                .collect();
+            Expr::Record {
+                ty: ty.clone(),
+                fields: converted_fields,
+            }
+        }
+        QuotedAst::Try(e) => Expr::Try(Box::new(quoted_ast_to_expr(
+            e,
+            interp_counter,
+            interp_values,
+        ))),
+        QuotedAst::OptionalChain(obj, field) => Expr::OptionalChain(
+            Box::new(quoted_ast_to_expr(obj, interp_counter, interp_values)),
+            field.clone(),
+        ),
+        QuotedAst::Spawn(e) => Expr::Spawn(Box::new(quoted_ast_to_expr(
+            e,
+            interp_counter,
+            interp_values,
+        ))),
+        QuotedAst::Await(e) => Expr::Await(Box::new(quoted_ast_to_expr(
+            e,
+            interp_counter,
+            interp_values,
+        ))),
+        QuotedAst::Interpolate(value) => {
+            // Inject the runtime value as a comptime constant with a unique name.
+            let name = format!("__interp_{}", *interp_counter);
+            *interp_counter += 1;
+            interp_values.insert(name.clone(), *value.clone());
+            Expr::Ident(name)
+        }
+        QuotedAst::Block(stmts) => Expr::Block(
+            stmts
+                .iter()
+                .map(|s| quoted_ast_to_stmt(s, interp_counter, interp_values))
+                .collect(),
+        ),
+        QuotedAst::Lambda {
+            params,
+            ret,
+            body,
+            captured: _,
+        } => Expr::Lambda {
+            params: params.clone(),
+            ret: ret.clone(),
+            body: body.clone(),
+        },
+        QuotedAst::Cast(e, ty) => Expr::Cast(
+            Box::new(quoted_ast_to_expr(e, interp_counter, interp_values)),
+            ty.clone(),
+        ),
+        QuotedAst::NamedArg(name, e) => Expr::NamedArg(
+            name.clone(),
+            Box::new(quoted_ast_to_expr(e, interp_counter, interp_values)),
+        ),
+        QuotedAst::MapLiteral(entries) => Expr::MapLiteral {
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        quoted_ast_to_expr(k, interp_counter, interp_values),
+                        quoted_ast_to_expr(v, interp_counter, interp_values),
+                    )
+                })
+                .collect(),
+        },
+        QuotedAst::SetLiteral(elems) => Expr::SetLiteral(
+            elems
+                .iter()
+                .map(|e| quoted_ast_to_expr(e, interp_counter, interp_values))
+                .collect(),
+        ),
+        // Statement-level nodes that appear in expression position: wrap as block expr.
+        QuotedAst::Let { .. }
+        | QuotedAst::ExprStmt(_)
+        | QuotedAst::Return(_)
+        | QuotedAst::Break(_)
+        | QuotedAst::Continue
+        | QuotedAst::While(_, _)
+        | QuotedAst::WhileLet { .. }
+        | QuotedAst::Loop(_)
+        | QuotedAst::For(_, _, _)
+        | QuotedAst::Assign(_, _)
+        | QuotedAst::Arena(_)
+        | QuotedAst::Unsafe(_)
+        | QuotedAst::Drop(_)
+        | QuotedAst::Defer(_)
+        | QuotedAst::SharedLet { .. }
+        | QuotedAst::OnFailure(_)
+        | QuotedAst::Parasteps(_)
+        | QuotedAst::Alloc { .. } => {
+            let block = quoted_ast_to_block(qa, interp_counter, interp_values);
+            Expr::Block(block)
+        }
+    }
+}
+
+/// Evaluate a QuotedAst using the bytecode VM.
+///
+/// Converts the QuotedAst to a standard Block, collects interpolated values,
+/// and evaluates via eval_comptime_block_bytecode.
+pub fn eval_quoted_ast_bytecode(
+    file: &File,
+    qa: &crate::interp::value::QuotedAst,
+    captures: &HashMap<String, crate::interp::Value>,
+) -> Result<crate::interp::Value, String> {
+    use crate::interp::value::QuotedAst;
+    // A quoted lambda becomes a first-class Closure value directly.
+    // Compiling it into a BytecodeClosure would embed a proto index that is
+    // valid only in the synthetic eval program, not in the caller's program
+    // (tree-walker `eval_quoted_ast_body` parity). The VM's CallIndirect
+    // fallback evaluates such Closures via eval_comptime_block_bytecode.
+    // `quote! { fn(x) ... }` yields Block([ExprStmt(Lambda)]), so strip the
+    // statement/block wrappers before matching the Lambda node.
+    let mut stripped = qa;
+    loop {
+        match stripped {
+            QuotedAst::Block(stmts) if stmts.len() == 1 => match &stmts[0] {
+                QuotedAst::ExprStmt(inner) => {
+                    stripped = inner;
+                    continue;
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    if let QuotedAst::Lambda {
+        params,
+        ret,
+        body,
+        captured,
+    } = stripped
+    {
+        return Ok(crate::interp::Value::Closure {
+            params: params.clone(),
+            ret: ret.clone(),
+            body: body.clone(),
+            captured: captured.clone(),
+        });
+    }
+    let mut interp_counter: usize = 0;
+    let mut interp_values: HashMap<String, crate::interp::Value> = HashMap::new();
+    let block = quoted_ast_to_block(qa, &mut interp_counter, &mut interp_values);
+    // Merge captures (free identifiers from quote!) with interpolated values.
+    let mut comptime_values = captures.clone();
+    comptime_values.extend(interp_values);
+    eval_comptime_block_bytecode(file, &block, &comptime_values)
 }
