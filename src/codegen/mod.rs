@@ -447,6 +447,18 @@ enum HeapEntry<'ctx> {
         inkwell::types::StructType<'ctx>,
         u32,
     ),
+    /// L6: a custom-enum value `{i32 tag, i64 payload}` whose payload slot holds
+    /// a heap box pointer ONLY for the variants listed in `boxed_ordinals`
+    /// ( PayloadKind::Packed). At scope exit, load the struct, read the tag,
+    /// and free `inttoptr(payload)` iff the tag is a boxed variant — `Single`/
+    /// `None` variants store inline data in the i64 slot and must NOT be freed
+    /// (freeing inline bits would crash). `slot` is an entry-block alloca
+    /// holding the whole `{i32, i64}` struct so the tag is readable at free time.
+    EnumBox {
+        slot: inkwell::values::PointerValue<'ctx>,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        boxed_ordinals: Vec<u64>,
+    },
 }
 
 // Resolved-directory query methods are production instrumentation consumed by
@@ -1600,6 +1612,84 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// L6: register a heap box pointer for scope-exit free, with an entry-block
+    /// null-init of the slot. Unlike `register_heap_alloc`, the slot is
+    /// null-initialised at the entry block so a registration emitted in a
+    /// conditional branch that is NOT taken at runtime frees `null` (a no-op)
+    /// rather than garbage — e.g. an enum constructor inside `if cond { Rect(..)
+    /// }` whose sibling branch registers a different box. Without null-init the
+    /// untaken branch's slot is undef → `free(undef)` crashes.
+    pub(super) fn register_heap_box(&self, box_ptr: inkwell::values::PointerValue<'ctx>) {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let slot = self
+            .build_entry_alloca(ptr_ty, "enum_box_ptr_slot")
+            .unwrap_or(box_ptr);
+        if slot != box_ptr {
+            // Null-init at the entry block (after the alloca) so untaken
+            // conditional paths load null.
+            let saved = self.builder.get_insert_block();
+            if let Some(slot_inst) = slot.as_instruction() {
+                if let Some(next) = slot_inst.get_next_instruction() {
+                    self.builder.position_before(&next);
+                } else if let Some(parent) = slot_inst.get_parent() {
+                    self.builder.position_at_end(parent);
+                }
+                let _ = self.build_store(slot, ptr_ty.const_null());
+            }
+            if let Some(saved) = saved {
+                self.builder.position_at_end(saved);
+            }
+            // Store the actual box pointer at the current (ctor call) position.
+            let _ = self.build_store(slot, box_ptr);
+        }
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
+            stack.push(HeapEntry::Ptr(slot));
+        }
+    }
+
+    /// L6: register a custom-enum value `{i32 tag, i64 payload}` for a
+    /// tag-conditional box free at scope exit (`HeapEntry::EnumBox`). `slot` is
+    /// an entry-block alloca holding the whole struct (so the tag is readable at
+    /// free time). The slot is null-initialised at the entry block so a
+    /// never-stored path (e.g. the untaken branch of a conditional call) loads
+    /// tag=0/payload=0 → either the tag check skips, or `free(inttoptr(0))` is a
+    /// `free(null)` no-op — never a garbage free.
+    pub(super) fn register_enum_box(
+        &self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        boxed_ordinals: Vec<u64>,
+    ) {
+        let saved = self.builder.get_insert_block();
+        if let Some(f) = self.current_function() {
+            if let Some(entry_bb) = f.get_first_basic_block() {
+                if let Some(slot_inst) = slot.as_instruction() {
+                    if let Some(next) = slot_inst.get_next_instruction() {
+                        self.builder.position_before(&next);
+                    } else {
+                        self.builder
+                            .position_at_end(slot_inst.get_parent().unwrap_or(entry_bb));
+                    }
+                } else {
+                    self.builder.position_at_end(entry_bb);
+                }
+                let _ = self.build_store(slot, struct_ty.const_zero());
+            }
+        }
+        if let Some(saved) = saved {
+            self.builder.position_at_end(saved);
+        }
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
+            stack.push(HeapEntry::EnumBox {
+                slot,
+                struct_ty,
+                boxed_ordinals,
+            });
+        }
+    }
+
     /// Register an entry-alloca struct slot whose loaded value should be freed at
     /// scope exit. `field` is the index of the pointer field inside the struct.
     /// At free time, a fresh GEP is emitted from `base` in the current block,
@@ -1833,6 +1923,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .collect()
         };
         for entry in entries {
+            // L6: EnumBox needs a tag-conditional free; handle separately.
+            if let HeapEntry::EnumBox {
+                slot,
+                struct_ty,
+                boxed_ordinals,
+            } = entry
+            {
+                self.emit_enum_box_free(free_fn, slot, struct_ty, &boxed_ordinals, &claimed)?;
+                continue;
+            }
             let ptr = match entry {
                 HeapEntry::Ptr(slot) => {
                     // register_heap_alloc stores the pointer into an
@@ -1861,6 +1961,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         })?
                         .into_pointer_value()
                 }
+                HeapEntry::EnumBox { .. } => unreachable!("handled above"),
             };
             if claimed.is_empty() {
                 self.builder
@@ -1912,6 +2013,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_function("free")
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
             for entry in scope {
+                // L6: EnumBox needs a tag-conditional free (only Packed variants
+                // carry a box); handle it separately from the plain-pointer entries.
+                if let HeapEntry::EnumBox {
+                    slot,
+                    struct_ty,
+                    boxed_ordinals,
+                } = entry
+                {
+                    self.emit_enum_box_free(free_fn, slot, struct_ty, &boxed_ordinals, &claimed)?;
+                    continue;
+                }
                 let ptr = match entry {
                     HeapEntry::Ptr(slot) => {
                         // Load from the entry-block alloca (see register_heap_alloc).
@@ -1938,6 +2050,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             })?
                             .into_pointer_value()
                     }
+                    HeapEntry::EnumBox { .. } => unreachable!("handled above"),
                 };
                 if claimed.is_empty() {
                     self.builder
@@ -2001,6 +2114,96 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(skip_bb)
             .map_err(|e| CompileError::LlvmError(format!("b9 free merge error: {}", e)))?;
         self.builder.position_at_end(skip_bb);
+        Ok(())
+    }
+
+    /// L6: emit the conditional free for a `HeapEntry::EnumBox`. Loads the
+    /// `{i32 tag, i64 payload}` struct from `slot` and frees `inttoptr(payload)`
+    /// iff `tag` is one of `boxed_ordinals` (the `PayloadKind::Packed` variants
+    /// that actually carry a heap box). `Single`/`None` variants store inline
+    /// data in the i64 slot and are skipped — freeing inline bits would crash.
+    /// When `claimed` is non-empty (the enum value is being returned), the free
+    /// is further guarded so a claimed box (ownership transferred to the caller)
+    /// is not released here.
+    fn emit_enum_box_free(
+        &self,
+        free_fn: inkwell::values::FunctionValue<'ctx>,
+        slot: inkwell::values::PointerValue<'ctx>,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        boxed_ordinals: &[u64],
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+    ) -> Result<(), CompileError> {
+        if boxed_ordinals.is_empty() {
+            return Ok(());
+        }
+        let struct_val = self
+            .builder
+            .build_load(
+                BasicTypeEnum::StructType(struct_ty),
+                slot,
+                "enum_box_struct",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("enum box load: {e}")))?
+            .into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(struct_val, 0, "enum_box_tag")
+            .map_err(|e| CompileError::LlvmError(format!("enum box tag: {e}")))?
+            .into_int_value();
+        let i32_ty = self.context.i32_type();
+        let mut is_boxed = self.context.bool_type().const_int(0, false);
+        for ord in boxed_ordinals {
+            let eq = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    i32_ty.const_int(*ord, false),
+                    "enum_box_ord_eq",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("enum box cmp: {e}")))?;
+            is_boxed = self
+                .builder
+                .build_or(is_boxed, eq, "enum_box_matched")
+                .map_err(|e| CompileError::LlvmError(format!("enum box or: {e}")))?;
+        }
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("enum box free outside function".into()))?;
+        let free_bb = self.context.append_basic_block(parent, "enum_box_free");
+        let done_bb = self.context.append_basic_block(parent, "enum_box_done");
+        self.build_cond_br(is_boxed, free_bb, done_bb)?;
+        self.builder.position_at_end(free_bb);
+        // struct_val dominates free_bb (computed before the branch), so the
+        // payload extraction here is SSA-valid.
+        let payload_i64 = self
+            .builder
+            .build_extract_value(struct_val, 1, "enum_box_payload")
+            .map_err(|e| CompileError::LlvmError(format!("enum box payload: {e}")))?
+            .into_int_value();
+        let box_ptr = self.build_int_to_ptr(
+            payload_i64,
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            "enum_box_ptr",
+        )?;
+        if claimed.is_empty() {
+            self.builder
+                .build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::PointerValue(box_ptr)],
+                    "free_enum_box",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("enum box free: {e}")))?;
+            self.build_br(done_bb)?;
+        } else {
+            // Guarded: skip if the box is claimed (returned to the caller).
+            // emit_guarded_scope_free leaves insertion at its merge block.
+            self.emit_guarded_scope_free(free_fn, box_ptr, claimed)?;
+            self.build_br(done_bb)?;
+        }
+        self.builder.position_at_end(done_bb);
         Ok(())
     }
 

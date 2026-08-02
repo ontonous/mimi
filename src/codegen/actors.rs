@@ -789,6 +789,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
                 )?;
                 val = self.claim_string_return_value(val, ret_type, Some(expr), vars)?;
+                // L6: claim a returned custom-enum payload box (caller
+                // re-registers via EnumBox). Mirrors func.rs emit_return.
+                self.claim_returned_enum_box(val, ret_type)?;
                 let ensures = self.ensures_stmts.clone();
                 for ensures_expr in &ensures {
                     self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
