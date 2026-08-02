@@ -3878,22 +3878,22 @@ fn dual_extern_multiple_funcs() {
 
 #[test]
 fn dual_extern_with_cap() {
-    if !can_link() {
-        return;
-    }
-    // CHECKER-GAP: checker: cap type not allowed across C ABI boundary (E0231)
-    dual_assert_soft!(
-        r#"
-        cap FileReadCap;
-        extern "C" {
-            func read(fd: i32, file_cap: FileReadCap) -> string;
-        }
-        func main() -> i32 {
-            println(42);
-            0
-        }
-    "#,
-        "42"
+    // Capability types across a C ABI boundary are statically rejected
+    // (E0231): a linear capability handed to C cannot be tracked by the
+    // checker, so the boundary is closed by design. Adjudicated during
+    // 0.34.19 CHECKER-GAP review — this is a language contract (L2), not
+    // a checker gap, and the dual-backend behaviors are not load-bearing.
+    let diags =
+        check_source("cap FileReadCap; extern \"C\" { func read(fd: i32, file_cap: FileReadCap) -> string; } func main() -> i32 { println(42); 0 }")
+            .expect_err("cap type across C ABI must be rejected (E0231)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0231"),
+        "expected E0231 diagnostic, got:\n{rendered}"
     );
 }
 
@@ -6341,8 +6341,10 @@ fn dual_quote_interpolate_snapshot() {
         0
     }
     "#;
-    // CHECKER-GAP: quote!/comptime not fully resolved by checker
-    let _ = check_source(src);
+    // quote!/comptime resolve cleanly in the checker since 0.34.19; the
+    // load-bearing assertion is the interp double-eval below (a double-free
+    // would abort), so the check gate is hard now.
+    check_source(src).expect("quote snapshot must check");
     // Both evaluations must succeed without panic (double-free would abort).
     let v1 = run_source(src);
     let v2 = run_source(src);
@@ -11243,9 +11245,10 @@ fn dual_quote_cast() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP (0.34.10a, golden §7.6 R8): ast_eval result participates in
-    // arithmetic (ast_eval(quote!{...}) + 1) — static return type AST cannot
-    // satisfy numeric unification. Retained as soft; 3 difficult items kept.
+    // CHECKER-GAP (0.34.10a, golden §7.6 R8): ast_eval result participates
+    // in arithmetic (ast_eval(quote!{...}) + 1) — static return type AST
+    // cannot satisfy numeric unification. Retained as soft; adjudicated:
+    // quote returns a runtime AST value, arithmetic on it stays interp-only.
     dual_assert_soft!(
         r#"
         func main() -> i32 {
