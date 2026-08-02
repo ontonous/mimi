@@ -93,14 +93,10 @@ impl Parser {
             }
             TokenKind::BitAnd => {
                 self.advance();
-                // Check for &'a lifetime annotation
-                let lifetime = if self.at(&TokenKind::Tick) {
-                    self.advance();
-                    let name = self.expect_ident()?;
-                    Some(name)
-                } else {
-                    None
-                };
+                // v0.34.4 (ADR-004): explicit lifetime annotations `&'a T`
+                // removed. Only elision `&T` / `&mut T` remain — the Option
+                // field is kept for minimal diff (112 match sites untouched).
+                let lifetime: Option<String> = None;
                 let mut_ = self.at(&TokenKind::Mut);
                 if mut_ {
                     self.advance();
@@ -657,7 +653,7 @@ mod tests {
 
     #[test]
     fn nested_composite_types_have_exact_source_aware_half_open_spans() {
-        let source = "Result<List<i32>,\n  Option<&'a mut string>>?";
+        let source = "Result<List<i32>,\n  Option<&mut string>>?";
         let source_id = SourceId::new(91);
         let ty = parse_source_type(source, source_id);
         assert_user_span(&ty, span_for(source, source, source_id));
@@ -683,20 +679,18 @@ mod tests {
         assert_user_span(&list_args[0], span_for(source, "i32", source_id));
 
         let option = &result_args[1];
-        assert_user_span(
-            option,
-            span_for(source, "Option<&'a mut string>", source_id),
-        );
+        assert_user_span(option, span_for(source, "Option<&mut string>", source_id));
         let Type::Name(option_name, option_args) = option.unlocated() else {
             panic!("expected Option application");
         };
         assert_eq!(option_name, "Option");
         let reference = &option_args[0];
-        assert_user_span(reference, span_for(source, "&'a mut string", source_id));
+        assert_user_span(reference, span_for(source, "&mut string", source_id));
         let Type::RefMut(lifetime, inner) = reference.unlocated() else {
             panic!("expected mutable reference");
         };
-        assert_eq!(lifetime.as_deref(), Some("a"));
+        // v0.34.4 (ADR-004): explicit lifetimes removed — Option stays None.
+        assert_eq!(lifetime.as_deref(), None);
         assert_user_span(inner, span_for(source, "string", source_id));
     }
 

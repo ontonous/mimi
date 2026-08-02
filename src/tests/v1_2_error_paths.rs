@@ -391,6 +391,8 @@ func main() -> i32 {
 
 #[test]
 fn parse_lifetime_annotation() {
+    // v0.34.4 (ADR-004): explicit lifetime annotations `&'a T` removed —
+    // the lexer rejects `'` outright (no other use in the language).
     let src = r#"
 func main() -> i32 {
     let x = 42;
@@ -398,16 +400,16 @@ func main() -> i32 {
     42
 }
 "#;
-    let result = check_source(src);
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
     assert!(
-        result.is_ok(),
-        "lifetime annotation 'a should parse: {:?}",
-        result.err()
+        tokens.is_err(),
+        "explicit lifetime annotation must be rejected (ADR-004)"
     );
 }
 
 #[test]
 fn parse_lifetime_mut_annotation() {
+    // v0.34.4 (ADR-004): `&'a mut T` rejected like `&'a T`.
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
@@ -415,11 +417,10 @@ func main() -> i32 {
     42
 }
 "#;
-    let result = check_source(src);
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
     assert!(
-        result.is_ok(),
-        "lifetime annotation 'a mut should parse: {:?}",
-        result.err()
+        tokens.is_err(),
+        "explicit lifetime annotation must be rejected (ADR-004)"
     );
 }
 

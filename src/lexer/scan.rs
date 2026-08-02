@@ -902,8 +902,9 @@ impl<'a> super::Lexer<'a> {
                 Ok(TokenKind::Hash)
             }
             '\'' => {
-                self.advance();
-                Ok(TokenKind::Tick)
+                // v0.34.4 (ADR-004): explicit lifetime annotations `'a`
+                // removed; `'` has no other use in the language.
+                Err(unexpected_character(c, line, col))
             }
             _ => Err(unexpected_character(c, line, col)),
         }

@@ -160,7 +160,6 @@ pub enum TokenKind {
     Ellipsis,
     At,
     Hash,
-    Tick,
 
     Newline,
     Indent,
@@ -312,7 +311,6 @@ impl fmt::Display for TokenKind {
             TokenKind::Newline => "newline",
             TokenKind::Indent => "INDENT",
             TokenKind::Dedent => "DEDENT",
-            TokenKind::Tick => "'",
             TokenKind::Eof => "EOF",
             TokenKind::BitAndEq => "&=",
             TokenKind::BitOrEq => "|=",
@@ -463,7 +461,6 @@ impl TokenKind {
             TokenKind::Ellipsis => "...",
             TokenKind::At => "@",
             TokenKind::Hash => "#",
-            TokenKind::Tick => "'",
             TokenKind::Newline => "\n",
             TokenKind::Indent => "",
             TokenKind::Dedent => "",

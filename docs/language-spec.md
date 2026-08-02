@@ -14,11 +14,10 @@
 >
 > | 规范位置 | 规范主张 | 实现实况 | 处置 |
 > |---------|---------|---------|------|
-> | §6.1 `LANG-FUNCTION-001` | `func(T)->U` **removed**，迁移到 `fn(T)->U` | `func(T)->U` 仍解析（parse_type.rs:213-237）；`fn` 仅限闭包表达式与 `extern "C" fn(...)` 类型（parse_type.rs:242） | 待 ADR-003 裁决（golden §1.2） |
+> | §6.1 `LANG-FUNCTION-001` | `func(T)->U` **removed**，迁移到 `fn(T)->U` | `func(T)->U` 仍解析（parse_type.rs:213-237）；`fn` 仅限闭包表达式与 `extern "C" fn(...)` 类型（parse_type.rs:242） | ✅ ADR-003 裁决：保留现状，spec 修正（0.34.4） |
 > | §3.12 `FLOW-FAULT-001` | fault 变体块 `fault F { A \| B }` + `fault Variant(...)` terminal + `reset`/`recover` 语句 | 仅 `fault ErrorType`（top_level.rs:1216-1222）；变体块语法全仓零匹配；reset/recover 仅系统注入 transition 名 | 收缩到现实（golden §3.2，spec 改由实现驱动） |
 > | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | 0.34.1 删除（golden §1.1） |
 > | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | 随 ADR-001 终止符裁决一并处理（golden §1.2） |
-> | state-level `invariant` | :776 文档化 | 未实现；仅块内 `invariant:` 子句（parse_stmt.rs:831-843） | 未排期，见 golden §8.3 |
 
 Normative requirements use stable IDs defined in `docs/language-requirements.toml`. Design rationale lives in `devdocs/pre-1.0/`; implementation structure and progress live in `docs/ast-appendix.md` and `docs/language-support.toml`. Parser acceptance and an existing implementation do not grant stable status.
 
@@ -950,15 +949,14 @@ source/IR hash: ...
 - `func name(...)`: named function definition;
 - `fn(...) { ... }`: anonymous closure;
 - `fn(T) -> U`: function value/function pointer type;
-- `extern "C" fn(T) -> U`: FFI function pointer.
+- `extern "C" fn(T) -> U` / `extern "C" func(...)`: FFI declarations — both spellings accepted.
 
 Memory rule: named functions use `func`; functions-as-values use `fn`.
 
-#### Convergence `[removed]`
-
-- `func(T) -> U` as function type: **removed**; migrate to `fn(T) -> U`;
-- `extern "C" func(...)` type spelling: **removed**;
-- Parser must not accept both spellings in the same context.
+> **ADR-003 裁决（2026-08-02）**：`fn` = 闭包（表达式位置）、`func` = 函数声明、
+> extern 类型两者皆可。**保留现状**，不强制收敛。`func(T) -> U` 作为函数类型
+> 仍解析（parse_type.rs:213-237）；`fn` 用于闭包表达式与 `extern "C" fn(...)` 类型
+> （parse_type.rs:242）。原 "Convergence [removed]" 节废止，见 golden-document §1.2。
 
 ### 6.2 Permissions: `view/mutate/consume` vs `&/&mut` `[stable]`
 

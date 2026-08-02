@@ -1091,7 +1091,11 @@ fn lex_scan_token(
         '?' => Ok((next!(pos), TokenKind::Question)),
         '@' => Ok((next!(pos), TokenKind::At)),
         '#' => Ok((next!(pos), TokenKind::Hash)),
-        '\'' => Ok((next!(pos), TokenKind::Tick)),
+        '\'' => {
+            // v0.34.4 (ADR-004): explicit lifetime annotations `'a`
+            // removed; `'` has no other use in the language.
+            Err(unexpected_character(c, line, col))
+        }
         _ => Err(unexpected_character(c, line, col)),
     }
 }
