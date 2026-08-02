@@ -4496,7 +4496,7 @@ impl BodyLowerer<'_> {
             (
                 Some(ResolvedType::Nominal { item: state, arguments, .. }),
                 Some(ResolvedType::Nominal { item: builtin, arguments: builtin_arguments, .. }),
-            ) if state.as_str().starts_with("state:")
+            ) if state.nominal_is_flow_state()
                 && state.as_str().ends_with("::Fault")
                 && arguments.is_empty()
                 && builtin.as_str() == "builtin:type:Fault"
