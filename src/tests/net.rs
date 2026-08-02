@@ -377,3 +377,99 @@ fn codegen_net_tcp_client_echo() {
 
     let _ = echo_server.join();
 }
+
+// ─── connect/http validation guards (audit fixes) ─────────────
+
+#[test]
+fn net_connect_rejects_standard_stream_fd() {
+    // connect() must not dup2 over stdin/stdout/stderr — rejected before any
+    // network activity.
+    let r = run_source_result(
+        r#"
+func main() -> i32 {
+    let ret = connect(0, "127.0.0.1", 12345)
+    println(ret)
+    0
+}
+"#,
+    );
+    assert!(
+        r.is_err(),
+        "connect(0, ...) must be rejected (would hijack stdin): {:?}",
+        r
+    );
+}
+
+#[test]
+fn net_connect_rejects_non_socket_fd() {
+    // A plain file fd is not an open socket — must be rejected, not silently
+    // replaced by dup2.
+    let r = run_source_result(
+        r#"
+func main() -> i32 {
+    let fd = 999
+    let ret = connect(fd, "127.0.0.1", 12345)
+    println(ret)
+    0
+}
+"#,
+    );
+    assert!(
+        r.is_err(),
+        "connect(999, ...) must be rejected (not an open socket): {:?}",
+        r
+    );
+}
+
+#[test]
+fn net_http_rejects_https_false_promise() {
+    // https:// is accepted by URL validation but the connection is plain TCP —
+    // it must fail loudly instead of silently connecting on port 80.
+    let r = run_source_result(
+        r#"
+func main() -> i32 {
+    let body = http_get("https://example.com/")
+    println(body)
+    0
+}
+"#,
+    );
+    assert!(
+        r.is_err(),
+        "https:// must be rejected (TLS not supported): {:?}",
+        r
+    );
+}
+
+#[test]
+fn net_http_rejects_bad_port() {
+    for bad in ["http://example.com:70000/", "http://example.com:abc/"] {
+        let src = format!(
+            "func main() -> i32 {{ let b = http_get(\"{}\"); println(b); 0 }}",
+            bad
+        );
+        let r = run_source_result(&src);
+        assert!(
+            r.is_err(),
+            "http URL with invalid port {} must be rejected: {:?}",
+            bad,
+            r
+        );
+    }
+}
+
+#[test]
+fn net_http_rejects_bare_ipv6() {
+    // Bare IPv6 host (multiple colons) cannot be split by ':' — rejected
+    // with a clear error instead of misparsing.
+    let r = run_source_result(
+        r#"
+func main() -> i32 {
+    let b = http_get("http://2001:db8::1/")
+    println(b)
+    0
+}
+"#,
+    );
+    assert!(r.is_err(), "bare IPv6 host must be rejected: {:?}", r);
+}

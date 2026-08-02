@@ -2,7 +2,9 @@
 //
 // Built-in functions (no import needed):
 //   to_json(value) -> string                    — Serialize to JSON
-//   from_json(s) -> value                       — Parse JSON (interp only)
+//   from_json(s) -> string                     — Validate JSON, return the input
+//                                                unchanged (use from_json::<T> for a
+//                                                typed parse to an actual value)
 //   json_get_string(json, key) -> string        — Get string field
 //   json_get_int(json, key) -> i64              — Get integer field
 //   json_get_element(json, index) -> value      — Get array element

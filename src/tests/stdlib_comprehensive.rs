@@ -20,6 +20,43 @@ fn edge_walk_dir_single_file() {
 }
 
 #[test]
+fn edge_walk_dir_recurses() {
+    // walk_dir must recurse into subdirectories (matches runtime mimi_walk_dir)
+    // — not just list one level like listdir.
+    let dir = std::env::temp_dir().join(format!("mimi_walk_dir_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub/deep")).expect("create temp dirs");
+    std::fs::write(dir.join("a.txt"), "a").expect("write a");
+    std::fs::write(dir.join("sub/b.txt"), "b").expect("write b");
+    std::fs::write(dir.join("sub/deep/c.txt"), "c").expect("write c");
+
+    let src = format!(
+        "func main() -> i32 {{ len(walk_dir(\"{}\")) }}",
+        dir.display()
+    );
+    let v = run_source(&src);
+    assert_eq!(
+        v,
+        interp::Value::Int(3),
+        "walk_dir should find all 3 nested files"
+    );
+
+    // listdir must NOT recurse (one level: a.txt + sub)
+    let src = format!(
+        "func main() -> i32 {{ len(listdir(\"{}\")) }}",
+        dir.display()
+    );
+    let v = run_source(&src);
+    assert_eq!(
+        v,
+        interp::Value::Int(2),
+        "listdir should only list the top level"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn edge_is_dir_on_symlink_like() {
     // is_dir on special paths
     let v = run_source("func main() -> i32 { if is_dir(\"/tmp\") { 1 } else { 0 } }");
