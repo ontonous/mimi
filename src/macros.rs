@@ -35,7 +35,7 @@ macro_rules! mimi_debug_assert {
         if cfg!(debug_assertions) && !$cond {
             eprintln!("[mimi-debug-assert] FAILED: {} — {}",
                 stringify!($cond), format!($fmt, $($arg),*));
-            debug_assert!($cond, $fmt, $($arg)*);
+            debug_assert!($cond, $fmt, $($arg),*);
         }
     };
 }

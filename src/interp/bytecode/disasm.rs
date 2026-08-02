@@ -5,39 +5,6 @@
 
 use super::instr::*;
 
-/// Operand format for disassembly display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperandFormat {
-    /// rd, ra, rb (three registers)
-    RdRaRb,
-    /// rd, ra (two registers)
-    RdRa,
-    /// rd only
-    Rd,
-    /// rd + constant index
-    RdConst,
-    /// jump offset
-    Jump,
-    /// jump offset + register
-    JumpReg,
-    /// call: rd, func/builtin, args_base, argc
-    Call,
-    /// data: rd + base + count
-    Data,
-    /// field: rd, ra, field_idx
-    Field,
-    /// no operands
-    None,
-    /// special (handled per-opcode)
-    Special,
-}
-
-/// Opcode metadata for disassembly.
-pub struct OpDesc {
-    pub name: &'static str,
-    pub format: OperandFormat,
-}
-
 /// Get the display name for an opcode.
 pub fn op_name(op: &Op) -> &'static str {
     match op {
@@ -683,7 +650,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 })
                 .unwrap_or("?");
             format!(
-                "{:04}  {:<16} r{} = dyn_call(r{}, {}, {})",
+                "{:04}  {:<16} r{} = dyn_call(r{}, method={}, argc={})",
                 pc, name, rd, args_base, m, argc
             )
         }

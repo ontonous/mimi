@@ -64,7 +64,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
         name: "walk_dir",
         arity: 1,
         category: BuiltinCategory::System,
-        func: builtin_listdir,
+        func: builtin_walk_dir,
     });
     reg.register(BuiltinDesc {
         name: "path_basename",
@@ -239,6 +239,32 @@ fn builtin_listdir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
         }
         Err(_) => Ok(Value::List(vec![])),
     }
+}
+
+/// walk_dir: recursively list file paths under a directory.
+/// Depth-first, collects files only (directories are descended into, not
+/// listed) — matches the runtime `mimi_walk_dir` semantics so the dual
+/// backends agree.
+fn builtin_walk_dir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let path = expect_str(args, 0)?;
+    fn walk_recursive(dir: &std::path::Path, out: &mut Vec<String>) {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let path_str = path.to_string_lossy().to_string();
+            if path.is_dir() {
+                walk_recursive(&path, out);
+            } else {
+                out.push(path_str);
+            }
+        }
+    }
+    let mut result = Vec::new();
+    walk_recursive(std::path::Path::new(&path), &mut result);
+    Ok(Value::List(result.into_iter().map(Value::String).collect()))
 }
 
 // ── Path operations ─────────────────────────────────────

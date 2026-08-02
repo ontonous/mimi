@@ -65,8 +65,7 @@ pub fn poll_deferred(state: &mut PollFuture) {
     } = state
     {
         // Build comptime values from globals + args (params bound as constants).
-        let mut comptime_values: std::collections::HashMap<String, Value> =
-            std::mem::take(globals);
+        let mut comptime_values: std::collections::HashMap<String, Value> = std::mem::take(globals);
         let taken_args = std::mem::take(args);
         for (p, a) in func.params.iter().zip(taken_args) {
             comptime_values.insert(p.name.clone(), a);
@@ -76,7 +75,7 @@ pub fn poll_deferred(state: &mut PollFuture) {
             &func.body,
             &comptime_values,
         )
-        .map_err(|e| InterpError::new(e));
+        .map_err(InterpError::new);
         *state = PollFuture::Ready(result);
     }
 }

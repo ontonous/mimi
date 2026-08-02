@@ -598,7 +598,8 @@ fn builtin_actor_is_faulted(
     args: &[Value],
 ) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::Actor(h) => Ok(Value::Bool(h.is_faulted())),
+        // Returns Int(0/1) — matches codegen (mimi_actor_is_faulted -> i32).
+        Value::Actor(h) => Ok(Value::Int(if h.is_faulted() { 1 } else { 0 })),
         _ => Err(InterpError::new("actor_is_faulted expects actor handle")),
     }
 }
@@ -636,10 +637,17 @@ fn builtin_broadcast(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
                     continue;
                 }
                 match handle.try_enqueue(method.clone(), vec![]) {
-                    Ok(rx) => match rx.recv() {
-                        Ok(Ok(v)) => results.push(v),
-                        _ => results.push(Value::Int(-1)),
-                    },
+                    Ok(rx) => {
+                        // Never block forever: the worker only responds after
+                        // it dequeues the message, and a long-running/hung
+                        // actor method would otherwise deadlock the VM thread.
+                        let ttl = std::time::Duration::from_millis(handle.bp.ttl_ms);
+                        match rx.recv_timeout(ttl) {
+                            Ok(Ok(v)) => results.push(v),
+                            Ok(Err(_)) => results.push(Value::Int(-1)),
+                            Err(_) => results.push(Value::Int(-1)),
+                        }
+                    }
                     Err(_) => results.push(Value::Int(-1)),
                 }
             }
