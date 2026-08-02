@@ -406,19 +406,8 @@ func main() -> i32 { 0 }
     assert!(program.function("main").is_some());
 }
 
-#[test]
-fn resolved_function_records_effect_clause() {
-    let file = parse(
-        r#"
-cap Io
-func write(x: i32) -> i32 with Io { x }
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    let write = program.function("write").expect("write");
-    assert!(write.effects.iter().any(|e| e == "Io"));
-}
+// 0.34.18c (§4.2): resolved_function_records_effect_clause removed — the `with`
+// effect clause is abolished (parser rejects it).
 
 #[test]
 fn resolved_session_types_are_indexed() {
@@ -579,35 +568,24 @@ func main() -> i32 { 0 }
 
 #[test]
 fn interpreter_from_checked_installs_function_directory() {
+    // 0.34.18c (§4.2): `with Io` effect clause removed; this test keeps the
+    // function-directory installation assertions (arity/ret/params) only.
     let file = parse(
         r#"
-cap Io
-func write(x: i32) -> i32 with Io { x }
+func write(x: i32) -> i32 { x }
 func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert_eq!(interp.resolved_function_arity("write"), Some(1));
-    let effects = program
-        .function("write")
-        .expect("write function")
-        .effects
-        .clone();
-    assert!(effects.iter().any(|e| e == "Io"));
     assert!(program.function("write").is_some());
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
     let _ = verifier.verify_checked(&program);
     assert!(verifier.has_checked_function("write"));
-    assert!(program
-        .function("write")
-        .is_some_and(|f| f.effects.iter().any(|x| x == "Io")));
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "fx");
     codegen.compile_checked(&program).expect("compile");
-    assert!(program
-        .function("write")
-        .is_some_and(|f| f.effects.iter().any(|x| x == "Io")));
     assert_eq!(codegen.resolved_function_return_type("write"), Some("i32"));
     assert_eq!(verifier.checked_function_return_type("write"), Some("i32"));
     assert_eq!(
@@ -772,43 +750,30 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn consumers_install_trait_impl_method_params_and_effects() {
+fn consumers_install_trait_impl_method_params() {
+    // 0.34.18c (§4.2): `with Io` effect clause removed; this test keeps the
+    // trait/impl method params directory assertions only (effects now always empty).
     let file = parse(
         r#"
-cap Io
 trait Writer {
     func write(data: i32) -> i32
 }
 type Buffer { x: i32 }
 impl Writer for Buffer {
-    func write(data: i32) -> i32 with Io { data }
+    func write(data: i32) -> i32 { data }
 }
 func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
     let interp = crate::interp::Interpreter::from_checked(&program);
-    // Trait method: params materialised; effects empty (trait decls carry no effect set).
     assert_eq!(
         interp.resolved_method_params("Writer.write"),
         Some(vec![("data".into(), "i32".into())])
     );
     assert_eq!(
-        program
-            .trait_method_signature("Writer", "write")
-            .map(|m| m.effects.clone()),
-        Some(vec![])
-    );
-    // Impl method: params + effects (Io) materialised under impl qualified name.
-    assert_eq!(
         interp.resolved_method_params("Writer:for:Buffer.write"),
         Some(vec![("data".into(), "i32".into())])
-    );
-    assert_eq!(
-        program
-            .impl_method_signature("Writer", "Buffer", "write")
-            .map(|m| m.effects.clone()),
-        Some(vec!["Io".to_string()])
     );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
     let _ = verifier.verify_checked(&program);
@@ -817,33 +782,15 @@ func main() -> i32 { 0 }
         Some(vec![("data".into(), "i32".into())])
     );
     assert_eq!(
-        program
-            .trait_method_signature("Writer", "write")
-            .map(|m| m.effects.clone()),
-        Some(vec![])
-    );
-    assert_eq!(
         verifier.checked_method_params("Writer:for:Buffer.write"),
         Some(vec![("data".into(), "i32".into())])
     );
-    assert_eq!(
-        program
-            .impl_method_signature("Writer", "Buffer", "write")
-            .map(|m| m.effects.clone()),
-        Some(vec!["Io".to_string()])
-    );
     let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_effects");
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_methods");
     codegen.compile_checked(&program).expect("compile");
     assert_eq!(
         codegen.resolved_method_params("Writer.write"),
         Some(vec![("data".into(), "i32".into())])
-    );
-    assert_eq!(
-        program
-            .impl_method_signature("Writer", "Buffer", "write")
-            .map(|m| m.effects.clone()),
-        Some(vec!["Io".to_string()])
     );
 }
 
@@ -1645,12 +1592,13 @@ func main() -> i32 { c_abs(1, 2) }
 
 #[test]
 fn actor_method_signatures_are_materialised() {
+    // 0.34.18c (§4.2): `with Io` effect clause removed; signature/params
+    // assertions kept, effects assertions dropped (effects now always empty).
     let file = parse(
         r#"
 actor Worker {
-    func run(x: i32) -> i32 with Io { x }
+    func run(x: i32) -> i32 { x }
 }
-cap Io
 func main() -> i32 { 0 }
 "#,
     );
@@ -1672,12 +1620,6 @@ func main() -> i32 { 0 }
         interp.resolved_actor_method_params("Worker", "run"),
         Some(vec![("x".into(), "i32".into())])
     );
-    assert_eq!(
-        program
-            .actor_method_signature("Worker", "run")
-            .map(|m| m.effects.clone()),
-        Some(vec!["Io".into()])
-    );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
     let _ = verifier.verify_checked(&program);
     assert_eq!(
@@ -1687,12 +1629,6 @@ func main() -> i32 { 0 }
     assert_eq!(
         verifier.checked_actor_method_params("Worker", "run"),
         Some(vec![("x".into(), "i32".into())])
-    );
-    assert_eq!(
-        program
-            .actor_method_signature("Worker", "run")
-            .map(|m| m.effects.clone()),
-        Some(vec!["Io".into()])
     );
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "actor_sig");
@@ -1704,12 +1640,6 @@ func main() -> i32 { 0 }
     assert_eq!(
         codegen.resolved_actor_method_params("Worker", "run"),
         Some(vec![("x".into(), "i32".into())])
-    );
-    assert_eq!(
-        program
-            .actor_method_signature("Worker", "run")
-            .map(|m| m.effects.clone()),
-        Some(vec!["Io".into()])
     );
 }
 
@@ -2179,38 +2109,8 @@ func main() -> i32 { 0 }
     assert!(codegen.is_resolved_extern_unsafe("raw_abs"));
 }
 
-#[test]
-fn call_sites_bind_callee_effects_from_function_directory() {
-    // IR-only materialization: avoid effect-scope runtime checks at call sites.
-    let file = parse(
-        r#"
-cap Io
-func write_it(x: i32) -> i32 with Io { x }
-func main() -> i32 {
-    write_it(1)
-}
-"#,
-    );
-    let program = crate::core::CheckedProgram::from_checked_file(&file).expect("ir");
-    assert!(
-        program.call_sites().values().any(|s| {
-            s.callee == "write_it"
-                && s.effects.iter().any(|e| e == "Io")
-                && s.expected_argc == Some(1)
-                && s.kind == crate::core::ResolvedCallKind::Function
-                && s.ret.as_deref() == Some("i32")
-        }),
-        "expected write_it Io call site"
-    );
-    // Effects are bound at the IR level; verify via program.call_sites() directly.
-    assert!(
-        program
-            .call_sites()
-            .values()
-            .any(|s| s.callee == "write_it" && s.effects.iter().any(|e| e == "Io")),
-        "write_it call site must carry Io effect from function directory"
-    );
-}
+// 0.34.18c (§4.2): call_sites_bind_callee_effects_from_function_directory removed
+// — the `with` effect clause is abolished, so call-site effects are always empty.
 
 #[test]
 fn codegen_compile_checked_installs_directories() {

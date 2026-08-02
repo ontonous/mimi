@@ -6535,6 +6535,26 @@ func main() -> i32 {
 }
 
 #[test]
+fn with_effect_clause_rejected_by_ruling_4_2() {
+    // 0.34.18c (§4.2 ruling): the `with` effect clause is abolished. The parser
+    // must reject it; `with` remains a reserved keyword.
+    let src = r#"
+cap Io
+func write(x: i32) -> i32 with Io { x }
+func main() -> i32 { 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("`with` effect clause must be rejected by parser");
+    assert!(
+        err.message.contains("§4.2"),
+        "error should mention ruling §4.2, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn flow_explicit_reset_overrides_system_verb() {
     // v0.31.10 / 0.34.18b: user-defined reset(Fault) -> State overrides the
     // auto-injected system verb. Entry via single-target absorbed panic.

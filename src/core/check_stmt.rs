@@ -819,16 +819,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // A capability binding makes its declared effect available.
-                // Move/consume semantics are validated from ResolvedBody + CFG.
-                if let Type::Cap(cap_name) = final_ty.unlocated() {
-                    if matches!(pat.kind, PatternKind::Variable(_)) {
-                        // Introduce the cap as an effect
-                        if let Some(s) = self.available_effects.last_mut() {
-                            s.insert(cap_name.clone(), true);
-                        }
-                    }
-                }
+                // v0.34.18c (§4.2): capability bindings no longer introduce an
+                // "available effect" — the `with` effect clause is abolished.
+                // Cap move/consume semantics are still validated from ResolvedBody
+                // + CFG (linear capability, E0256), independent of effects.
             }
             Stmt::Return(None) => {
                 // C2: use unification for unit return check

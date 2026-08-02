@@ -273,16 +273,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Check if an effect is available in the current scope
-    pub(crate) fn has_effect(&self, effect: &str) -> bool {
-        for scope in self.available_effects.iter().rev() {
-            if scope.contains_key(effect) {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Get all variant names for an enum type
     pub(crate) fn get_enum_variants(&self, ty: &Type) -> Vec<String> {
         match ty.unlocated() {

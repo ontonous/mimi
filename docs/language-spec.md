@@ -187,18 +187,21 @@ Different constructs must not compete for the same responsibility. For example, 
 - Untrusted or potentially stuck external components must support process isolation and typed `ForeignFault`.
 - In-process ABI, IPC, WebSocket, WASM, and worker process must project the same Component/Protocol semantics.
 
-### 2.7 Effect and Capability Invariants `[experimental]`
+### 2.7 Capability Invariants
 
-- Effect describes what an operation may produce; Capability describes whether the caller is authorized to trigger it; the two cannot substitute for each other.
-- The proposed minimum effect set includes: `pure`, `alloc`, `io`, `blocking`, `spawn`, `ffi`, `unsafe`; mutation is also constrained by `view/mutate/consume` and shared effect.
-- Undeclared effects must not be silently expanded by function body, external import, or dynamic dispatch.
-- Caller's effect must cover callee effect; `pure` can only call pure/total operations.
-- Actor turn defaults to prohibiting unknown-duration `blocking`; FFI and callback blocking/reentrant/thread effect must enter Component IR.
+> **0.34.18c (§4.2 ruling): the `with` effect clause is abolished.** Function effect
+> annotations (`func f() with io`) were a parseable-but-unenforced model that
+> guaranteed nothing and duplicated contracts; the parser now rejects `with`
+> (reserved keyword). Side-effect obligations are expressed by contracts
+> (`requires`/`ensures`) and capability tokens. The Effect half of this section is
+> therefore removed; the Capability invariants below remain (the `cap` token is a
+> core linear carrier, enforced by E0256).
+
+- Capability describes whether the caller is authorized to trigger an operation.
 - Capability is nominal, unforgeable, scope/audience-restrictable, revocable; holding a capability does not change the Flow's currently allowed event set.
-- Effect inference can reduce boilerplate, but exported API, Protocol, Component Boundary, and proof artifact must have stable, explicit, comparable resolved effect summary.
-- Higher-order effect polymorphism remains experimental if inference, subtyping, and backend closure cannot be completed.
+- Capability tokens are linear: a `cap` value must be consumed exactly once (E0256); issuance/delegation/revocation semantics are part of the linear-capability model.
 
-The entire effect/capability surface remains experimental until the minimum effect lattice, caller-covers-callee rule, capability issuance/delegation/revocation semantics, and resolved summaries are frozen. At that point the closed minimum subset may be promoted independently; higher-order effect polymorphism remains experimental.
+The capability surface remains experimental until issuance/delegation/revocation semantics and resolved summaries are frozen. Mutation safety is carried by the `view/mutate/consume` permission model (§3.3), not by effects.
 
 ---
 

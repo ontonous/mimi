@@ -32,7 +32,7 @@ pub(crate) mod v1_2_boundary;
 pub(crate) mod v1_2_builtin_hof;
 pub(crate) mod v1_2_codegen;
 pub(crate) mod v1_2_core_edge;
-pub(crate) mod v1_2_effects;
+// 0.34.18c (§4.2): v1_2_effects removed — the `with` effect clause is abolished.
 pub(crate) mod v1_2_error_coverage;
 pub(crate) mod v1_2_error_paths;
 pub(crate) mod v1_2_generics;

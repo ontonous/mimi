@@ -426,17 +426,9 @@ impl<'a> Checker<'a> {
                         entry.push((wc.type_param.clone(), wc.bounds.clone()));
                     }
                 }
-                // Store effects if present and validate against declared caps
-                if !f.effects.is_empty() {
-                    for effect in &f.effects {
-                        if !self.declared_caps.contains(effect) {
-                            self.emit_code(crate::diagnostic::codes::E0254,
-                                format!("effect '{}' in function '{}' is not a declared capability. Declare it with `cap {};`",
-                                    effect, f.name, effect));
-                        }
-                    }
-                    self.func_effects.insert(qualified_name, f.effects.clone());
-                }
+                // v0.34.18c (§4.2): the `with` effect clause is abolished; the
+                // parser rejects it, so `f.effects` is always empty and the former
+                // E0254 declaration validation + func_effects population is gone.
             }
             Item::Type(t) => {
                 if self.types.contains_key(&t.name) {
