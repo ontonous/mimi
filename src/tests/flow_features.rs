@@ -3874,6 +3874,36 @@ func main() -> i32 {
 }
 
 #[test]
+fn actor_is_faulted_returns_int_dual() {
+    // actor_is_faulted must return Int(0/1) on both backends: codegen exposes
+    // mimi_actor_is_faulted -> i32, so the bytecode VM must not return Bool.
+    let src = r#"
+actor Counter {
+    n: i32
+    func get() -> i32 { self.n }
+}
+func main() -> i32 {
+    let c = Counter.spawn()
+    let f = actor_is_faulted(c)
+    println(f)
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::Int(0)),
+        "bytecode actor_is_faulted must yield Int"
+    );
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "0", "codegen actor_is_faulted must print 0");
+}
+
+#[test]
 fn actor_mailbox_backpressure_ttl() {
     // With depth=1, a slow consumer causes second concurrent send to wait;
     // we simulate by setting depth=1 and flooding from main (sequential still ok).

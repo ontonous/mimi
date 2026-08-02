@@ -4344,6 +4344,46 @@ fn dual_codegen_regex_capture_groups() {
 }
 
 #[test]
+fn dual_regex_find_all_escapes_json_specials() {
+    if !can_link() {
+        return;
+    }
+    // Control characters in matches must be JSON-escaped (\n \t \uXXXX) so the
+    // result is parseable by from_json — both backends agree.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let matches = regex_find_all("a\nb", "a\nb")
+            println(matches)
+            let tabs = regex_find_all("x\ty", "x\ty")
+            println(tabs)
+            let ctl = regex_find_all("p\x01q", "p\x01q")
+            println(ctl)
+            0
+        }
+        "#,
+        "[\"a\\nb\"]\n[\"x\\ty\"]\n[\"p\\u0001q\"]"
+    );
+}
+
+#[test]
+fn dual_regex_capture_groups_escapes_json_specials() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let groups = regex_capture_groups("a\nb", "(a\nb)")
+            println(groups)
+            0
+        }
+        "#,
+        "[\"a\\nb\"]"
+    );
+}
+
+#[test]
 fn dual_regex_capture_groups_no_match() {
     if !can_link() {
         return;
