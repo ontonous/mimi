@@ -58,7 +58,8 @@ trait NetOps {
 impl NetOps for i64 {
     func send(data: string) -> Result<i32, NetError> {
         let n = send(self, data)
-        if n < 0 { Err(SendFailed) } else { Ok(n) }
+        // v0.34.6: narrowing i64→i32 requires explicit `as`.
+        if n < 0 { Err(SendFailed) } else { Ok(n as i32) }
     }
     func recv(buf_size: i32) -> Result<string, NetError> {
         let data = recv(self, buf_size)

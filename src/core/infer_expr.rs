@@ -178,14 +178,14 @@ impl<'a> Checker<'a> {
             _ => {}
         }
         if self.unification.unify(expected_inner, actual).is_err() {
-            // Mimi implicitly coerces between numeric widths in *both*
-            // directions (e.g. std::env::get_int returns `Ok(parsed.1)` where
-            // the parser yields i64 into a `Result<i32, string>`). Preserve
-            // that leniency: only reject genuine category mismatches
-            // (string into i32) and non-coercible trait payloads.
-            let both_numeric = crate::core::helpers::is_numeric(expected_inner)
-                && crate::core::helpers::is_numeric(actual);
-            if !both_numeric
+            // v0.34.6 (golden §2.1): numeric coercion is SINGLE-DIRECTION
+            // widening {i32→i64, i32→f64, i64→f64} — narrowing requires an
+            // explicit `as`. The old both-directions leniency (i64 into i32
+            // variant payload) is removed. Only genuine category mismatches
+            // and non-coercible trait payloads are rejected.
+            let numeric_widening =
+                crate::core::helpers::is_numeric_coercion(expected_inner, actual);
+            if !numeric_widening
                 && !crate::core::helpers::is_trait_coercion(expected_inner, actual, &self.impls)
             {
                 self.emit_code(
