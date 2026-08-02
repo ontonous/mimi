@@ -1140,8 +1140,11 @@ Quote/AST generation remains experimental until:
 #### Removed / Migrated
 
 - Semantic-less `do`;
-- `func(...) -> T` function type;
-- `extern "C" func(...)` type;
+- `delegate view/mutate/consume`（amendment clause 2）;
+- `@transactional` / WAL / metadata_shadow（amendment clause 3）;
+- `pinned(timeout)`（amendment clause 10）;
+- `|>` as transition target separator;
+- Explicit lifetime `&'a T`（ADR-004）;
 - `.mimi` `desc`/`rule` statement;
 - Executing AST `mms` statement;
 - String-based Protocol reflection;
@@ -1151,8 +1154,33 @@ Quote/AST generation remains experimental until:
 - User-visible bare Session `i64` handle;
 - Actor arbitrary mutable business fields;
 - Unknown attribute silent ignore;
-- `|>` as transition target separator;
 - `math { Expr... }` general statement.
+
+> **v0.34.6 修正（ADR-003）**：`func(T) -> U` 函数类型与 `extern "C" func(...)`
+> **保留**（非 removed）——`func` = 声明、`fn` = 闭包、extern 两者皆可。
+> 此项从 Removed 清单移除，见 §6.1。
+
+### 6.13 Numeric Coercion `[stable]`（v0.34.6，golden §2.1）
+
+Mimi 数值隐式转换**只允许单向 widening**：
+
+| 源 → 目标 | 隐式允许 |
+|-----------|---------|
+| `i32` → `i64` | ✅ |
+| `i32` → `f64` | ✅ |
+| `i64` → `f64` | ✅ |
+| `i64` → `i32` | ❌ 需显式 `as i32` |
+| `f64` → `i32`/`i64` | ❌ 需显式 `as` |
+| `i32` → `f64` 之外的任何窄化 | ❌ |
+
+规则：
+1. 隐式转换仅发生在**声明位置**（变量绑定、函数实参、variant payload）的
+   `is_numeric_coercion` 检查（core/helpers.rs:354-371）。
+2. **窄化必须显式 `as`**：`str_parse_int(...) as i32`（先例 prelude.mimi to_int_safe）。
+3. `freeze_variant_payload` 不豁免双向数值（infer_expr.rs:174-200）——变体 payload
+   只接受单向 widening，窄化报 E0209。
+4. 语义确定性：状态机数据必须数学自洽（架构修正案），隐式窄化可能静默截断，
+   因此禁止。Z3 合约可证明无溢出时消除运行时检查。
 
 ---
 

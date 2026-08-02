@@ -93,7 +93,8 @@ pub func input_int() -> Result<i32, string> {
     let line = parsed.unwrap_or("")
     let n = str_parse_int(line)
     if n.0 {
-        Ok(n.1)
+        // v0.34.6: narrowing i64→i32 requires explicit `as`.
+        Ok(n.1 as i32)
     } else {
         Err("input_int: not a valid integer")
     }

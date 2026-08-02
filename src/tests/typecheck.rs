@@ -2033,3 +2033,43 @@ func main() -> i32 {
         "reduce with valid types should pass"
     );
 }
+
+#[test]
+fn numeric_narrowing_i64_to_i32_variant_payload_rejected() {
+    // v0.34.6 (golden §2.1): variant payload only accepts single-direction
+    // widening {i32→i64, i32→f64, i64→f64}; i64 into Result<i32,...> payload
+    // must be an explicit `as i32`.
+    let src = r#"
+func main() -> i32 {
+    let parsed = str_parse_int("42")
+    if parsed.0 {
+        let r: Result<i32, string> = Ok(parsed.1)
+        0
+    } else {
+        -1
+    }
+}
+"#;
+    let errors = check_source(src).expect_err("i64→i32 payload narrowing must be rejected");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0209")),
+        "expected E0209 for i64→i32 payload, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn numeric_widening_i32_to_i64_variant_payload_accepted() {
+    // v0.34.6: widening i32→i64 remains implicit.
+    let src = r#"
+func main() -> i32 {
+    let r: Result<i64, string> = Ok(42)
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "i32→i64 widening should be accepted: {:?}",
+        check_source(src)
+    );
+}
