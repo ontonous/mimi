@@ -39,6 +39,22 @@ impl<'a> Checker<'a> {
         }
         // Builtins
         match name {
+            "unsafe_cast_protocol" => {
+                // 条款 11 escape hatch — typed at the call site by the
+                // expected dyn type (check_expr). Without a dyn context the
+                // target type is unknowable; a fresh Infer binds to the
+                // surrounding expectation and residual Infer is rejected by
+                // scan_residual, so the user must annotate the target.
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "unsafe_cast_protocol expects 1 argument (the concrete value to cast)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Infer;
+            }
             "println" => {
                 for a in args {
                     self.infer_expr(a, scopes);
