@@ -99,7 +99,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             let val = match field.name.as_str() {
                 "last_state" => self.build_const_string(last_state)?,
                 "unexpected_event" => self.build_const_string(unexpected_event)?,
-                "snapshot" => self.build_const_string("runtime panic")?,
+                // snapshot="" matches the bytecode absorber (vm.rs absorb_flow_fault
+                // → make_fault_value(from_state, "panic:<code>", "")) — L1 parity.
+                "snapshot" => self.build_const_string("")?,
                 "trace" => self.build_system_trace(last_state, unexpected_event)?,
                 // typed `error` field (or anything else) — default value.
                 _ => self.build_default_value(&field.ty, field_llvm_ty)?,
@@ -113,8 +115,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_load(BasicTypeEnum::StructType(sty), alloca, "fault_val")
     }
 
-    /// Build the structured `SystemTrace` with `last_state_name`/`unexpected_event`
-    /// mirroring the flat Fault fields (matches the bytecode VM's absorption).
+    /// Build the structured `SystemTrace` mirroring `flow_matrix::make_fault_value`
+    /// field-for-field (bytecode reference): `last_state_name`/`unexpected_event`
+    /// from the panic context, `snapshot=""`, a populated `memory_dump`
+    /// (`fields="from_state=<S>;event=<E>"`, `count=2`) and `panic_payload`
+    /// (`error_type=<E>`, `file=""`, `line=0`, `stack=""`).
     fn build_system_trace(
         &self,
         last_state: &str,
@@ -137,7 +142,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             let val = match field.name.as_str() {
                 "last_state_name" => self.build_const_string(last_state)?,
                 "unexpected_event" => self.build_const_string(unexpected_event)?,
-                "snapshot" => self.build_const_string("runtime panic")?,
+                "snapshot" => self.build_const_string("")?,
+                "memory_dump" => {
+                    self.build_memory_dump(last_state, unexpected_event, field_llvm_ty)?
+                }
+                "panic_payload" => self.build_panic_payload(unexpected_event, field_llvm_ty)?,
                 _ => self.build_default_value(&field.ty, field_llvm_ty)?,
             };
             let gep = self
@@ -147,6 +156,78 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_store(gep, val)?;
         }
         self.build_load(BasicTypeEnum::StructType(sty), alloca, "trace_val")
+    }
+
+    /// Build the `MemoryDump` sub-record matching `make_fault_value`:
+    /// `fields="from_state=<S>;event=<E>"`, `count=2`.
+    fn build_memory_dump(
+        &self,
+        last_state: &str,
+        unexpected_event: &str,
+        llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let BasicTypeEnum::StructType(sty) = llvm_ty else {
+            return self.build_default_record("MemoryDump");
+        };
+        let fields = self.record_fields_of_type("MemoryDump")?;
+        let alloca = self.build_alloca(sty, "memory_dump")?;
+        let dump = format!("from_state={};event={}", last_state, unexpected_event);
+        for (i, field) in fields.iter().enumerate() {
+            let field_llvm_ty = sty
+                .get_field_type_at_index(i as u32)
+                .ok_or_else(|| CompileError::LlvmError(format!("memdump field {} type", i)))?;
+            let val = match field.name.as_str() {
+                "fields" => self.build_const_string(&dump)?,
+                "count" => self.build_int_const(field_llvm_ty, 2),
+                _ => self.build_default_value(&field.ty, field_llvm_ty)?,
+            };
+            let gep = self
+                .gep()
+                .build_struct_gep(sty, alloca, i as u32, &field.name)
+                .map_err(|e| CompileError::LlvmError(format!("memdump gep: {}", e)))?;
+            self.build_store(gep, val)?;
+        }
+        self.build_load(BasicTypeEnum::StructType(sty), alloca, "memdump_val")
+    }
+
+    /// Build the `PanicPayload` sub-record matching `make_fault_value`:
+    /// `error_type=<E>`, `file=""`, `line=0`, `stack=""` (= snapshot).
+    fn build_panic_payload(
+        &self,
+        unexpected_event: &str,
+        llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let BasicTypeEnum::StructType(sty) = llvm_ty else {
+            return self.build_default_record("PanicPayload");
+        };
+        let fields = self.record_fields_of_type("PanicPayload")?;
+        let alloca = self.build_alloca(sty, "panic_payload")?;
+        for (i, field) in fields.iter().enumerate() {
+            let field_llvm_ty = sty
+                .get_field_type_at_index(i as u32)
+                .ok_or_else(|| CompileError::LlvmError(format!("panic field {} type", i)))?;
+            let val = match field.name.as_str() {
+                "error_type" => self.build_const_string(unexpected_event)?,
+                "file" => self.build_const_string("")?,
+                "line" => self.build_int_const(field_llvm_ty, 0),
+                "stack" => self.build_const_string("")?,
+                _ => self.build_default_value(&field.ty, field_llvm_ty)?,
+            };
+            let gep = self
+                .gep()
+                .build_struct_gep(sty, alloca, i as u32, &field.name)
+                .map_err(|e| CompileError::LlvmError(format!("panic gep: {}", e)))?;
+            self.build_store(gep, val)?;
+        }
+        self.build_load(BasicTypeEnum::StructType(sty), alloca, "panic_val")
+    }
+
+    /// Integer constant for a field's LLVM type (falls back to i64).
+    fn build_int_const(&self, llvm_ty: BasicTypeEnum<'ctx>, v: u64) -> BasicValueEnum<'ctx> {
+        match llvm_ty {
+            BasicTypeEnum::IntType(it) => it.const_int(v, false).into(),
+            _ => self.context.i64_type().const_int(v, false).into(),
+        }
     }
 
     /// Build a default (zero) value for an arbitrary record type, recursing into

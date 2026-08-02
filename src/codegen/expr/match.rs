@@ -275,11 +275,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         let payload_ptr =
                                             self.build_alloca(payload_ty, "named_field_alloca")?;
                                         self.build_store(payload_ptr, sv)?;
-                                        // Field index from the owning Record
-                                        // type definition (declaration order).
-                                        let field_idx = variant_owner
-                                            .as_ref()
-                                            .and_then(|(owner, _)| {
+                                        // Full field defs (name + type) from the
+                                        // owning Record type definition. We need
+                                        // both the index (declaration order) AND
+                                        // the field's AST type so downstream field
+                                        // access (`bind_name.subfield`) resolves —
+                                        // v0.34.18b fixes E0707 on match-bound
+                                        // record fields (e.g. `Fault { trace }` →
+                                        // `trace.last_state_name`).
+                                        let record_fields: Option<Vec<crate::ast::Field>> =
+                                            variant_owner.as_ref().and_then(|(owner, _)| {
                                                 self.type_defs.get(owner).and_then(|td| {
                                                     if let TypeDefKind::Enum(variants) = &td.kind {
                                                         variants
@@ -288,23 +293,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             .and_then(|v| match &v.payload {
                                                                 Some(VariantPayload::Tuple(
                                                                     types,
-                                                                )) if types.len() == 1 => {
-                                                                    self.record_fields_of(&types[0])
-                                                                }
+                                                                )) if types.len() == 1 => self
+                                                                    .record_field_defs_of(
+                                                                        &types[0],
+                                                                    ),
                                                                 _ => None,
                                                             })
                                                     } else {
                                                         None
                                                     }
                                                 })
-                                            })
-                                            .and_then(|fields| {
+                                            });
+                                        let field_info =
+                                            record_fields.as_ref().and_then(|fields| {
                                                 fields
                                                     .iter()
-                                                    .position(|f| f == bind_name)
-                                                    .map(|i| i as u32)
+                                                    .position(|f| f.name == *bind_name)
+                                                    .map(|i| (i as u32, fields[i].ty.clone()))
                                             });
-                                        if let Some(idx) = field_idx {
+                                        if let Some((idx, field_ast_ty)) = field_info {
                                             let elem_ty = match payload_ty {
                                                 BasicTypeEnum::StructType(st) => st
                                                     .get_field_type_at_index(idx)
@@ -339,6 +346,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 val,
                                                 elem_ty,
                                             )?;
+                                            // Register the field's AST type so
+                                            // `bind_name.subfield` field access can
+                                            // resolve the record type name.
+                                            self.var_types.insert(
+                                                bind_name.to_string(),
+                                                field_ast_ty.clone(),
+                                            );
+                                            if let Some(full) =
+                                                self.get_full_type_name(&field_ast_ty)
+                                            {
+                                                self.var_type_names
+                                                    .insert(bind_name.to_string(), full);
+                                            }
+                                            self.register_list_elem_type(bind_name, &field_ast_ty);
                                             continue;
                                         }
                                     }

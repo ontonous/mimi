@@ -2502,11 +2502,12 @@ func main() -> i32 { 0 }
         .expect("implicit reset transition");
     assert!(matches!(reset.origin, Origin::RuntimeSystem { .. }));
     assert_eq!(reset.origin.rule(), Some("flow.reset"));
-    let fallback = program
-        .transition("Main", "run", "Fault")
-        .expect("matrix fallback transition");
-    assert!(matches!(fallback.origin, Origin::PrototypeFallback { .. }));
-    assert_eq!(fallback.origin.rule(), Some("flow.matrix.fallback"));
+    // 0.34.18b (amendment clause 1): the N×M matrix fallback `Main::run::Fault`
+    // (Origin::PrototypeFallback) is no longer injected — sparse is irreversible.
+    assert!(
+        program.transition("Main", "run", "Fault").is_none(),
+        "sparse must not inject a Main::run::Fault matrix fallback"
+    );
     let run_stmt_id = generated_node_id(
         &program,
         "transition:Main::run::Single",
@@ -2527,21 +2528,6 @@ func main() -> i32 { 0 }
         unreachable!()
     };
     assert_eq!(run_stmt_parent, &run.node_id);
-    let fallback_stmt_id = generated_node_id(
-        &program,
-        "transition:Main::run::Fault",
-        "stmt.return",
-        "flow.matrix.fallback",
-    );
-    let fallback_stmt = program
-        .node_meta()
-        .get(&fallback_stmt_id)
-        .expect("matrix fallback body metadata");
-    assert!(matches!(
-        fallback_stmt.origin,
-        Origin::PrototypeFallback { .. }
-    ));
-    assert_eq!(fallback_stmt.origin.rule(), Some("flow.matrix.fallback"));
 }
 
 #[test]

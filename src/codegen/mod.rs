@@ -2410,6 +2410,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Full field definitions (name + type) of a record type, for registering a
+    /// match-bound record field's AST type so downstream field access resolves
+    /// (v0.34.18b: fixes E0707 on `Fault { trace, .. }` → `trace.subfield`).
+    pub(super) fn record_field_defs_of(&self, ty: &Type) -> Option<Vec<crate::ast::Field>> {
+        let type_name = self.get_full_type_name(ty)?;
+        let def = self.type_defs.get(&type_name).or_else(|| {
+            self.type_defs.values().find(|td| {
+                td.name == type_name || td.name.rsplit("::").next() == Some(type_name.as_str())
+            })
+        })?;
+        match &def.kind {
+            crate::ast::TypeDefKind::Record(fields) => Some(fields.clone()),
+            _ => None,
+        }
+    }
+
     pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
         match ty.unlocated() {
             Type::Name(tn, args) => {

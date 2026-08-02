@@ -16,21 +16,6 @@ fn flow_generated_meta(flow: &FlowDef, origin: AstOrigin) -> AstNodeMeta {
     AstNodeMeta::inherited(flow.meta.span, origin)
 }
 
-fn generated_param(param: &Param, span: Span, origin: AstOrigin) -> Param {
-    let meta = AstNodeMeta::inherited(span, origin);
-    Param {
-        meta,
-        name: param.name.clone(),
-        ty: param.ty.clone().deep_reorigin(meta),
-        mut_: param.mut_,
-        default_value: param
-            .default_value
-            .clone()
-            .map(|value| generated_expr(value, origin, span)),
-        borrow: param.borrow,
-    }
-}
-
 fn generated_record_meta(rule: &'static str) -> AstNodeMeta {
     AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(rule))
 }
@@ -160,69 +145,12 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
     // Always ensure Fault exists so recovery verbs have a source state.
     ensure_fault_state(flow);
 
-    // v0.31.25: Sparse is the DEFAULT. @dense opts into N×M fallback injection.
-    // @sparse is accepted but redundant (backward compatibility).
-    let is_dense = flow
-        .annotations
-        .iter()
-        .any(|a| matches!(a.kind, FlowAnnotationKind::Dense));
-
-    // Event name → params (first definition wins; overloads should share params).
-    // Exclude system verbs from the N×M matrix:
-    // - reset/recover only apply from Fault
-    // - peer_fault is injected per-state (v0.29.20) rather than N×M-expanded
-    let mut events: HashMap<String, Vec<Param>> = HashMap::new();
-    for t in &flow.transitions {
-        if t.name == "reset" || t.name == "recover" || t.name == "peer_fault" {
-            continue;
-        }
-        events
-            .entry(t.name.clone())
-            .or_insert_with(|| t.params.clone());
-    }
-
-    // Already-defined (from_state, event) pairs — never override user code.
-    let defined: HashSet<(String, String)> = flow
-        .transitions
-        .iter()
-        .map(|t| (t.from_state.clone(), t.name.clone()))
-        .collect();
-
-    let state_names: Vec<String> = flow.states.iter().map(|s| s.name.clone()).collect();
-
-    if is_dense {
-        let mut fallbacks: Vec<TransitionDef> = Vec::new();
-        for state in &state_names {
-            for (event, params) in &events {
-                if defined.contains(&(state.clone(), event.clone())) {
-                    continue;
-                }
-                let body = fault_return_body(
-                    flow,
-                    state,
-                    event,
-                    shapes,
-                    AstOrigin::PrototypeFallback("flow.matrix.fallback"),
-                );
-                let origin = AstOrigin::PrototypeFallback("flow.matrix.fallback");
-                fallbacks.push(TransitionDef {
-                    meta: flow_generated_meta(flow, origin),
-                    name: event.clone(),
-                    from_state: state.clone(),
-                    params: params
-                        .iter()
-                        .map(|param| generated_param(param, flow.meta.span, origin))
-                        .collect(),
-                    to_states: vec!["Fault".to_string()],
-                    body: Some(body),
-                    fails: None,
-                    is_fallback: true,
-                    is_ffi_pinned: false,
-                });
-            }
-        }
-        flow.transitions.extend(fallbacks);
-    }
+    // v0.34.18b (amendment clause 1, sparse-irreversible): the former @dense N×M
+    // fallback injection lived here. It is repealed — an undeclared (state, event)
+    // pair is a compile error (E0211), not a runtime Fault. The parser rejects
+    // @dense outright; there is no opt-in to auto-completion. A transition that
+    // can fault declares it with a multi-target return `-> State | Fault` and the
+    // compiler bottoms out the Fault payload on a runtime panic.
 
     // v0.29.13: inject reset / recover from Fault → root state.
     inject_system_verbs(flow, shapes);
@@ -1109,7 +1037,7 @@ mod tests {
             pub_: false,
             generics: vec![],
             annotations: vec![FlowAnnotation::synthetic(
-                FlowAnnotationKind::Dense,
+                FlowAnnotationKind::Sparse,
                 AstOrigin::User,
             )],
             states: vec![
@@ -1157,30 +1085,37 @@ mod tests {
     }
 
     #[test]
-    fn injects_fault_and_missing_cells() {
+    fn injects_fault_and_system_verbs_sparse() {
         let mut flow = sample_flow();
         expand_flow(&mut flow);
         assert!(
             flow.states.iter().any(|s| s.name == "Fault"),
             "Fault state must be injected"
         );
-        // Defined: Zero+inc. Missing: Positive+inc, Fault+inc + reset/recover.
-        let fallbacks: Vec<_> = flow.transitions.iter().filter(|t| t.is_fallback).collect();
+        // 0.34.18b (amendment clause 1, sparse-irreversible): NO N×M event
+        // fallbacks are injected. Positive+inc and Fault+inc must be absent —
+        // an undeclared (state, event) is a compile error (E0211), not a Fault.
         assert!(
-            fallbacks.len() >= 4,
-            "expected ≥4 fallbacks, got {:?}",
-            fallbacks
+            !flow
+                .transitions
+                .iter()
+                .any(|t| t.from_state == "Positive" && t.name == "inc"),
+            "sparse must not inject a Positive+inc fallback"
         );
-        assert!(fallbacks
-            .iter()
-            .any(|t| t.from_state == "Positive" && t.name == "inc"));
-        assert!(fallbacks
-            .iter()
-            .any(|t| t.from_state == "Fault" && t.name == "inc"));
-        assert!(fallbacks
+        assert!(
+            !flow
+                .transitions
+                .iter()
+                .any(|t| t.from_state == "Fault" && t.name == "inc"),
+            "sparse must not inject a Fault+inc fallback"
+        );
+        // System verbs reset/recover (from Fault) are still injected.
+        assert!(flow
+            .transitions
             .iter()
             .any(|t| t.name == "reset" && t.from_state == "Fault"));
-        assert!(fallbacks
+        assert!(flow
+            .transitions
             .iter()
             .any(|t| t.name == "recover" && t.from_state == "Fault"));
         // User transition preserved.
@@ -1188,42 +1123,6 @@ mod tests {
             .transitions
             .iter()
             .any(|t| !t.is_fallback && t.from_state == "Zero" && t.name == "inc"));
-
-        let matrix_fallback = flow
-            .transitions
-            .iter()
-            .find(|t| t.from_state == "Positive" && t.name == "inc")
-            .expect("matrix fallback");
-        let matrix_meta = matrix_fallback.body.as_ref().expect("body")[0]
-            .meta()
-            .expect("generated statement metadata");
-        assert_eq!(
-            matrix_meta.origin,
-            AstOrigin::PrototypeFallback("flow.matrix.fallback")
-        );
-        assert_eq!(matrix_meta.span, flow.meta.span);
-        assert_eq!(
-            matrix_fallback.meta.origin,
-            AstOrigin::PrototypeFallback("flow.matrix.fallback")
-        );
-        assert_eq!(matrix_fallback.meta.parent, AstParentHint::Enclosing);
-        let Stmt::Return(Some(matrix_value)) =
-            matrix_fallback.body.as_ref().unwrap()[0].unlocated()
-        else {
-            panic!("matrix fallback return")
-        };
-        assert_eq!(matrix_value.meta().unwrap().origin, matrix_meta.origin);
-        let generated_param = &matrix_fallback.params[0];
-        assert_eq!(generated_param.meta, matrix_fallback.meta);
-        assert_eq!(generated_param.ty.meta(), Some(matrix_fallback.meta));
-        let Type::Name(_, args) = generated_param.ty.unlocated() else {
-            panic!("generated list parameter")
-        };
-        assert_eq!(args[0].meta(), Some(matrix_fallback.meta));
-        let Type::Option(inner) = args[0].unlocated() else {
-            panic!("generated option parameter")
-        };
-        assert_eq!(inner.meta(), Some(matrix_fallback.meta));
 
         let user_transition = flow
             .transitions
@@ -1357,14 +1256,18 @@ mod tests {
             .find(|t| t.from_state == "Positive" && t.name == "inc")
             .expect("Positive+inc");
         assert!(!pos_inc.is_fallback);
-        // Event fallbacks: only Fault+inc (plus reset/recover system verbs).
+        // 0.34.18b (amendment clause 1): sparse injects NO N×M event fallbacks.
+        // There is no Fault+inc fallback; only the reset/recover system verbs.
         let event_fb: Vec<_> = flow
             .transitions
             .iter()
             .filter(|t| t.is_fallback && t.name == "inc")
             .collect();
-        assert_eq!(event_fb.len(), 1);
-        assert_eq!(event_fb[0].from_state, "Fault");
+        assert!(
+            event_fb.is_empty(),
+            "sparse must not inject event fallbacks, got {:?}",
+            event_fb
+        );
         assert!(flow
             .transitions
             .iter()

@@ -977,6 +977,10 @@ pub struct BytecodeProgram {
     pub max_children: Option<usize>,
     /// Flow persistent fields: flow_name → field names (for Fault shadowing).
     pub flow_persistent: std::collections::HashMap<String, Vec<String>>,
+    /// Flow typed-fault error type: flow_name → error type name (from `fault T`).
+    /// Used by panic absorption to add a defaulted `error` field to the Fault
+    /// record, matching the codegen backend (v0.34.18b typed-fault parity).
+    pub flow_fault_type: std::collections::HashMap<String, String>,
     /// Type definitions: type_name → kind (for type_fields / type_variants).
     pub type_defs: std::collections::HashMap<String, crate::ast::TypeDefKind>,
     /// The original AST (for actor worker threads that use tree-walker internally).
