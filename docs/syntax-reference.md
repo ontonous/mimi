@@ -1,1146 +1,406 @@
-# Mimi 语法参考 (EBNF)
+# Mimi 语法参考（EBNF）
 
-> **Authority**: This document provides per-token EBNF for Mimi syntax.
-> **Semantic authority**: `docs/language-spec.md` (extracted from `devdocs/pre-1.0/`).
+> **Authority**: 本文档是 `devdocs/v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF）
+> 的渲染副本。语法以 golden 为准；本文档 0.34.5 起由 golden 重新生成。
+> **Semantic authority**: `docs/language-spec.md`（extracted from `devdocs/pre-1.0/`）。
 > When this file and `language-spec.md` conflict on semantics, `language-spec.md` prevails.
 >
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
 > See `docs/language-support.toml` for 9-dimension capability matrix.
 >
-> Version: v1.0-spec-draft (2026-07-17)
-> Implementation: v0.30.0
-> Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/pre-1.0/`
+> Version: v0.1.4-dev (2026-08-02, regenerated from golden)
+> Implementation: v0.1.4-dev (internal sprint 0.34.X)
+> Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
 
-> **⚠ 已过期（2026-08-01）**：本文件 Implementation 停留在 v0.30.0，至少 6 处状态标签与
-> parser 实况相反（`pinned(timeout)`/`actor runs Flow`/`fails E`/`do {}`/`stay`/state-level `invariant`，
-> 逐项见下方"已知差异"与 `devdocs/v0.34/golden-document.md` §8.3）。
-> **权威语法描述已迁移至 `devdocs/v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF）**。
-> 计划 0.34.5 以 golden 为源重新生成本文件；在此之前本文档仅作历史参考。
+---
 
-## 0. 与 parser 实况的已知差异（2026-08-01，golden 为准）
+# Mimi 语法金标准（Parser 实况转录）
 
-| 主题 | 本文档 | parser 实况 |
-|------|--------|-------------|
-| `pinned(timeout)` | :946 状态反转 | 已拒绝（parse_stmt.rs:184-195，条款 10） |
-| `actor runs Flow` | :849 [not-yet-implemented] | 已实现（top_level.rs:616-621） |
-| `fails E` | :803 [not-yet-implemented] | 已实现且有语料（top_level.rs:1358-1364） |
-| `do {}` | :797 [removed] | 仍解析且是语料主流（parse_stmt.rs:121-127） |
-| `stay` | :924 [not-yet-implemented] | 已解析+求值（parse_stmt.rs:134-138） |
-| state-level `invariant` | :776 | 未实现（仅块内 invariant 子句） |
+> **版本**：0.1.4-dev（内部 sprint 0.34.X）
+> **依据**：`src/parser/`（parse_type.rs / parse_stmt.rs / parse_expr.rs / top_level.rs / pattern.rs）与 `src/lexer/keywords.rs` 的**实际产生式**，逐条手工转录。
+> **权威性**：本文档是 parser 实况的唯一权威描述。`docs/syntax-reference.md` 是本文档的渲染副本（0.34.5 起由 golden 重新生成）。
+> **标记约定**：`[事实]` = 坐标已验证；`[裁决]` = 修正案/SD/ADR 依据；`[建议]` = 待拍板；⚠DEAD = 已废止但仍被 parser 接受的语法（删除清单见 `golden-document.md` §1.1）。
+> **坐标约定**：`file:line` 相对仓库根 `mimi/`。
+> **同步规则**：parser 产生式变更后，本文件必须同步更新；`docs/syntax-reference.md` 以本文件为源重新生成。
+
+---
 
 ## 1. 词法
 
 ### 1.1 注释
 
-```
-// 行注释（到行尾）
-```
-
-块注释 `/* ... */` 支持嵌套。
-
-### 1.2 标识符
-
-```
-identifier ::= [a-zA-Z_][a-zA-Z0-9_]*
-```
-
-- 以字母或 `_` 开头
-- 后续字符为字母、数字或 `_`
-- 关键字不可作为裸标识符使用（见 §1.4）
-
-### 1.3 字面量
-
-```
-integer     ::= decimal | hex | binary | octal
-decimal     ::= [0-9]([0-9_]*[0-9])?    // 十进制（支持下划线分隔）
-hex         ::= "0" ("x" | "X") hex_digit+
-binary      ::= "0" ("b" | "B") ("0" | "1" | "_")+
-octal       ::= "0" ("o" | "O") ("0"-"7" | "_")+
-float       ::= digit+ "." digit+ ([eE][+-]? digit+)?
-string      ::= "\"" string_char* "\""
-fstring     ::= "f" "\""
-                 ( string_char
-                 | "{" expr "}"     // 插值表达式
-                 | "\\{" / "\\}"   // 转义大括号
-                 )*
-                 "\""
-bool        ::= "true" | "false"
-unit        ::= "()"
-```
-
-**转义序列**（字符串和 f-string 通用）：
-
-| 序列 | 含义 |
-|------|------|
-| `\n` | 换行 |
-| `\t` | 制表符 |
-| `\r` | 回车 |
-| `\\` | 反斜杠 |
-| `\"` | 双引号 |
-| `\{` | 左大括号（仅 f-string 中需要） |
-| `\}` | 右大括号（仅 f-string 中需要） |
-| `\0` | 空字符 |
-| `\xHH` | 十六进制字节 |
-| `\uHHHH` | 四位数 Unicode |
-| `\u{H...}` | Unicode 码点（花括号形式） |
-
-注：没有独立的 `char` 字面量类型。`'a'` 在词法上是 `Tick` 标记，用于生命周期。
-
-### 1.4 关键字
-
-```
-module    type      func      fn        actor
-newtype   let       mut       ref       shared
-local_shared  weak  weak_local    c_shared  c_borrow
-c_borrow_mut  raw_string  arena   alloc   cap
-trait     impl      dyn       where     extern
-if        else      for       in        while
-loop      return    break     continue  match     use
-const     pub       drop      await     async     unsafe
-spawn     steps     parasteps quote     comptime
-failure   requires  ensures   invariant math
-desc      rule      old       mms       with
-as        and       or        not       true      false
-unit      nothing
-```
-
-`i32`, `i64`, `f64`, `bool`, `string` 是预置类型名（以标识符形式存在，非独立关键字）。
-
-### 1.5 运算符标记
-
-```
-+   -   *   /   %   **          // 算术运算符
-=                                     // 赋值
-==  !=  <   >   <=  >=               // 比较
-&&  ||  !                            // 逻辑
-&   |   ^   ~   <<   >>              // 位运算
-+=  -=  *=  /=  &=  |=  ^=          // 复合赋值
-->          // 箭头（函数返回值）
-=>          // 胖箭头（match arm）
-..          // 范围 / 切片
-...         // 省略号（sketch 模式占位 / variadic）
-?           // 问号（错误传播）
-@           // at（cap 模式标注 / 属性）
-#           // hash（属性开头）
-$           // dollar（仅限 $( 用于 quote 插值）
-```
-
-### 1.6 标点标记
-
-```
-(   )   {   }   [   ]   :   ::   ;   ,   .   '
-```
-
-### 1.7 特殊标记
-
-```
-INDENT   DEDENT   NEWLINE   EOF
-```
-
-`INDENT`/`DEDENT` 仅在 sketch 模式 (`.mms`) 中使用，基于 4 空格缩进。
-
-## 2. 类型系统
-
-### 2.1 基本类型
-
-| 类型 | 描述 | 内存 |
+| 形式 | 状态 | 坐标 |
 |------|------|------|
-| `i32` | 32 位有符号整数 | 4 字节 |
-| `i64` | 64 位有符号整数 | 8 字节 |
-| `f64` | 64 位浮点数 | 8 字节 |
-| `bool` | 布尔值 (`true` / `false`) | 1 字节 |
-| `string` | UTF-8 字符串（赋值拷贝语义） | 指针 + 长度 |
-| `nothing` | 底类型（不可达 / 错误类型） | 0 字节 |
+| `// ...` 行注释 | ✅ | flow.rs 词法器 |
+| `#` 裸行注释（后随非 `[`） | ✅ | flow.rs:883-891（LX-H2） |
+| `#[ ... ]` 属性 | ✅ | 见 §7 属性（`#` + `[` 被词法器显式排除出注释） |
 
-### 2.2 复合类型
+### 1.2 字面量
 
-| 类型 | 示例 | 描述 |
-|------|------|------|
-| 元组 | `(i32, string)` | 异质序列 |
-| 列表 | `List<i32>` | 同质动态数组 |
-| 固定数组 | `[i32; 4]` | 编译期定长数组 |
-| 切片 | `&List<T>` | 不可变列表视图（借用） |
-| 函数 | `func(i32) -> bool` | 函数类型（注意是 `func` 关键字） |
-| 外部函数 | `extern "C" fn(i32) -> bool` | C ABI 函数指针 |
-| Option | `i32?` 或 `Option<i32>` | 可选值（`?` 后缀语法糖） |
-| Result | `Result<i32, string>` | 结果类型 |
-| Set | `Set<T>` | 唯一元素集合（字面量 `{1, 2, 3}`） |
-| impl Trait | `impl Clone + Default` | 不透明返回类型 |
-| dyn Trait | `dyn Clone` | 运行时 trait 对象（胖指针） |
+| 字面量 | 语法 | 坐标 |
+|--------|------|------|
+| 整数 | `123` / `0x1F` / `0b1010` / `0o17`，允许 `_` 分隔 | parse_expr.rs:234-254（模式同款 parse_pattern，pattern.rs:120-140） |
+| 浮点 | `3.14`（允许 `_`） | parse_expr.rs:255-264 |
+| 字符串 | `"..."`，转义 `\n \t \r \0 \\ \" \{ \}` | parse_stmt.rs:748-767 |
+| f-string | `f"text {expr} text"`，空插值 `f"{}"` 非法 | parse_stmt.rs:655-777（LX-H8） |
+| 布尔 | `true` / `false` | parse_expr.rs:278-287 |
+| 单元 | `()`（表达式与类型两处均归一化为 `unit`） | parse_expr.rs:288-292；parse_type.rs:139-140 |
 
-### 2.3 引用类型
+### 1.3 关键字（80 个硬关键字 → TokenKind，keywords.rs:102-194；v0.34.2 实测）
 
 ```
-&'a T         // 不可变引用（生命周期可选）
-&'a mut T     // 可变引用（生命周期可选）
-*T            // 裸指针（不可变）
-*mut T        // 裸指针（可变）
+module type func fn actor newtype let const mut ref
+shared local_shared weak weak_local c_shared c_borrow c_borrow_mut
+raw_string arena alloc cap trait impl dyn where extern
+if else for fault fails in while return reset recover break continue
+match use pub drop defer await async unsafe spawn parasteps
+quote comptime failure requires ensures invariant math desc rule old mms
+flow state transition protocol delegate pinned persistent view mutate
+do become stay session dual end with loop as
+true false unit i32 nothing
 ```
 
-生命周期用 `'name` 表示（`'a`, `'b` 等）。
+v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
+- **移出关键字表**：`subflow`（条款 2）、`steps`（MimiSpec-only）、`consume`（随 delegate 死）——现在 tokenize 为 Ident。
+- **软关键字化**：`and`/`or`/`not` 仍 tokenize 为运算符 kind，但**不是硬关键字**（绑定位置可作标识符）。
+- `delegate` 保留为硬关键字（parser 拒绝并报条款 2 诊断）。
+- [建议] 再审查：`reset`/`recover`（仅系统注入 transition 名）、`nothing`。
+- **剩余计划**：`become`/`stay` 删除（ADR-001，0.34.11-12）→ 80→78。
 
-### 2.4 共享 / 弱引用
+### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
-```
-shared T             // 原子引用计数（跨线程，Arc<RwLock<T>>）
-local_shared T       // 非原子引用计数（单线程，Rc<RefCell<T>>）
-weak T               // 共享弱引用
-weak_local T         // 局部共享弱引用
-c_shared T           // C 兼容共享句柄
-c_borrow T           // C 兼容不可变借用
-c_borrow_mut T       // C 兼容可变借用
-raw_string           // C 原始字符串（C 须通过 mimi_string_free_raw 释放）
-```
-
-### 2.5 分配器
-
-```
-Allocator             // 分配器类型
-alloc(System) { ... } // 系统分配器
-alloc(Arena) { ... }  // Arena 区域分配器
-alloc(Bump) { ... }   // Bump 分配器
-```
-
-### 2.6 C 兼容类型
-
-```
-CBuffer<T>            // C 缓冲类型（自动 malloc/free）
-*T                    // 裸只读指针
-*mut T                // 裸可变指针
-extern "C" fn(Args...) -> Ret  // C 函数指针
-#[repr(C)]            // C 兼容布局属性（枚举/结构体）
-#[repr(transparent)]  // 透明包装属性
-```
-
-### 2.7 用户定义类型
-
-```
-// 枚举
-type Option<T> {
-    Some(T)
-    None
-}
-
-// 记录（结构体）
-type Point {
-    x: f64,
-    y: f64,
-}
-
-// 枚举变体可含元组或记录 payload
-type Tree<T> {
-    Leaf(T),
-    Node { left: Tree<T>, right: Tree<T> },
-}
-
-// 类型别名
-type MyInt = i32
-
-// 强包装类型（newtype）
-newtype UserId = i32
-
-// C 兼容联合（仅 #[repr(C)]）
-#[repr(C)]
-type Value = union {
-    int_val: i32,
-    float_val: f64,
-}
-```
-
-### 2.8 泛型
-
-```
-func identity<T>(x: T) -> T { x }
-
-// 泛型约束
-func clone<T: Clone>(x: T) -> T { ... }
-
-// 多重约束
-func process<T: Clone + Default>(x: T) -> T { ... }
-
-// where 子句
-func map<T, U>(x: T, f: func(T) -> U) -> U where T: Clone { ... }
-
-// 类型泛型
-type Container<T> {
-    value: T,
-}
-```
-
-## 3. 表达式
-
-### 3.1 运算符优先级（从低到高）
-
-| 优先级 | 运算符 | 结合性 | 说明 |
-|--------|--------|--------|------|
-| 1 | `\|\|` | 左 | 逻辑或 |
-| 2 | `&&` | 左 | 逻辑与 |
-| 3 | `==` `!=` `..` | 左 | 相等比较和范围 |
-| 4 | `<` `>` `<=` `>=` | 左 | 大小比较 |
-| 5 | `\|` | 左 | 按位或 |
-| 6 | `^` | 左 | 按位异或 |
-| 7 | `&` | 左 | 按位与 |
-| 8 | `<<` `>>` | 左 | 移位 |
-| 9 | `+` `-` | 左 | 加减 |
-| 10 | `*` `/` `%` | 左 | 乘除取模 |
-| 11 | `**` | **右** | 幂运算 |
-| — | postfix | — | 函数调用/字段/索引/切片 |
-| — | unary | — | 负号/取反/引用/解引用 |
-
-### 3.2 一元运算符
-
-```
--expr       // 取负
-!expr       // 逻辑非
-not expr    // 逻辑非（关键字形式）
-&expr       // 不可变引用
-&mut expr   // 可变引用
-*expr       // 解引用
-```
-
-### 3.3 字面量 / 标识符
-
-```
-42              // 整数
--1              // 负整数
-3.14            // 浮点数
-true            // 布尔真
-false           // 布尔假
-()              // 单元值
-"hello"         // 字符串
-f"x = {x}"      // 格式化字符串（插值）
-[1, 2, 3]       // 列表
-{"a": 1, "b": 2} // Map 字面量（键必为字符串）
-{1, 2, 3}       // Set 字面量（≥2 元素，{expr} 仍为块）
-x               // 变量引用
-```
-
-### 3.4 后置运算
-
-```
-func_name(arg1, arg2)       // 函数调用
-obj.method(arg1)            // 方法调用
-record.field                // 字段访问
-tuple.0                     // 元组索引
-array[i]                    // 索引
-array[start..end]           // 切片
-array[..end]                // 半开切片
-array[start..]              // 半开切片
-expr?                       // 错误传播（Try）
-expr as Type                // 类型转换（i32/i64/f64/bool/string）
-```
-
-### 3.5 副作用表达式
-
-```
-{ stmt; stmt; expr }       // 块表达式（最后表达式为值）
-if cond { ... } else { ... }  // if 表达式
-match expr { ... }          // 模式匹配
-```
-
-### 3.6 闭包（Lambda）
-
-```
-fn(param: Type) -> RetType { body }
-fn(x: i32) -> i32 { x + 1 }
-```
-
-闭包可以捕获环境变量。捕获变量通过引用计数（`shared`）在闭包和外部作用域间共享。
-
-### 3.7 元组 / 列表 / 记录
-
-```
-(1, "hello", true)          // 元组
-[1, 2, 3]                   // 列表字面量
-{"a": 1, "b": 2}           // Map 字面量
-{1, 2, 3}                   // Set 字面量
-Point { x: 1.0, y: 2.0 }    // 记录构造
-Point { x, y }              // 记录构造（字段简写）
-[expr for var in iter]       // 列表推导
-[expr for var in iter if cond]  // 带过滤的列表推导
-```
-
-### 3.8 其他表达式
-
-```
-// 范围表达式
-start..end
-
-// 快照（用于 ensures 后置条件）
-old(expr)
-
-// Arena 块表达式
-arena { stmt; expr }
-
-// Comptime 块（编译时执行）
-comptime { stmt; expr }
-
-// Quote 块（编译时 AST 生成）
-quote! { stmt; stmt }
-
-// Quote 插值
-$(expr)
-
-// Turbofish（显式泛型实例化）
-func_name::<Type>(args)
-
-// 类型信息
-type_name(expr)     // 运行时类型名（字符串）
-type_info(Type)     // 类型元数据
-
-// 异步 / 并发
-spawn expr          // 生成异步任务
-await expr          // 等待 Future
-```
-
-## 4. 语句
-
-### 4.1 Let 绑定
-
-```
-let x = expr              // 不可变绑定
-let mut x = expr          // 可变绑定
-let x: Type = expr        // 带类型标注
-let ref x = expr          // Arena 引用绑定
-let (a, b) = expr         // 解构绑定
-let x;                    // 声明而不初始化（后需赋值）
-```
-
-### 4.1b Const 常量
-
-```
-const PORT: i32 = 6380              // 顶层常量
-const NAME: string = "mimi-kv"      // 字符串常量
-const PI: f64 = 3.14159             // 浮点常量
-```
-
-`const` 在顶层声明常量，启动时求值，全局可用。类型标注可选（自动推断）。
-
-### 4.2 赋值
-
-```
-x = expr                // 变量赋值
-x.field = expr          // 字段赋值
-x[i] = expr             // 索引赋值
-x += expr               // 复合赋值（+= -= *= /= &= |= ^=）
-```
-
-### 4.3 共享绑定
-
-```
-shared x = expr              // 原子引用计数
-local_shared x = expr        // 局部引用计数
-weak x = expr                // 弱引用（从 shared 升级）
-weak_local x = expr          // 局部弱引用
-```
-
-所有共享绑定可选类型标注：`shared x: Type = expr`。
-
-### 4.4 控制流
-
-```
-if cond { ... } else { ... }       // if/else
-if cond { ... } else if ...        // 链式 elif（else 内嵌 if）
-while cond { ... }                 // while 循环
-for var in iterable { ... }        // for 循环
-break                              // 跳出循环
-break expr                         // 带值 break
-continue                           // 继续循环
-return expr                        // 函数返回
-```
-
-### 4.5 函数声明
-
-```
-// 普通函数
-func name(param: Type) -> RetType {
-    body
-}
-
-// 公有函数
-pub func add(x: i32, y: i32) -> i32 { x + y }
-
-// 泛型函数
-func first<T>(list: List<T>) -> T { list[0] }
-
-// 带 where 子句
-func clone<T>(x: T) -> T where T: Clone { ... }
-
-// 带效果（能力声明）
-func write_file(path: string, data: string) with FileIO { ... }
-
-// 异步函数
-async func fetch(url: string) -> string { ... }
-
-// Comptime 函数（编译时执行，仅在解释器中可用）
-comptime func generate_code() -> func(i32) -> i32 { ... }
-
-// 外部导出（不修改符号名，C ABI）
-extern "C" func my_export(x: i32) -> i32 { x + 1 }
-```
-
-隐式返回：函数体最后一个表达式的值作为返回值。
-
-### 4.6 模块和导入
-
-```
-use path::to::module              // 导入模块
-module Name { ... }               // 模块定义
-pub func / pub type / pub actor   // 公有可见性
-```
-
-### 4.7 类型声明
-
-```
-type Name { Variant1, Variant2(Type) }       // 枚举
-type Name { field1: Type, field2: Type }     // 记录
-type Alias = ExistingType                    // 别名
-newtype Name = ExistingType                  // 强包装
-#[repr(C)] type Name { ... }                 // C 兼容布局
-type Name = union { ... }                    // C 兼容联合
-```
-
-### 4.8 Trait / Impl
-
-```
-// Trait 定义
-trait Clone<T> {
-    func clone(x: T) -> T;
-}
-
-// Impl 实现
-impl<T: Clone> Clone<T> for MyType {
-    func clone(x: MyType) -> MyType { ... }
-}
-```
-
-### 4.9 Actor
-
-```
-actor Counter {
-    mut count: i32 = 0
-
-    func increment() -> i32 {
-        count = count + 1
-        count
-    }
-}
-```
-
-### 4.10 Capability 声明
-
-```
-// 简单能力
-cap FileIO
-
-// 组合能力
-cap FileIO + NetworkIO
-// 或
-cap FileIO = FileRead + FileWrite
-```
-
-### 4.11 Extern 块（FFI 导入）
+`old view mutate do persistent and or not session dual end`
 
-```
-extern "C" {
-    // 基本 FFI
-    func puts(s: string) -> i32
-
-    // 带 cap mode 标注（传递能力）
-    func send(cap@ conn: c_shared Connection, data: raw_string)
-
-    // 带借用的 cap mode
-    func read(& buf: CBuffer<u8>) -> i32
-
-    // 合约（前置/后置条件）
-    func divide(a: i32, b: i32) -> i32
-        requires: b != 0
-        ensures: result * b == a
-
-    // Variadic 函数
-    func printf(fmt: raw_string, ...) -> i32
-
-    // 无 panic 保护（catch_unwind + 信号处理）
-    #[no_panic]
-    func unsafe_ffi_call(ptr: *mut T) -> i32
-}
-```
-
-### 4.12 合约
-
-```
-requires: expr     // 前置条件
-ensures: expr      // 后置条件（可用 old(expr) 引用入口快照）
-invariant: expr    // 循环不变量
-math: {            // 数学公式块（供 Z3 验证器使用）
-    expr1
-    expr2
-}
-```
-
-### 4.13 Comptime / Quote
-
-```
-comptime func gen() { ... }      // 编译时函数
-comptime { stmt; expr }          // 编译时块表达式
-quote! { stmt; expr }            // AST 引用（仅在 interpreter 中可用）
-$(expr)                          // Quote 插值
-```
-
-### 4.14 元数据
-
-```
-desc "描述文本"                    // 描述元数据（单行）
-desc {                             // 描述元数据（多行块）
-    自然语言描述
-    支持多行文本
-}
-rule "规则文本"                    // 规则元数据（单行）
-rule {                             // 规则元数据（多行块）
-    约束条件
-    自然语言描述
-}
-mms { 意图内容 }                   // MimiSpec 块
-```
-
-### 4.15 并发语句
-
-```
-parasteps { ... }                          // 并行步骤块
-spawn expr                                 // 生成并发任务
-await expr                                 // 等待异步任务完成
-on failure { ... }                         // 补偿块（parasteps 失败时执行）
-```
-
-### 4.16 其他语句
-
-```
-unsafe { ... }          // 不安全块
-arena { ... }           // Arena 区域块（表达式形式也有）
-alloc(System) { ... }   // 指定分配器
-alloc(Arena) { ... }
-alloc(Bump) { ... }
-drop(expr)              // 释放能力
-{ ... }                 // 嵌套块
-...                     // 占位符（仅 sketch 模式）
-```
-
-## 5. 模式匹配
-
-### 5.1 模式语法
-
-```
-pattern ::= "_"                        // 通配符
-          | identifier                 // 变量绑定
-          | literal                    // 字面量（42, "hello", true）
-          | Name(args...)              // 构造器模式
-          | Name { field: pat, ... }   // 记录构造器模式
-          | (p1, p2)                   // 元组模式
-          | [p1, p2]                   // 数组模式
-          | [p1, ..rest]               // 切片模式（rest 绑定剩余元素）
-```
-
-### 5.2 Match 表达式
-
-```
-match expr {
-    Pattern1 if guard => body,     // 带守卫（if 条件）
-    Pattern2 => body,
-    _ => default_body,
-}
-```
-
-- Guard 是 `if` 后跟任意表达式
-- Match arm body 可以是块 `{ ... }` 或单个表达式
-- 臂间用逗号分隔
-
-### 5.3 Let 解构
-
-```
-let (a, b) = tuple_expr
-let [x, y, z] = list_expr
-let Some(value) = optional_expr
-```
-
-## 6. 属性
-
-```
-#[derive(Trait1, Trait2)]    // 自动派生
-#[repr(C)]                   // C 兼容内存布局
-#[repr(transparent)]         // 透明包装（与内部类型同布局）
-#[no_panic]                  // 外部队块免 panic 包装
-```
-
-## 7. 顶层程序结构
-
-```
-// 源文件结构
-file ::= import* item*
-
-import  ::= "use" path ";"                    // 路径： ident "::" ident ...
-item    ::= attr* vis? func_def
-          | attr* vis? type_def
-          | attr* vis? newtype_def
-          | attr* vis? actor_def             // [experimental]
-          | attr* vis? flow_def              // [stable]
-          | attr* vis? protocol_def          // [stable]
-          | session_def                      // [experimental]
-          | "const" ident "=" expr ";"       // 顶层常量
-          | cap_def                          // [experimental]
-          | trait_def
-          | impl_def
-          | extern_block
-          | "comptime" func_def              // comptime 函数
-          | "async" func_def                 // 异步函数
-          | "unsafe" extern_block            // 免 passport 类型检查
-
-vis     ::= "pub"
-attr    ::= "#" "[" Ident ( "(" attr_args ")" )? "]"
-```
-
-### 7.1 `use` 导入语义
-
-- `use path;` 会加载对应的 `.mimi` 模块文件，并把该模块中 `pub` 导出的函数、类型、trait 实现**合并到当前作用域**。因此导入后可以直接使用模块中的 `pub` 名字，无需再加模块前缀。
-- 内建函数（如 `json_get_int`、`to_json`、`from_json`）始终全局可用，**不需要** `use`。
-- `use std::xxx` 加载 `std/xxx.mimi`。例如 `use std::json` 会引入 `get_int`、`get_bool` 等包装函数以及 `JsonExt` trait（为 `string` 提供 `.get_int(...)` 等方法）。
-
-示例：
-
-```mimi
-use std::json
+### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
-func main() -> i64 {
-    let data = "{\"count\":42}"
-    // get_int 由 use std::json 引入
-    get_int(data, "count")
-}
-```
-
-### 7.2 函数定义 `[stable]`
-
-```
-func_def ::= "func" ident generic_params?
-             "(" params? ")"
-             ("->" type)?
-             ("where" ident ":" bound ("+" bound)*)?
-             ("with" ident ("," ident)*)?
-             ("effects" "=" "[" ident ("," ident)* "]")?   // [experimental]
-             ("fails" ident)?                                // [not-yet-implemented] transition only
-             contract_clause*                                // [not-yet-implemented] signature contracts
-             block
+`old view mutate consume do persistent subflow session dual end`
 
-params         ::= param ("," param)*
-param          ::= "mut"? ident ":" type
-                  | "view" ident ":" type    // [stable] read-only borrow
-                  | "mutate" ident ":" type  // [stable] in-place mutable borrow
-contract_clause ::= "requires" expr
-                  | "ensures" expr
-                  | "invariant" expr
+---
+
+## 2. 类型语法（parse_type.rs）
+
+```
+Type := PostfixType { '?' }
+PostfixType := TypeAtom { '<' TypeList '>' } [ '->' Type ]      (* 仅 allow_func 时 *)
+TypeAtom :=
+      Ident                    (* 命名类型，含 Result/List/Option 等，parse_type.rs:81-85 *)
+    | '_'                      (* Type::Infer，:77-80 *)
+    | 'CBuffer<' Type '>'      (* :70-76 *)
+    | 'alloc'                  (* Type::Allocator，:86-89 *)
+    | 'nothing'                (* Type::Nothing，:90-93 *)
+    | '&' [ 'mut' ] Type           (* Ref/RefMut，:94-121；v0.34.4 ADR-004 删 '\'' lifetime *)
+    | '&' [ 'mut' ] '[' Type ']'   (* Slice，:109-113 *)
+    | '(' { Type ',' } ')'     (* 空 → unit，:123-144 *)
+    | 'shared' Type            (* :145-149 *)
+    | 'local_shared' Type      (* :150-154 *)
+    | 'weak' Type              (* :155-159 *)
+    | 'weak_local' Type        (* :160-164 *)
+    | 'c_shared' Type          (* :165-169 *)
+    | 'c_borrow' Type          (* :170-174 *)
+    | 'c_borrow_mut' Type      (* :175-179 *)
+    | 'raw_string'             (* :180-183 *)
+    | '*' [ 'mut' ] Type       (* RawPtr/RawPtrMut，:184-196 *)
+    | 'cap' Ident              (* :197-212 *)
+    | 'func' '(' { Type ',' } ')' [ '->' Type ]      (* :213-237 *)
+    | 'extern' '"C"' ( 'fn' | 'func' ) '(' { Type ',' } ')' [ '->' Type ]  (* :238-275 *)
+    | 'impl' Ident { '+' Ident }                     (* :276-310 *)
+    | 'dyn' Ident { '+' Ident }                      (* :311-345 *)
+    | '[' Type ';' size ']'    (* 定长数组，:346-379 *)
 ```
 
-**Permission model** `[stable]`:
-- `view T`: read-only borrow for call duration
-- `mutate T`: constrained in-place modification
-- `T` (by value): ownership transfer (consume)
-- `&T` / `&mut T`: `[experimental]` — low-level, not in stable safe API
+[事实] 类型参数只允许加在命名类型上（parse_type.rs:35-45）。
+[事实] `func(T) -> U` 类型接受；裸 `fn` 类型仅存在于 `extern "C" fn(...)` 模式（parse_type.rs:242-253）——对应 golden-document.md ADR-003（保留现状）。
+[事实] v0.34.4（ADR-004）：显式生命周期 `&'a T` **已删除**——lexer 拒绝 `'`（scan.rs + flow.rs），仅 elision `&T`/`&mut T`（Type::Ref Option 字段保留，恒 None）。
 
-### 7.3 类型定义
+### 2.1 类型定义（parse_type.rs:389-610）
 
 ```
-type_def      ::= "type" ident generic_params? ("=" type | block)
-newtype_def   ::= "newtype" ident generic_params? "=" type ";"
-
-generic_params ::= "<" generic_param ("," generic_param)* ">"
-generic_param  ::= ident (":" bound ("+" bound)*)?
+TypeDef := 'type' Ident [ generics ] '=' ...
+         | 'type' Ident [ generics ] '{' record-or-enum '}'
+Newtype := 'newtype' Ident [ generics ] '=' Type ';'
+
+union  := 'type' Ident '=' 'union' '{' record-fields '}'     (* :443-463 *)
+record := '{' { Ident ':' Type (','|换行) } '}'
+enum   := '{' { Variant } '}'
+Variant := Ident [ '(' { Type ',' } ')' | '{' record-fields '}' ]
 ```
-
-### 7.3 外部块
+
+### 2.2 泛型参数（top_level.rs:818-852）
 
 ```
-extern_block ::= "extern" string_literal? "{" extern_func* "}"
-extern_func  ::= ("func" | "fn") ident
-                 "(" extern_param? ("," extern_param)* (",")? "..."? ")"
-                 ("->" type)?
-                 ("requires" ":" expr)?
-                 ("ensures" ":" expr)?
-                 ";"
-
-extern_param ::= ("cap" "@" | "&")? ident ":" type
+generics := '<' { Ident [ ':' Ident { '+' Ident } ] ',' } '>'
 ```
 
-### 7.4 Capability 定义
+---
+
+## 3. 模式语法（pattern.rs:68-220）
 
-```
-cap_def ::= "cap" ident (
-              ";"
-            | "+" ident ";"
-            | "=" ident ("+" ident)* ";"
-            )
 ```
-
-### 7.5 Flow 定义 `[stable]`
-
-*[source: src/parser/top_level.rs:706 `parse_flow_def`, src/ast.rs:616 `FlowDef`]*
-
-Flow 是 Mimi 中跨时间业务状态变化的唯一语言主语。
-
+Pattern := Ident                              (* Variable *)
+         | '_'                                (* Wildcard，:114-115 *)
+         | Ident '(' { Pattern ',' } ')'      (* Constructor tuple，:75-91 *)
+         | Ident '{' { Ident [ ':' Pattern ] ',' } '}'  (* Constructor record，:92-113 *)
+         | Int | String | true | false        (* Literal，:120-152 *)
+         | '(' { Pattern ',' } ')'            (* Tuple，:153-167 *)
+         | '[' { Pattern ',' } [ '..' [ Ident ] ] ']'   (* Array/Slice+rest，:168-195 *)
+         | 软关键字 → Variable（old/view/mutate/consume/do/persistent/subflow/session/dual/end）
+```
+
+---
+
+## 4. 语句语法（parse_stmt.rs）
+
+### 4.1 语句分发（parse_stmt.rs:17-296）
+
+```
+Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* :496-546 *)
+      | 'const' Ident [ ':' Type ] '=' Expr ';'                              (* :496-501 *)
+      | 'return' [ Expr ] ';'                                                (* :548-560 *)
+      | 'break' [ Expr ] ';' | 'continue' ';'                                (* :21-39 *)
+      | 'if' Expr '{' Block '}' [ 'else' ('if' ... | '{' Block '}') ]       (* :562-591 *)
+      | 'while' [ 'let' Pattern '=' Expr ] Expr '{' Block '}'                (* :593-614 *)
+      | 'loop' '{' Block '}'                                                 (* :616-622 *)
+      | 'for' Ident 'in' Expr '{' Block '}'                                  (* :624-637，仅单标识符 *)
+      | 'arena' '{' Block '}' ';'                                            (* :298-305 *)
+      | 'unsafe' '{' Block '}' ';'                                           (* :307-314 *)
+      | 'alloc' '(' (Ident|'arena') ')' '{' Block '}'                        (* :316-359，System/Arena/Bump *)
+      | ('shared'|'local_shared'|'weak'|'weak_local') Ident [ ':' Type ] '=' Expr ';'  (* :456-494 *)
+      | 'mms' '{' text '}' ';'                                               (* :404-454，MimiSpec 嵌入 *)
+      | 'desc' ('{' text '}' | String) ';'                                   (* :56-67 *)
+      | 'rule' ('{' text '}' | String) ';'                                   (* :68-79 *)
+      | '...' ';'                                                            (* sketch-only，:80-91 *)
+      | 'drop' '(' Expr ')' ';'                                              (* :92-99 *)
+      | 'defer' '{' Block '}' ';'                                            (* :100-107 *)
+      | 'parasteps' '{' Block '}' ';'                                        (* :108-115 *)
+      | 'func' FuncDef ';'                                                   (* :116-120 *)
+      | 'do' '{' Block '}'                                                   (* :121-127 *)
+      | 'become' Expr ';'                                                    (* :128-133 *)
+      | 'stay' ';'                                                           (* :134-138，仅裸形式 *)
+      | 'delegate' ... — **v0.34.1 已拒绝**（条款 2 诊断，parse_stmt.rs:139-160）
+      | 'pinned' '(' Expr ')' [ '|' Ident '|' ] '{' Block '}'   (* :180-216；v0.34.3 timeout 字段删除 *)
+      | 'if' 'let' Pattern '=' Expr '{' Block '}' [ 'else' ( 'if' ... | '{' Block '}' ) ]  (* v0.34.3 Stmt::IfLet *)
+      | 'on' 'failure' '{' Block '}'                                         (* :217-224 *)
+      | Target ('=' | '+=' | '-=' | '*=' | '/=' | '&=' | '|=' | '^=') Expr ';'  (* 复合赋值→desugar 为 Assign+Binary，:226-294 *)
+      | Expr ';'                                                             (* :290-293 *)
 ```
-flow_def  ::= flow_attr* "pub"? "flow" ident generic_params?
-             ("impl" ident ("," ident)*)?
-             "{" state_decl* transition_decl* fault_decl? "}"
-
-flow_attr ::= "@" (
-               "mailbox" "(" "depth" "=" int ")"
-             | "max_children" "(" "=" int ")"
-             | "transactional"
-             )
-
-state_decl      ::= "state" ident ("{" field_decl* "}")?
-                    ("invariant" ":" expr)?
-
-field_decl      ::= "persistent"? ident ":" type
-
-transition_decl ::= "transition" ident
-                    "(" from_state ("," param)* ")"
-                    "->" target_state
-                    ("fails" ident)?
-                    transition_body
 
-from_state      ::= state_pattern ("{" field_binding* "}")?
-state_pattern   ::= ident              // state name
-field_binding   ::= ident (":" type)?
-
-target_state    ::= ident               // single target `[stable]`
-                  | ident ("|" ident)+  // multi-target `[experimental]`
-
-transition_body ::= "{" "do" "{" stmt* "}" "}"     // `[removed]` — old do wrapper
-                  | "{" stmt* "}"                 // `[stable]` — direct body
+[事实] `pinned(expr, timeout = N)` 硬错误："abolished by architecture amendment clause 10. Async FFI timeout (spawn_foreign_task) is planned for 0.2..."（parse_stmt.rs:162-168）。
+[事实] v0.34.3：`Stmt::Pinned.timeout` 字段删除（parser 恒拒绝 timeout），仅 pin + body 保留。
+[事实] v0.34.3：`if let` 为 Stmt::IfLet（非 desugar 到 match——pattern 绑定需 then 块可见），bytecode 完整执行，codegen E0700（golden-document.md §1.3）。
+[事实] `stay { payload }` 带 payload 形式**不解析**，仅裸 `stay;`（parse_stmt.rs:134-137）。
+[事实] 复合赋值 desugar：`x += e` → `Assign(x, x + e)`，RHS 中 x 标记 Desugared（parse_stmt.rs:263-289）。
+
+### 4.2 块内合约子句（parse_stmt.rs:803-861）
+
+```
+'requires' ':' Expr ';'*     (* 在块内任意位置，:803-817 *)
+'ensures'  ':' Expr ';'*
+'invariant' ':' Expr ';'*
+'math' ':' '{' { Expr ';' } '}' ';'    (* :844-861 *)
+'desc' / 'rule'（同 §4.1）
 ```
-
-**Status notes**:
-- `do { }` wrapper: `[removed]` — target is bare `{ }` body (04-language-coherence.md §9)
-- Multi-target `A | B`: `[experimental]` — codegen uses first target only (01-flow-first-model.md §5)
-- `fails E` error type declaration: `[not-yet-implemented]` — transition rollback path
-- State unforgeability: `[not-yet-implemented]` — external code cannot construct state payload
-
-**Example**:
-```mimi
-flow Order {
-    state Pending
-    state Paid { receipt: string }
-    state Shipped { tracking: Tracking }
 
-    transition pay(Pending, payment: Payment) -> Paid {
-        become Paid { receipt: payment.receipt }
-    }
+---
 
-    transition ship(Paid) -> Shipped {
-        let tracking = allocate_tracking()
-        become Shipped { tracking }
-    }
-}
-```
-
-### 7.6 Actor 定义 `[experimental]`
+## 5. 表达式语法（parse_expr.rs）
 
-*[source: src/parser/top_level.rs:436 `parse_actor_def`, src/ast.rs:118 `ActorDef`]*
+### 5.1 二元运算符优先级（parse_expr.rs:38-59，含 pipe 特例）
 
-Actor 是 Flow 的并发运行容器。
+| 优先级 | 运算符 | 结合性 | Token |
+|-------|--------|--------|-------|
+| pipe | `\|>` | 左 | PipeArrow（parse_expr.rs:28-35，desugar 为调用；仅表达式管道——转移目标分隔符 `\|>` 已 v0.34.1 拒绝） |
+| 1 | `or` / `\|\|` | 左 | OrOr / Or |
+| 2 | `and` / `&&` | 左 | AndAnd / And |
+| 3 | `==` / `!=` / `..` | 左 | EqEq / Ne / DotDot（Range 仅 parse_expr_inner；slice 起点用 with-`..` 变体 :76-124） |
+| 4 | `<` `>` `<=` `>=` | 左 | Lt Gt Le Ge |
+| 5 | `\|` | 左 | BitOr |
+| 6 | `^` | 左 | BitXor |
+| 7 | `&` | 左 | BitAnd |
+| 8 | `<<` `>>` | 左 | Shl Shr |
+| 9 | `+` `-` | 左 | Plus Minus |
+| 10 | `*` `/` `%` | 左 | Star Slash Percent |
+| 11 | `**` | **右** | Pow |
 
-```
-actor_def ::= "pub"? "actor" ident "{" actor_member* "}"
+[事实] `..` 作为二元运算符被解析为 `Binary(BinOp::Range)`（parse_expr.rs:47），`Expr::Range` variant 全仓零构造（golden-document.md §1.1）。
 
-actor_member ::= actor_field
-               | actor_method
-               | actor_mailbox
-               | actor_children
+### 5.2 一元运算符（parse_expr.rs:126-175）
 
-actor_field   ::= "mut"? ident ":" type ";"
-actor_method  ::= func_def
-actor_mailbox ::= "mailbox" "depth" "=" int ";"
-actor_children ::= "children" "max" "=" int ";"
 ```
-
-**Status notes**:
-- Mutable business fields (`mut`): `[removed]` — target is Actor runs Flow (04 §5)
-- `actor runs Flow` syntax: `[not-yet-implemented]` — target semantics:
-  ```mimi
-  actor OrderWorker runs Order {
-      mailbox depth = 128
-      children max = 8
-  }
-  ```
-- Actor helper (stateless computation): `[stable]`
-
-### 7.7 Protocol 定义 `[stable]`
-
-*[source: src/parser/top_level.rs `parse_protocol_def`, src/ast.rs:670 `ProtocolDef`]*
-
-Protocol 是 Flow 的静态拓扑投影。
-
+Unary := '-' Expr | '!' Expr | 'not' Expr
+       | '&' [ 'mut' ] Expr      (* Ref/RefMut *)
+       | '*' Expr                (* Deref *)
+       | 'old' '(' Expr ')'      (* 软关键字，后随 '(' 才是快照，:159-172 *)
 ```
-protocol_def ::= "pub"? "protocol" ident
-                "{" proto_state* proto_transition* "}"
 
-proto_state      ::= "state" ident ("{" field_decl* "}")?
+### 5.3 表达式主（parse_expr.rs:230-454）
 
-proto_transition ::= "transition" ident
-                     "(" from_state ("," param)* ")"
-                     "->" target_state
-                     (";" | "{" "}")     // signature only, no body
 ```
-
-**Rules**:
-- Protocol transition signature has no body (unlike Flow transition)
-- Flow implementing Protocol: checker verifies states/edges exist, payload variance, effect constraints
-- String-based `protocol_methods("Name")`: `[removed]` (04 §6.2)
-- Dynamic `dyn Protocol` with typed VTable: `[experimental]`
-
-### 7.8 Session 定义 `[experimental]`
-
-*[source: src/parser/top_level.rs:1190 `parse_session_def`, src/ast.rs:679 `SessionDef`]*
-
-Session 描述两个线性端点之间的通信顺序。
-
+Primary := Int | Float | String | FString | true | false | unit
+         | '(' { Expr ',' } ')'            (* 单元素 = 分组 *)
+         | '[' { Expr ',' } [ '..' Expr ] ']'      (* List/range，parse_bracket_primary *)
+         | 'match' Expr '{' MatchArm '}'   (* :331-343 *)
+         | 'spawn' Expr (prec 12)          (* :344-349 *)
+         | 'await' Expr (prec 12)          (* :350-355 *)
+         | 'arena' '{' Block '}'           (* :356-363 *)
+         | 'comptime' '{' Block '}'        (* :364-371 *)
+         | 'quote' [ '!' ] '{' Block '}'   (* :372-382 *)
+         | '$(' Expr ')'                   (* QuoteInterpolate，:383-394 *)
+         | 'fn' '(' Params ')' [ '->' Type ] '{' Block '}'   (* Lambda 闭包，:400-420 *)
+         | '{' map-literal | set-literal | Block '}'          (* :421-436 *)
+         | Ident | 关键字即标识符（is_keyword_token 兜底，:437-443）
+         | 'if' Expr '{' Block '}' [ 'else' ... ]  (* if-expr，:177-228 *)
 ```
-session_def  ::= "session" ident "=" session_type ";"
 
-session_type ::= "!" type "." session_type     // send T, then continue
-              | "?" type "." session_type     // receive T, then continue
-              | "dual" "(" session_type ")"   // dual of a protocol
-              | "end"                          // terminated
-              | ident                          // reference to named session
 ```
-
-**Status notes**:
-- `session_pair::<P>()` returns `SessionChan<P>` and `SessionChan<dual P>`: `[partial]`
-- send/recv/close advance residual: `[partial]` — checker has residual map, runtime not fully lowered
-- Endpoint as linear value: `[partial]` — no runtime linear handle enforcement
-- Bare `i64` handle user API: `[removed]` — prohibited
-- Recursive protocols, dynamic participants, multiparty: `[experimental]`
-
-**Example**:
-```mimi
-session PingPong = !Ping . ?Pong . end
-
-// Usage:
-let (client, server) = session_pair::<PingPong>()
-let client1 = send(client, Ping)
-let (reply, client2) = recv(client1)
-close(client2)
+MatchArm := Pattern [ 'if' Expr ] '=>' ( '{' Block '}' | Expr ) [ ',' ]   (* pattern.rs:6-66 *)
 ```
 
-### 7.9 Transition Terminal Actions `[stable]`
+### 5.4 后缀运算（parse_expr.rs:456-531）
 
-*[source: src/ast.rs `TransitionDef`, src/codegen/compile.rs:279]*
-
-Transition body ends with exactly one terminal action:
-
 ```
-terminal ::= "become" target_state "{" field_init* "}"    // commit new state
-           | "stay" "{" field_init* "}"                    // same state, new gen `[not-yet-implemented]`
-           | "fault" ident ("(" args ")")?                 // commit typed Fault `[partial]`
-           // rollback failure: implicit via `?` + `fails E` `[not-yet-implemented]`
-
-field_init ::= ident ":" expr ("," ident ":" expr)*
+Postfix := Primary { Call | Field | IndexOrSlice | Try | OptionalChain }
+Call := '(' Args ')'
+Args := [ { ('mutate'|'view') * /* 跳过，borrow 模式由参数声明决定，:541-547 */ Ident '=' Expr /* 命名参数 */ | Expr } ',' ]
+Field := '.' Ident | '.' Int                  (* 元组索引 *)
+IndexOrSlice := '[' Expr ']' | '[' [Expr] '..' [Expr] ']'    (* :588-632 *)
+Try := '?'                                    (* 后缀 loop 内，:488-493 *)
+OptionalChain := '?.' Ident | '?.' Int        (* :462-487 *)
+Cast := ... 'as' Type                         (* 收尾，:523-529 *)
 ```
 
-### 7.10 Delegate `[stable]`
+---
 
-*[source: src/ast.rs:334 `Stmt::Delegate`]*
+## 6. 顶层语法（top_level.rs）
 
 ```
-delegate_stmt ::= "delegate" delegate_kind "(" expr ")" "to" ident
-
-delegate_kind ::= "view" | "mutate" | "consume"
+Item := [ 'pub' ] [ Attributes ] (
+          'comptime' 'func' FuncDef            (* :191-198 *)
+        | 'async' 'func' FuncDef               (* :199-206 *)
+        | 'func' FuncDef                       (* :207-211 *)
+        | 'module' Ident '{' { 'use' ... } Items '}'   (* :694-718，parse_module *)
+        | 'type' ... / 'newtype' ...           (* §2.1 *)
+        | 'actor' Ident [ 'runs' Ident ] '{' { Fields | Funcs } '}'   (* :611-692 *)
+        | 'const' Ident [ ':' Type ] '=' Expr ';'      (* :230-250 *)
+        | 'cap' Ident [ '+' Ident | '=' Ident { '+' Ident } ] ';'     (* :324-354 *)
+        | 'trait' Ident generics '{' { 'func' Name generics '(' Params ')' [ '->' Type ] ';' } '}'   (* :356-400 *)
+        | 'impl' generics Ident [ '<' Types '>' ] 'for' Type '{' { FuncDef } '}'    (* :402-459 *)
+        | 'unsafe' 'extern' [ '"C"' ] '{' ExternFuncs '}'      (* :265-273 *)
+        | 'extern' '"C"' 'func' FuncDef        (* Mimi → C 导出，:282-306 *)
+        | 'extern' [ '"C"' ] '{' ExternFuncs '}'  (* C → Mimi 导入，:461-609 *)
+        | 'flow' ...                          (* §6.1 *)
+        | 'protocol' ...                      (* §6.2 *)
+        | 'session' ...                       (* §6.3 *)
+)
 ```
 
-### 7.11 Pinned `[stable]`
-
-*[source: src/ast.rs:340 `Stmt::Pinned`]*
-
 ```
-pinned_stmt ::= "pinned" "(" expr ("," "timeout" "=" expr)? ")"
-                "|" ident "|" block
+FuncDef := 'func' Ident generics '(' Params ')' [ '->' Type ]
+           [ 'where' { Ident ':' Ident { '+' Ident } ',' } ]
+           [ 'with' Ident { ',' Ident } ]     (* effects，:774-786 *)
+           '{' Block '}'
+Params := { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type [ '=' Expr ] ',' }   (* :854-908 *)
 ```
 
-### 7.12 Effect and Capability Annotations `[experimental]`
+[事实] `with` 子句解析后存入 `effects: Vec<String>`（top_level.rs:775-786），checker 验证（items.rs:429-438，E0254）——零语料使用，模型为空壳（golden-document.md §4.2）。
 
-*[source: src/ast.rs:148 `FuncDef.effects`, src/ast.rs:111 `CapDef`]*
+### 6.1 Flow（top_level.rs:920-1252）
 
 ```
-func_with_effects ::= "func" ident "(" params? ")" ("->" type)?
-                      "effects" "=" "[" ident ("," ident)* "]"
-                      block
-
-cap_type  ::= "cap" ident
+Flow := 'flow' Ident generics
+        { '@sparse' | '@mailbox' ['(' ['depth' '='] Int ')'] | '@max_children' ['(' ['children' '='] Int ')'] }
+        '{'
+          { 'impl' Ident ';' }                (* :1048-1054 *)
+        | [ 'persistent' ] 'state' Ident [ '{' { Ident ':' Type ',' } '}' ] ';'   (* :1254-1287 *)
+        | 'transition' Ident '(' FromIdent [ ',' { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type } ] ')'
+          '->' Ident { '|' Ident }            (* v0.34.1：仅 `|` 多目标分隔符；`|>` 已拒绝 *)
+          [ 'fails' Type ]                    (* :1358-1364 *)
+          [ '{' Block '}' | ';' ]             (* body 为裸 block（do 包装可选）:1366-1375 *)
+        | 'fault' Type ';'                    (* per-Flow 单一 typed error，:1216-1222 *)
+        '}'
 ```
-
-**Status notes**:
-- Raw string list; no resolved effect set (05 §Phase 2): `[not-yet-implemented]`
-- Nominal, unforgeable, scope/audience-restrictable: `[experimental]`
-- Higher-order effect polymorphism: `[experimental]`
-
-## 8. 内置函数
-
-### 8.1 标准库模块
-
-| 模块 | 文件 |
-|------|------|
-| prelude | `std/prelude.mimi` |
-| io | `std/io.mimi` |
-| fs | `std/fs.mimi` |
-| strings | `std/strings.mimi` |
-| collections | `std/collections.mimi` |
-| mymath | `std/mymath.mimi` |
-| net | `std/net.mimi` |
-| maps | `std/maps.mimi` |
-| json | `std/json.mimi` |
-| time | `std/time.mimi` |
-| datetime | `std/datetime.mimi` |
-| env | `std/env.mimi` |
-| testing | `std/testing.mimi` |
-| random | `std/random.mimi` |
-| text | `std/text.mimi` |
-| result | `std/result.mimi` |
-| regex | 内置（builtins） |
-| crypto | `std/crypto.mimi` |
-| csv | `std/csv.mimi` |
-| template | `std/template.mimi` |
-| set | `std/set.mimi` |
-
-### 8.2 内置函数
 
-正则表达式（无需导入）：
+[事实] v0.34.1：`@transactional` **已拒绝**（条款 3 诊断，top_level.rs:1061-1070）；`metadata_shadow_fields`/`transactional_fields` FlowDef 字段删除（ast.rs）。`@dense` 保留（0.34.18 删除）。
+[事实] v0.34.1：`delegate` 已拒绝（条款 2 诊断）。`|>` 转移分隔符已拒绝。
+[事实] `fault Variant { ... }` 变体块语法全仓零匹配——仅 `fault Type`（golden-document.md §3.2）。
+[事实] v0.34.3：`for` 绑定为 Pattern（`for (k, v) in m` 解构；单标识符 = Pattern::Variable）——ast.rs For.var。
 
-```
-regex_match(text: string, pattern: string) -> bool
-regex_find(text: string, pattern: string) -> string
-regex_replace(text: string, pattern: string, replacement: string) -> string
-```
+### 6.2 Protocol（top_level.rs:1389-1468）
 
-目录与路径操作（v0.28.0 新增）：
-
 ```
-listdir(path: string) -> List<string>        // 列出目录内容
-walk_dir(path: string) -> List<string>       // 递归遍历所有文件
-is_dir(path: string) -> bool                 // 是否目录
-is_file(path: string) -> bool                // 是否文件
-path_join(a: string, b: string) -> string    // 路径拼接
-path_ext(path: string) -> string             // 文件扩展名（不含点）
-path_basename(path: string) -> string        // 文件名
-path_dirname(path: string) -> string         // 父目录
-mkdir_p(path: string) -> bool                // 递归创建目录
-remove_file(path: string) -> bool            // 删除文件
+Protocol := 'protocol' Ident generics '{'
+              { 'state' Ident [ '{' Ident ':' Type '}' ] ';' }   (* 单一 payload 字段 *)
+            | { 'transition' Ident '(' Ident ')' '->' Ident ';' }
+            '}'
 ```
 
-加密操作（v0.28.0 新增）：
+### 6.3 Session（top_level.rs:1476-1542）
 
 ```
-sha256(data: string) -> string               // SHA-256 哈希（hex 输出，64 字符）
-base64_encode(data: string) -> string        // Base64 编码
-base64_decode(data: string) -> Result<string, string>  // Base64 解码
+Session := 'session' Ident '=' SessionType ';'
+SessionType := '!' Type '.' SessionType      (* Send *)
+             | '?' Type '.' SessionType      (* Recv *)
+             | 'dual' '(' SessionType ')'    (* :1514-1521 *)
+             | 'end'                         (* :1522-1525 *)
+             | Ident                         (* 命名引用 *)
 ```
 
-List/Map 方法（通过隐式 trait 调用）：
+### 6.4 属性（top_level.rs:64-189）
 
 ```
-list.len() -> i32
-list.push(value)
-list.pop() -> T
-list.insert(index: i32, value)
-list.remove(index: i32) -> T
-map.keys() -> [K]
-map.values() -> [V]
+Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* Copy/Default 预留拒绝 *)
+             | '#[' 'repr' '(' ('C'|'transparent') ')' ']'
+             | '#[' 'no_panic' ']'          (* 仅 extern 块 *)
+             | '#[' 'errno' ']'             (* 仅 extern 块，SD-3 实现为扁平属性 *)
+             | '#[' 'errno' ']'             (* extern 块内 per-function，:491-514 *)
+             }
 ```
-
-## 9. 编译模式
-
-### 9.1 Production 模式 (`.mimi`)
-
-- 使用 `{ }` 大括号界定块
-- 不需要 `...` 占位符
-- 标准语法
-
-### 9.2 Sketch 模式 (`.mms`)
-
-- 使用缩进（4 空格）和 `INDENT`/`DEDENT` 界定块
-- 函数/类型头后使用 `:` 而非 `{`
-- 允许 `...` 占位符表示未实现代码
-- 用于 MimiSpec 渐进式开发
 
-### 9.3 模式关键字对应关系
+[事实] 属性约束：derive/repr 仅限 type/newtype；no_panic/errno 仅限 extern 块（top_level.rs:163-189）。
+[事实] 未知属性硬错误（top_level.rs:153-159）——PR-H2。
 
-| Production | Sketch |
-|-----------|--------|
-| `func name() { ... }` | `func name():` + 缩进体 |
-| `type Name { ... }` | `type Name:` + 缩进体 |
-| `module Name { ... }` | `module Name:` + 缩进体 |
+---
 
-## 10. 执行模型
+## 7. 与 docs/syntax-reference.md 的已知差异（golden 为准）
 
-### 10.1 三条执行路径
+| 主题 | syntax-reference.md | parser 实况 |
+|------|--------------------|-------------|
+| `pinned(timeout)` | :946 状态反转 | parser 已拒绝（条款 10） |
+| `actor runs Flow` | :849 [not-yet-implemented] | 已实现（top_level.rs:616-621） |
+| `fails E` | :803 [not-yet-implemented] | 已实现且有语料（top_level.rs:1358-1364） |
+| `do {}` | :797 [removed] | 仍在解析且是语料主流（parse_stmt.rs:121-127） |
+| `stay` | :924 [not-yet-implemented] | 已解析+求值（parse_stmt.rs:134-138） |
+| state-level `invariant` | :776 | 未实现（仅块内 invariant 子句 §4.2） |
 
-| 命令 | 处理流程 |
-|------|----------|
-| `mimi run` | 解析 → 类型检查 → 解释器执行 |
-| `mimi build` | 解析 → 类型检查 → LLVM codegen |
-| `mimi verify` | 解析 → Z3 验证（跳过 comptime 求值） |
-
-### 10.2 Comptime 执行
-
-- `comptime func` 在 `main()` 之前执行，结果缓存
-- `quote! { ... }` 仅在解释器 (`mimi run`) 中可用
-- `$(expr)` 在 quote 块中插值编译期表达式
-- Codegen (`mimi build`) 排除所有 comptime 函数
-
-### 10.3 合约验证
-
-- `requires:` / `ensures:` 在函数体顶部声明
-- `--verify-contracts` 编译为运行时断言
-- Z3 验证器操作原始 AST，不展开 comptime
-- `old(expr)` 在 ensures 中捕获函数入口值
-
-### 10.4 并发模型
-
-- `spawn` 生成异步任务，返回 Future
-- `await` 阻塞直到 Future 完成
-- `async func` 编译为状态机（poll-based）
-- `parasteps` 并行执行块内语句
-- 运行时使用协作式调度（单线程 executor）
-- **并发原语**
-  - `Mutex<T>`：`mutex_new(value)` 创建互斥锁；`mutex_lock(m)` 返回 lock token；`mutex_get(token)` / `mutex_set(token, v)` 读写受保护数据；`mutex_unlock(token)` 显式释放。
-  - 原子类型：`AtomicI32` / `AtomicI64` / `AtomicBool`，提供 `load()`、`store(v)`、`fetch_add(v)`、`compare_exchange(expected, desired)` 方法，codegen 映射到 LLVM 原子指令。
-  - `Channel<T>`：`channel_new()` 创建无界通道；`channel_send(ch, v)` 发送；`channel_recv(ch)` 接收；`channel_try_recv(ch)` 非阻塞接收。
-
-## 11. 语法约定速查表
-
-### 11.1 语句结束
-
-```
-stmt ::= ... ";"                     // 显式分号结束
-       | ... (换行于 })              // 右大括号后隐式结束
-```
-
-### 11.2 关键字是否保留
-
-所有关键字不可用作标识符（但以 `Ident` token 形式存在的 `i32`, `i64`, `f64`, `bool`, `string` 可用作类型名前缀）。
-
-### 11.3 运算符别名
-
-```
-"and"   ≡ "&&"
-"or"    ≡ "||"
-"not"   ≡ "!"
+---
 
-## 12. 已知限制
+## 附录 A：产生式坐标速查
 
-### 12.1 不支持的语法
+| 产生式 | 坐标 |
+|--------|------|
+| 二元优先级表 | parse_expr.rs:38-59 |
+| pipe desugar | parse_expr.rs:28-35 |
+| 后缀 loop（call/field/`?.`/try） | parse_expr.rs:456-531 |
+| slice/index | parse_expr.rs:588-632 |
+| f-string 插值 | parse_stmt.rs:655-777 |
+| 语句分发 | parse_stmt.rs:17-296 |
+| 块内合约子句 | parse_stmt.rs:803-861 |
+| 模式 | pattern.rs:68-220 |
+| match arms | pattern.rs:6-66 |
+| 类型 | parse_type.rs:6-387 |
+| 类型定义/union/newtype | parse_type.rs:389-610 |
+| func 签名（where/with） | top_level.rs:720-816 |
+| 泛型参数 | top_level.rs:818-852 |
+| 参数（view/mutate/默认值） | top_level.rs:854-908 |
+| flow 定义 | top_level.rs:920-1252 |
+| transition 定义 | top_level.rs:1289-1387 |
+| 属性 | top_level.rs:64-189 |
+| extern 块 | top_level.rs:461-609 |
+| actor | top_level.rs:611-692 |
+| protocol | top_level.rs:1389-1468 |
+| session | top_level.rs:1476-1542 |
+| 关键字表 | keywords.rs:102-194 |
 
-| 语法 | 状态 | 替代方案 |
-|------|------|---------|
-| 嵌套 tuple 访问 `t.1.1` | ❌ 不支持 | 用解构 `let (a, b) = t; let (c, d) = b; d` |
-| `comptime func` 多重闭包依 | ⬜ 参考 | actor mailbox 替代 |
+---
 
 ### 12.2 Codegen 状态对照
 
@@ -1161,3 +421,5 @@ stmt ::= ... ";"                     // 显式分号结束
 | ast_eval(ast) | ✅ | ❌ | 仅在 interp 路径实现 |
 | comptime func / quote! | ✅ | ❌ | 仅解释器求值；codegen 静默跳过 |
 ```
+
+
