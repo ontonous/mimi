@@ -20,7 +20,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut free_vars = BTreeMap::new();
         self.collect_free_vars(body, &param_names, vars, &mut free_vars);
 
-        let ret_type = lambda_ret_type(self.context, ret);
+        let ret_type = self.lambda_ret_type(ret);
         let param_types_llvm = self.lambda_param_types(params);
         let fn_type = lambda_fn_type(self.context, ret_type, &param_types_llvm);
 
@@ -552,16 +552,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         result
     }
-}
 
-pub(in crate::codegen) fn lambda_ret_type<'ctx>(
-    context: &'ctx inkwell::context::Context,
-    ret: &Option<Type>,
-) -> BasicTypeEnum<'ctx> {
-    match ret {
-        Some(ty) => types::mimi_type_to_llvm(context, ty)
-            .unwrap_or(BasicTypeEnum::IntType(context.i64_type())),
-        None => BasicTypeEnum::IntType(context.i64_type()),
+    /// Determine the LLVM return type for a lambda function. Uses
+    /// `self.llvm_type_for` (which consults `type_llvm`) so user-defined custom
+    /// enums/records resolve to their real layout (e.g. a custom enum →
+    /// `{i32 tag, i64 payload}`) instead of the standalone `mimi_type_to_llvm`
+    /// fallback that maps unknown names to `i64`. Without this, a lambda
+    /// declared `-> Shape` is compiled as `define i64` while its body returns
+    /// the `{i32,i64}` ctor result — a signature/body mismatch that miscompiles
+    /// the closure call and the subsequent match.
+    pub(in crate::codegen) fn lambda_ret_type(&self, ret: &Option<Type>) -> BasicTypeEnum<'ctx> {
+        match ret {
+            Some(ty) => self
+                .llvm_type_for(ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
+            None => BasicTypeEnum::IntType(self.context.i64_type()),
+        }
     }
 }
 

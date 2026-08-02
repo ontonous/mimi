@@ -42,7 +42,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .var_types
                             .get(name.as_str())
                             .and_then(|ty| Self::closure_return_llvm_type(self, ty));
-                        return self.compile_closure_call(closure_val, &compiled_args, ret_ty);
+                        let result =
+                            self.compile_closure_call(closure_val, &compiled_args, ret_ty)?;
+                        // L6: when the closure returns a custom enum, register its
+                        // payload box for a tag-conditional free at this (caller)
+                        // scope exit. The lambda claimed the box on return
+                        // (claim_returned_enum_box) — ownership transfers here,
+                        // mirroring named-function calls. The closure's declared
+                        // return type comes from its Func type in var_types.
+                        let closure_ret_ast =
+                            self.var_types
+                                .get(name.as_str())
+                                .and_then(|ty| match ty.unlocated() {
+                                    Type::Func(_, ret) | Type::ExternFunc(_, ret) => {
+                                        Some(ret.as_ref().clone())
+                                    }
+                                    _ => None,
+                                });
+                        return self.register_enum_box_for_return(closure_ret_ast.as_ref(), result);
                     }
                 }
 
@@ -6973,6 +6990,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .func_defs
             .get(callee_name)
             .and_then(|fd| fd.ret.as_ref());
+        self.register_enum_box_for_return(ret_ty, result)
+    }
+
+    /// L6: register a returned custom-enum payload box for a tag-conditional
+    /// free at the caller's scope exit, given the callee's return-type AST.
+    /// Shared by named-function calls (`track_enum_box_return_lifetime`, which
+    /// looks the return type up in `func_defs`) and closure calls (which pass
+    /// the closure's declared return type directly). Non-enum return types
+    /// (records, primitives, built-in Option/Result) pass through unchanged —
+    /// `boxed_ordinals_for_return_type` returns `None` for them so a
+    /// `{i32, i64}`-shaped record is never mistaken for an enum box carrier.
+    pub(in crate::codegen) fn register_enum_box_for_return(
+        &self,
+        ret_ty: Option<&crate::ast::Type>,
+        result: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let Some(boxed_ordinals) = self.boxed_ordinals_for_return_type(ret_ty) else {
             return Ok(result);
         };
