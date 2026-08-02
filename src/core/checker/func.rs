@@ -152,12 +152,8 @@ impl<'a> Checker<'a> {
         if func.is_comptime {
             self.in_comptime = true;
         }
-        // Make function's own effects available in its body
-        let mut effects_scope = HashMap::new();
-        for effect in &func.effects {
-            effects_scope.insert(effect.clone(), true);
-        }
-        self.available_effects.push(effects_scope);
+        // v0.34.18c (§4.2): the `with` effect clause is abolished — no effects
+        // scope is pushed for the function body.
         // Check all-return-paths requirement
         if !matches!(ret.unlocated(), Type::Name(n, _) if n == "unit")
             && !self.block_returns_on_all_paths(&func.body)
@@ -214,7 +210,6 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        self.available_effects.pop();
         self.var_scopes.pop();
         self.finish_expression_type_capture();
         self.current_ret = None;

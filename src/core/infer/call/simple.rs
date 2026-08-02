@@ -2521,20 +2521,9 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            // Check effects
-            if let Some(required_effects) = self.func_effects.get(name).cloned() {
-                for effect in &required_effects {
-                    if !self.has_effect(effect) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0254,
-                            format!(
-                                "effect '{}' required by function '{}' is not available in current scope",
-                                effect, name
-                            ),
-                        );
-                    }
-                }
-            }
+            // v0.34.18c (§4.2): the `with` effect clause is abolished; the former
+            // E0254 call-site effect-availability check (func_effects + has_effect)
+            // is removed. Side-effect obligations are contracts + capability tokens.
         }
         ret
     }

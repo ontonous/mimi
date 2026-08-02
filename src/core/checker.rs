@@ -28,11 +28,9 @@ pub(crate) struct Checker<'a> {
     /// Track where clauses for functions: func_name -> [(type_param, bounds), ...]
     /// CK-H6: store ALL type-param bounds (not a single overwritten entry).
     pub(crate) where_clauses: HashMap<String, Vec<(String, Vec<String>)>>,
-    /// Track effects for functions: func_name -> list of effect names
-    pub(crate) func_effects: HashMap<String, Vec<String>>,
-    /// Track available effects in current scope
-    pub(crate) available_effects: Vec<HashMap<String, bool>>,
-    /// Track declared capability names for cross-validation of `with` clauses
+    /// Track declared capability names (`cap X;`). Capability tokens are a core
+    /// linear feature (E0256); they remain after the `with` effect clause was
+    /// abolished (§4.2). No longer used to cross-validate `with` clauses.
     pub(crate) declared_caps: HashSet<String>,
     /// Strict mode: enforce $$ lock semantics
     pub(crate) strict: bool,
@@ -234,8 +232,6 @@ impl<'a> Checker<'a> {
             trait_generics: HashMap::new(),
             impls: HashMap::new(),
             where_clauses: HashMap::new(),
-            func_effects: HashMap::new(),
-            available_effects: vec![HashMap::new()],
             declared_caps: HashSet::new(),
             strict: false,
             var_scopes: vec![HashMap::new()],

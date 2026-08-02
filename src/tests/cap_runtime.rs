@@ -54,28 +54,17 @@ func main() -> i32 {
     assert_eq!(run_source(src), interp::Value::Int(42));
 }
 
-#[test]
-fn cap_in_function_with_effect() {
-    let src = r#"
-cap FileRead;
-
-func read(path: string) with FileRead {
-    println(path);
-}
-
-func main() -> i32 {
-    42
-}
-"#;
-    let result = check_source(src);
-    assert!(result.is_ok());
-}
+// 0.34.18c (§4.2): cap_in_function_with_effect removed — it tested that a
+// function may declare `with Cap`, but the `with` effect clause is abolished.
+// cap_declaration covers cap declaration.
 
 #[test]
 fn cap_closure_consume() {
+    // 0.34.18c (§4.2): `with IO` effect clause removed from use_io; the test
+    // keeps its real subject — closure consumption.
     let src = r#"
 cap IO;
-func use_io(f: i32) with IO { println(f) }
+func use_io(f: i32) { println(f) }
 func main() -> i32 {
     let runner = fn(x: i32) -> i32 { println(x); x };
     runner(42)

@@ -771,19 +771,22 @@ impl Parser {
             self.expect(TokenKind::Colon, "`:`")?;
             self.skip_newlines();
         }
-        // Parse effects if present: with Effect1, Effect2
-        let effects = if self.at(&TokenKind::With) {
-            self.advance();
-            let mut effects = Vec::new();
-            effects.push(self.expect_ident()?);
-            while self.at(&TokenKind::Comma) {
-                self.advance();
-                effects.push(self.expect_ident()?);
-            }
-            effects
-        } else {
-            Vec::new()
-        };
+        // v0.34.18c (§4.2 ruling): the `with` effect clause is abolished. Effect
+        // annotations guaranteed nothing (a parseable but unenforced model) and
+        // duplicate contracts. `with` stays a reserved keyword (good error here).
+        if self.at(&TokenKind::With) {
+            let tok = self.peek();
+            return Err(ParseError::new(
+                "the `with` effect clause was abolished (0.34 architecture ruling §4.2): \
+                 effect annotations guaranteed nothing and duplicate contracts. Remove `with ...`. \
+                 Side-effect obligations are expressed by contracts (requires/ensures) and \
+                 capability tokens (cap); `with` remains a reserved keyword."
+                    .to_string(),
+                tok.line,
+                tok.col,
+            ));
+        }
+        let effects: Vec<String> = Vec::new();
         self.expect_block_start("function body")?;
         let body = self.parse_block()?;
         // 0.31.19 追加 B: O(1) contract flags — scan once at parse time

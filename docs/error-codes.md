@@ -121,7 +121,7 @@
 | E0251 | pattern mismatch |
 | E0252 | missing method in trait impl |
 | E0253 | where constraint violated |
-| E0254 | effect not available |
+| E0254 | retired | effect not available — abolished with the `with` effect clause (0.34.18c, §4.2 ruling); code never reused |
 | E0255 | function does not return on all paths (deprecated: use E0235) |
 | E0256 | linear capability not consumed |
 | E0257 | function argument count mismatch |
