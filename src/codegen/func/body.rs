@@ -548,7 +548,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: BasicValueEnum<'ctx>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
-        let obj_val = self.compile_expr(obj, vars)?;
+        // v0.34.13: `mutate` borrow params (vars entry = (param_ptr_as_alloca,
+        // List StructType)) compile to a loaded List struct value, not a list
+        // pointer. Fall back to the place-address path only when the plain
+        // expression compile does NOT yield a list pointer — ordinary locals
+        // and parasteps-captured lists keep their existing codegen path
+        // (compile_place_addr's branch-splitting bounds check would otherwise
+        // change block layout for them).
+        let mut obj_val = self.compile_expr(obj, vars)?;
+        if !matches!(obj_val, BasicValueEnum::PointerValue(_)) {
+            if let Ok((ptr, _)) = self.compile_place_addr(obj, vars) {
+                obj_val = BasicValueEnum::PointerValue(ptr);
+            }
+        }
         let idx_val = self.compile_expr(idx, vars)?;
         let idx_iv = match idx_val {
             BasicValueEnum::IntValue(iv) => iv,

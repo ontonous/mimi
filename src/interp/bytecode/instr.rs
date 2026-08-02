@@ -336,6 +336,16 @@ pub enum Op {
         regs_base: Reg,
         count: u16,
     },
+    /// v0.34.13: mutate writeback targets that are record FIELDS of the
+    /// caller (payload member-level borrow, clause 6). `count` targets, each
+    /// occupying 2 registers at [regs_base ..): (obj_reg, field_const_idx).
+    /// On callee Ret, the final parameter value is RecordSet into
+    /// caller.regs[obj_reg] at field — writes `mutate self.field` back to
+    /// the payload slot (golden §3.3; previously silently dropped).
+    MutateSetupField {
+        regs_base: Reg,
+        count: u16,
+    },
     /// Call builtin: rd = builtin[idx](args[0..argc])
     CallBuiltin {
         rd: Reg,
