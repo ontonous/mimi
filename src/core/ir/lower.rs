@@ -1339,6 +1339,12 @@ impl BodyLowerer<'_> {
                     }
                 }
             }
+            Expr::Binary(op, left, right) if matches!(op, BinOp::Range) => {
+                ResolvedExprKind::Range {
+                    start: Box::new(self.lower_expr(left, &format!("{role}.start"))?),
+                    end: Box::new(self.lower_expr(right, &format!("{role}.end"))?),
+                }
+            }
             Expr::Binary(op, left, right) => ResolvedExprKind::Binary {
                 op: self.lower_binary(&node_id, *op)?,
                 left: Box::new(self.lower_expr(left, &format!("{role}.left"))?),
@@ -4474,10 +4480,9 @@ impl BodyLowerer<'_> {
             BinOp::Shl => ResolvedBinaryOp::ShiftLeft,
             BinOp::Shr => ResolvedBinaryOp::ShiftRight,
             BinOp::Range => {
-                return Err(vec![ResolvedBodyError::new(
-                    node_id.clone(),
-                    "binary sugar `..` is not supported in resolved IR lowering",
-                )]);
+                // unreachable: lower_expr special-cases BinOp::Range before
+                // calling lower_binary. Kept exhaustive for the enum.
+                unreachable!("BinOp::Range is lowered by lower_expr, not lower_binary")
             }
         })
     }
@@ -4557,6 +4562,70 @@ impl BodyLowerer<'_> {
     ) -> Result<CheckedConversion, Vec<ResolvedBodyError>> {
         if from == to {
             return self.identity_conversion(node_id, from, to);
+        }
+        // Transparent containers (Option/List/Set) with structurally identical
+        // payloads resolve to distinct ids when the payload is an aliased
+        // nominal: `Some(p)` / `[(1,2), (3,4)]` against declared `Option<Pair>` /
+        // `List<Pair>` produce Tuple payloads on the constructor side and
+        // Nominal("Pair") on the annotation side (interning is not
+        // canonicalized across callsites). Unwrap aliases on both sides and
+        // admit an identity conversion when the shapes agree (0.34.19
+        // CHECKER-GAP).
+        let container_payloads = match (self.types.get(from), self.types.get(to)) {
+            (
+                Some(ResolvedType::Option(from_inner)),
+                Some(ResolvedType::Option(to_inner)),
+            ) => Some((from_inner, to_inner)),
+            (
+                Some(ResolvedType::Nominal {
+                    item: from_item,
+                    arguments: from_args,
+                    ..
+                }),
+                Some(ResolvedType::Nominal {
+                    item: to_item,
+                    arguments: to_args,
+                    ..
+                }),
+            ) if from_item == to_item
+                && matches!(
+                    from_item.as_str(),
+                    "builtin:type:List" | "builtin:type:Set"
+                )
+                && from_args.len() == 1
+                && to_args.len() == 1 =>
+            {
+                Some((&from_args[0], &to_args[0]))
+            }
+            _ => None,
+        };
+        if let Some((from_inner, to_inner)) = container_payloads {
+            let payload_match = if from_inner == to_inner {
+                true
+            } else {
+                let from_eff = self
+                    .instantiated_type_target(node_id, from_inner)
+                    .ok()
+                    .flatten()
+                    .map(|(_, target)| target)
+                    .unwrap_or_else(|| from_inner.clone());
+                let to_eff = self
+                    .instantiated_type_target(node_id, to_inner)
+                    .ok()
+                    .flatten()
+                    .map(|(_, target)| target)
+                    .unwrap_or_else(|| to_inner.clone());
+                from_eff == to_eff || self.types.get(&from_eff) == self.types.get(&to_eff)
+            };
+            if payload_match {
+                // identity_conversion() would reject the distinct ids; the
+                // conversion is still content-identity for transparent wrappers.
+                return Ok(CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
         }
         if matches!(
             (self.types.get(from), self.types.get(to)),

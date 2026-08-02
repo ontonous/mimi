@@ -786,8 +786,7 @@ fn dual_for_range() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: typed body lowering does not support binary sugar (for range)
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let mut s = 0
@@ -804,8 +803,7 @@ fn dual_for_track() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: typed body lowering does not support binary sugar (for track)
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let mut s = 0
@@ -900,13 +898,24 @@ fn dual_let_simple() {
 
 #[test]
 fn dual_let_shadow() {
-    if !can_link() {
-        return;
-    }
-    // CHECKER-GAP: checker rejects variable shadowing (E0403)
-    dual_assert_soft!(
-        "func main() -> i32 { let x = 1; let x = x + 10; println(x); 0 }",
-        "11"
+    // Same-scope variable rebinding is statically rejected by the language
+    // contract (E0403, "rename the variable or use assignment to update").
+    // The interpreter and codegen would happily run it, but the checker must
+    // reject it — this is a test-vs-contract mismatch, not a checker gap.
+    // Adjudicated during 0.34.19 CHECKER-GAP review: shadowing is a nested-
+    // scope feature only (see dual_block_expr); same-scope rebinding stays
+    // an L2 error. The dual-backend behaviors are therefore not load-bearing
+    // here — the negative gate is the contract.
+    let diags = check_source("func main() -> i32 { let x = 1; let x = x + 10; println(x); 0 }")
+        .expect_err("same-scope rebinding must be rejected (E0403)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0403"),
+        "expected E0403 diagnostic, got:\n{rendered}"
     );
 }
 
@@ -926,9 +935,9 @@ fn dual_block_expr() {
     if !can_link() {
         return;
     }
-    // Use a closure to create an inner scope
-    // CHECKER-GAP: checker rejects variable shadowing in closure scope (E0403)
-    dual_assert_soft!(
+    // Use a closure to create an inner scope. Shadowing across a lexical
+    // scope boundary is legal (E0403 only forbids same-scope rebinding).
+    dual_assert!(
         r#"
         func main() -> i32 {
             let x = 1
@@ -7871,8 +7880,7 @@ fn dual_option_list_pair_alias() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: Option implicit conversion not resolved
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         type Pair = (i32, i32)
         func main() -> i32 {
@@ -10594,8 +10602,7 @@ fn dual_multiline_slice() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: slice expression typed as [List<i32>] not List<i32> (E0242)
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let xs = [1, 2, 3, 4, 5]
@@ -10775,8 +10782,7 @@ fn dual_atomic_bool_load_store() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: atomic_bool_load returns i64, not bool (E0205)
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let c = atomic_bool_new(true)
@@ -11024,8 +11030,7 @@ fn dual_comptime_block_let() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: comptime block let bindings not resolved (E0400)
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let v = comptime {

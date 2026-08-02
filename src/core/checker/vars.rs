@@ -109,6 +109,13 @@ impl<'a> Checker<'a> {
         if let Some(const_ty) = self.const_types.get(name) {
             return self.unification.resolve(const_ty);
         }
+        // Capability name used as a value: `let c = FullAccess`. Both simple
+        // (`cap FileReadCap;`) and combined-alias caps (`cap FullAccess = A + B`)
+        // resolve here; `split()`/`drop()` dispatch on the Cap type
+        // (0.34.19 CHECKER-GAP: aliases were declared but never resolvable).
+        if self.declared_caps.contains(name) {
+            return Type::Cap(name.to_string());
+        }
         // Built-in bare None constructor (only if no user-defined None variant exists).
         // IF-C2: use a fresh TypeVar (not Type::Infer). Infer is an escape hatch that
         // unifies with anything, so `let a = None; let b: Option<string> = a` would

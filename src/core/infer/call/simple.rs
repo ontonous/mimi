@@ -1107,8 +1107,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i32".into(), vec![]);
             }
-            "atomic_i64_load" | "atomic_bool_load" | "mutex_get" | "channel_recv"
-            | "channel_try_recv" => {
+            "atomic_i64_load" | "mutex_get" | "channel_recv" | "channel_try_recv" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -1118,6 +1117,21 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[0], scopes);
                 }
                 return Type::Name("i64".into(), vec![]);
+            }
+            // atomic_bool_load yields the loaded boolean (i1 on the codegen
+            // side), not i64. Previously grouped with the i64 loads, producing
+            // "condition must be bool, found i64" on `if atomic_bool_load(c)`
+            // (0.34.19 CHECKER-GAP E0205).
+            "atomic_bool_load" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{} expects 1 argument", name),
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
             }
             "atomic_i32_store"
             | "atomic_i64_store"

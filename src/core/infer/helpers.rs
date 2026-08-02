@@ -270,6 +270,19 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // A List/string slice yields a value of the *same container kind* as the
+        // target, not a fixed-length Array-style Slice. `xs[1..3]` on List<i32>
+        // is List<i32> (len/iteration/append all keep working); previously the
+        // result was typed `Slice`, which `len` and friends rejected
+        // ("len expects List/string/Map/Set, found [List<i32>]", 0.34.19
+        // CHECKER-GAP E0242). Array and TypeVar targets stay Slice-typed.
+        match target_ty.unlocated() {
+            Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                return Type::Name("List".into(), vec![args[0].clone()]);
+            }
+            Type::Name(n, _) if n == "string" => return Type::Name("string".into(), vec![]),
+            _ => {}
+        }
         Type::Slice(Box::new(target_ty))
     }
 
