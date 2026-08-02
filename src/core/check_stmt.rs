@@ -165,11 +165,7 @@ impl<'a> Checker<'a> {
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis
-            | Stmt::Stay
             | Stmt::Pinned { .. } => {}
-            Stmt::Become(e) => {
-                self.check_expr_parasteps_safe(e, scopes);
-            }
             Stmt::Do(body) => {
                 for s in body {
                     self.check_stmt_parasteps_safe(s, scopes);
@@ -304,11 +300,7 @@ impl<'a> Checker<'a> {
             | Stmt::Desc(..)
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
-            | Stmt::Stay
             | Stmt::Ellipsis => {}
-            Stmt::Become(e) => {
-                self.collect_shared_writes_in_expr(e, scopes, writes);
-            }
             Stmt::Do(body) => {
                 for s in body {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
@@ -1763,40 +1755,6 @@ impl<'a> Checker<'a> {
                 }
                 self.check_block(body, ret, &mut inner_scopes);
                 self.in_pinned_depth = self.in_pinned_depth.saturating_sub(1);
-            }
-            Stmt::Become(e) => {
-                // FLOW-TURN-001: `become Target { ... }` is an explicit transition
-                // terminal equivalent to `return Target { ... }`.
-                let ty = self.infer_expr(e, scopes);
-                // Skip type check for multi-target transitions where ret is unit
-                // (the actual target is determined at runtime by the become expression).
-                let is_multi_target = matches!(ret.unlocated(), Type::Name(n, _) if n == "unit");
-                if !is_multi_target && self.unification.unify(&ty, ret).is_err() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0209,
-                        format!(
-                            "become expression type `{:?}` does not match transition target `{:?}`",
-                            ty, ret
-                        ),
-                    );
-                }
-            }
-            Stmt::Stay => {
-                // FLOW-TURN-001: `stay` returns the source state unchanged.
-                // Validate that the source type (self) unifies with the return
-                // type — i.e., the transition declares the source as a valid target.
-                if let Some(self_ty) = scopes.last().and_then(|s| s.get("self")).cloned() {
-                    if self.unification.unify(&self_ty, ret).is_err() {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0209,
-                            format!(
-                                "stay requires the source state `{:?}` to be a valid target, \
-                                 but the transition returns `{:?}`",
-                                self_ty, ret
-                            ),
-                        );
-                    }
-                }
             }
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }

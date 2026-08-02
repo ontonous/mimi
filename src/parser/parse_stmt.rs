@@ -128,17 +128,6 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::Do(body))
             }
-            TokenKind::Become => {
-                self.advance();
-                let expr = self.parse_expr(0)?;
-                self.match_semi();
-                Ok(Stmt::Become(expr))
-            }
-            TokenKind::Stay => {
-                self.advance();
-                self.match_semi();
-                Ok(Stmt::Stay)
-            }
             TokenKind::Delegate => {
                 // v0.34.1: `delegate` abolished by amendment clause 2 (no nested
                 // Flow delegation). Reject with a clause-referencing diagnostic.

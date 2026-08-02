@@ -17,7 +17,7 @@
 > | §6.1 `LANG-FUNCTION-001` | `func(T)->U` **removed**，迁移到 `fn(T)->U` | `func(T)->U` 仍解析（parse_type.rs:213-237）；`fn` 仅限闭包表达式与 `extern "C" fn(...)` 类型（parse_type.rs:242） | ✅ ADR-003 裁决：保留现状，spec 修正（0.34.4） |
 > | §3.12 `FLOW-FAULT-001` | fault 变体块 `fault F { A \| B }` + `fault Variant(...)` terminal + `reset`/`recover` 语句 | 仅 `fault ErrorType`（top_level.rs:1216-1222）；变体块语法全仓零匹配；reset/recover 仅系统注入 transition 名 | 收缩到现实（golden §3.2，spec 改由实现驱动） |
 > | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | 0.34.1 删除（golden §1.1） |
-> | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | 随 ADR-001 终止符裁决一并处理（golden §1.2） |
+> | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | ✅ ADR-001 实施（0.34.11）：`become`/`stay` 均删除，唯一终止符 `return S{}`（golden §1.2） |
 
 Normative requirements use stable IDs defined in `docs/language-requirements.toml`. Design rationale lives in `devdocs/pre-1.0/`; implementation structure and progress live in `docs/ast-appendix.md` and `docs/language-support.toml`. Parser acceptance and an existing implementation do not grant stable status.
 
@@ -141,7 +141,7 @@ Different constructs must not compete for the same responsibility. For example, 
 - Transition consumes the old state; the old state cannot be used after transition.
 - Self-loops also produce a new state generation; old aliases cannot be retained.
 - Multi-target transitions must preserve runtime state tag. `[experimental]`
-- Each transition turn must end with exactly one of: `become`, `stay`, typed `fault`, or rollback failure.
+- Each transition turn must end with exactly one of: `return Target { ... }`, typed `fault`, or rollback failure.
 - State commit is atomic; failure must not leave a half-updated payload.
 
 ### 2.2 Compilation Invariants `[stable]`
@@ -257,12 +257,16 @@ acquire source generation
   -> atomically publish target generation
 ```
 
-Terminal actions are exactly four kinds:
+Terminal actions are exactly three kinds:
 
-- `become Target { ... }`: commit new state;
-- `stay { ... }`: commit same-named state with new generation;
+- `return Target { ... }`: commit new state;
 - `fault FaultVariant(...)`: commit typed Fault;
 - Rollback failure: no new state committed; caller regains original source generation and typed error.
+
+> v0.34.11 (ADR-001): `return State { ... }` is the **unique** transition
+> terminal. `become`/`stay` were removed — a self-loop is written as an
+> explicit `return SourceState { ... }`. A `fault` terminal is spelled with
+> the `?` operator (rollback path) or an explicit `fault` expression.
 
 Rollback failure conceptually is `Rejected { source: Flow@Source, error: E }`. Transition signature must declare `E`; `?` in body can only enter this path. It does not implicitly enter Fault, exit the process, or discard Source.
 
@@ -664,7 +668,7 @@ Boundary error escalation to Fault is explicitly decided by Flow strategy. Compi
 
 - `defer`: execute cleanup whether scope exits normally or abnormally;
 - `defer failure`: execute compensation only when scope exits with `Err`, Fault absorption, or panic;
-- Transition rollback failure is a failure exit; `become`/`stay` is not;
+- Transition rollback failure is a failure exit; a `return Target { ... }` terminal is not;
 - Ordinary `return Ok(...)` does not trigger failure-only compensation;
 - `break`/`continue` trigger rules explicitly defined by lexical scope;
 - Compensation failure must aggregate as typed error or secondary Fault; must not overwrite original failure.
@@ -1039,11 +1043,14 @@ transition ship(Paid) -> Shipped
     fails TrackingError
 {
     let tracking = allocate_tracking()?
-    become Shipped { tracking }
+    return Shipped { tracking }
 }
 ```
 
 If body uses `?`, signature must declare rollback failure error type; failure returns source generation.
+
+> v0.34.11 (ADR-001): the terminal above is spelled `return Shipped { ... }`
+> (`become` removed). Self-loops spell `return SourceState { ... }` explicitly.
 
 ### 6.8 Contracts: requires, ensures, invariant, math `[stable]`
 #### Function-exclusive structure

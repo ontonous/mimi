@@ -473,32 +473,6 @@ impl<'a> Lowerer<'a> {
                 self.point(&current, meta, CfgPointKind::Statement, "stmt.noop");
                 Some(current)
             }
-            Stmt::Stay => {
-                // FLOW-TURN-001: `stay` is a terminal (returns source state).
-                self.point(&current, meta, CfgPointKind::ResourceAction, "stmt.stay");
-                self.terminate(
-                    &current,
-                    Terminator::Return {
-                        value: None,
-                        implicit: false,
-                    },
-                );
-                None
-            }
-            Stmt::Become(expr) => {
-                let current = self
-                    .lower_expr(expr, current, &format!("{role}.become"))
-                    .unwrap_or_else(|| self.new_block(meta, "unreachable.become"));
-                self.point(&current, meta, CfgPointKind::ResourceAction, "stmt.become");
-                self.terminate(
-                    &current,
-                    Terminator::Return {
-                        value: None,
-                        implicit: false,
-                    },
-                );
-                None
-            }
         }
     }
 
