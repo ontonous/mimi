@@ -101,12 +101,42 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("connect: fd must be i32"))? as i32;
+    // dup2(new_fd, fd) below silently closes and replaces any already-open fd.
+    // Guard: fd must be a live socket we are allowed to take over. In
+    // particular 0/1/2 (stdin/stdout/stderr) and arbitrary files must not be
+    // silently hijacked (which would even redirect stdio).
+    if fd <= 2 {
+        return Err(InterpError::new(format!(
+            "connect: fd={} would replace a standard stream (0/1/2); pass a socket() fd",
+            fd
+        )));
+    }
+    let mut so_type: libc::c_int = 0;
+    let mut so_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let is_socket = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut so_type as *mut _ as *mut libc::c_void,
+            &mut so_len,
+        ) == 0
+    };
+    if !is_socket {
+        return Err(InterpError::new(format!(
+            "connect: fd={} is not an open socket; pass a socket() fd",
+            fd
+        )));
+    }
     let host = args[1]
         .as_string()
         .ok_or_else(|| InterpError::new("connect: host must be string"))?;
     let port = args[2]
         .as_int()
         .ok_or_else(|| InterpError::new("connect: port must be i32"))?;
+    if !(0..=65535).contains(&port) {
+        return Err(InterpError::new("connect: port must be in range 0-65535"));
+    }
     let c_host = std::ffi::CString::new(host)
         .map_err(|e| InterpError::new(format!("connect: invalid host: {}", e)))?;
     let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
@@ -281,9 +311,6 @@ fn builtin_recv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
         return Ok(Value::String(String::new()));
     }
     let n = n as usize;
-    if n > buf.len() {
-        return Ok(Value::String(String::new()));
-    }
     buf.truncate(n);
     Ok(Value::String(String::from_utf8_lossy(&buf).to_string()))
 }
@@ -390,7 +417,14 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
 
 fn validate_http_url(url: &str) -> Result<(), InterpError> {
     let lower = url.to_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("http://") {
+    if lower.starts_with("https://") {
+        // TLS is not implemented; accepting https:// here would be a false
+        // promise (the connection below would always fail or be misparsed).
+        return Err(InterpError::new(
+            "http_get/http_post: https:// is not supported (no TLS); use http://",
+        ));
+    }
+    if lower.starts_with("http://") {
         return Ok(());
     }
     if lower.contains("://") {
@@ -399,6 +433,68 @@ fn validate_http_url(url: &str) -> Result<(), InterpError> {
         ));
     }
     Ok(())
+}
+
+/// Split a validated http:// URL into (host, port), enforcing the port range.
+/// IPv6 literals use the [addr]:port form (bare "::1" would be misparsed by
+/// the ':' split) — same rules as the runtime `parse_http_url`.
+fn http_split_host_port(host: &str) -> Result<(&str, i64), InterpError> {
+    if host.contains('[') || host.contains(']') {
+        // IPv6 literal: [addr] or [addr]:port
+        let close = host
+            .find(']')
+            .ok_or_else(|| InterpError::new("http_get/http_post: unterminated '[' in host"))?;
+        if !host.starts_with('[') || host[..close].contains('[') {
+            return Err(InterpError::new(
+                "http_get/http_post: invalid IPv6 host literal",
+            ));
+        }
+        let addr = &host[1..close];
+        if addr.is_empty() {
+            return Err(InterpError::new(
+                "http_get/http_post: empty IPv6 host literal",
+            ));
+        }
+        let after = &host[close + 1..];
+        let port = if after.is_empty() {
+            80
+        } else if let Some(p) = after.strip_prefix(':') {
+            p.parse()
+                .map_err(|_| InterpError::new("http_get/http_post: invalid port"))?
+        } else {
+            return Err(InterpError::new(
+                "http_get/http_post: invalid IPv6 host suffix (expected [addr]:port)",
+            ));
+        };
+        if !(0..=65535).contains(&port) {
+            return Err(InterpError::new(
+                "http_get/http_post: port must be in range 0-65535",
+            ));
+        }
+        return Ok((addr, port));
+    }
+    if host.matches(':').count() > 1 {
+        return Err(InterpError::new(
+            "http_get/http_post: bare IPv6 hosts are not supported (use [addr]:port form)",
+        ));
+    }
+    let (host, port) = if let Some((h, p)) = host.split_once(':') {
+        let port: i64 = p
+            .parse()
+            .map_err(|_| InterpError::new("http_get/http_post: invalid port"))?;
+        if !(0..=65535).contains(&port) {
+            return Err(InterpError::new(
+                "http_get/http_post: port must be in range 0-65535",
+            ));
+        }
+        (h, port)
+    } else {
+        (host, 80)
+    };
+    if host.is_empty() {
+        return Err(InterpError::new("http_get/http_post: empty host"));
+    }
+    Ok((host, port))
 }
 
 fn validate_host_ssrf(host: &str) -> Result<(), InterpError> {
@@ -439,14 +535,7 @@ fn builtin_http_get(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     } else {
         &format!("/{}", rest)
     };
-    let (host, port) = if let Some((h, p)) = host.split_once(':') {
-        let port: i64 = p
-            .parse()
-            .map_err(|_| InterpError::new("http_get: invalid port"))?;
-        (h, port)
-    } else {
-        (host, 80)
-    };
+    let (host, port) = http_split_host_port(host)?;
     validate_host_ssrf(host)?;
     let fd = http_connect(host, port)?;
     let request = format!(
@@ -476,14 +565,7 @@ fn builtin_http_post(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     } else {
         &format!("/{}", rest)
     };
-    let (host, port) = if let Some((h, p)) = host.split_once(':') {
-        let port: i64 = p
-            .parse()
-            .map_err(|_| InterpError::new("http_post: invalid port"))?;
-        (h, port)
-    } else {
-        (host, 80)
-    };
+    let (host, port) = http_split_host_port(host)?;
     validate_host_ssrf(host)?;
     let fd = http_connect(host, port)?;
     let request = format!(

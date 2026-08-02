@@ -971,6 +971,25 @@ fn builtin_json_array_length(
 
 // ── Regex extended ──────────────────────────────────────
 
+/// Escape a string for embedding in a JSON string literal.
+/// Complete escaping (\n \r \t \uXXXX for control chars) so the result is
+/// valid JSON — same rules as read_lines_json below.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(text), Value::String(pattern)) => {
@@ -982,7 +1001,7 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
                 .enumerate()
                 .map(|(i, m)| {
                     if i > 0 { "," } else { "" }.to_string()
-                        + &format!("\"{}\"", m.replace('\\', "\\\\").replace('"', "\\\""))
+                        + &format!("\"{}\"", escape_json_string(m))
                 })
                 .collect::<String>();
             Ok(Value::String(format!("[{}]", json)))
@@ -1348,17 +1367,7 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
         }
         first = false;
         result.push('"');
-        for ch in line.chars() {
-            match ch {
-                '"' => result.push_str("\\\""),
-                '\\' => result.push_str("\\\\"),
-                '\n' => result.push_str("\\n"),
-                '\r' => result.push_str("\\r"),
-                '\t' => result.push_str("\\t"),
-                c if c < '\x20' => result.push_str(&format!("\\u{:04x}", c as u32)),
-                c => result.push(c),
-            }
-        }
+        result.push_str(&escape_json_string(&line));
         result.push('"');
     }
     result.push(']');
@@ -1386,7 +1395,7 @@ fn builtin_regex_capture_groups(
                         .enumerate()
                         .map(|(i, g)| {
                             if i > 0 { "," } else { "" }.to_string()
-                                + &format!("\"{}\"", g.replace('\\', "\\\\").replace('"', "\\\""))
+                                + &format!("\"{}\"", escape_json_string(g))
                         })
                         .collect::<String>();
                     Ok(Value::String(format!("[{}]", json)))
@@ -1569,5 +1578,5 @@ fn builtin_ast_eval(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     // Clone (not drain): a quoted AST can be evaluated multiple times.
     let captures = vm.quote_captures.clone();
     crate::interp::bytecode::compiler::eval_quoted_ast_bytecode(file.as_ref(), &qa, &captures)
-        .map_err(|e| InterpError::new(e))
+        .map_err(InterpError::new)
 }

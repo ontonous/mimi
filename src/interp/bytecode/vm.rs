@@ -458,6 +458,16 @@ impl<'a> BytecodeVM<'a> {
 
             if frame.pc >= proto.code.len() {
                 // Fell off the end — implicit return Unit.
+                // Observable under MIMI_VERBOSE so a compiler emitting a bad
+                // pc is not silently masked by the fall-off-end path.
+                if std::env::var("MIMI_VERBOSE").is_ok() {
+                    eprintln!(
+                        "[bytecode] fn#{} fell off end at pc={} (len={}) — implicit return",
+                        frame.proto_idx,
+                        frame.pc,
+                        proto.code.len()
+                    );
+                }
                 let return_reg = frame.return_reg;
                 let wrap_ok = frame.wrap_ok;
                 self.pop_frame();
@@ -1135,6 +1145,14 @@ impl<'a> BytecodeVM<'a> {
                             pc, offset
                         )));
                     }
+                    if new_pc as usize > proto.code.len() {
+                        return Err(InterpError::new(format!(
+                            "Jmp overflow: pc={} offset={} len={}",
+                            pc,
+                            offset,
+                            proto.code.len()
+                        )));
+                    }
                     frame.pc = new_pc as usize;
                 }
                 Op::JmpIf { offset, ra } => {
@@ -1146,6 +1164,14 @@ impl<'a> BytecodeVM<'a> {
                             return Err(InterpError::new(format!(
                                 "JmpIf underflow: pc={} offset={}",
                                 pc, offset
+                            )));
+                        }
+                        if new_pc as usize > proto.code.len() {
+                            return Err(InterpError::new(format!(
+                                "JmpIf overflow: pc={} offset={} len={}",
+                                pc,
+                                offset,
+                                proto.code.len()
                             )));
                         }
                         frame.pc = new_pc as usize;
@@ -1160,6 +1186,14 @@ impl<'a> BytecodeVM<'a> {
                             return Err(InterpError::new(format!(
                                 "JmpIfNot underflow: pc={} offset={}",
                                 pc, offset
+                            )));
+                        }
+                        if new_pc as usize > proto.code.len() {
+                            return Err(InterpError::new(format!(
+                                "JmpIfNot overflow: pc={} offset={} len={}",
+                                pc,
+                                offset,
+                                proto.code.len()
                             )));
                         }
                         frame.pc = new_pc as usize;
@@ -2129,7 +2163,7 @@ impl<'a> BytecodeVM<'a> {
                                     body,
                                     &comptime_values,
                                 )
-                                .map_err(|e| InterpError::new(e))?;
+                                .map_err(InterpError::new)?;
                                 self.set_reg(rd, v);
                             } else {
                                 return Err(InterpError::new(format!(
@@ -3062,6 +3096,12 @@ impl<'a> BytecodeVM<'a> {
         if let Some(caller) = self.stack.last_mut() {
             if let Some(targets) = caller.mutate_writebacks.take() {
                 for (val, &target) in vals.iter().zip(targets.iter()) {
+                    mimi_debug_assert!(
+                        (target as usize) < caller.regs.len(),
+                        "mutate writeback target {} out of bounds (len {})",
+                        target,
+                        caller.regs.len()
+                    );
                     caller.regs[target as usize] = val.clone();
                 }
             }
@@ -3121,31 +3161,26 @@ impl<'a> BytecodeVM<'a> {
     pub(crate) fn get_reg(&self, r: Reg) -> &Value {
         let frame = self.cur_frame();
         let idx = r as usize;
-        if idx >= frame.regs.len() {
-            panic!(
-                "bytecode: register {} out of bounds (len {})",
-                idx,
-                frame.regs.len()
-            );
-        }
+        mimi_debug_assert!(
+            idx < frame.regs.len(),
+            "register {} out of bounds (len {})",
+            idx,
+            frame.regs.len()
+        );
         &frame.regs[idx]
     }
 
     pub(crate) fn get_reg_mut(&mut self, r: Reg) -> &mut Value {
         let len = self.cur_frame().regs.len();
         let idx = r as usize;
-        if idx >= len {
-            panic!("bytecode: register {} out of bounds (len {})", idx, len);
-        }
+        mimi_debug_assert!(idx < len, "register {} out of bounds (len {})", idx, len);
         &mut self.cur_frame_mut().regs[idx]
     }
 
     pub(crate) fn set_reg(&mut self, r: Reg, v: Value) {
         let idx = r as usize;
         let len = self.cur_frame().regs.len();
-        if idx >= len {
-            panic!("bytecode: register {} out of bounds (len {})", idx, len);
-        }
+        mimi_debug_assert!(idx < len, "register {} out of bounds (len {})", idx, len);
         self.cur_frame_mut().regs[idx] = v;
     }
 
@@ -3235,6 +3270,12 @@ impl<'a> BytecodeVM<'a> {
     }
 
     fn load_const(&self, proto: &FunctionProto, idx: ConstIdx) -> Value {
+        mimi_debug_assert!(
+            (idx as usize) < proto.constants.len(),
+            "constant index {} out of bounds (len {})",
+            idx,
+            proto.constants.len()
+        );
         match &proto.constants[idx as usize] {
             ConstValue::Int(v) => Value::Int(*v),
             ConstValue::Float(v) => Value::Float(*v),

@@ -80,6 +80,12 @@ impl BuiltinRegistry {
     /// Get the function pointer, arity, and name for a builtin.
     /// Used by VM dispatch to avoid borrow conflicts.
     pub fn get_func(&self, idx: u32) -> (BuiltinFn, usize, &'static str) {
+        mimi_debug_assert!(
+            (idx as usize) < self.descs.len(),
+            "builtin index {} out of bounds (len {})",
+            idx,
+            self.descs.len()
+        );
         let desc = &self.descs[idx as usize];
         (desc.func, desc.arity, desc.name)
     }
