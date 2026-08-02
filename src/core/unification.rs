@@ -462,10 +462,12 @@ impl UnificationTable {
             // SAFETY: `_` is emitted by the parser when the user writes `let x: _ = ...`.
             //         Such bindings appear ONLY at let-init positions (check_stmt.rs:626)
             //         where the inferred init_ty substitutes for the declared type.
-            //         `Any` is user-authored for gradual-typing / FFI; lint W012 warns when
-            //         it is used as a let-binding declared type.
+            //         v0.34.10: `Any` removed from user syntax (golden §2.4) — the branch
+            //         below only serves internal artifact paths.
             // TODO(#v0.31-type-engine): restrict these to top-level inference boundaries
-            //       and surface E0710 at function call/field access sites.
+            //       and surface E0431 (type escape hatch leaked past its boundary) at
+            //       function call/field access sites. E0710 is reserved for "extern
+            //       function not declared" — do NOT reuse it for escape scenarios.
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
             (Type::Name(n, _), _) if n == "Any" => Ok(()),

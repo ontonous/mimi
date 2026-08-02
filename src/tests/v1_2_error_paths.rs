@@ -451,3 +451,21 @@ fn error_path_multi_position_diagnostics() {
         "multi-position diagnostic should carry an error code"
     );
 }
+
+#[test]
+fn any_type_removed_from_user_syntax() {
+    // v0.34.10 (golden §2.4): `Any` removed from builtin type names — user
+    // code naming `Any` must fail type checking (undefined type E0407).
+    let src = r#"
+func main() -> i32 {
+    let x: Any = 42
+    0
+}
+"#;
+    let errors = check_source(src).expect_err("Any must not be a valid user type");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0407")),
+        "expected E0407 (undefined type) for Any, got: {:?}",
+        errors
+    );
+}
