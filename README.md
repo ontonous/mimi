@@ -4,9 +4,9 @@
 
 **A Flow-first, Typestate-Oriented system programming language**
 
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.4--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4400%2B-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-4500%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -90,12 +90,12 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 | `flow` / `state` / `transition` declarations, state payloads, transfer dispatch | ✅ |
 | Sparse transition graph — undeclared `(state, event)` = compile error (`@sparse`) | ✅ |
 | Typed Fault — per-flow `fault ErrorType` declaration | ✅ |
-| `become` / `stay` explicit terminal keywords | ✅ |
+| `return S{}` terminal — unique transition terminal (become/stay removed per ADR-001) | ✅ |
 | `fails E` rollback path — `?` returns `Err((source, error))`, source generation restored | ✅ |
 | Reset / Recover system verbs (user-overridable) | ✅ |
 | SystemTrace provenance (`last_state`, `unexpected_event`, snapshot) | ✅ |
 | Progressive mode — script `main()` via shell injection (true lowering: post-1.0) | ✅ |
-| Multi-target transition (`-> A \| B` with state tags) | 📋 0.31.25 |
+| Multi-target transition (`-> A \| B` with state tags) | 📋 0.1.4 (0.34.15-16) |
 
 ### Linear Safety & Ownership
 
@@ -106,8 +106,8 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 | CFG-level linearity — `is_linear()` for Flow states in dataflow analysis | ✅ |
 | Session endpoint linearity — scope exit (E0425), use-after-alias (E0426) | ✅ |
 | Shared/weak wrapping of linear resources rejected | ✅ |
-| View/mutate borrowing (pure function parameter passing) | 📋 0.31.25 |
-| Cross-turn exactly-once resource tracking | 📋 |
+| View/mutate borrowing (pure function parameter passing) | 📋 0.1.4 (0.34.13-14) |
+| Cross-turn exactly-once resource tracking | ✅ |
 | Channel/Mutex/Atomic type-level linearity | 📋 (known limitation: builtin integer handles) |
 
 ### Concurrency
@@ -134,7 +134,7 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 
 | Feature | Status |
 |---------|--------|
-| Interpreter (fast dev) + LLVM 18 codegen (native binary) — L1 equivalence tested | ✅ |
+| Bytecode VM interpreter (sole interpreter since 0.1.3) + LLVM 18 codegen (native binary) — L1 equivalence tested | ✅ |
 | Hindley-Milner type inference (undo trail + TypeScheme + zonk) | ✅ |
 | Generics `<T: Bound>`, recursive types | ✅ |
 | Enums / records / tuples, `match` exhaustiveness, `while let` | ✅ |
@@ -149,7 +149,7 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 | LSP: completion, hover, goto-definition, contract lens | ✅ |
 | Package manager: `mimi.toml`, registry, git deps, dependency tree | ✅ |
 | Cross-compilation: `--target` flag, shared library `.so` output | ✅ |
-| Component IR + Native ABI + Wire Schema | 📋 Phase C |
+| Component IR + Native ABI + Wire Schema | ✅ (0.1.1 Phase C; SDK conformance green) |
 
 ---
 
@@ -220,14 +220,14 @@ Source → Lexer → Parser → AST
   → HM Inference → Type Checker → CheckedProgram
     → Typed Resolved IR (canonical signatures, catalogs, materialized types)
     → CFG (per-callable control flow graph)
-    → Ownership Ledger (linear resource analysis)
+    → Resource Analysis (linear resource actions)
       ↓
   ┌───────────┼───────────┐
   Interpreter   Codegen     Verifier
   (from_checked) (compile_checked) (verify_checked)
 ```
 
-**Iron rule**: backends cannot fall back to raw AST. `CheckedProgram::file()` is crate-internal `legacy_body_file()` — function body migration to Resolved IR is tracked per body class through 0.1.1 sprints.
+**Iron rule**: backends cannot fall back to raw AST. Declaration layer (signatures, Flow transitions, Actor/Session, ownership, CFG) is fully installed from CheckedProgram; function bodies compile via per-function dispatch (resolved native emitter with an explicit, observable legacy arm). `CheckedProgram::raw_ast()` is crate-internal and limited to 3 permanent consumers (codegen pass 5 / interpreter / Z3 verifier).
 
 ### Dependency Chain
 
@@ -247,7 +247,7 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | **HM Unification** | `src/core/unification.rs` | Undo trail + TypeScheme + zonk; generic call fresh instantiation |
 | **TypeFolder** | `src/core/type_folder.rs` | Binder-aware type folding (SurfaceTy / InferTy / ZonkedTy / BackendTy) |
 | **CFG** | `src/core/cfg/` | Per-callable control flow graph, stable-ID CallableCfg |
-| **Ownership Ledger** | `src/core/ownership.rs` | Linear resource Introduce / Move / Drop / Return + borrow analysis |
+| **Resource Analysis** | `src/core/ownership.rs` | Linear resource ledger (Introduce / Move / Drop / Return + borrow) with canonical action kinds |
 | **AstNodeMeta** | `src/span.rs` | SourceId + Span + AstOrigin; NodeIdBuilder stable identity |
 
 ### Compiler Internal Flow Paradigm
@@ -325,7 +325,7 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 
 ```
 mimi/
-├── src/                        # Rust compiler (360 files, ~278k LOC)
+├── src/                        # Rust compiler (366 files, ~305k LOC)
 │   ├── main.rs                 # CLI entry point (clap derive)
 │   ├── lib.rs                  # Library entry point
 │   ├── ast.rs                  # AST: FlowDef, StateDef, TransitionDef, ProtocolDef, ...
@@ -344,9 +344,10 @@ mimi/
 │   │   ├── unification.rs      # HM unification (undo trail + TypeScheme)
 │   │   ├── type_folder.rs      # Binder-aware type folding
 │   │   ├── cfg/                # Per-callable control flow graph
-│   │   ├── ownership.rs        # Linear resource ledger (analysis)
+│   │   ├── ownership.rs        # Linear resource analysis (canonical actions)
 │   │   └── infer/              # HM type inference + contract derivation
-│   ├── interp/                 # Interpreter (from_checked)
+│   ├── interp/                 # Bytecode VM (sole interpreter since 0.1.3)
+│   │   └── bytecode/           # Bytecode compiler + VM + builtin registry
 │   ├── codegen/                # LLVM 18 codegen (compile_checked)
 │   │   └── builtins/           # Builtin function codegen (io, string, json, ...)
 │   ├── verifier/               # Z3 contract verifier (verify_checked)
@@ -358,11 +359,11 @@ mimi/
 │   ├── lint.rs                 # Static linter
 │   ├── main/                   # CLI subcommand implementations (24 commands)
 │   ├── diagnostic/             # Error codes & formatting
-│   └── tests/                  # 4100+ tests
+│   └── tests/                  # 4500+ tests
 ├── std/                        # Standard library (24 modules)
-├── examples/                   # Example programs (32)
-├── demos/                      # Demo programs (30)
-├── tests/real_world/           # MCDD real-world dual-backend suite (70 programs)
+├── examples/                   # Example programs (28)
+├── demos/                      # Demo programs (23)
+├── tests/real_world/           # MCDD real-world dual-backend suite (69 programs)
 ├── devdocs/                    # Design docs, blind reviews, amendment, roadmap
 ├── scripts/                    # Build & CI scripts
 ├── Cargo.toml
@@ -414,29 +415,15 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ---
 
-## Roadmap (0.1.1)
+## Status & Key References
 
-0.1.1 is a long-cycle release covering 51 internal sprints (0.31.8–0.31.58). No intermediate tags. Codegen per-function dispatch is active (eligible slice: scalar/tuple/string/control-flow); full migration deferred to 0.1.2.
-
-| Phase | Sprints | Theme |
-|-------|---------|-------|
-| **A** | 0.31.8–0.31.19 | Flow core closure + foundation repair: atomic turn, Fault, Actor runs Flow, Session linearity, exactly-once, type-level linearity, higher-order interaction, evidence sync, attack audit I |
-| **Perf** | 0.31.20–0.31.21 | Runtime Efficiency I/II: quick wins + Value clone reduction + O1 fix |
-| **Soundness** | 0.31.22–0.31.24 | Soundness hemostasis + Runtime architecture + Error model & Stdlib |
-| **B** | 0.31.25–0.31.29 | Language freeze: syntax convergence, View/Mutate, Multi-target, type walker merge, Verification IR fail-closed, VC artifact, attack audit II |
-| **C** | 0.31.30–0.31.38 | Component boundary: Component IR + ABI generator, Native ABI + fat pointers, stable checkpoint, Wire Schema, Rust SDK conformance, XPU FFI validation, SDK hardening |
-| **D** | 0.31.39–0.31.44 | Tooling & isolation: migration, fmt/LSP/probes, Provenance/TyErr/Z3 translation, experimental isolation |
-| **E** | 0.31.45–0.31.48 | Freeze: DEBUG + L1 hardening + Interpreter slimming, final hostile audit + Trap Tests, RC1, RC2 |
-| **F** | 0.31.49–0.31.54 | Soundness: type system, arithmetic semantics, Runtime, Verifier, Interpreter/Stdlib/Quote |
-| **G** | 0.31.55–0.31.56 | Completeness: Flow/Session/Actor + systematic pattern fixes + test infrastructure |
-| **H** | 0.31.57–0.31.58 | Release: RC1, RC2, 0.1.1 tag |
-
-**Next: 0.1.2 (0.32.1–0.32.30)** — Codegen full migration (`legacy_body_file()` deletion) + post-migration audit.
+**Current**: 0.1.4-dev. 0.1.3 shipped (Bytecode VM sole interpreter, tree-walker removed). 0.1.4 (internal sprints 0.34.x) covers syntax freeze and semantic rulings — see the golden document and per-version roadmaps below.
 
 ### Key References
 
 | Document | Role |
 |----------|------|
+| [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 golden document: semantic rulings + sprint plan (authoritative for 0.1.4) |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | Authoritative roadmap (31 requirements, exit conditions) |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | Architecture Amendment: 13 clauses + 10 invariants (supersedes white paper) |
 | [`devdocs/pre-1.0/`](devdocs/pre-1.0/) | Pre-1.0 design contract: core goals, Flow-first model, error algebra, Verified Core, Component Boundary |
@@ -453,7 +440,10 @@ Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurre
 
 | Version | Highlight |
 |---------|-----------|
-| **0.1.1-dev** | **Current**. 51-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. Codegen per-function dispatch active. |
+| **0.1.4-dev** | **Current**. Syntax freeze + semantic rulings (golden document): become/stay removal (ADR-001), multi-target (ADR-002), `'a` removal (ADR-004), trivia-ization of `desc:`/`rule:`/`mms{}`. |
+| **0.1.3** | Bytecode VM becomes the sole interpreter: tree-walker (24,976 LOC) + ResolvedInterpreter (4,375 lines) deleted, `--legacy` removed, FFI/Actor/quote fully on bytecode. |
+| **0.1.2** | Codegen full migration: `raw_ast()` privatized (3 permanent consumers), gap filling, performance baseline. |
+| **0.1.1** | 51-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. Codegen per-function dispatch active. |
 | **0.1.0** | Baseline stability: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership analysis, runtime/resolved split, semver switch, 4063 tests green |
 | **v0.30.0** | Hemostasis: zero new features — 15 architecture debts cleared (sprintf→snprintf, path safety, malloc checks, fmt tokenization) |
 | **v0.29.0–41** | Flow paradigm: compiler internal Flow replacement (7 modules) + language-level Flow semantics + 38 white paper capabilities |
