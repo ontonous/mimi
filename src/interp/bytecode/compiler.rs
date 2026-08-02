@@ -2919,12 +2919,28 @@ impl BytecodeCompiler {
             if let Some(&fidx) = self.func_table.get(name.as_str()) {
                 let proto = &self.functions[fidx as usize];
                 let mut targets: Vec<Reg> = Vec::new();
+                let mut field_targets: Vec<(Reg, u32)> = Vec::new();
                 for &pi in &proto.mut_param_indices {
                     if let Some(Expr::Ident(var_name)) =
                         effective_args.get(pi as usize).map(|a| a.unlocated())
                     {
                         if let Some(reg) = fc.lookup_var(var_name) {
                             targets.push(reg);
+                        }
+                    }
+                    // v0.34.13 (clause 6, golden §3.3): payload member-level
+                    // mutate borrow — `apply_filter(mutate self.buffer, s)`.
+                    // The field is passed by value, but the callee's final
+                    // parameter value must be RecordSet back into the payload
+                    // slot on return (previously silently dropped).
+                    if let Some(Expr::Field(obj, field)) =
+                        effective_args.get(pi as usize).map(|a| a.unlocated())
+                    {
+                        if let Expr::Ident(obj_name) = obj.unlocated() {
+                            if let Some(obj_reg) = fc.lookup_var(obj_name) {
+                                let field_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
+                                field_targets.push((obj_reg, field_idx));
+                            }
                         }
                     }
                 }
@@ -2944,6 +2960,29 @@ impl BytecodeCompiler {
                     fc.emit(Op::MutateSetup {
                         regs_base: base,
                         count: targets.len() as u16,
+                    });
+                }
+                if !field_targets.is_empty() {
+                    let base = fc.proto.alloc_reg();
+                    for _ in 1..field_targets.len() * 2 {
+                        fc.proto.alloc_reg();
+                    }
+                    for (i, (obj_reg, field_idx)) in field_targets.iter().enumerate() {
+                        let obj_slot = base + (i * 2) as Reg;
+                        let field_slot = obj_slot + 1;
+                        let oidx = fc.proto.add_const(ConstValue::Int(*obj_reg as i64));
+                        fc.emit(Op::LoadConst {
+                            rd: obj_slot,
+                            idx: oidx,
+                        });
+                        fc.emit(Op::LoadConst {
+                            rd: field_slot,
+                            idx: *field_idx,
+                        });
+                    }
+                    fc.emit(Op::MutateSetupField {
+                        regs_base: base,
+                        count: field_targets.len() as u16,
                     });
                 }
                 fc.emit(Op::Call {

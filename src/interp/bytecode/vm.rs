@@ -46,6 +46,13 @@ struct Frame {
     /// callee returns. One entry per callee mut_param_indices entry, in the
     /// same order (set by Op::MutateSetup).
     mutate_writebacks: Option<Vec<Reg>>,
+    /// v0.34.13 (clause 6): record-FIELD writeback targets for payload
+    /// member-level `mutate self.field` borrow. Each entry = (obj_reg,
+    /// field_name); on callee Ret the final parameter value is RecordSet
+    /// into caller.regs[obj_reg] at that field. Set by Op::MutateSetupField.
+    /// `mutate_writebacks` (register targets) and this are mutually
+    /// exclusive — a given call uses one or the other.
+    mutate_field_writebacks: Option<Vec<(Reg, String)>>,
     /// Flow-transition context for this frame (None for ordinary calls).
     /// Used to absorb runtime panics into a Fault value (v0.29.12).
     flow_tx: Option<FlowTxCtx>,
@@ -420,6 +427,7 @@ impl<'a> BytecodeVM<'a> {
             fault_pc: None,
             fault_reg: None,
             mutate_writebacks: None,
+            mutate_field_writebacks: None,
             flow_tx: None,
             old_snapshots,
         });
@@ -1226,6 +1234,30 @@ impl<'a> BytecodeVM<'a> {
                     }
                     if !targets.is_empty() {
                         self.cur_frame_mut().mutate_writebacks = Some(targets);
+                    }
+                }
+                Op::MutateSetupField { regs_base, count } => {
+                    // v0.34.13: each target = (obj_reg, field_name) in 2
+                    // consecutive registers.
+                    let mut targets = Vec::with_capacity(count as usize);
+                    let mut ok = true;
+                    for i in 0..count {
+                        let obj_slot = regs_base + (i * 2) as Reg;
+                        let field_slot = obj_slot + 1;
+                        match (self.get_reg(obj_slot), self.get_reg(field_slot)) {
+                            (Value::Int(obj_reg), Value::String(field)) => {
+                                targets.push((*obj_reg as Reg, field.clone()));
+                            }
+                            _ => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok && !targets.is_empty() {
+                        self.cur_frame_mut().mutate_field_writebacks = Some(targets);
+                    } else {
+                        self.cur_frame_mut().mutate_field_writebacks = None;
                     }
                 }
                 Op::CallBuiltin {
@@ -2979,13 +3011,18 @@ impl<'a> BytecodeVM<'a> {
             None
         };
 
+        // v0.34.13: collect mutate-param values BEFORE mem::replace — if the
+        // return register aliases a mutate parameter (e.g. `RET r0` where the
+        // param lives at r0), replace would leave Unit in the param slot and
+        // the write-back would silently store Unit into the caller.
+        let mut_param_vals = self.collect_mut_param_vals();
+
         // Move value out of register (frame is about to be popped — no clone needed).
         let mut v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
         let frame = self.cur_frame();
         let return_reg = frame.return_reg;
         let wrap_ok = frame.wrap_ok;
         let source_state = frame.flow_source_state.clone();
-        let mut_param_vals = self.collect_mut_param_vals();
         if wrap_ok {
             if is_early_return {
                 // `?` triggered rejection: unwrap Err(x) → Err((source, x))
@@ -3104,6 +3141,16 @@ impl<'a> BytecodeVM<'a> {
                         caller.regs.len()
                     );
                     caller.regs[target as usize] = val.clone();
+                }
+            }
+            // v0.34.13 (clause 6): payload member-level borrow — RecordSet
+            // the final parameter value back into the caller's payload slot.
+            if let Some(field_targets) = caller.mutate_field_writebacks.take() {
+                for (val, (obj_reg, field)) in vals.iter().zip(field_targets.iter()) {
+                    let obj = caller.regs.get_mut(*obj_reg as usize);
+                    if let Some(Value::Record(_, fields)) = obj {
+                        fields.insert(field.clone(), val.clone());
+                    }
                 }
             }
         }

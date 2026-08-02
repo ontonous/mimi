@@ -57,6 +57,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::JmpIfNot { .. } => "JMP_IF_NOT",
         Op::Call { .. } => "CALL",
         Op::MutateSetup { .. } => "MUTATE_SETUP",
+        Op::MutateSetupField { .. } => "MUTATE_SETUP_FIELD",
         Op::CallBuiltin { .. } => "CALL_BUILTIN",
         Op::CallIndirect { .. } => "CALL_INDIRECT",
         Op::Ret { .. } => "RET",
@@ -253,6 +254,13 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             name,
             regs_base,
             *regs_base as u16 + count.saturating_sub(1)
+        ),
+        Op::MutateSetupField { regs_base, count } => format!(
+            "{:04}  {:<16} r{}..r{} = mutate FIELD writeback targets (obj, field)",
+            pc,
+            name,
+            regs_base,
+            *regs_base as u16 + (count.saturating_mul(2)).saturating_sub(1)
         ),
         Op::CallBuiltin {
             rd,

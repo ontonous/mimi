@@ -4497,6 +4497,69 @@ func main() -> i32 {
     assert_eq!(out.trim(), "15");
 }
 
+#[test]
+fn mutate_field_writeback_clause6_dual_backend() {
+    // v0.34.13 (clause 6, golden §3.3): `mutate self.field` payload member
+    // borrow must write the callee's final parameter value back into the
+    // payload slot. Root causes fixed: (1) MutateSetupField op + VM RecordSet
+    // writeback (was: silently dropped — `apply_filter(mutate self.buffer)`
+    // left self.buffer unchanged); (2) do_return collected mutate-param vals
+    // AFTER mem::replace, so a return register aliasing a mutate param (e.g.
+    // `RET r0` with x at r0) wrote Unit back to the caller.
+    let src = r#"
+func apply_filter(buf: mutate List<i32>) -> i32 {
+    buf[0] = 99
+    len(buf)
+}
+flow Process {
+    state Active { buffer: List<i32> }
+    state Done { first: i32 }
+    transition process(Active) -> Done {
+        do {
+            let n = apply_filter(mutate self.buffer)
+            let f = self.buffer[0]
+            return Done { first: f + n }
+        }
+    }
+}
+func main() -> i32 {
+    let s0 = Active { buffer: [1, 2, 3] }
+    let s1 = Process::process(s0)
+    println(s1.first)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
+    // L1: codegen must agree — self.buffer[0] is 99 after the mutate borrow.
+    let out = compile_and_run(src).expect("codegen mutate field writeback");
+    assert_eq!(out.trim(), "102");
+}
+
+#[test]
+fn mutate_var_writeback_alias_return_dual_backend() {
+    // v0.34.13: `bump(mutate v)` write-back when the callee's return register
+    // aliases the mutate param register (`RET r0`, x at r0). do_return used to
+    // collect param values after mem::replace → Unit written back to v.
+    let src = r#"
+func bump(x: mutate i32) -> i32 {
+    x = x + 1
+    x
+}
+func main() -> i32 {
+    let mut v = 10
+    let r = bump(mutate v)
+    let sum = v + r
+    println(sum)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen mutate var writeback");
+    assert_eq!(out.trim(), "22");
+}
+
 // ── v0.29.35 broadcast PeerFault sentinel ─────────────────────────────
 
 // ── v0.29.38 Test engineering: assert_state + inject_fault ────────────
