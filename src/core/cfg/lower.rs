@@ -1069,7 +1069,6 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::Lambda { .. } => "expr.lambda",
         Expr::Old(..) => "expr.old",
         Expr::SliceExpr { .. } => "expr.slice",
-        Expr::Range { .. } => "expr.range",
         Expr::Turbofish(..) => "expr.turbofish",
         Expr::TupleIndex(..) => "expr.tuple_index",
         Expr::Arena(..) => "expr.arena",
@@ -1177,10 +1176,6 @@ fn collect_read_places(expr: &Expr, places: &mut Vec<String>) {
             if let Some(guard) = guard {
                 collect_read_places(guard, places);
             }
-        }
-        Expr::Range { start, end } => {
-            collect_read_places(start, places);
-            collect_read_places(end, places);
         }
         Expr::SliceExpr { target, start, end } => {
             collect_read_places(target, places);

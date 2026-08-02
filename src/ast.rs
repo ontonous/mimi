@@ -630,11 +630,6 @@ pub enum Expr {
         start: Option<Box<Expr>>,
         end: Option<Box<Expr>>,
     },
-    /// Range expression: start..end
-    Range {
-        start: Box<Expr>,
-        end: Box<Expr>,
-    },
     /// Turbofish: `func_name::<Type>(args)` — explicit type instantiation
     Turbofish(String, Vec<Type>, Vec<Expr>),
     /// Numeric tuple field access: t.0, t.1, etc.
@@ -773,7 +768,6 @@ pub enum BinOp {
     Div,
     Mod,
     Pow,
-    Assign,
     EqCmp,
     NeCmp,
     Lt,

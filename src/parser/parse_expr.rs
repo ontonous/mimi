@@ -1075,7 +1075,6 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Await
             | TokenKind::Alloc
             | TokenKind::Drop
-            | TokenKind::Steps
             | TokenKind::Parasteps
             | TokenKind::Failure
             | TokenKind::Requires
@@ -1383,7 +1382,6 @@ mod tests {
             TokenKind::Await,
             TokenKind::Alloc,
             TokenKind::Drop,
-            TokenKind::Steps,
             TokenKind::Parasteps,
             TokenKind::Failure,
             TokenKind::Requires,

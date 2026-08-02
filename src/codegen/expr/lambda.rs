@@ -473,10 +473,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.collect_free_vars_expr(&arm.body, defined, vars, free_vars);
                 }
             }
-            Expr::Range { start, end } => {
-                self.collect_free_vars_expr(start, defined, vars, free_vars);
-                self.collect_free_vars_expr(end, defined, vars, free_vars);
-            }
             Expr::SliceExpr { target, start, end } => {
                 self.collect_free_vars_expr(target, defined, vars, free_vars);
                 if let Some(s) = start {

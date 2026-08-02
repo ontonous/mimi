@@ -1516,10 +1516,6 @@ impl BodyLowerer<'_> {
                     )?),
                 }
             }
-            Expr::Range { start, end } => ResolvedExprKind::Range {
-                start: Box::new(self.lower_expr(start, &format!("{role}.start"))?),
-                end: Box::new(self.lower_expr(end, &format!("{role}.end"))?),
-            },
             Expr::SliceExpr { target, start, end } => ResolvedExprKind::Slice {
                 target: Box::new(self.lower_expr(target, &format!("{role}.target"))?),
                 start: start
@@ -4410,7 +4406,12 @@ impl BodyLowerer<'_> {
             BinOp::BitXor => ResolvedBinaryOp::BitXor,
             BinOp::Shl => ResolvedBinaryOp::ShiftLeft,
             BinOp::Shr => ResolvedBinaryOp::ShiftRight,
-            BinOp::Assign | BinOp::Range => return self.unsupported(node_id, "binary sugar"),
+            BinOp::Range => {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "binary sugar `..` is not supported in resolved IR lowering",
+                )]);
+            }
         })
     }
 

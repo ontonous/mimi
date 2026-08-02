@@ -204,7 +204,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
                 self.compile_bitwise_binop(op, lhs, rhs)
             }
-            _ => Err(format!("unsupported binary operator {:?}", op).into()),
         }
     }
 

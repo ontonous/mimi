@@ -246,10 +246,6 @@ pub(crate) fn collect_idents_in_expr(expr: &Expr, idents: &mut Vec<String>) {
                 collect_idents_in_expr(g, idents);
             }
         }
-        Expr::Range { start, end } => {
-            collect_idents_in_expr(start, idents);
-            collect_idents_in_expr(end, idents);
-        }
         Expr::SliceExpr { target, start, end } => {
             collect_idents_in_expr(target, idents);
             if let Some(s) = start {

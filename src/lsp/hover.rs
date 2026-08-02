@@ -542,7 +542,6 @@ impl LspServer {
             BinOp::Div => "/",
             BinOp::Mod => "%",
             BinOp::Pow => "^",
-            BinOp::Assign => "=",
             BinOp::EqCmp => "==",
             BinOp::NeCmp => "!=",
             BinOp::Lt => "<",

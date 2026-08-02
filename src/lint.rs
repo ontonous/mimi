@@ -438,10 +438,6 @@ fn collect_refs_in_expr(expr: &Expr, info: &mut VarUsage) {
                 collect_refs_in_expr(e, info);
             }
         }
-        Expr::Range { start, end } => {
-            collect_refs_in_expr(start, info);
-            collect_refs_in_expr(end, info);
-        }
         Expr::Arena(b) => collect_refs_in_block(b, info),
         Expr::MapLiteral { entries } => {
             for (k, v) in entries {
@@ -618,10 +614,6 @@ fn detect_eq_bool_in_expr(expr: &Expr, diagnostics: &mut Vec<Diagnostic>, func_p
             if let Some(e) = end {
                 detect_eq_bool_in_expr(e, diagnostics, func_pos);
             }
-        }
-        Expr::Range { start, end } => {
-            detect_eq_bool_in_expr(start, diagnostics, func_pos);
-            detect_eq_bool_in_expr(end, diagnostics, func_pos);
         }
         Expr::Arena(b) => detect_eq_bool(b, diagnostics, func_pos),
         Expr::MapLiteral { entries } => {
@@ -853,7 +845,6 @@ fn expr_calls_name(expr: &Expr, name: &str) -> bool {
                 || start.as_ref().is_some_and(|s| expr_calls_name(s, name))
                 || end.as_ref().is_some_and(|e| expr_calls_name(e, name))
         }
-        Expr::Range { start, end } => expr_calls_name(start, name) || expr_calls_name(end, name),
         Expr::MapLiteral { entries } => entries
             .iter()
             .any(|(k, v)| expr_calls_name(k, name) || expr_calls_name(v, name)),
@@ -1276,10 +1267,6 @@ fn collect_names_in_expr(expr: &Expr, names: &mut std::collections::HashSet<Stri
             if let Some(e) = end {
                 collect_names_in_expr(e, names);
             }
-        }
-        Expr::Range { start, end } => {
-            collect_names_in_expr(start, names);
-            collect_names_in_expr(end, names);
         }
         Expr::MapLiteral { entries } => {
             for (k, v) in entries {

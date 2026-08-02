@@ -225,10 +225,6 @@ fn collect_calls_from_expr(
         Expr::Field(e, _) | Expr::TupleIndex(e, _) => {
             collect_calls_from_expr(e, text, items, uri, calls, visited);
         }
-        Expr::Range { start, end } => {
-            collect_calls_from_expr(start, text, items, uri, calls, visited);
-            collect_calls_from_expr(end, text, items, uri, calls, visited);
-        }
         Expr::SliceExpr { target, start, end } => {
             collect_calls_from_expr(target, text, items, uri, calls, visited);
             if let Some(s) = start {
@@ -376,10 +372,6 @@ fn collect_call_sites_from_expr(
         }
         Expr::Field(e, _) | Expr::TupleIndex(e, _) => {
             collect_call_sites_from_expr(e, func_name, lines, call_lines);
-        }
-        Expr::Range { start, end } => {
-            collect_call_sites_from_expr(start, func_name, lines, call_lines);
-            collect_call_sites_from_expr(end, func_name, lines, call_lines);
         }
         Expr::SliceExpr { target, start, end } => {
             collect_call_sites_from_expr(target, func_name, lines, call_lines);

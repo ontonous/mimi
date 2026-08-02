@@ -68,10 +68,6 @@ impl<'a> Checker<'a> {
             Expr::OptionalChain(inner, _) => Self::collect_uses_in_expr(inner, uses),
             Expr::Spawn(inner) => Self::collect_uses_in_expr(inner, uses),
             Expr::Await(inner) => Self::collect_uses_in_expr(inner, uses),
-            Expr::Range { start, end } => {
-                Self::collect_uses_in_expr(start, uses);
-                Self::collect_uses_in_expr(end, uses);
-            }
             Expr::SliceExpr { target, start, end } => {
                 Self::collect_uses_in_expr(target, uses);
                 if let Some(s) = start {
