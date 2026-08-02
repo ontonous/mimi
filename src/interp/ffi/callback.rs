@@ -6,6 +6,7 @@ use libffi::low::{self as ffi_low};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Wrapper around `*const File` for a process-static callback AST.
 ///
@@ -219,21 +220,12 @@ fn evaluate_cross_thread_callback(
             .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
         return encode_callback_result(result, ret_is_float);
     }
-    let file_ptr = {
-        let store = callback_file().lock().unwrap_or_else(|e| e.into_inner());
-        store.as_ref().map(|s| s.0).ok_or_else(|| {
-            "no program file registered for cross-thread callback evaluation".to_string()
-        })?
-    };
-    // SAFETY: The File was Box::leaked and is valid for 'static.
-    let file = unsafe { &*file_ptr };
-    let mut interp = Interpreter::new(file);
-    interp.verify_contracts = false;
-    interp.ffi_runtime.verify_ffi = false;
-    let result = interp
-        .apply_closure_ffi(closure, args)
-        .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
-    encode_callback_result(result, ret_is_float)
+    // 0.33 Phase F: tree-walker Closure values are no longer produced.
+    // All closures are BytecodeClosure; if we reach here it's a logic error.
+    Err(format!(
+        "cross-thread callback: unsupported closure type {} (tree-walker removed in 0.33)",
+        closure
+    ))
 }
 
 /// F3: C-ABI function to deregister an async callback and free its resources.
@@ -561,33 +553,4 @@ unsafe fn callback_trampoline_inner(
     }
 }
 
-impl<'a> FfiClosureRunner for Interpreter<'a> {
-    /// F8: Apply a Mimi closure value to arguments from within a C callback context.
-    /// Mirrors `apply_closure` in call.rs but designed for &self usage from a
-    /// C trampoline via raw pointer.
-    fn apply_closure_ffi(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
-        match closure {
-            Value::Closure {
-                params,
-                body,
-                captured,
-                ..
-            } => self
-                .apply_closure_inner(params, body, captured, args)
-                .map_err(|e| e.to_string()),
-            _ => Err(format!("expected a closure, found {}", closure)),
-        }
-    }
 
-    fn ffi_file(&self) -> &File {
-        self.file
-    }
-
-    fn eval_contract_expr(
-        &mut self,
-        expr: &crate::ast::Expr,
-        result_binding: Option<&Value>,
-    ) -> Result<Value, String> {
-        self.eval_contract_expr(expr, result_binding)
-    }
-}

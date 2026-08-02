@@ -1063,8 +1063,8 @@ mod bench {
     use std::time::Instant;
 
     #[test]
-    fn bench_fib25_bytecode_vs_treewalk() {
-        // fib(20) to avoid test-thread stack overflow (2MB default).
+    fn bench_fib25_bytecode() {
+        // fib(20) bytecode benchmark (tree-walker removed in 0.33 Phase F).
         let src = r#"
 func fib(n: i32) -> i32 {
     if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
@@ -1075,22 +1075,6 @@ func main() -> i32 {
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
-
-        // Tree-walker on a large-stack thread (test threads default to 2MB).
-        let src_owned = src.to_string();
-        let tree_time = std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(move || {
-                let tokens = crate::lexer::Lexer::new(&src_owned).tokenize().unwrap();
-                let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
-                let t0 = Instant::now();
-                let mut interp = crate::interp::Interpreter::new(&file);
-                let _ = interp.run();
-                t0.elapsed()
-            })
-            .unwrap()
-            .join()
-            .unwrap();
 
         // Bytecode compile + run.
         let t1 = Instant::now();
@@ -1106,18 +1090,11 @@ func main() -> i32 {
         assert_eq!(bc_result, 6765); // fib(20)
 
         eprintln!("\n═══ fib(20) Benchmark ═══");
-        eprintln!("Tree-walker:     {:?}", tree_time);
         eprintln!("BC compile:      {:?}", compile_time);
         eprintln!("BC execute:      {:?}", bc_time);
-        eprintln!(
-            "Speedup (exec):  {:.1}x",
-            tree_time.as_secs_f64() / bc_time.as_secs_f64()
-        );
-        eprintln!(
-            "Speedup (total): {:.1}x",
-            tree_time.as_secs_f64() / (compile_time + bc_time).as_secs_f64()
-        );
+        eprintln!("BC total:        {:?}", compile_time + bc_time);
     }
+
 
     // ═══ Disassembler ════════════════════════════════════════
 

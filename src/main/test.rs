@@ -4,11 +4,11 @@ use crate::{is_sketch, resolve_path};
 use mimi::ast::Item;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 
-use mimi::{interp, lexer, loader};
+use mimi::{lexer, loader};
 
 pub(crate) fn test(
     path: Option<&Path>,
-    allocator: &str,
+    _allocator: &str,
     filter: Option<&str>,
     verbose: bool,
     strict: bool,
@@ -101,14 +101,17 @@ pub(crate) fn test(
     let mut errors = Vec::new();
     let use_color = colors_enabled();
 
+    // 0.33 Phase F: use bytecode VM (tree-walker removed).
+    use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
+    let mut compiler = BytecodeCompiler::new();
+    compiler.install_checked_program(&checked_program);
+    let prog = compiler
+        .compile_file(&merged_file)
+        .map_err(|e| format!("bytecode compile error: {}", e))?;
+
     for func_name in &test_funcs {
-        let mut interp = interp::Interpreter::from_checked(&checked_program);
-        interp.default_allocator = match allocator {
-            "arena" => interp::AllocatorKind::Arena,
-            "bump" => interp::AllocatorKind::Bump,
-            _ => interp::AllocatorKind::System,
-        };
-        match interp.call_named(func_name, vec![]) {
+        let mut vm = BytecodeVM::new(&prog);
+        match vm.call_named(func_name, vec![]) {
             // TC-H1: bool-returning tests fail when the value is false;
             // non-bool Ok is still a pass (side-effect / unit tests).
             Ok(val) => {

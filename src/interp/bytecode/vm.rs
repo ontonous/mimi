@@ -2098,7 +2098,7 @@ impl<'a> BytecodeVM<'a> {
                         }
                         other => {
                             // Fallback: tree-walker Closure (from ast_eval / quote).
-                            // Evaluate via temporary interpreter (same pattern as builtin_ast_eval).
+                            // 0.33 Phase F: evaluate via bytecode comptime evaluator.
                             if let Value::Closure {
                                 params,
                                 body,
@@ -2119,16 +2119,17 @@ impl<'a> BytecodeVM<'a> {
                                 let file = self.program.ast.clone().ok_or_else(|| {
                                     InterpError::new("call indirect: no program AST for Closure")
                                 })?;
-                                let mut interp = crate::interp::Interpreter::new(file.as_ref());
-                                interp.verify_contracts = false;
-                                for (name, val) in captured.iter() {
-                                    let _ = interp.scope_env.bind(name, val.clone());
-                                }
+                                // Seed comptime values: captured vars + params.
+                                let mut comptime_values = captured.clone();
                                 for (p, a) in params.iter().zip(args.iter()) {
-                                    let _ = interp.scope_env.bind(&p.name, a.clone());
+                                    comptime_values.insert(p.name.clone(), a.clone());
                                 }
-                                let result = interp.eval_block(body)?;
-                                let v = result.unwrap_or(Value::Unit);
+                                let v = crate::interp::bytecode::compiler::eval_comptime_block_bytecode(
+                                    file.as_ref(),
+                                    body,
+                                    &comptime_values,
+                                )
+                                .map_err(|e| InterpError::new(e))?;
                                 self.set_reg(rd, v);
                             } else {
                                 return Err(InterpError::new(format!(
