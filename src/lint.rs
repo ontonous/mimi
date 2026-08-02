@@ -11,7 +11,7 @@
 /// - W009: Recursive function without base case
 /// - W010: Unused import
 use crate::ast::{BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, Type};
-use crate::diagnostic::codes::{W002, W003, W004, W006, W007, W008, W009, W010, W012};
+use crate::diagnostic::codes::{W002, W003, W004, W006, W007, W008, W009, W010, W012, W013};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
@@ -53,6 +53,25 @@ impl Linter {
             if let Item::Func(f) = item {
                 self.lint_func(f, source, &mut diagnostics);
             }
+        }
+
+        // W013 (v0.34.7): newtype/inner mix warning. Collect `newtype Name = Inner`
+        // declarations, then warn on transparent usage (opt-in clarity aid).
+        let newtype_inner: std::collections::HashMap<String, String> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Type(td) => match &td.kind {
+                    crate::ast::TypeDefKind::Newtype(inner) => {
+                        Some((td.name.clone(), crate::core::fmt_type(inner)))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if !newtype_inner.is_empty() {
+            detect_newtype_inner_mix(file, &newtype_inner, &mut diagnostics);
         }
 
         // W007: Redundant parentheses — scan source for `((` patterns
@@ -1596,6 +1615,43 @@ func main() -> i32 {
             "concrete type annotation should not trigger W012"
         );
     }
+
+    #[test]
+    fn lint_newtype_inner_mix_warns() {
+        // v0.34.7 (W013): newtype initialized with raw inner literal warns.
+        let src = "newtype UserId = i32\nfunc main() -> i32 {\n    let uid: UserId = 42\n    0\n}";
+        let file = parse_source(src);
+        let linter = Linter::new();
+        let result = linter.lint(&file, src);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some(W013)),
+            "newtype/inner mix should trigger W013, got: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(|d| d.code.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lint_newtype_no_false_positive_when_not_annotated() {
+        // v0.34.7: unannotated binding (no declared newtype) should NOT warn.
+        let src = "newtype UserId = i32\nfunc main() -> i32 {\n    let uid = 42\n    0\n}";
+        let file = parse_source(src);
+        let linter = Linter::new();
+        let result = linter.lint(&file, src);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some(W013)),
+            "unannotated binding should not trigger W013"
+        );
+    }
 }
 
 // ---- W012: type escape hatch detection (CO-C2 audit fix) ----
@@ -1642,6 +1698,133 @@ fn is_escape_hatch_type(t: &Type) -> bool {
         Type::Infer => true,
         Type::Name(n, _) if n == "_" || n == "Any" => true,
         _ => false,
+    }
+}
+
+/// Rough literal kind of an expression for W013 diagnostics.
+fn expr_literal_hint(expr: &Expr) -> &'static str {
+    match expr.unlocated() {
+        Expr::Literal(Lit::Int(_)) => "integer literal",
+        Expr::Literal(Lit::Float(_)) => "float literal",
+        Expr::Literal(Lit::String(_)) => "string literal",
+        Expr::Literal(Lit::Bool(_)) => "bool literal",
+        Expr::Tuple(_) => "tuple literal",
+        Expr::List(_) => "list literal",
+        Expr::Ident(_) => "identifier",
+        _ => "expression",
+    }
+}
+
+/// W013 (v0.34.7): warn when a newtype is used interchangeably with its
+/// inner type — transparent newtype is intentional (golden §2.2), but the
+/// mix weakens nominal safety. Pure-AST heuristics:
+/// 1. `let x: Newtype = <inner-literal>` (annotated binding fed an inner value)
+/// 2. call argument of declared-newtype type receiving an inner literal
+/// This is an opt-in clarity aid, not an error (1.1 evaluates strict mode).
+fn detect_newtype_inner_mix(
+    file: &File,
+    newtype_inner: &std::collections::HashMap<String, String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let is_newtype = |ty: &Type| -> Option<String> {
+        match ty.unlocated() {
+            Type::Name(n, _) if newtype_inner.contains_key(n) => Some(n.clone()),
+            _ => None,
+        }
+    };
+    // Collect declared newtype parameter names per function.
+    for item in &file.items {
+        let Item::Func(func) = item else { continue };
+        // Return type declared as newtype.
+        let _ret_newtype = func.ret.as_ref().and_then(&is_newtype);
+        // Body scan: let x: Newtype = inner-literal.
+        let mut check_stmt = |stmt: &Stmt| {
+            if let Stmt::Let {
+                ty: Some(t),
+                init: Some(init),
+                ..
+            } = stmt.unlocated()
+            {
+                if let Some(nt) = is_newtype(t) {
+                    let init_fmt = expr_literal_hint(init);
+                    if let Some(inner) = newtype_inner.get(nt.as_str()) {
+                        diagnostics.push(Diagnostic::warning_code(
+                            W013,
+                            format!(
+                                "newtype `{nt}` (inner `{inner}`) initialized with a raw \
+                                 `{init_fmt}` value — transparent newtype is intentional, \
+                                 but this mixes the newtype with its inner type"
+                            ),
+                            stmt.meta().map(|meta| meta.span).unwrap_or(Span::UNKNOWN),
+                        ));
+                    }
+                }
+            }
+        };
+        walk_stmts(&func.body, &mut check_stmt);
+        // Call sites: argument position of declared-newtype params.
+        let mut check_call = |stmt: &Stmt| {
+            if let Stmt::Expr(expr) = stmt.unlocated() {
+                if let Expr::Call(callee, args) = expr.unlocated() {
+                    let callee_name = match callee.unlocated() {
+                        Expr::Ident(n) => Some(n.as_str()),
+                        Expr::Field(obj, name) => match obj.unlocated() {
+                            Expr::Ident(_) => Some(name.as_str()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(name) = callee_name {
+                        // Local func in same file with newtype params.
+                        let matched = file.items.iter().find_map(|it| match it {
+                            Item::Func(f)
+                                if f.name == name
+                                    && f.params.len() == args.len()
+                                    && f.params.iter().zip(args).any(|(p, a)| {
+                                        is_newtype(&p.ty).is_some()
+                                            && matches!(
+                                                a.unlocated(),
+                                                Expr::Literal(_) | Expr::Tuple(_)
+                                            )
+                                    }) =>
+                            {
+                                Some(())
+                            }
+                            _ => None,
+                        });
+                        if matched.is_some() {
+                            // Emit per newtype arg.
+                            for (p, a) in file
+                                .items
+                                .iter()
+                                .find_map(|it| match it {
+                                    Item::Func(f) if f.name == name => Some(f),
+                                    _ => None,
+                                })
+                                .map(|f| f.params.iter().zip(args))
+                                .into_iter()
+                                .flatten()
+                            {
+                                if let Some(nt) = is_newtype(&p.ty) {
+                                    if let Some(inner) = newtype_inner.get(nt.as_str()) {
+                                        diagnostics.push(Diagnostic::warning_code(
+                                            W013,
+                                            format!(
+                                                "newtype `{nt}` (inner `{inner}`) passed a raw \
+                                                 literal argument — transparent newtype mixes \
+                                                 nominal and inner typing"
+                                            ),
+                                            a.meta().map(|meta| meta.span).unwrap_or(Span::UNKNOWN),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        walk_stmts(&func.body, &mut check_call);
     }
 }
 
