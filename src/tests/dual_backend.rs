@@ -3678,8 +3678,7 @@ fn dual_cap_split_returns_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not resolve capability alias (FullAccess)
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         cap FileReadCap;
         cap FileWriteCap;
@@ -3687,6 +3686,7 @@ fn dual_cap_split_returns_tuple() {
         func main() -> i32 {
             let c = FullAccess;
             let parts = c.split();
+            drop(parts);
             println(42);
             0
         }

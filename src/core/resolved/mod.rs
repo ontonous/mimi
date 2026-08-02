@@ -2245,6 +2245,30 @@ fn collect_items(
                         ),
                     },
                 );
+                // 0.34.19 CHECKER-GAP: capability identifiers (e.g.
+                // `let c = FullAccess;`) must resolve in typed bodies. Register
+                // the capability as a catalog constant so the Ident arm of
+                // typed-body lowering resolves it to Constant(capability node).
+                // The value is Unit: interp constructs a real cap via bytecode
+                // NewCap from the raw AST, and codegen lowers Cap to i64 where
+                // Unit materializes as const_zero (dummy handle).
+                constants.insert(
+                    node_id.clone(),
+                    ResolvedConstant {
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
+                        ty: Some(format!("cap:{}", qualified)),
+                        value: ResolvedConstValue::Unit,
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Constant,
+                            &qualified,
+                            &node_id,
+                            cap.meta,
+                            span,
+                            errors,
+                        ),
+                    },
+                );
             }
             Item::Trait(trait_def) => {
                 let qualified = qualify(module, &trait_def.name);
