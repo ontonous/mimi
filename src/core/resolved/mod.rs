@@ -119,6 +119,21 @@ pub(crate) fn builtin_record_schema(
             ("memory_dump", "MemoryDump"),
             ("panic_payload", "PanicPayload"),
         ]),
+        // v0.34.19 (CHECKER-GAP): ExecResult/StatResult are builtin records but had
+        // no field schema, so `r.exit_code` / `s.is_file` field access failed the
+        // resolved-IR field-catalog lookup. Field sets mirror the codegen/runtime
+        // construction (io.rs compile_exec_safe, misc.rs file_stat).
+        "builtin:type:ExecResult" => Some(&[
+            ("exit_code", "i32"),
+            ("stdout", "string"),
+            ("stderr", "string"),
+        ]),
+        "builtin:type:StatResult" => Some(&[
+            ("size", "i64"),
+            ("modified", "i64"),
+            ("is_file", "bool"),
+            ("is_dir", "bool"),
+        ]),
         _ => None,
     }
 }
@@ -8830,6 +8845,8 @@ fn build_canonical_function_signatures(
         "builtin:type:PanicPayload",
         "builtin:type:PeerFault",
         "builtin:type:SystemTrace",
+        "builtin:type:ExecResult",
+        "builtin:type:StatResult",
     ] {
         let Some(schema) = builtin_record_schema(owner) else {
             continue;

@@ -4933,8 +4933,7 @@ fn dual_exec_safe_multi_arg() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: ExecResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r = exec_safe("printf", "hi%s", "!")
@@ -4952,8 +4951,7 @@ fn dual_exec_safe_no_args() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: ExecResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r = exec_safe("true")
@@ -10301,8 +10299,7 @@ fn dual_exec_basic() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: ExecResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r = exec("echo hello")
@@ -10319,8 +10316,7 @@ fn dual_exec_stdout() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: ExecResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r = exec("echo hello")
@@ -10337,8 +10333,7 @@ fn dual_exec_exit_code() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: ExecResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r = exec("exit 42")
@@ -10355,8 +10350,7 @@ fn dual_file_stat_file() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: StatResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             write_file("/tmp/mimi_stat_test.txt", "hello world")
@@ -10376,8 +10370,7 @@ fn dual_file_stat_dir() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: StatResult has no unique field catalog
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             mkdir_p("/tmp/mimi_stat_dir_test")
