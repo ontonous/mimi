@@ -517,6 +517,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result =
             res.map_err(|e| CompileError::LlvmError(format!("{} error: {}", op_name(op), e)))?;
 
+        // v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant
+        // is suspended — IEEE 754 NaN/Inf are legitimate there.
+        if self.ieee_depth > 0 {
+            return Ok(result.into());
+        }
+
         // SD-9: Check for NaN (unordered comparison with self) and Inf.
         // NaN: fcmp uno x, x → true only for NaN.
         let is_nan = self

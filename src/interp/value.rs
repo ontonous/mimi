@@ -181,6 +181,8 @@ pub enum QuotedAst {
     Assign(Box<QuotedAst>, Box<QuotedAst>),
     Arena(Box<QuotedAst>),
     Unsafe(Box<QuotedAst>),
+    /// v0.34.10a (SD-9): `ieee_float { }` escape hatch.
+    IeeeFloat(Box<QuotedAst>),
     Drop(Box<QuotedAst>),
     Defer(Box<QuotedAst>),
     SharedLet {

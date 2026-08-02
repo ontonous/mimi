@@ -440,6 +440,7 @@ impl<'a> Lowerer<'a> {
             Stmt::Block(block)
             | Stmt::Arena(block)
             | Stmt::Unsafe(block)
+            | Stmt::IeeeFloat(block)
             | Stmt::OnFailure(block)
             | Stmt::Do(block)
             | Stmt::Parasteps(block)

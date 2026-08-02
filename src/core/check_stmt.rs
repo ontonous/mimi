@@ -130,6 +130,7 @@ impl<'a> Checker<'a> {
             Stmt::Block(block)
             | Stmt::Arena(block)
             | Stmt::Unsafe(block)
+            | Stmt::IeeeFloat(block)
             | Stmt::Parasteps(block)
             | Stmt::OnFailure(block)
             | Stmt::Defer(block) => {
@@ -261,6 +262,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Block(block)
             | Stmt::Unsafe(block)
+            | Stmt::IeeeFloat(block)
             | Stmt::Alloc { body: block, .. }
             | Stmt::Arena(block)
             | Stmt::Parasteps(block)
@@ -1162,6 +1164,13 @@ impl<'a> Checker<'a> {
             }
             Stmt::Unsafe(block) => {
                 // Unsafe block: check the body (no additional restrictions at type-check level)
+                scopes.push(HashMap::new());
+                self.check_block(block, ret, scopes);
+                scopes.pop();
+            }
+            Stmt::IeeeFloat(block) => {
+                // v0.34.10a (SD-9): ieee_float escape hatch — body checked
+                // like a plain block (finiteness is a runtime concern).
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);
                 scopes.pop();

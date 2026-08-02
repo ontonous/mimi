@@ -2480,6 +2480,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Unsafe: execute block (no restrictions in codegen)
                     self.compile_block(block, vars)?;
                 }
+                Stmt::IeeeFloat(block) => {
+                    // v0.34.10a (SD-9): suspend finiteness trap inside.
+                    self.ieee_depth += 1;
+                    let r = self.compile_block(block, vars);
+                    self.ieee_depth -= 1;
+                    r?;
+                }
                 Stmt::Alloc {
                     kind: AllocKind::Arena,
                     body,

@@ -767,6 +767,12 @@ pub enum Op {
     /// No operation
     Nop,
 
+    /// v0.34.10a (SD-9): enter `ieee_float { }` — suspend float finiteness
+    /// trapping for the enclosing block. Paired with IeeeExit.
+    IeeeEnter,
+    /// Leave the innermost `ieee_float { }` block.
+    IeeeExit,
+
     // ═══════════════════════════════════════════════════════════
     // Fault handling (OnFailure compensation)
     // ═══════════════════════════════════════════════════════════

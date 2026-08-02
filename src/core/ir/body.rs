@@ -439,6 +439,8 @@ pub enum AllocatorKind {
 pub enum ResolvedScopeKind {
     Lexical,
     Unsafe,
+    /// v0.34.10a (SD-9): `ieee_float { }` — IEEE 754 escape hatch scope.
+    IeeeFloat,
     FailureGuard,
     Defer,
     Arena,

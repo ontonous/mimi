@@ -159,6 +159,9 @@ pub struct CodeGenerator<'ctx> {
     pub builder: Builder<'ctx>,
     loop_break: Option<inkwell::basic_block::BasicBlock<'ctx>>,
     loop_continue: Option<inkwell::basic_block::BasicBlock<'ctx>>,
+    /// v0.34.10a (SD-9): `ieee_float { }` nesting depth — when > 0, float
+    /// arithmetic skips the finiteness trap (NaN/Inf allowed, IEEE 754).
+    ieee_depth: usize,
     type_defs: HashMap<String, crate::ast::TypeDef>,
     type_llvm: HashMap<String, BasicTypeEnum<'ctx>>,
     cap_vars: Vec<HashMap<String, (inkwell::values::PointerValue<'ctx>, bool)>>,
@@ -452,6 +455,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             builder,
             loop_break: None,
             loop_continue: None,
+            ieee_depth: 0,
             type_defs: HashMap::new(),
             type_llvm: HashMap::new(),
             cap_vars: vec![HashMap::new()],

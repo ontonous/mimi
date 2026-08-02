@@ -43,6 +43,9 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Arena => self.parse_arena(),
             TokenKind::Unsafe => self.parse_unsafe(),
+            // v0.34.10a (SD-9): `ieee_float` is a soft keyword — expression/
+            // statement position, binding position still an identifier.
+            TokenKind::Ident(name) if name == "ieee_float" => self.parse_ieee_float(),
             TokenKind::Alloc if self.is_alloc_block() => self.parse_alloc(),
             TokenKind::Shared => self.parse_shared_let(SharedKind::Shared),
             TokenKind::LocalShared => self.parse_shared_let(SharedKind::LocalShared),
@@ -280,6 +283,17 @@ impl Parser {
         let body = self.parse_block()?;
         self.match_semi();
         Ok(Stmt::Unsafe(body))
+    }
+
+    /// v0.34.10a (SD-9): `ieee_float { block }` — IEEE 754 escape hatch.
+    /// Float results inside may be NaN/Inf without the finiteness trap.
+    fn parse_ieee_float(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `ieee_float` ident
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{` for ieee_float block")?;
+        let body = self.parse_block()?;
+        self.match_semi();
+        Ok(Stmt::IeeeFloat(body))
     }
 
     fn parse_alloc(&mut self) -> Result<Stmt, ParseError> {

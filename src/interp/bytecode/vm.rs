@@ -82,6 +82,9 @@ pub struct BytecodeVM<'a> {
     stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     /// Recursion depth guard.
     depth: usize,
+    /// v0.34.10a (SD-9): `ieee_float { }` nesting depth. When > 0, float
+    /// builtins skip the finiteness trap (NaN/Inf allowed, IEEE 754).
+    ieee_depth: usize,
     /// When > 0, exec_loop returns when depth drops below this value.
     /// Used by call_closure to stop when the closure frame returns.
     /// 0 = normal mode (return when stack is empty).
@@ -121,6 +124,9 @@ impl<'a> BytecodeVM<'a> {
             stdout_capture: None,
             depth: 0,
             stop_depth: 0,
+            // v0.34.10a (SD-9): ieee_float nesting depth — >0 suspends the
+            // float finiteness trap (NaN/Inf allowed, IEEE 754 semantics).
+            ieee_depth: 0,
             registry: registry::create_registry(),
             max_children: program.max_children,
             spawn_count: 0,
@@ -2385,6 +2391,10 @@ impl<'a> BytecodeVM<'a> {
                     return Err(InterpError::new(msg_str));
                 }
                 Op::Nop => {}
+                Op::IeeeEnter => self.ieee_depth += 1,
+                Op::IeeeExit => {
+                    self.ieee_depth = self.ieee_depth.saturating_sub(1);
+                }
 
                 // ── Actor / Flow / Session (Phase D) ──────────
                 Op::ActorSpawn { rd, actor } => {
@@ -3251,6 +3261,11 @@ impl<'a> BytecodeVM<'a> {
     }
 
     pub(crate) fn check_float(&self, v: f64, op: &str) -> Result<(), InterpError> {
+        // v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant
+        // is suspended — NaN/Inf are legitimate IEEE 754 values there.
+        if self.ieee_depth > 0 {
+            return Ok(());
+        }
         if v.is_nan() || v.is_infinite() {
             return Err(InterpError::float_error(format!(
                 "invalid floating-point result from {}",

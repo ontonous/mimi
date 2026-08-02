@@ -100,6 +100,8 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::TypeOf { .. } => "TYPE_OF",
         Op::Trap { .. } => "TRAP",
         Op::Nop => "NOP",
+        Op::IeeeEnter => "IEEE_ENTER",
+        Op::IeeeExit => "IEEE_EXIT",
         Op::SetFaultPc { .. } => "SET_FAULT_PC",
         Op::ClearFaultPc => "CLEAR_FAULT_PC",
         Op::FaultRetEarly => "FAULT_RET_EARLY",
@@ -589,7 +591,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 .unwrap_or("?");
             format!("{:04}  {:<16} {:?}", pc, name, m)
         }
-        Op::Nop => format!("{:04}  {:<16}", pc, name),
+        Op::Nop | Op::IeeeEnter | Op::IeeeExit => {
+            format!("{:04}  {:<16}", pc, name)
+        }
         Op::ActorSpawn { rd, actor } => {
             let a = proto
                 .constants
