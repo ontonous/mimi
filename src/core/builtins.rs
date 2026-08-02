@@ -190,6 +190,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "session_open"
             | "session_pair"
             | "actor_mailbox_depth"
+            | "actor_is_faulted"
             | "actor_is_muted"
             | "actor_set_mailbox_depth"
             | "actor_set_max_children"
