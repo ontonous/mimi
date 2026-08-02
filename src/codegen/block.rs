@@ -43,6 +43,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(expr)) => {
                     let mut val = self.compile_expr(expr, vars)?;
+                    // v0.34.16 (ADR-002): multi-target transition return —
+                    // wrap the target state struct into the synthetic
+                    // {i32 tag, i64 payload} union (payload = ptrtoint boxed
+                    // state struct). Tag = the state's ordinal in
+                    // multi_target_states (declared order).
+                    if self.in_multi_target_transition {
+                        let state_name = match expr.unlocated() {
+                            Expr::Record { ty: Some(ty_name), .. } => ty_name.clone(),
+                            Expr::Located { expr: inner, .. } => {
+                                match inner.unlocated() {
+                                    Expr::Record { ty: Some(ty_name), .. } => ty_name.clone(),
+                                    _ => {
+                                        return Err(CompileError::LlvmError(
+                                            "multi-target transition return must construct a target state record (e.g. `return TargetState { ... }`)".to_string(),
+                                        ))
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError::LlvmError(
+                                    "multi-target transition return must construct a target state record (e.g. `return TargetState { ... }`)".to_string(),
+                                ))
+                            }
+                        };
+                        // Tag must match the Enum's sorted-ordinal layout
+                        // (register_type_def sorts variants by name, and
+                        // find_variant_ordinal uses the same order).
+                        let mut sorted_states = self.multi_target_states.clone();
+                        sorted_states.sort();
+                        let tag = sorted_states
+                            .iter()
+                            .position(|s| s == &state_name)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "returned state '{state_name}' is not a target of this multi-target transition (targets: {:?})",
+                                    self.multi_target_states
+                                ))
+                            })? as u64;
+                        let state_ty = self.type_llvm.get(&state_name).copied();
+                        val = self.wrap_multi_target_value(val, tag, state_ty)?;
+                    }
                     if self.in_fails_transition {
                         val = self.compile_ok_constructor(vec![val])?;
                     }
@@ -1295,6 +1336,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(e)) => {
                     let mut val = self.compile_expr(e, vars)?;
+                    // v0.34.16 (ADR-002): multi-target transition return
+                    // inside an if-branch — wrap into {i32 tag, i64 payload}.
+                    if self.in_multi_target_transition {
+                        let state_name = match e.unlocated() {
+                            Expr::Record { ty: Some(ty_name), .. } => ty_name.clone(),
+                            _ => {
+                                return Err(CompileError::LlvmError(
+                                    "multi-target transition return must construct a target state record (e.g. `return TargetState { ... }`)".to_string(),
+                                ))
+                            }
+                        };
+                        let mut sorted_states = self.multi_target_states.clone();
+                        sorted_states.sort();
+                        let tag = sorted_states
+                            .iter()
+                            .position(|s| s == &state_name)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "returned state '{state_name}' is not a target of this multi-target transition (targets: {:?})",
+                                    self.multi_target_states
+                                ))
+                            })? as u64;
+                        let state_ty = self.type_llvm.get(&state_name).copied();
+                        val = self.wrap_multi_target_value(val, tag, state_ty)?;
+                    }
                     let ret_type = self
                         .current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));

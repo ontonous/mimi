@@ -724,6 +724,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Cache the flow definition for transition compilation.
                     self.flow_defs.insert(f.name.clone(), f.clone());
+                    // v0.34.16 (ADR-002): register the synthetic multi-target
+                    // union enum here (first pass) — match arms in main()
+                    // resolve variant ordinals before the fifth pass compiles
+                    // transition bodies.
+                    self.register_flow_multi_target_enums(f)?;
                     // v0.29.24: first @max_children(N) wins as process spawn quota.
                     if self.max_children.is_none() {
                         for a in &f.annotations {
@@ -870,6 +875,79 @@ impl<'ctx> CodeGenerator<'ctx> {
         format!("{}__{}__from_{}", flow, transition, from)
     }
 
+    /// v0.34.16 (ADR-002): register a synthetic `flow::{Name}::__MultiTarget`
+    /// enum for each flow that has a multi-target transition. Variants are the
+    /// target states (declared order = tag ordinal); payload is the state's
+    /// record struct type (boxed: ptrtoint-encoded into the uniform i64 slot
+    /// of the enum's `{i32 tag, i64 payload}` layout). The synthetic enum is
+    /// what match arms on `Small { v }` / `Large { v }` dispatch against.
+    pub(super) fn register_flow_multi_target_enums(&mut self, flow: &FlowDef) -> MimiResult<()> {
+        let multi_target_states: Vec<&str> = flow
+            .transitions
+            .iter()
+            .filter(|t| t.to_states.len() > 1)
+            .flat_map(|t| t.to_states.iter())
+            .map(|s| s.as_str())
+            .collect();
+        if multi_target_states.is_empty() {
+            return Ok(());
+        }
+        // Dedup preserving first-seen order.
+        let mut seen = std::collections::HashSet::new();
+        let states: Vec<&str> = multi_target_states
+            .into_iter()
+            .filter(|s| seen.insert((*s).to_string()))
+            .collect();
+        let qualified = format!("flow::{}::__MultiTarget", flow.name);
+        let meta = AstNodeMeta::inherited(
+            flow.meta.span,
+            AstOrigin::RuntimeSystem("codegen.multi_target_union"),
+        );
+        let variants: Vec<Variant> = states
+            .iter()
+            .map(|state_name| {
+                let state_ty =
+                    Type::Name(format!("flow::{}::{}", flow.name, state_name), Vec::new())
+                        .deep_reorigin(meta);
+                Variant {
+                    meta,
+                    name: state_name.to_string(),
+                    payload: Some(VariantPayload::Tuple(vec![state_ty])),
+                }
+            })
+            .collect();
+        let td = TypeDef {
+            meta,
+            name: qualified.clone(),
+            pub_: false,
+            kind: TypeDefKind::Enum(variants),
+            generics: vec![],
+            derives: vec![],
+            attributes: vec![],
+        };
+        self.register_type_def(&td)?;
+        // Also register the unqualified alias so `match r { Small { .. } }`
+        // resolves the owning enum through find_variant_owner.
+        if !self
+            .type_defs
+            .contains_key(&format!("__MultiTarget_{}", flow.name))
+        {
+            let alias = TypeDef {
+                meta,
+                name: format!("__MultiTarget_{}", flow.name),
+                pub_: false,
+                kind: TypeDefKind::Alias(
+                    Type::Name(qualified.clone(), Vec::new()).deep_reorigin(meta),
+                ),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.register_type_def(&alias)?;
+        }
+        Ok(())
+    }
+
     /// Convert a flow transition into a synthetic FuncDef for codegen.
     ///
     /// Parameters: `self` (from-state payload) + event params.
@@ -898,11 +976,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             borrow: param.borrow,
         }));
 
-        let ret_name = t
-            .to_states
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "unit".to_string());
+        // v0.34.16 (ADR-002): multi-target transitions return the synthetic
+        // tagged union `flow::{Flow}::__MultiTarget` ({i32 tag, i64 payload});
+        // single-target transitions return the target state struct as before.
+        let ret_name = if t.to_states.len() > 1 {
+            format!("flow::{}::__MultiTarget", flow.name)
+        } else {
+            t.to_states
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unit".to_string())
+        };
 
         // FLOW-TURN-001: when `fails E` is declared, the transition's return type
         // becomes Result<Target, (Source, E)> so the caller can match Ok/Err.
@@ -969,11 +1053,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 continue; // abstract / protocol-style transition — no body
             }
             if t.to_states.len() != 1 {
-                return Err(CompileError::Unsupported(format!(
-                    "multi-target transition '{}::{}({})' requires a tagged-state-union ABI",
-                    flow.name, t.name, t.from_state
-                ))
-                .at(t.meta.span));
+                // Multi-target: ret type is the synthetic union; return
+                // statements are wrapped (tag + boxed payload) below.
+                let func = Self::transition_to_func(flow, t);
+                self.in_multi_target_transition = true;
+                self.multi_target_states = t.to_states.clone();
+                let result = self
+                    .compile_func_legacy(&func)
+                    .map_err(|e| e.at(t.meta.span));
+                self.in_multi_target_transition = false;
+                self.multi_target_states = Vec::new();
+                result?;
+                continue;
             }
             let func = Self::transition_to_func(flow, t);
             // FLOW-TURN-001: flag transition bodies with `fails E` so

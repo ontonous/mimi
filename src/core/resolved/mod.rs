@@ -1828,8 +1828,10 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
     match backend {
         // Interpreter implements the current Flow surface, including experimental multi-target.
         BackendProfile::Interpreter => true,
-        // Native still lacks tagged multi-target ABI.
-        BackendProfile::Native => !matches!(capability, "flow.multi_target"),
+        // v0.34.16 (ADR-002): Native gained the tagged-state-union ABI
+        // (synthetic __MultiTarget enum + boxed payload) — multi-target
+        // transitions are now lowered, so the gate is removed.
+        BackendProfile::Native => true,
         // Verifier proves function contracts; it does not claim Proven for Flow turns.
         // Multi-target flows must not block unrelated contract verification.
         BackendProfile::Verifier => true,

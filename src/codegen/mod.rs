@@ -413,6 +413,14 @@ pub struct CodeGenerator<'ctx> {
     /// (Rejected codegen not yet implemented) instead of silently calling
     /// `mimi_try_exit` which would produce wrong dual-backend behavior.
     in_fails_transition: bool,
+    /// v0.34.16 (ADR-002): true when compiling a multi-target transition.
+    /// `Stmt::Return(Some(expr))` wraps the target state struct into the
+    /// synthetic `{i32 tag, i64 payload}` union (tag = state ordinal in
+    /// `multi_target_states`, payload = ptrtoint boxed state struct).
+    in_multi_target_transition: bool,
+    /// v0.34.16: target state names of the current multi-target transition,
+    /// in declared order (ordinal = tag).
+    multi_target_states: Vec<String>,
     /// Set of function qualified_names that the resolved emitter attempted to
     /// compile but failed (e.g., due to a coercion error in the body emission).
     /// These functions may have partial basic blocks (entry block without
@@ -591,6 +599,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             component_ir: None,
             max_children: None,
             in_fails_transition: false,
+            in_multi_target_transition: false,
+            multi_target_states: Vec::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
         }
     }
@@ -1271,6 +1281,68 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_ptr_to_int(ptr, int_ty, name)
             .map_err(|e| CompileError::LlvmError(format!("ptrtoint error ({}): {}", name, e)))
+    }
+
+    /// v0.34.16 (ADR-002): wrap a multi-target transition's target state
+    /// struct into the synthetic tagged union `{i32 tag, i64 payload}`.
+    /// The struct is boxed (malloc + store), and the box pointer is
+    /// ptrtoint-encoded into the uniform i64 payload slot so targets with
+    /// differing layouts share one return type.
+    pub(super) fn wrap_multi_target_value(
+        &mut self,
+        state_val: BasicValueEnum<'ctx>,
+        tag: u64,
+        state_ty: Option<BasicTypeEnum<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
+        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+        // Dereference pointer-valued states (compile_record returns the state
+        // in an alloca; the callee's `return` path hands us the pointer). The
+        // element type is passed in by the caller (opaque pointers cannot
+        // recover it).
+        let state_val = match state_val {
+            BasicValueEnum::PointerValue(pv) => {
+                let ty = state_ty.unwrap_or(state_val.get_type());
+                self.build_load(ty, pv, "mt_state_load")?
+            }
+            other => other,
+        };
+        // Box the state struct. Allocate conservatively: struct size is
+        // field_count × 8 bytes (all Mimi scalar fields are ≤ 64-bit; structs
+        // are ≥ that, so the box is never undersized).
+        let state_ty = state_val.get_type();
+        let field_count: u64 = match state_ty {
+            BasicTypeEnum::StructType(st) => st.count_fields() as u64,
+            _ => 1,
+        };
+        let box_bytes = (field_count * 8).max(8);
+        let size = self
+            .builder
+            .build_int_mul(
+                self.context.i64_type().const_int(box_bytes, false),
+                self.context.i64_type().const_int(1, false),
+                "mt_box_size",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("mt box size: {e}")))?;
+        let box_ptr = self.malloc_or_abort(size, "mt_box")?;
+        self.build_store(box_ptr, state_val)
+            .map_err(|e| CompileError::LlvmError(format!("mt box store: {}", e)))?;
+        let payload_i64 = self.build_ptr_to_int(box_ptr, self.context.i64_type(), "mt_box_ptr")?;
+        // Pack {i32 tag, i64 payload}.
+        let struct_ty = self.context.struct_type(&[i32_ty, i64_ty], false);
+        let alloca = self.build_alloca(struct_ty, "mt_union")?;
+        let tag_gep = self
+            .gep()
+            .build_struct_gep(struct_ty, alloca, 0, "mt_tag")
+            .map_err(|e| CompileError::LlvmError(format!("mt tag gep: {}", e)))?;
+        self.build_store(tag_gep, self.context.i32_type().const_int(tag, false))?;
+        let payload_gep = self
+            .gep()
+            .build_struct_gep(struct_ty, alloca, 1, "mt_payload")
+            .map_err(|e| CompileError::LlvmError(format!("mt payload gep: {}", e)))?;
+        self.build_store(payload_gep, payload_i64)?;
+        self.build_load(BasicTypeEnum::StructType(struct_ty), alloca, "mt_union_val")
+            .map_err(|e| CompileError::LlvmError(format!("mt union load: {}", e)))
     }
 
     /// Build a `bitcast` instruction.
@@ -2110,6 +2182,23 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Get the full type name including generics for a variable (for list element reconstruction).
+    /// v0.34.16 (ADR-002): field names of a Record-typed AST type (declaration
+    /// order), used to map named constructor-pattern fields to struct indices.
+    pub(super) fn record_fields_of(&self, ty: &Type) -> Option<Vec<String>> {
+        let type_name = self.get_full_type_name(ty)?;
+        let def = self.type_defs.get(&type_name).or_else(|| {
+            self.type_defs.values().find(|td| {
+                td.name == type_name || td.name.rsplit("::").next() == Some(type_name.as_str())
+            })
+        })?;
+        match &def.kind {
+            crate::ast::TypeDefKind::Record(fields) => {
+                Some(fields.iter().map(|f| f.name.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
         match ty.unlocated() {
             Type::Name(tn, args) => {
