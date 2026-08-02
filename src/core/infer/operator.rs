@@ -207,7 +207,11 @@ impl<'a> Checker<'a> {
                     );
                     Type::Name("unknown".into(), vec![])
                 } else {
-                    Type::Name("Range".into(), vec![])
+                    // Range<T> carries the element type so resolved lowering
+                    // can type the for-loop binding (`for i in 0..4` → i: i32).
+                    // Previously bare "Range" left the element type unbound
+                    // (0.34.19 CHECKER-GAP: binary sugar in resolved bodies).
+                    Type::Name("Range".into(), vec![lt])
                 }
             }
             BinOp::And | BinOp::Or => {

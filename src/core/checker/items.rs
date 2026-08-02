@@ -665,6 +665,27 @@ impl<'a> Checker<'a> {
                         format!("duplicate capability declaration '{}'", c.name),
                     );
                 }
+                // Expand capability aliases into their component list, mirroring
+                // the bytecode compiler (`compiler.rs` cap_components):
+                //   cap A;            → [A]
+                //   cap A + B         → [A, B]        (combined_with = "B")
+                //   cap A = B + C     → [B, C]        (combined_with = "B + C")
+                //   cap A = B         → [A, B]        (single-token alias)
+                let components = match c.combined_with.as_deref() {
+                    Some(combined) => {
+                        let parts: Vec<String> = combined
+                            .split(" + ")
+                            .map(|s| s.trim().to_string())
+                            .collect();
+                        if parts.len() > 1 {
+                            parts
+                        } else {
+                            vec![c.name.clone(), combined.to_string()]
+                        }
+                    }
+                    None => vec![c.name.clone()],
+                };
+                self.cap_components.insert(c.name.clone(), components);
             }
             Item::Trait(trait_def) => {
                 self.set_span(trait_def.meta.span);

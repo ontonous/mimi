@@ -24,6 +24,13 @@ impl<'a> Checker<'a> {
             })
             .collect();
         scopes.push(HashMap::new());
+        // The lambda body is a nested lexical scope: shadowing an outer
+        // variable inside it is legal (E0403 only forbids same-scope rebinding).
+        // The HM `scopes` stack already gets a fresh layer; the checker's
+        // `var_scopes` shadow-detection stack must mirror it, otherwise
+        // `let x = ...` inside a closure incorrectly reports E0403 against the
+        // enclosing function scope.
+        self.var_scopes.push(HashMap::new());
         // 0.31.17: track lambda parameter names for flow state capture rejection.
         let param_name_set: std::collections::HashSet<String> =
             params.iter().map(|p| p.name.clone()).collect();
@@ -60,6 +67,7 @@ impl<'a> Checker<'a> {
             }
         }
         scopes.pop();
+        self.var_scopes.pop();
         self.lambda_depth -= 1;
         self.lambda_param_names.pop();
         let return_type = match ret {

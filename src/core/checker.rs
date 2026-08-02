@@ -32,6 +32,13 @@ pub(crate) struct Checker<'a> {
     /// linear feature (E0256); they remain after the `with` effect clause was
     /// abolished (§4.2). No longer used to cross-validate `with` clauses.
     pub(crate) declared_caps: HashSet<String>,
+    /// Component expansion of capability declarations: simple caps map to
+    /// themselves; combined caps (`cap FullAccess = FileReadCap + FileWriteCap`)
+    /// map to their component list. Mirrors the bytecode compiler's
+    /// `cap_components` so checker-side `split()` typing agrees with the VM.
+    /// Populated in `collect_item_decls` (0.34.19 CHECKER-GAP: capability
+    /// aliases were declared but never resolved as values).
+    pub(crate) cap_components: HashMap<String, Vec<String>>,
     /// Strict mode: enforce $$ lock semantics
     pub(crate) strict: bool,
     /// Track variable scopes for shadowing detection
@@ -233,6 +240,7 @@ impl<'a> Checker<'a> {
             impls: HashMap::new(),
             where_clauses: HashMap::new(),
             declared_caps: HashSet::new(),
+            cap_components: HashMap::new(),
             strict: false,
             var_scopes: vec![HashMap::new()],
             mut_vars: vec![HashMap::new()],

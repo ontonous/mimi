@@ -110,6 +110,41 @@ impl<'a> Checker<'a> {
         }
 
         let obj_ty = self.infer_expr(obj, scopes);
+        // Capability method dispatch: Type::Cap(name) with split/drop.
+        // Interp: Value::Cap(components); split() → Tuple of single-component
+        // caps, drop() → unit. Checker mirrors the component count from the
+        // cap declaration (0.34.19 CHECKER-GAP: aliases were unresolved).
+        if let Type::Cap(cap_name) = obj_ty.unlocated() {
+            match method_name {
+                "split" => {
+                    let components = self
+                        .cap_components
+                        .get(cap_name)
+                        .cloned()
+                        .unwrap_or_else(|| vec![cap_name.clone()]);
+                    let parts: Vec<Type> = components
+                        .iter()
+                        .map(|component| Type::Cap(component.clone()))
+                        .collect();
+                    return Type::Tuple(parts);
+                }
+                "drop" => return Type::Name("unit".into(), vec![]),
+                _ => {
+                    self.errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0221,
+                            format!(
+                                "capability '{}' has no method '{}' (available: split, drop)",
+                                cap_name, method_name
+                            ),
+                            self.diagnostic_span(),
+                        )
+                        .with_help("capabilities support split() on combined caps and drop()"),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+            }
+        }
         // Newtype delegates method dispatch using the newtype name.
         // e.g. UserId(42).id() looks up trait methods for "UserId".
         let (type_name, type_args): (&String, &[Type]) = match obj_ty.unlocated() {
