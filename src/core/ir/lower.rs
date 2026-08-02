@@ -1611,7 +1611,22 @@ impl BodyLowerer<'_> {
                     conversion,
                 }
             }
-            Expr::Quote(_) | Expr::QuoteInterpolate(_) | Expr::NamedArg(_, _) => {
+            Expr::Quote(_block) => {
+                // v0.34.10a (golden §7.6): quote! is an AST-producing
+                // expression. Its interior is NOT lowered — the checker never
+                // finalizes types for quoted content (it is a runtime value,
+                // folded at codegen/bytecode compile time). Lower as an empty
+                // block placeholder; the original AST stays on the Expr and
+                // backends compile it directly.
+                ResolvedExprKind::Quote(Box::new(ResolvedBlock {
+                    node_id: NodeId(format!("{}/quote", node_id.0)),
+                    origin: origin.clone(),
+                    ty: self.unit.clone(),
+                    statements: Vec::new(),
+                    result: None,
+                }))
+            }
+            Expr::QuoteInterpolate(_) | Expr::NamedArg(_, _) => {
                 return self.unsupported(&node_id, expr_kind(expr))
             }
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),

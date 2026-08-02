@@ -1168,7 +1168,11 @@ impl<'a> Checker<'a> {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                // v0.34.10a (golden §7.6): return the registered "AST" type
+                // instead of "unknown" — unknown poisoned downstream
+                // unification; AST is a legal nominal type name that unifies
+                // with quote! results.
+                return Type::Name("AST".into(), vec![]);
             }
             "allocator_system" | "allocator_arena" | "allocator_bump" => {
                 return Type::Name("unknown".into(), vec![]);
