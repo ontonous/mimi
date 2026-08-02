@@ -5184,6 +5184,12 @@ func main() -> i32 {
 
 #[test]
 fn multi_target_incompatible_payload_layout_rejected() {
+    // v0.34.15 (ADR-002, golden §1.2): payload layouts MAY differ across
+    // multi-target states — the runtime dispatches on the state TAG, never on
+    // layout. Pre-0.34.15 rejected differing layouts with E0419 (M6); that
+    // check was inverted. The transition type-checks, bytecode runs both
+    // branches to the correct tagged state, and codegen fails CLOSED
+    // (tagged-state-union ABI pending — never silently miscompiles).
     let src = r#"
 flow C {
     state A { v: i32 }
@@ -5195,19 +5201,102 @@ flow C {
         }
     }
 }
-func main() -> i32 { 0 }
+func main() -> i32 {
+    let s0 = A { v: 5 }
+    let r = C::go(s0)
+    let tag = match r {
+        B { message } => 1,
+        A { v } => 2
+    }
+    println(tag)
+    0
+}
 "#;
-    let errors = check_source(src).expect_err("incompatible result layouts must be rejected");
     assert!(
-        errors
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("E0419")
-                || diagnostic
-                    .message
-                    .contains("incompatible target payload layouts")),
-        "expected E0419, got: {:?}",
-        errors
+        check_source(src).is_ok(),
+        "differing layouts must be accepted after ADR-002 inversion: {:?}",
+        check_source(src)
     );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::Int(0)),
+        "runtime dispatch by state tag"
+    );
+    // codegen: fail-closed until the tagged-state-union ABI lands (0.34.16).
+    let err = compile_and_run(src).expect_err("codegen multi-target must fail closed");
+    assert!(
+        err.contains("tagged-state-union") || err.contains("unsupported"),
+        "unexpected codegen error: {}",
+        err
+    );
+}
+
+#[test]
+fn multi_target_runtime_tag_dispatch_bytecode() {
+    // v0.34.15 (ADR-002): multi-target transition results carry the target
+    // state name as the record tag; match arms dispatch on it at runtime
+    // (IsVariant extended to Record, PatternField for named field extraction).
+    // Covers both same-layout and differing-layout target sets.
+    let src = r#"
+flow Checker {
+    state Small { v: i32 }
+    state Large { v: i32 }
+    transition classify(Small, amount: i32) -> Small | Large {
+        do {
+            if self.v + amount > 50 {
+                return Large { v: self.v + amount }
+            } else {
+                return Small { v: self.v + amount }
+            }
+        }
+    }
+}
+flow C {
+    state A { v: i32 }
+    state B { message: string }
+    transition go(A) -> B | A {
+        do {
+            if self.v > 0 { return B { message: "positive" } }
+            return A { v: 0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s1 = Small { v: 10 }
+    let r1 = Checker::classify(s1, 100)
+    let s2 = Small { v: 10 }
+    let r2 = Checker::classify(s2, 5)
+    let t1 = match r1 {
+        Small { v } => v,
+        Large { v } => v
+    }
+    let t2 = match r2 {
+        Small { v } => v,
+        Large { v } => v
+    }
+    let s3 = A { v: 5 }
+    let r3 = C::go(s3)
+    let t3 = match r3 {
+        B { message } => 1,
+        A { v } => 2
+    }
+    let s4 = A { v: -1 }
+    let r4 = C::go(s4)
+    let t4 = match r4 {
+        B { message } => 1,
+        A { v } => 2
+    }
+    println(t1)
+    println(t2)
+    println(t3)
+    println(t4)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (result, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(result, interp::Value::Int(0));
+    assert_eq!(out.trim(), "110\n15\n1\n2");
 }
 
 #[test]

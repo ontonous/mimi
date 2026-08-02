@@ -2234,6 +2234,12 @@ impl<'a> BytecodeVM<'a> {
                     };
                     let matches = match v {
                         Value::Variant(name, _) => name == &expected_tag,
+                        // v0.34.15: flow states are Record(Some(state_name), _)
+                        // — multi-target transition results carry the target
+                        // state name as the record tag, so match arms on
+                        // `Small { v }` / `Large { v }` must IsVariant-match
+                        // against records too.
+                        Value::Record(Some(name), _) => name == &expected_tag,
                         _ => false,
                     };
                     self.set_reg(rd, Value::Bool(matches));
@@ -2256,6 +2262,45 @@ impl<'a> BytecodeVM<'a> {
                             return Err(InterpError::new(format!(
                                 "variant get: expected Variant, got {}",
                                 other
+                            )))
+                        }
+                    }
+                }
+                Op::PatternField { rd, ra, field } => {
+                    // v0.34.15: field extraction for match arms. Flow states
+                    // are Record(Some(name), HashMap) — extract by field name.
+                    // Variants keep positional _0.._N semantics.
+                    let v = self.get_reg(ra).clone();
+                    let field_name = match &proto.constants[field as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    match v {
+                        Value::Record(_, fields) => {
+                            if let Some(value) = fields.get(&field_name) {
+                                self.set_reg(rd, value.clone());
+                            } else {
+                                return Err(InterpError::new(format!(
+                                    "pattern field '{field_name}' absent from record"
+                                )));
+                            }
+                        }
+                        Value::Variant(_, vals) => {
+                            let idx = field_name
+                                .strip_prefix('_')
+                                .and_then(|n| n.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if idx >= vals.len() {
+                                return Err(InterpError::new(format!(
+                                    "pattern field index {idx} out of bounds (arity {})",
+                                    vals.len()
+                                )));
+                            }
+                            self.set_reg(rd, vals[idx].clone());
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "pattern field: expected Record or Variant, got {other}"
                             )))
                         }
                     }

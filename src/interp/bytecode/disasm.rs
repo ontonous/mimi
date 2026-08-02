@@ -86,6 +86,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::VariantPayload { .. } => "VARIANT_PAYLOAD",
         Op::IsVariant { .. } => "IS_VARIANT",
         Op::VariantGet { .. } => "VARIANT_GET",
+        Op::PatternField { .. } => "PATTERN_FIELD",
         Op::Some { .. } => "SOME",
         Op::None { .. } => "NONE",
         Op::NewCap { .. } => "NEW_CAP",
@@ -541,6 +542,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::VariantGet { rd, ra, idx } => {
             format!("{:04}  {:<16} r{} = r{}[{}]", pc, name, rd, ra, idx)
+        }
+        Op::PatternField { rd, ra, field } => {
+            format!("{:04}  {:<16} r{} = r{}.field[{}]", pc, name, rd, ra, field)
         }
         Op::Some { rd, ra } => format!("{:04}  {:<16} r{} = Some(r{})", pc, name, rd, ra),
         Op::None { rd } => format!("{:04}  {:<16} r{} = None", pc, name, rd),
