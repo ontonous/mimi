@@ -7605,6 +7605,8 @@ fn build_canonical_function_signatures(
             "Type",
             "TypeInfo",
             "session_chan",
+            // v0.34.10a (golden §7.6): quote!/ast_eval exchange AST values.
+            "AST",
         ];
         BUILTIN_NOMINALS
             .contains(&name)

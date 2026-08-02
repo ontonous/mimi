@@ -176,6 +176,9 @@ impl<'a> Checker<'a> {
             "Record".into(),
             "ExecResult".into(),
             "StatResult".into(),
+            // v0.34.10a (golden §7.6): quote!/ast_eval produce/consume AST —
+            // registered so `let a: AST = quote!{...}` type-checks.
+            "AST".into(),
         ]
     }
 

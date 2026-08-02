@@ -2699,8 +2699,8 @@ fn dual_quote_eval_literal() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         func main() -> i32 {
             let ast = quote! { 42 };
@@ -11127,8 +11127,8 @@ fn dual_quote_literal_fold() {
         return;
     }
     // quote! { 42 } folds to Value::Int(42) at codegen time.
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         func main() -> i32 {
             let v = ast_eval(quote! { 42 })
@@ -11146,8 +11146,8 @@ fn dual_quote_arith_fold() {
         return;
     }
     // quote! { 10 + 20 } folds to Value::Int(30).
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         func main() -> i32 {
             let v = ast_eval(quote! { 10 + 20 })
@@ -11176,8 +11176,8 @@ fn dual_quote_comptime_ident_fold() {
     // Comptime call result is interpolated into a quote! block; the
     // fold path runs the call through the interpreter and emits the
     // sum as a constant.
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         comptime func seven() -> i32 { 7 }
         func main() -> i32 {
@@ -11196,8 +11196,8 @@ fn dual_quote_nested_comptime() {
         return;
     }
     // Two comptime funcs combined inside a quote! block.
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         comptime func base() -> i32 { 100 }
         comptime func step() -> i32 { 23 }
@@ -11218,8 +11218,8 @@ fn dual_quote_comptime_let_fold() {
     }
     // A let-binding inside a quote! block, with the rhs supplied by a
     // comptime call (folded into a constant).
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         comptime func make_sum() -> i32 { 30 + 12 }
         func main() -> i32 {
@@ -11261,7 +11261,9 @@ fn dual_quote_cast() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    // CHECKER-GAP (0.34.10a, golden §7.6 R8): ast_eval result participates in
+    // arithmetic (ast_eval(quote!{...}) + 1) — static return type AST cannot
+    // satisfy numeric unification. Retained as soft; 3 difficult items kept.
     dual_assert_soft!(
         r#"
         func main() -> i32 {
@@ -11281,8 +11283,8 @@ fn dual_quote_interpolate_in_comptime() {
     // Top-level $(expr) interpolation inside a quote! block that is
     // wrapped in a comptime block — exercises Expr::QuoteInterpolate
     // resolution through both quote and comptime fold paths.
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         comptime func k() -> i32 { 5 }
         func main() -> i32 {
@@ -11303,8 +11305,8 @@ fn dual_quote_with_comptime_conditional() {
     // An `if` inside a quote! block whose branch values are both
     // comptime-foldable, ensuring the If arm of QuotedAst::eval
     // participates in the codegen fold.
-    // CHECKER-GAP: checker: quote!/comptime not fully resolved
-    dual_assert_soft!(
+    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    dual_assert!(
         r#"
         comptime func flag() -> bool { true }
         func main() -> i32 {
