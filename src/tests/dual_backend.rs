@@ -8324,8 +8324,7 @@ fn dual_result_map_println() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -8465,8 +8464,7 @@ fn dual_result_option_map_println() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"x\":9}")
@@ -8542,8 +8540,7 @@ fn dual_list_result_map_println() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -8747,8 +8744,7 @@ fn dual_result_map_string_println() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, string>>("{\"a\":\"hi\"}")
@@ -9070,8 +9066,7 @@ fn dual_to_json_result_map() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -9641,8 +9636,7 @@ fn dual_to_json_list_result_map() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -9661,8 +9655,7 @@ fn dual_to_json_option_result_map() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -9935,8 +9928,7 @@ fn dual_map_println() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m: Map<string, i32> = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -11936,8 +11928,7 @@ fn dual_list_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")
@@ -11977,8 +11968,7 @@ fn dual_option_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")
@@ -12017,8 +12007,7 @@ fn dual_list_option_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let xs: List<Option<Map<string, (i32, i32)>>> = [
@@ -12040,8 +12029,7 @@ fn dual_list_result_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let xs: List<Result<Map<string, (i32, i32)>, string>> = [
@@ -12082,8 +12070,7 @@ fn dual_option_list_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let o: Option<List<Map<string, (i32, i32)>>> = Some([from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")])
@@ -12141,8 +12128,7 @@ fn dual_result_list_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r: Result<List<Map<string, (i32, i32)>>, string> = Ok([from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")])
@@ -12301,8 +12287,7 @@ fn dual_result_option_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r: Result<Option<Map<string, (i32, i32)>>, string> = Ok(Some(from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")))
@@ -12340,8 +12325,7 @@ fn dual_option_map_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let o: Option<Map<string, Map<string, (i32, i32)>>> = Some(from_json::<Map<string, Map<string, (i32, i32)>>>("{\"outer\":{\"a\":[1,2]}}"))
@@ -12360,8 +12344,7 @@ fn dual_list_map_set_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let xs: List<Map<string, Set<(i32, i32)>>> = [from_json::<Map<string, Set<(i32, i32)>>>("{\"a\":[[1,2]]}")]
@@ -12380,8 +12363,7 @@ fn dual_result_map_list_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r: Result<Map<string, List<(i32, i32)>>, string> = Ok(from_json::<Map<string, List<(i32, i32)>>>("{\"a\":[[1,2],[3,4]]}"))
@@ -12460,8 +12442,7 @@ fn dual_option_result_map_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let o: Option<Result<Map<string, (i32, i32)>, string>> = Some(Ok(from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")))
@@ -12480,8 +12461,7 @@ fn dual_list_option_map_list_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let xs: List<Option<Map<string, List<(i32, i32)>>>> = [
@@ -12503,8 +12483,7 @@ fn dual_result_option_map_set_product_tuple() {
     if !can_link() {
         return;
     }
-    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
-    dual_assert_soft!(
+    dual_assert!(
         r#"
         func main() -> i32 {
             let r: Result<Option<Map<string, Set<(i32, i32)>>>, string> = Ok(Some(from_json::<Map<string, Set<(i32, i32)>>>("{\"a\":[[1,2]]}")))

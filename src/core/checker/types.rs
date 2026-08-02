@@ -170,6 +170,9 @@ impl<'a> Checker<'a> {
             "unit".into(),
             "List".into(),
             "Set".into(),
+            // v0.34.19 (CHECKER-GAP): Map is a builtin container but was missing
+            // from this list, so `let a: ... Map<K, V> ...` annotations hit E0407.
+            "Map".into(),
             "Future".into(),
             "Result".into(),
             "Option".into(),
