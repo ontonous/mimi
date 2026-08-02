@@ -15,7 +15,7 @@
 > | 规范位置 | 规范主张 | 实现实况 | 处置 |
 > |---------|---------|---------|------|
 > | §6.1 `LANG-FUNCTION-001` | `func(T)->U` **removed**，迁移到 `fn(T)->U` | `func(T)->U` 仍解析（parse_type.rs:213-237）；`fn` 仅限闭包表达式与 `extern "C" fn(...)` 类型（parse_type.rs:242） | ✅ ADR-003 裁决：保留现状，spec 修正（0.34.4） |
-> | §3.12 `FLOW-FAULT-001` | fault 变体块 `fault F { A \| B }` + `fault Variant(...)` terminal + `reset`/`recover` 语句 | 仅 `fault ErrorType`（top_level.rs:1216-1222）；变体块语法全仓零匹配；reset/recover 仅系统注入 transition 名 | 收缩到现实（golden §3.2，spec 改由实现驱动） |
+> | §3.12 `FLOW-FAULT-001` | fault 变体块 `fault F { A \| B }` + `fault Variant(...)` terminal + `reset`/`recover` 语句 | 仅 `fault ErrorType`（top_level.rs:1216-1222）；变体块语法全仓零匹配；reset/recover 仅系统注入 transition 名 | ✅ 0.34.17 收缩到现实：spec §3.12 改由实现驱动（per-flow `fault ErrorType` + 系统 Fault payload 文档化 + recover=业务转移）；变体块 fault-set 排 0.2（golden §3.2） |
 > | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | 0.34.1 删除（golden §1.1） |
 > | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | ✅ ADR-001 实施（0.34.11）：`become`/`stay` 均删除，唯一终止符 `return S{}`（golden §1.2） |
 
@@ -259,14 +259,15 @@ acquire source generation
 
 Terminal actions are exactly three kinds:
 
-- `return Target { ... }`: commit new state;
-- `fault FaultVariant(...)`: commit typed Fault;
+- `return Target { ... }`: commit new state (the target may be the system `Fault` state — see §3.12);
+- enter `Fault`: commit the system Fault state via an undefined-event auto-fallback or an absorbed runtime panic (§3.12);
 - Rollback failure: no new state committed; caller regains original source generation and typed error.
 
 > v0.34.11 (ADR-001): `return State { ... }` is the **unique** transition
 > terminal. `become`/`stay` were removed — a self-loop is written as an
-> explicit `return SourceState { ... }`. A `fault` terminal is spelled with
-> the `?` operator (rollback path) or an explicit `fault` expression.
+> explicit `return SourceState { ... }`. Entering `Fault` explicitly is written
+> as `return Fault { ... }` (Fault is a reservable target state); the `?`
+> operator takes the separate rollback path, not the Fault path.
 
 Rollback failure conceptually is `Rejected { source: Flow@Source, error: E }`. Transition signature must declare `E`; `?` in body can only enter this path. It does not implicitly enter Fault, exit the process, or discard Source.
 
@@ -482,31 +483,87 @@ Fault, reset, and recover must not use `unit`, empty list, or zero value to subs
 `persistent` only indicates cross-Fault ownership retention strategy; it does not automatically prove data consistency. `transactional` must provide the same commit and rollback semantics in all execution backends.
 
 ### 3.12 Fault and Recovery `[stable]`
-Fault should be a Flow-specific, typed fault set, not a global catch-all record.
 
-Conceptual example:
+A Flow that cannot maintain its business invariants enters a system-injected
+`Fault` state. Fault is per-Flow and typed; it is not a global catch-all record,
+and a program may not declare a state named `Fault` (the name is reserved for the
+system sink).
+
+**Declaring a typed fault.** A flow may declare a single typed error with
+`fault ErrorType` in its body. When present, the injected `Fault` state carries an
+additional `error: ErrorType` field alongside the system payload:
 
 ```mimi
-fault OrderFault {
-    Storage(StorageError)
-    Peer(PeerFault)
-    Timeout(Duration)
-    UnexpectedEvent {
-        state: StateId,
-        event: EventId,
+type AccountError {
+    code: i32,
+    reason: string,
+}
+
+flow Account {
+    state Active { balance: i32 }
+    fault AccountError
+
+    transition deposit(Active, amount: i32) -> Active {
+        do { return Active { balance: self.balance + amount } }
     }
-    Panic(PanicPayload)
+}
+```
+
+**The Fault payload.** Every `Fault` value carries the following system fields
+(formalized here; previously implemented but undocumented):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `last_state` | `string` | Name of the state the flow was in when the fault occurred. |
+| `unexpected_event` | `string` | The event that had no handling transition, or `"panic:<code>"` for an absorbed runtime panic (e.g. `"panic:E0801"` for division by zero). |
+| `snapshot` | `string` | A textual snapshot of the faulting state. |
+| `trace` | `SystemTrace` | Structured trace: `{ last_state_name, unexpected_event, snapshot, memory_dump, panic_payload }`. |
+| `error` | `ErrorType` | Present only when `fault ErrorType` is declared; the per-flow typed error. |
+
+**Entering Fault.** A flow enters `Fault` through two channels:
+
+1. *Undefined event (auto-fallback).* Calling a declared event from a state that
+   has no user-defined transition for it returns a `Fault` value whose
+   `last_state`/`unexpected_event` name the source state and the event.
+2. *Absorbed panic.* A runtime panic inside a transition body (for example a
+   division by zero, `E0801`) is absorbed into `Fault` with
+   `unexpected_event = "panic:<code>"`. A panic that occurs while the flow is
+   *already* in `Fault` propagates rather than being re-absorbed.
+
+**Recovery is a business-defined state transition.** Recovering from `Fault` is an
+explicit transition the author writes — either a transition whose source state is
+`Fault`, or a `match` on the `Fault` record that routes to a real business state.
+Recovery must not be default-value construction of fake external resources:
+
+```mimi
+func handle(f: Fault) -> i32 {
+    match f {
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
+            if last_state == "Ready" {
+                if unexpected_event == "panic:E0801" {
+                    return 1  // route to a defined recovery path
+                }
+            }
+            0
+        }
+        _ => 0
+    }
 }
 ```
 
 Recovery rules:
 
-- Anticipated business failures prefer `Result`; do not automatically enter Fault;
+- Anticipated business failures prefer `Result`; they do not automatically enter Fault;
 - Invariant breakage, unrecoverable runtime errors, and explicitly absorbed panics can enter Fault;
-- Recover must match specific Fault variant;
+- Recover must be a business-defined state transition, not default-value construction;
 - Reset/recover does not auto-generate business implementations;
-- Persistent resource must have explicit recovery strategy;
-- Secondary Fault must be recorded or escalated; cannot be silently swallowed.
+- Persistent resources must have an explicit recovery strategy;
+- A secondary Fault (a fault while handling a fault) must be recorded or escalated; it cannot be silently swallowed.
+
+> **Deferred to 0.2.** A full fault *set* — a variant block such as
+> `fault OrderFault { Storage(StorageError) | Peer(PeerFault) | Timeout(Duration) }`
+> with per-variant recover matching — is not part of 1.0. The 1.0 surface is the
+> single per-flow typed error (`fault ErrorType`) plus the system payload above.
 
 ### 3.13 Progressive Mode `[stable]`
 
