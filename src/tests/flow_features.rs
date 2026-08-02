@@ -5657,6 +5657,41 @@ func main() -> i32 {
 }
 
 #[test]
+fn closure_call_result_record_field_access_dual_backend() {
+    // A let-binding whose init is a closure call (`let p = mk_point()`) must
+    // track the closure's return type name in var_type_names so field access on
+    // the result (`p.x`) resolves the record layout. Before the fix, the
+    // closure call result had no tracked type — infer_object_type fell back to
+    // the variable name ("p"), which is not in type_llvm, so codegen rejected
+    // the field access with E0707 while the bytecode backend (which carries
+    // resolved types) worked. The closure's Func return type (recorded at the
+    // lambda's own let-binding) is the source of truth.
+    let src = r#"
+type Point { x: i32, y: i32 }
+func main() -> i32 {
+    let mk_point = fn() -> Point { Point { x: 7, y: 8 } }
+    let p = mk_point()
+    println(p.x + p.y)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        bc.trim(),
+        "15",
+        "bytecode closure-result record field access"
+    );
+    let native = compile_and_run(src)
+        .expect("codegen closure-result record field access must compile (was E0707)");
+    assert_eq!(
+        native.trim(),
+        "15",
+        "codegen closure-result record field access"
+    );
+}
+
+#[test]
 fn multi_target_match_accepted() {
     // A multi-target value may be moved as a whole before it is matched.
     let src2 = r#"
