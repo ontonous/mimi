@@ -1086,7 +1086,6 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Loop
             | TokenKind::Do
             | TokenKind::Pinned
-            | TokenKind::Delegate
             | TokenKind::Shared
             | TokenKind::Const
             | TokenKind::Func
@@ -1352,10 +1351,12 @@ mod tests {
     #[test]
     fn is_stmt_start_keyword_covers_all_keywords() {
         // audit (MEDIUM): is_stmt_start_keyword previously omitted many
-        // keywords (Loop, Do, Pinned, Delegate, Shared, Const, Func, Type,
+        // keywords (Loop, Do, Pinned, Shared, Const, Func, Type,
         // Module, Extern, Use). This test ensures they are recognized so
         // that block expressions containing these statements as their first
         // element are correctly parsed as blocks, not as map/set literals.
+        // (Delegate was in this list but softened to an identifier in 0.34
+        // — golden §1.1/§1.4; it is rejected in statement position instead.)
         for kind in [
             TokenKind::Let,
             TokenKind::If,
@@ -1368,7 +1369,6 @@ mod tests {
             TokenKind::Loop,
             TokenKind::Do,
             TokenKind::Pinned,
-            TokenKind::Delegate,
             TokenKind::Shared,
             TokenKind::Const,
             TokenKind::Func,

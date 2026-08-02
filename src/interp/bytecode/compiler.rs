@@ -1337,7 +1337,27 @@ impl BytecodeCompiler {
 
                 // v0.34.1: `delegate` removed (clause 2); Pinned is still live
                 // (FFI pinning) but its timeout field is DEAD (clause 10).
-                Stmt::Pinned { .. } => {}
+                Stmt::Pinned { expr, var, body } => {
+                    // H3 fix: mirror codegen (block.rs:999) — evaluate the pinned
+                    // expr, bind the optional |var|, run the body. Was a no-op
+                    // (`Stmt::Pinned { .. } => {}`), which silently skipped the
+                    // body and broke L1 dual-backend equivalence for any pinned
+                    // body with observable side effects.
+                    let r = self.compile_expr(fc, expr)?;
+                    fc.push_scope();
+                    if let Some(v) = var {
+                        let ty = self.infer_expr_type(fc, expr);
+                        fc.set_reg_type(v, ty);
+                        let new_r = fc.proto.alloc_reg();
+                        fc.emit(Op::Mov { rd: new_r, rs: r });
+                        fc.vars_mut().insert(v.clone(), new_r);
+                    }
+                    let result = self.compile_block(fc, body)?;
+                    fc.pop_scope();
+                    if is_last {
+                        last_reg = result;
+                    }
+                }
 
                 _ => {
                     // Remaining unsupported: Ellipsis, Located (wrapper).
@@ -2933,6 +2953,13 @@ impl BytecodeCompiler {
                     // The field is passed by value, but the callee's final
                     // parameter value must be RecordSet back into the payload
                     // slot on return (previously silently dropped).
+                    // TODO(M3): only single-level Field(Ident, _) places get a
+                    // writeback. A nested place (`mutate self.a.b` / `o.inner.value`
+                    // → Field(Field(_))) matches neither the Ident arm above nor
+                    // this arm, so its mutation is SILENTLY DROPPED (both backends
+                    // agree — not an L1 break, but silent data loss). The checker
+                    // does no mutate-arg place validation. Tracked by
+                    // flow_features::mutate_nested_field_writeback_gap_m3 (#[ignore]).
                     if let Some(Expr::Field(obj, field)) =
                         effective_args.get(pi as usize).map(|a| a.unlocated())
                     {

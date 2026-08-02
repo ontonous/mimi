@@ -293,6 +293,17 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
+                // H2/M1 fix: `ieee_float { }` and `unsafe { }` are transparent
+                // wrapper blocks — a `return` inside them returns from the
+                // enclosing function. Without these arms, `ieee_float { return X }`
+                // as the last statement fell through to `_ => {}` and triggered a
+                // spurious E0255 ("not all paths return"), which masked the H2
+                // ieee_depth leak by forbidding the early-return syntax outright.
+                Stmt::IeeeFloat(inner) | Stmt::Unsafe(inner) => {
+                    if self.block_returns_on_all_paths(inner) {
+                        return true;
+                    }
+                }
                 Stmt::Arena(inner) => {
                     if self.block_returns_on_all_paths(inner) {
                         return true;

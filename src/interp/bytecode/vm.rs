@@ -59,6 +59,13 @@ struct Frame {
     /// Pre-call parameter snapshots for `old(x)` in ensures contracts.
     /// Only populated when the function has_ensures (avoids allocation otherwise).
     old_snapshots: Vec<Value>,
+    /// v0.34.10a (SD-9, H2 fix): per-frame `ieee_float { }` nesting depth.
+    /// When > 0, float arithmetic + builtins in THIS frame skip the finiteness
+    /// trap (NaN/Inf allowed, IEEE 754). Per-frame (not VM-global) so an early
+    /// `return` inside an ieee block — whose IeeeExit is unreachable — cannot
+    /// leak the suspended-trap state into the caller or later calls. Mirrors
+    /// codegen, where ieee_depth is a per-function compile-time field.
+    ieee_depth: usize,
 }
 
 /// Context captured when a flow transition frame is entered. Used to
@@ -89,9 +96,6 @@ pub struct BytecodeVM<'a> {
     stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     /// Recursion depth guard.
     depth: usize,
-    /// v0.34.10a (SD-9): `ieee_float { }` nesting depth. When > 0, float
-    /// builtins skip the finiteness trap (NaN/Inf allowed, IEEE 754).
-    ieee_depth: usize,
     /// When > 0, exec_loop returns when depth drops below this value.
     /// Used by call_closure to stop when the closure frame returns.
     /// 0 = normal mode (return when stack is empty).
@@ -122,6 +126,17 @@ pub struct BytecodeVM<'a> {
 
 const MAX_DEPTH: usize = 768;
 
+/// Read a register value as f64 (Float directly, Int widened). Used by the
+/// float arithmetic ops to release the frame borrow before calling the
+/// `&self` method `check_float` (H1 fix).
+fn reg_as_f64(v: &Value) -> Result<f64, InterpError> {
+    match v {
+        Value::Float(f) => Ok(*f),
+        Value::Int(i) => Ok(*i as f64),
+        other => Err(InterpError::new(format!("expected Float, got {}", other))),
+    }
+}
+
 impl<'a> BytecodeVM<'a> {
     pub fn new(program: &'a BytecodeProgram) -> Self {
         BytecodeVM {
@@ -131,9 +146,6 @@ impl<'a> BytecodeVM<'a> {
             stdout_capture: None,
             depth: 0,
             stop_depth: 0,
-            // v0.34.10a (SD-9): ieee_float nesting depth — >0 suspends the
-            // float finiteness trap (NaN/Inf allowed, IEEE 754 semantics).
-            ieee_depth: 0,
             registry: registry::create_registry(),
             max_children: program.max_children,
             spawn_count: 0,
@@ -430,6 +442,7 @@ impl<'a> BytecodeVM<'a> {
             mutate_field_writebacks: None,
             flow_tx: None,
             old_snapshots,
+            ieee_depth: 0,
         });
         Ok(())
     }
@@ -699,103 +712,60 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Float arithmetic ───────────────────────────
                 Op::AddFloat { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let a = match &frame.regs[ra as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
-                    };
-                    let b = match &frame.regs[rb as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            reg_as_f64(&frame.regs[ra as usize])?,
+                            reg_as_f64(&frame.regs[rb as usize])?,
+                        )
                     };
                     let r = a + b;
-                    if r.is_nan() || r.is_infinite() {
-                        return Err(InterpError::float_error(
-                            "invalid floating-point result from +",
-                        ));
-                    }
-                    frame.regs[rd as usize] = Value::Float(r);
+                    // H1 fix (SD-9): route through check_float so `ieee_float { }`
+                    // suspends the finiteness trap for basic arithmetic too
+                    // (was: hardcoded is_nan/is_infinite, ignoring ieee_depth).
+                    self.check_float(r, "+")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::SubFloat { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let a = match &frame.regs[ra as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
-                    };
-                    let b = match &frame.regs[rb as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            reg_as_f64(&frame.regs[ra as usize])?,
+                            reg_as_f64(&frame.regs[rb as usize])?,
+                        )
                     };
                     let r = a - b;
-                    if r.is_nan() || r.is_infinite() {
-                        return Err(InterpError::float_error(
-                            "invalid floating-point result from -",
-                        ));
-                    }
-                    frame.regs[rd as usize] = Value::Float(r);
+                    self.check_float(r, "-")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::MulFloat { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let a = match &frame.regs[ra as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
-                    };
-                    let b = match &frame.regs[rb as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            reg_as_f64(&frame.regs[ra as usize])?,
+                            reg_as_f64(&frame.regs[rb as usize])?,
+                        )
                     };
                     let r = a * b;
-                    if r.is_nan() || r.is_infinite() {
-                        return Err(InterpError::float_error(
-                            "invalid floating-point result from *",
-                        ));
-                    }
-                    frame.regs[rd as usize] = Value::Float(r);
+                    self.check_float(r, "*")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::DivFloat { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let a = match &frame.regs[ra as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            reg_as_f64(&frame.regs[ra as usize])?,
+                            reg_as_f64(&frame.regs[rb as usize])?,
+                        )
                     };
-                    let b = match &frame.regs[rb as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
-                    };
-                    if b == 0.0 {
+                    // H1 fix (SD-9): IEEE 754 division by zero yields ±Inf, so
+                    // skip the div-by-zero trap inside `ieee_float { }`.
+                    if b == 0.0 && self.cur_frame().ieee_depth == 0 {
                         return Err(InterpError::div_by_zero());
                     }
                     let r = a / b;
-                    if r.is_nan() || r.is_infinite() {
-                        return Err(InterpError::float_error(
-                            "invalid floating-point result from /",
-                        ));
-                    }
-                    frame.regs[rd as usize] = Value::Float(r);
+                    self.check_float(r, "/")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::NegFloat { rd, ra } => {
                     let frame = self.cur_frame_mut();
@@ -2468,9 +2438,10 @@ impl<'a> BytecodeVM<'a> {
                     return Err(InterpError::new(msg_str));
                 }
                 Op::Nop => {}
-                Op::IeeeEnter => self.ieee_depth += 1,
+                Op::IeeeEnter => self.cur_frame_mut().ieee_depth += 1,
                 Op::IeeeExit => {
-                    self.ieee_depth = self.ieee_depth.saturating_sub(1);
+                    let frame = self.cur_frame_mut();
+                    frame.ieee_depth = frame.ieee_depth.saturating_sub(1);
                 }
 
                 // ── Actor / Flow / Session (Phase D) ──────────
@@ -3355,7 +3326,10 @@ impl<'a> BytecodeVM<'a> {
     pub(crate) fn check_float(&self, v: f64, op: &str) -> Result<(), InterpError> {
         // v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant
         // is suspended — NaN/Inf are legitimate IEEE 754 values there.
-        if self.ieee_depth > 0 {
+        // H2 fix: ieee_depth is per-frame, so a callee's suspended state never
+        // leaks into the caller (and an early return inside an ieee block,
+        // whose IeeeExit is unreachable, dies with the frame).
+        if self.cur_frame().ieee_depth > 0 {
             return Ok(());
         }
         if v.is_nan() || v.is_infinite() {

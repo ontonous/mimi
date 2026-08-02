@@ -79,7 +79,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::State
             | TokenKind::Transition
             | TokenKind::Protocol
-            | TokenKind::Delegate
             | TokenKind::Pinned
             | TokenKind::Persistent
             | TokenKind::View
@@ -156,7 +155,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "state" => TokenKind::State,
         "transition" => TokenKind::Transition,
         "protocol" => TokenKind::Protocol,
-        "delegate" => TokenKind::Delegate,
         "pinned" => TokenKind::Pinned,
         "persistent" => TokenKind::Persistent,
         "view" => TokenKind::View,
@@ -236,9 +234,12 @@ mod tests {
         // - subflow: abolished (amendment clause 2, no nested Flow delegation)
         // - steps: MimiSpec-only, no parser arm
         // - consume: only used by the removed `delegate` construct
+        // v0.34 (golden §1.1/§1.4): delegate also softened (89→80 keyword diet);
+        // rejected in statement position (parse_stmt.rs) but tokenizes as Ident.
         assert!(matches!(keyword_or_ident("subflow"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("steps"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("consume"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("delegate"), TokenKind::Ident(_)));
     }
 
     #[test]

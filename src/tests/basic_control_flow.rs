@@ -1462,3 +1462,40 @@ func main() -> i32 {
     let err = compile_and_run(src).expect_err("if-let must fail closed in codegen");
     assert!(err.contains("if-let"), "unexpected codegen error: {}", err);
 }
+
+#[test]
+#[ignore = "M4: if-let has no native codegen lowering yet (codegen fails closed with E0700 — see if_let_codegen_gap_reported). Un-ignore once if-let is lowered in codegen (e.g. desugared to a match with a wildcard else arm); this asserts L1 dual-backend equivalence."]
+fn if_let_dual_backend_equivalence_goal() {
+    // Forward marker (IDD §14.4): the L1 goal for if-let. Bytecode already
+    // produces 42 / 99; once codegen lowers if-let, both backends must agree.
+    let src = r#"
+func main() -> i32 {
+    let x = Some(42)
+    let mut a = -1
+    if let Some(v) = x {
+        a = v
+    } else {
+        a = -1
+    }
+    let y: Option<i32> = None
+    let mut b = -1
+    if let Some(v) = y {
+        b = v
+    } else {
+        b = 99
+    }
+    println(a)
+    println(b)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "42\n99", "bytecode if-let");
+    let native = compile_and_run(src).expect("codegen if-let (once implemented)");
+    assert_eq!(
+        native.trim(),
+        "42\n99",
+        "codegen if-let must match bytecode"
+    );
+}
