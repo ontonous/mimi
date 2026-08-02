@@ -1307,23 +1307,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             other => other,
         };
-        // Box the state struct. Allocate conservatively: struct size is
-        // field_count × 8 bytes (all Mimi scalar fields are ≤ 64-bit; structs
-        // are ≥ that, so the box is never undersized).
+        // Box the state struct. C2 (MEM-C8): size the box from the actual
+        // LLVM type size via size_of(), NOT field_count × 8. A nested record
+        // field (state Foo { inner: Bar } with Bar = { i32, i32, i32 }) lowers
+        // to { { i32, i32, i32 } }: count_fields() == 1 but the store writes
+        // 12 bytes, so field_count × 8 == 8 undersizes the box and the store
+        // overflows the heap. size_of() accounts for nesting, padding and
+        // alignment (same pattern as registry/types.rs:293).
         let state_ty = state_val.get_type();
-        let field_count: u64 = match state_ty {
-            BasicTypeEnum::StructType(st) => st.count_fields() as u64,
-            _ => 1,
-        };
-        let box_bytes = (field_count * 8).max(8);
-        let size = self
-            .builder
-            .build_int_mul(
-                self.context.i64_type().const_int(box_bytes, false),
-                self.context.i64_type().const_int(1, false),
-                "mt_box_size",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("mt box size: {e}")))?;
+        let box_bytes: u64 = match state_ty {
+            BasicTypeEnum::StructType(st) => st
+                .size_of()
+                .and_then(|sv| sv.get_zero_extended_constant())
+                // size_of virtually always succeeds for StructType; 64 covers
+                // any pathological payload (matches registry/types.rs MEM-C8).
+                .unwrap_or(64),
+            // Scalar states (i32/i64/f64/pointer) are all ≤ 8 bytes.
+            _ => 8,
+        }
+        .max(8);
+        let size = self.context.i64_type().const_int(box_bytes, false);
+        // TODO(L6): this payload box is never freed. The match-dispatch unwrap
+        // (pattern.rs find_variant_ordinal + inttoptr/load) extracts the fields
+        // but does not free the box → one leak per multi-target transition result
+        // (valgrind: "2 allocs, 1 frees"). Part of a broader payload-boxing leak
+        // (the enum Packed payload at registry/types.rs:293 likely leaks too).
+        // A correct fix must free the box AFTER all arm fields are copied out
+        // (freeing earlier = use-after-free), so it needs a payload-lifetime
+        // analysis across the match arms — not a spot fix.
         let box_ptr = self.malloc_or_abort(size, "mt_box")?;
         self.build_store(box_ptr, state_val)
             .map_err(|e| CompileError::LlvmError(format!("mt box store: {}", e)))?;

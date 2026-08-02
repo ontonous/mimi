@@ -666,3 +666,109 @@ func main() -> i32 {
         err
     );
 }
+
+#[test]
+fn ieee_float_basic_arithmetic_suspends_trap_dual_backend() {
+    // H1 (SD-9, L1): the finiteness trap must be suspended for BASIC arithmetic
+    // (+ - * /) inside `ieee_float { }`, not just math builtins (sqrt/log/...).
+    // Pre-fix the four bytecode Float ops hardcoded `is_nan() || is_infinite()`
+    // and ignored ieee_depth, so `1e308 * 10.0` trapped in bytecode while
+    // codegen (operator.rs ieee_depth guard) allowed it — an L1 break.
+    // DivFloat's `b == 0.0` trap must also be skipped inside ieee_float
+    // (IEEE 754 division by zero yields ±Inf).
+    let src = r#"
+func main() -> i32 {
+    let mut x = 0.0
+    ieee_float {
+        x = 1e308 * 10.0
+        x = x - x
+    }
+    if is_nan(x) { println(1) } else { println(0) }
+    let mut y = 0.0
+    ieee_float {
+        y = 1.0 / 0.0
+    }
+    if is_infinite(y) { println(1) } else { println(0) }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "1\n1", "bytecode ieee_float basic arithmetic");
+    let native = compile_and_run(src).expect("codegen ieee_float basic arithmetic");
+    assert_eq!(native.trim(), "1\n1", "codegen ieee_float basic arithmetic");
+}
+
+#[test]
+fn ieee_depth_does_not_leak_across_function_boundary() {
+    // H2 (SD-9, L1): ieee_depth is per-frame. An early `return` inside
+    // `ieee_float { }` (whose IeeeExit is unreachable) must NOT leak the
+    // suspended-trap state into the caller or later calls. Pre-fix ieee_depth
+    // was VM-global, so after `leaky()` returned, main's `x * 2.0` (= Inf)
+    // was silently allowed instead of trapping.
+    // This test also exercises M1: `ieee_float { return .. }` as the last
+    // statement must type-check (block_returns_on_all_paths sees through the
+    // ieee_float wrapper) — pre-fix it was a spurious E0255.
+    let src = r#"
+func leaky() -> f64 {
+    ieee_float {
+        return 1e308 * 10.0
+    }
+}
+func main() -> i32 {
+    let x = leaky()
+    let y = x * 2.0
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "ieee_float early return must type-check (M1): {:?}",
+        check_source(src)
+    );
+    let err = run_source_bytecode_result(src).expect_err("bytecode: Inf*2 outside ieee must trap");
+    assert!(
+        err.contains("E0813") || err.contains("invalid floating-point"),
+        "bytecode leak: {}",
+        err
+    );
+    let native_err = compile_and_run(src).expect_err("codegen: Inf*2 outside ieee must trap");
+    assert!(
+        native_err.contains("E0813") || native_err.contains("NaN/Inf"),
+        "codegen leak: {}",
+        native_err
+    );
+}
+
+#[test]
+fn ieee_float_and_unsafe_blocks_count_as_returning() {
+    // M1: block_returns_on_all_paths must see through `ieee_float { }` and
+    // `unsafe { }` wrapper blocks. Pre-fix, a `return` inside them as the last
+    // statement fell through to `_ => {}` and triggered a spurious E0255
+    // ("not all paths return"), which masked the H2 ieee_depth leak by
+    // forbidding the early-return syntax outright.
+    let src = r#"
+func a() -> i32 {
+    ieee_float {
+        return 1
+    }
+}
+func b() -> i32 {
+    unsafe {
+        return 2
+    }
+}
+func main() -> i32 {
+    a() + b()
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "ieee_float/unsafe return must type-check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(crate::interp::Value::Int(3))
+    );
+}

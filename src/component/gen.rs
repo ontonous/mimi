@@ -634,7 +634,6 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("len", prim(UIntPtr))
             .unsafe_fn()
     });
-    gen.export("mimi_wall_clock_ms", |f| f.returns(prim(I64)).effect("io"));
     gen.export("mimi_runtime_set_error_handler", |f| {
         f.param("handler", prim(IntPtr))
     });
@@ -1402,7 +1401,6 @@ mod tests {
             "mimi_print_line",
             "mimi_print_err",
             "mimi_runtime_abort",
-            "mimi_wall_clock_ms",
             "mimi_try_exit",
             "mimi_assert_state",
             // Concurrency

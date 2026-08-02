@@ -13,6 +13,7 @@
 | E0240 | retired | superseded by E0253 (where constraint violated) |
 | E0241 | retired | superseded by E0254 (effect not available) |
 | E0255 | retired | duplicate of E0235 (function does not return on all paths) |
+| E0419 | retired | ADR-002 (v0.34.15) inverted the rejection — multi-target states MAY differ in payload layout; runtime dispatches by state tag (tagged-state-union ABI, v0.34.16) |
 | E0701 | retired | duplicate of E0722 (unsupported expression in codegen) |
 
 ## Code Ranges

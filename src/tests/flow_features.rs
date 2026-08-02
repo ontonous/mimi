@@ -428,6 +428,37 @@ flow SafeFFI {
 }
 
 #[test]
+fn pinned_body_executes_dual_backend() {
+    // H3 (L1): the bytecode compiler must compile a `pinned(expr) |var| { body }`
+    // body, not skip it. Pre-fix compiler.rs had `Stmt::Pinned { .. } => {}`
+    // (no-op), so any pinned body with observable side effects was silently
+    // dropped in bytecode while codegen (block.rs:999) ran it — an L1 break.
+    let src = r#"
+func main() -> i32 {
+    let ptr = 42
+    pinned(ptr) |p| {
+        println("pinned body executed")
+    }
+    println("after pinned")
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        bc.trim(),
+        "pinned body executed\nafter pinned",
+        "bytecode must run the pinned body"
+    );
+    let native = compile_and_run(src).expect("codegen pinned body");
+    assert_eq!(
+        native.trim(),
+        "pinned body executed\nafter pinned",
+        "codegen must run the pinned body"
+    );
+}
+
+#[test]
 fn flow_parse_with_impl_protocol() {
     let src = r#"
 flow LidarDriver {
@@ -484,7 +515,7 @@ fn flow_lexer_keywords() {
         ("state", TokenKind::State),
         ("transition", TokenKind::Transition),
         ("protocol", TokenKind::Protocol),
-        ("delegate", TokenKind::Delegate),
+        ("delegate", TokenKind::Ident("delegate".into())),
         ("pinned", TokenKind::Pinned),
         ("persistent", TokenKind::Persistent),
         ("view", TokenKind::View),
@@ -4541,6 +4572,74 @@ func main() -> i32 {
 }
 
 #[test]
+#[ignore = "M3: nested-place mutate writeback (o.inner.value / mutate self.a.b) is silently dropped in BOTH backends. The checker performs no mutate-arg place validation (even `bump(42)` is accepted), and the writeback only matches Field(Ident,_). Needs a design decision: checker place-grammar rejection (fail-closed) vs. nested writeback implementation in both backends. Tracked at compiler.rs mutate field_targets."]
+fn mutate_nested_field_writeback_gap_m3() {
+    // M3 (known gap, NOT an L1 violation — both backends agree on the wrong
+    // answer): `bump(o.inner.value)` is a nested field place. The callee's
+    // mutation of x is silently lost because the writeback machinery only
+    // handles Ident and single-level Field(Ident,_) places.
+    // Expected (once fixed): o.inner.value == 11. Actual (both backends): 10.
+    let src = r#"
+type Inner { value: i32 }
+type Outer { inner: Inner }
+func bump(x: mutate i32) {
+    x = x + 1
+}
+func main() -> i32 {
+    let mut o = Outer { inner: Inner { value: 10 } }
+    bump(o.inner.value)
+    println(o.inner.value)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "11", "bytecode nested mutate writeback");
+    let out = compile_and_run(src).expect("codegen nested mutate writeback");
+    assert_eq!(out.trim(), "11", "codegen nested mutate writeback");
+}
+
+#[test]
+#[ignore = "M6: aliasing simultaneous mutate borrows of the same place (bump2(self.tag, self.tag)) are accepted by the checker but violate mutate's exclusive-borrow invariant. Both backends produce a 'defined' result (4) instead of rejecting. Same root cause as M3: the checker performs no mutate-arg place validation (no place tracking, no alias detection). Needs the checker place-validation pass."]
+fn mutate_aliasing_borrow_should_be_rejected_m6() {
+    // M6 (known gap, negative test): two simultaneous `mutate` borrows of the
+    // SAME field alias exclusive borrows. The borrow system should reject this
+    // (cf. Rust: two &mut to the same place). Currently accepted; both backends
+    // compute x+y from by-value copies (tag=1 → x=2,y=2 → 4) and the writeback
+    // order is unspecified. Expected once fixed: a checker rejection (E0415
+    // view/mutate borrow violation or a dedicated aliasing diagnostic).
+    let src = r#"
+func bump2(x: mutate i32, y: mutate i32) -> i32 {
+    x = x + 1
+    y = y + 1
+    x + y
+}
+flow P {
+    state Active { tag: i32 }
+    state Done { v: i32 }
+    transition go(Active) -> Done {
+        do {
+            let a = bump2(self.tag, self.tag)
+            return Done { v: a }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Active { tag: 1 }
+    let r = P::go(s)
+    println(r.v)
+    0
+}
+"#;
+    // Goal: the checker rejects aliasing mutate borrows.
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "aliasing mutate borrows of the same field must be rejected"
+    );
+}
+
+#[test]
 fn mutate_var_writeback_alias_return_dual_backend() {
     // v0.34.13: `bump(mutate v)` write-back when the callee's return register
     // aliases the mutate param register (`RET r0`, x at r0). do_return used to
@@ -5083,44 +5182,6 @@ func main() -> i32 {
     assert!(r.is_ok(), "producer mute cascade should not crash: {:?}", r);
 }
 
-// ── v0.29.47: Delegate ChannelOverloaded Return ───────────────────────
-
-#[test]
-fn delegate_actor_dispatch_with_overloaded() {
-    // L1 interp: delegate to an actor actually dispatches to the actor.
-    // If the actor is muted/overloaded, returns ChannelOverloaded error.
-    let src = r#"
-actor Worker {
-    val: i32
-    func process(n: i32) -> i32 { self.val = self.val + n; self.val }
-    func get() -> i32 { self.val }
-}
-flow Parent {
-    state Active { buffer: i32, worker: i32 }
-    transition delegate_val(Active) -> Active {
-        do {
-            delegate view(self.buffer) to self.worker
-            return Active { buffer: self.buffer, worker: self.worker }
-        }
-    }
-}
-func main() -> i32 {
-    let w = Worker.spawn()
-    let s = Active { buffer: 42, worker: w }
-    let r = Parent::delegate_val(s)
-    println(r.buffer)
-    0
-}
-"#;
-    // This test verifies the delegate dispatch path works.
-    // The actor call may fail (no __delegate_view method), but the
-    // delegate should not silently drop the value.
-    let r = run_source_bytecode_result(src);
-    // Accept either success (actor handles __delegate_view) or error
-    // (actor doesn't have __delegate_view method) — the key is no crash.
-    assert!(r.is_ok() || r.is_err(), "delegate should not crash");
-}
-
 // ── v0.29.48: Integration Test Sandbox ────────────────────────────────
 
 #[test]
@@ -5366,6 +5427,84 @@ func main() -> i32 {
     assert_eq!(bytecode_out.trim(), "110\n15\n1\n2");
     let native = compile_and_run(src).expect("codegen multi-target dual backend");
     assert_eq!(native.trim(), "110\n15\n1\n2");
+}
+
+#[test]
+fn multi_target_nested_record_payload_box_sized_dual_backend() {
+    // C2 (MEM-C8, L1): wrap_multi_target_value must size the payload box from
+    // the actual LLVM type size (size_of), NOT field_count × 8. A target state
+    // with a NESTED record field (Done { inner: Inner }, Inner = {i32,i32,i32})
+    // lowers to { { i32, i32, i32 } }: count_fields() == 1 but the struct is
+    // 12 bytes, so field_count × 8 == 8 undersized the box and the store
+    // overflowed the heap. The bytecode data round-trip reads the nested
+    // fields back (sum == 6); codegen binds the nested record whole and
+    // dispatches by tag (100) — both backends agree, no heap corruption.
+    let src = r#"
+type Inner { a: i32, b: i32, c: i32 }
+flow F {
+    state Start { v: i32 }
+    state Done { inner: Inner }
+    state Skip { v: i32 }
+    transition go(Start) -> Done | Skip {
+        do {
+            if self.v > 0 {
+                return Done { inner: Inner { a: 1, b: 2, c: 3 } }
+            }
+            return Skip { v: 0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Start { v: 5 }
+    let r = F::go(s)
+    let sum = match r {
+        Done { inner } => inner.a + inner.b + inner.c,
+        Skip { v } => v
+    }
+    println(sum)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    // Bytecode round-trips the nested payload correctly.
+    let (_, bytecode_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        bytecode_out.trim(),
+        "6",
+        "bytecode nested-record round-trip"
+    );
+    // Codegen must box the 12-byte nested struct without overflow and
+    // dispatch the correct tag. (Nested field access in the match arm is a
+    // separate native-emitter capability, so the codegen assertion uses a
+    // tag-only variant below.)
+    let src_tag = r#"
+type Inner { a: i32, b: i32, c: i32 }
+flow F {
+    state Start { v: i32 }
+    state Done { inner: Inner }
+    state Skip { v: i32 }
+    transition go(Start) -> Done | Skip {
+        do {
+            if self.v > 0 {
+                return Done { inner: Inner { a: 1, b: 2, c: 3 } }
+            }
+            return Skip { v: 0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Start { v: 5 }
+    let r = F::go(s)
+    let tag = match r {
+        Done { inner } => 100,
+        Skip { v } => v
+    }
+    println(tag)
+    0
+}
+"#;
+    let native = compile_and_run(src_tag).expect("codegen nested-record box must not overflow");
+    assert_eq!(native.trim(), "100", "codegen nested-record tag dispatch");
 }
 
 #[test]

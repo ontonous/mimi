@@ -128,9 +128,13 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::Do(body))
             }
-            TokenKind::Delegate => {
-                // v0.34.1: `delegate` abolished by amendment clause 2 (no nested
-                // Flow delegation). Reject with a clause-referencing diagnostic.
+            TokenKind::Ident(s) if s == "delegate" => {
+                // v0.34.1 / golden §1.1+§1.4: `delegate` abolished by amendment
+                // clause 2 (no nested Flow delegation) and removed from the
+                // keyword table (softened to an identifier, like subflow/consume,
+                // 89→80 keyword diet). It is still recognized in statement
+                // position to reject with a clause-referencing diagnostic
+                // (governance §9.2: every abolished syntax keeps a negative test).
                 self.advance();
                 let tok = self.tokens[self.pos.saturating_sub(1)].clone();
                 return Err(ParseError::new(
