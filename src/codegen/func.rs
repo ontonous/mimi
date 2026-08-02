@@ -1620,6 +1620,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         };
                         let concrete_val = self.compile_expr(init, vars)?;
+                        // 条款 11 escape hatch: `dyn X = unsafe_cast_protocol(v)`
+                        // infers the concrete type from the inner value. The
+                        // escape hatch also permits a MISSING vtable (null) —
+                        // the user guarantees conformance; calling an
+                        // unimplemented method then aborts via the CG-H7 null
+                        // guard instead of failing the build.
+                        let mut is_unsafe_protocol_cast = false;
                         let concrete_type = match init.unlocated() {
                             Expr::Record { ty: Some(tn), .. } => tn.clone(),
                             Expr::Ident(var_name) => self
@@ -1627,6 +1634,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .get(var_name)
                                 .cloned()
                                 .unwrap_or_default(),
+                            Expr::Call(callee, args) if args.len() == 1 => {
+                                match callee.unlocated() {
+                                    Expr::Ident(fname) if fname == "unsafe_cast_protocol" => {
+                                        is_unsafe_protocol_cast = true;
+                                        match args[0].unlocated() {
+                                            Expr::Ident(var_name) => self
+                                                .var_type_names
+                                                .get(var_name)
+                                                .cloned()
+                                                .unwrap_or_default(),
+                                            Expr::Record { ty: Some(tn), .. } => tn.clone(),
+                                            _ => String::new(),
+                                        }
+                                    }
+                                    _ => String::new(),
+                                }
+                            }
                             _ => {
                                 return Err(CompileError::LlvmError(format!(
                                     "cannot infer concrete type for dyn Trait binding '{}'",
@@ -1641,38 +1665,67 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )));
                         }
                         let trait_name = &trait_names[0];
-                        let concrete_ty = self
-                            .type_llvm
-                            .get(&concrete_type)
-                            .cloned()
-                            .unwrap_or_else(|| concrete_val.get_type());
+                        // Records bind as pointers in Mimi (reference
+                        // semantics): the compiled value is a LidarDriver*
+                        // while type_llvm registers the {i32} value shape.
+                        // Storing the value into a {i32} data slot truncates
+                        // the pointer (garbage). When the value is already a
+                        // pointer, the data slot holds the pointer itself —
+                        // matching the impl method's `self: &Type` ABI.
+                        let concrete_ty = match concrete_val {
+                            BasicValueEnum::PointerValue(_) => self
+                                .context
+                                .ptr_type(inkwell::AddressSpace::default())
+                                .into(),
+                            _ => self
+                                .type_llvm
+                                .get(&concrete_type)
+                                .cloned()
+                                .unwrap_or_else(|| concrete_val.get_type()),
+                        };
                         let data_alloca =
                             self.build_alloca(concrete_ty, &format!("{}_data", name))?;
                         self.build_store(data_alloca, concrete_val)?;
                         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        // The fat pointer's data slot must hold the VALUE
+                        // (a LidarDriver* for record semantics) that the impl
+                        // method's `self: &Type` receives — not the address of
+                        // the staging alloca (that would double-indirect).
+                        // Load the stored value, then cast it to i8*.
+                        let data_ptr = self
+                            .build_load(concrete_ty, data_alloca, &format!("{}_data_val", name))?
+                            .into_pointer_value();
                         let data_ptr = self
                             .builder
-                            .build_pointer_cast(data_alloca, i8_ptr, &format!("{}_data_i8", name))
+                            .build_pointer_cast(data_ptr, i8_ptr, &format!("{}_data_i8", name))
                             .map_err(|e| {
                                 CompileError::LlvmError(format!("pointer cast error: {}", e))
                             })?;
                         let vtable_key = format!("{}__{}", concrete_type, trait_name);
-                        let vtable_gv = self.vtable_globals.get(&vtable_key).ok_or_else(|| {
-                            CompileError::LlvmError(format!(
-                                "no vtable for {}.{}",
-                                concrete_type, trait_name
-                            ))
-                        })?;
-                        let vtable_ptr = self
-                            .builder
-                            .build_pointer_cast(
-                                vtable_gv.as_pointer_value(),
-                                i8_ptr,
-                                &format!("{}_vtable_i8", name),
-                            )
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("pointer cast error: {}", e))
-                            })?;
+                        let vtable_ptr = match self.vtable_globals.get(&vtable_key) {
+                            Some(vtable) => self
+                                .builder
+                                .build_pointer_cast(
+                                    vtable.as_pointer_value(),
+                                    i8_ptr,
+                                    &format!("{}_vtable_i8", name),
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("pointer cast error: {}", e))
+                                })?,
+                            None if is_unsafe_protocol_cast => {
+                                // 条款 11: conformance is user-guaranteed. A
+                                // null vtable defers the failure to runtime —
+                                // the CG-H7 null guard aborts on a real call.
+                                i8_ptr.const_null()
+                            }
+                            None => {
+                                return Err(CompileError::LlvmError(format!(
+                                    "no vtable for {}.{}",
+                                    concrete_type, trait_name
+                                )));
+                            }
+                        };
                         let fat_ty = BasicTypeEnum::StructType(self.context.struct_type(
                             &[
                                 BasicTypeEnum::PointerType(i8_ptr),

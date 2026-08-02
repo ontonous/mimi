@@ -1556,6 +1556,21 @@ impl BodyLowerer<'_> {
                     // with caps leave the resolved native slice entirely
                     // (eligibility), so a type-correct placeholder suffices.
                     kind
+                } else if let Some(kind) =
+                    self.lower_unsafe_cast_protocol(&node_id, callee, arguments, role)?
+                {
+                    // 条款 11 escape hatch: identity cast — the checker
+                    // already typed it as the expected dyn type and skipped
+                    // conformance projection; lowering is the argument value.
+                    kind
+                } else if let Some(kind) =
+                    self.lower_dyn_method_call(&node_id, callee, arguments, role)?
+                {
+                    // dyn trait method dispatch (e.g. `sensor.read()`): dyn
+                    // programs leave the resolved native slice (eligibility),
+                    // so lowering a type-correct placeholder suffices — interp
+                    // dispatches by concrete record type, codegen by vtable.
+                    kind
                 } else {
                     ResolvedExprKind::Call(self.lower_call(
                         &node_id,
@@ -2880,6 +2895,81 @@ impl BodyLowerer<'_> {
             effects: Vec::new(),
             session: Vec::new(),
         }))
+    }
+
+    /// dyn trait method dispatch placeholder: `sensor.read()` on a
+    /// `dyn Trait` receiver. Programs with traits/impls leave the resolved
+    /// native slice (eligibility), so interp (bytecode, dispatches by
+    /// concrete record type) and codegen (legacy, vtable fat pointer) handle
+    /// execution from the raw AST; the resolved body only needs a
+    /// type-correct placeholder for CFG/ownership passes.
+    fn lower_dyn_method_call(
+        &mut self,
+        node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedExprKind>, Vec<ResolvedBodyError>> {
+        let Expr::Field(receiver, _method_name) = callee.unlocated() else {
+            return Ok(None);
+        };
+        // Tolerate receivers that cannot lower (actor names, flow states):
+        // those are not dyn values; the real method-call path handles them.
+        let Ok(receiver) = self.lower_expr(receiver, &format!("{role}.callee.inner")) else {
+            return Ok(None);
+        };
+        let is_dyn = matches!(
+            self.types.get(&receiver.ty),
+            Some(ResolvedType::Trait {
+                kind: super::TraitTypeKind::Dynamic,
+                ..
+            })
+        );
+        if !is_dyn {
+            return Ok(None);
+        }
+        for argument in arguments {
+            self.lower_expr(argument, &format!("{role}.argument"))?;
+        }
+        // The call-site type is authoritative; the placeholder expression's
+        // type is set by the caller from node_types. Only require the entry
+        // to exist so a missing type is caught at lowering time.
+        self.node_types.get(node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "dyn method call has no checker-finalized type",
+            )]
+        })?;
+        Ok(Some(ResolvedExprKind::Literal(ResolvedLiteral::Unit)))
+    }
+
+    /// 条款 11 escape hatch: `unsafe_cast_protocol(x)` lowers as an identity
+    /// cast — the argument value with the call-site (dyn) type. The checker
+    /// has already typed it against the expected dyn trait and skipped the
+    /// conformance projection check, so lowering does not re-validate.
+    fn lower_unsafe_cast_protocol(
+        &mut self,
+        node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedExprKind>, Vec<ResolvedBodyError>> {
+        let Expr::Ident(name) = callee.unlocated() else {
+            return Ok(None);
+        };
+        if name != "unsafe_cast_protocol" || arguments.len() != 1 {
+            return Ok(None);
+        }
+        let value = self.lower_expr(&arguments[0], &format!("{role}.argument"))?;
+        let ty = self.node_types.get(node_id).cloned().ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "unsafe_cast_protocol call has no checker-finalized type",
+            )]
+        })?;
+        let mut value = value;
+        value.ty = ty;
+        Ok(Some(value.kind))
     }
 
     /// Capability method dispatch: `c.split()` / `c.drop()` on a capability
@@ -4746,6 +4836,29 @@ impl BodyLowerer<'_> {
         ) {
             return Ok(CheckedConversion {
                 kind: CheckedConversionKind::FlowStateInject,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        // Concrete → dyn Trait packing (DynamicPack). The checker is the
+        // conformance gate: a plain `let s: dyn Sensor = driver` requires the
+        // (Sensor, Driver) impl (is_trait_coercion, check_stmt.rs), while
+        // `unsafe_cast_protocol(driver)` skips that check (条款 11 escape
+        // hatch). The resolved layer trusts the checker-finalized type pair
+        // and admits the pack. 0.34.20: DynamicPack was previously declared
+        // but never produced — trait 定位确认 closed the gap.
+        if matches!(
+            (self.types.get(to), self.types.get(from)),
+            (
+                Some(ResolvedType::Trait {
+                    kind: super::TraitTypeKind::Dynamic,
+                    ..
+                }),
+                Some(_),
+            )
+        ) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::DynamicPack,
                 from: from.clone(),
                 to: to.clone(),
             });

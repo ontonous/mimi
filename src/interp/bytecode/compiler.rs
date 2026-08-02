@@ -2857,6 +2857,14 @@ impl BytecodeCompiler {
                 });
                 return Ok(rd);
             }
+
+            // 条款 11 escape hatch: unsafe_cast_protocol(x) is an identity —
+            // the value passes through unchanged. dyn packing is implicit in
+            // the bytecode value model (Value::Record carries the concrete
+            // type name; dyn dispatch resolves by it at runtime).
+            if name == "unsafe_cast_protocol" && args.len() == 1 {
+                return self.compile_expr(fc, &args[0]);
+            }
         }
 
         // ── Normal path: pre-allocate and compile all arguments ──

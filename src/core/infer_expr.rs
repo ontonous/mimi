@@ -79,6 +79,23 @@ impl<'a> Checker<'a> {
                             self.freeze_variant_payload(error, &actual);
                             return expected.clone();
                         }
+                    } else if name == "unsafe_cast_protocol" && args.len() == 1 {
+                        // 条款 11 escape hatch: cast a concrete value to the
+                        // expected dyn trait/protocol type, SKIPPING the
+                        // conformance projection check (E0418 / is_trait_coercion).
+                        // The user guarantees conformance; if it does not hold,
+                        // runtime behavior is undefined (Rust `unsafe` semantics).
+                        self.infer_expr(&args[0], scopes);
+                        if !matches!(expected.unlocated(), Type::DynTrait(_)) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0209,
+                                format!(
+                                    "unsafe_cast_protocol requires a dyn trait target type, found {}",
+                                    crate::core::helpers::fmt_type(expected)
+                                ),
+                            );
+                        }
+                        return expected.clone();
                     }
                 }
                 self.infer_expr(expr, scopes)

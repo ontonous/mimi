@@ -11391,6 +11391,146 @@ fn dual_trait_impl_self_record() {
     );
 }
 
+// ─── 0.34.20 — 条款 11 unsafe_cast_protocol + dyn fat-pointer ────────
+// dyn codegen previously stored the data-slot ADDRESS instead of the value
+// (double indirection) → garbage on every dyn call. The fix and the escape
+// hatch are both covered here.
+
+#[test]
+fn dual_dyn_trait_dispatch_record() {
+    // Regression: dyn fat-pointer data slot must hold the value pointer.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        trait Sensor {
+            func read() -> i32;
+        }
+
+        type LidarDriver {
+            value: i32
+        }
+
+        impl Sensor for LidarDriver {
+            func read() -> i32 { self.value }
+        }
+
+        func main() -> i32 {
+            let driver = LidarDriver { value: 42 };
+            let sensor: dyn Sensor = driver;
+            println(sensor.read());
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_unsafe_cast_protocol() {
+    // 条款 11 escape hatch: cast a concrete value to a dyn trait the
+    // checker cannot prove conformance for. Here the impl exists, so the
+    // vtable is real and the dispatch works on both backends.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        trait Sensor {
+            func read() -> i32;
+        }
+
+        type LidarDriver {
+            value: i32
+        }
+
+        impl Sensor for LidarDriver {
+            func read() -> i32 { self.value }
+        }
+
+        func main() -> i32 {
+            let driver = LidarDriver { value: 42 };
+            let sensor: dyn Sensor = unsafe_cast_protocol(driver);
+            println(sensor.read());
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_unsafe_cast_protocol_skip_conformance() {
+    // The escape hatch SKIPS the conformance projection check: Thermometer
+    // does not implement Sensor, so a plain `let s: dyn Sensor = t` is
+    // rejected (E0209) while unsafe_cast_protocol compiles. The null vtable
+    // defers failure to runtime (CG-H7 null guard) — here the method is
+    // never called, so both backends print 42.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        trait Sensor {
+            func read() -> i32;
+        }
+
+        type Thermometer {
+            temp: i32
+        }
+
+        func main() -> i32 {
+            let t = Thermometer { temp: 21 };
+            let sensor: dyn Sensor = unsafe_cast_protocol(t);
+            println(42);
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_dyn_binding_rejects_non_conforming() {
+    // L2 contract: a plain dyn binding without an impl is rejected — the
+    // checker's conformance projection gate stays intact (only the escape
+    // hatch bypasses it).
+    let diags = check_source(
+        "trait Sensor { func read() -> i32; } type Thermometer { temp: i32 } \
+         func main() -> i32 { let t = Thermometer { temp: 21 }; let sensor: dyn Sensor = t; println(42); 0 }",
+    )
+    .expect_err("non-conforming dyn binding must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0209"),
+        "expected E0209 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_unsafe_cast_protocol_requires_dyn_target() {
+    // The escape hatch only makes sense with a dyn trait target; using it
+    // against a concrete target is a type error.
+    let diags = check_source(
+        "type Box { v: i32 } func main() -> i32 { let b = Box { v: 1 }; let x: i32 = unsafe_cast_protocol(b); println(42); 0 }",
+    )
+    .expect_err("unsafe_cast_protocol with non-dyn target must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0209"),
+        "expected E0209 diagnostic, got:\n{rendered}"
+    );
+}
+
 #[test]
 fn dual_newtype_pattern() {
     // Newtype constructor patterns must destructure the transparent inner

@@ -21,6 +21,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     | "filter" | "reduce" => {
                         return self.compile_builtin_intrinsic(name, args, vars);
                     }
+                    // 条款 11 escape hatch: unsafe_cast_protocol(x) is an
+                    // identity cast — the value passes through unchanged; the
+                    // dyn fat-pointer packing is handled by the dyn let-binding
+                    // site in codegen/func.rs.
+                    "unsafe_cast_protocol" => {
+                        if args.len() == 1 {
+                            return self.compile_expr(&args[0], vars);
+                        }
+                    }
                     _ => {}
                 }
 
