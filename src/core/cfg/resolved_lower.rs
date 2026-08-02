@@ -372,6 +372,19 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 statement,
                 "while-let",
             ),
+            ResolvedStmtKind::IfLet {
+                pattern,
+                initializer,
+                then_block,
+                else_block,
+            } => self.lower_conditional_if(
+                initializer,
+                Some(pattern),
+                then_block,
+                else_block.as_ref(),
+                current,
+                statement,
+            ),
             ResolvedStmtKind::For {
                 pattern,
                 iterable,
@@ -872,6 +885,89 @@ impl<'a> ResolvedCfgLowerer<'a> {
             );
         }
         Some(exit)
+    }
+
+    /// v0.34.3: lower `if let` — initializer expression, then/else branches,
+    /// pattern binding point on the then entry. No loop structure.
+    fn lower_conditional_if(
+        &mut self,
+        initializer: &ResolvedExpr,
+        pattern: Option<&ResolvedPattern>,
+        then_block: &ResolvedBlock,
+        else_block: Option<&ResolvedBlock>,
+        current: BasicBlockId,
+        statement: &ResolvedStmt,
+    ) -> Option<BasicBlockId> {
+        let then_entry = self.new_block(&then_block.node_id, &then_block.origin, "iflet-then");
+        let else_entry = self.new_block(&statement.node_id, &statement.origin, "iflet-else");
+        let join = self.new_block(&statement.node_id, &statement.origin, "iflet-join");
+        let condition_end = self.lower_expr(initializer, current, CfgPointKind::Condition)?;
+        let then_edge = self.edge(
+            &condition_end,
+            &then_entry,
+            EdgeKind::Then,
+            &statement.node_id,
+            &statement.origin,
+            "iflet-then",
+        );
+        let else_edge = self.edge(
+            &condition_end,
+            &else_entry,
+            EdgeKind::Else,
+            &statement.node_id,
+            &statement.origin,
+            "iflet-else",
+        );
+        self.terminate(
+            &condition_end,
+            Terminator::Branch {
+                condition: initializer.node_id.clone(),
+                then_edge,
+                else_edge,
+            },
+        );
+        if let Some(pattern) = pattern {
+            self.point(
+                &then_entry,
+                &pattern.node_id,
+                &pattern.origin,
+                CfgPointKind::Binding,
+                PointAccesses {
+                    defs: self.pattern_names(pattern),
+                    ..PointAccesses::default()
+                },
+            );
+        }
+        let then_end = self.lower_block(then_block, Some(then_entry))?;
+        self.goto(
+            &then_end,
+            &join,
+            EdgeKind::Fallthrough,
+            &statement.node_id,
+            &statement.origin,
+            "iflet-join-then",
+        );
+        if let Some(else_block) = else_block {
+            let else_end = self.lower_block(else_block, Some(else_entry))?;
+            self.goto(
+                &else_end,
+                &join,
+                EdgeKind::Fallthrough,
+                &statement.node_id,
+                &statement.origin,
+                "iflet-join-else",
+            );
+        } else {
+            self.goto(
+                &else_entry,
+                &join,
+                EdgeKind::Fallthrough,
+                &statement.node_id,
+                &statement.origin,
+                "iflet-join-else",
+            );
+        }
+        Some(join)
     }
 
     fn lower_infinite_loop(

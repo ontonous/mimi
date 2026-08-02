@@ -2527,6 +2527,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.compile_block(body, vars)?;
                 }
+                Stmt::IfLet { .. } => {
+                    return Err(CompileError::Generic(
+                        "if-let is not yet supported in native codegen; use a match \
+                         expression or bind the value explicitly (E0700 family)"
+                            .to_string(),
+                    ));
+                }
                 _ => {}
             }
         }

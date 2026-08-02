@@ -901,6 +901,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::If { cond, then_, else_ } => {
                     self.compile_if_stmt(cond, then_, else_, vars, true)?;
                 }
+                Stmt::IfLet { .. } => {
+                    return Err(CompileError::Generic(
+                        "if-let is not yet supported in native codegen; use a match                          expression or bind the value explicitly (E0700 family)"
+                            .to_string(),
+                    ));
+                }
                 Stmt::Break(_) => {
                     self.compile_break_stmt()?;
                 }
@@ -1629,6 +1635,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(v) = self.compile_if_stmt(cond, then_, else_, vars, false)? {
                         last_val = v;
                     }
+                }
+                Stmt::IfLet { .. } => {
+                    return Err(CompileError::Generic(
+                        "if-let is not yet supported in native codegen; use a match                          expression or bind the value explicitly (E0700 family)"
+                            .to_string(),
+                    ));
                 }
                 Stmt::Break(_) => {
                     self.compile_break_stmt()?;

@@ -1150,6 +1150,15 @@ impl BytecodeCompiler {
                         self.compile_if_stmt(fc, cond, then_, else_.as_ref())?;
                     }
                 }
+                Stmt::IfLet {
+                    pat,
+                    init,
+                    then_,
+                    else_,
+                } => {
+                    // v0.34.3: if-let is a statement-only guard (no value form).
+                    self.compile_if_let_stmt(fc, pat, init, then_, else_.as_ref())?;
+                }
                 Stmt::While { cond, body } => {
                     let result_reg = self.compile_while(fc, cond, body)?;
                     if is_last {
@@ -3771,6 +3780,50 @@ impl BytecodeCompiler {
 
         let jmp_end = fc.emit(Op::Jmp { offset: 0 });
         fc.proto.patch_jump(jmp_else);
+
+        if let Some(else_block) = else_ {
+            fc.push_scope();
+            self.compile_block(fc, else_block)?;
+            fc.pop_scope();
+        }
+        fc.proto.patch_jump(jmp_end);
+
+        Ok(())
+    }
+
+    /// Compile `if let pat = init { then_ } else { else_ }`.
+    /// v0.34.3: pattern-match guard — test init against pat, bind pattern
+    /// variables in the then-branch scope.
+    fn compile_if_let_stmt(
+        &mut self,
+        fc: &mut FuncCompiler,
+        pat: &Pattern,
+        init: &Expr,
+        then_: &Block,
+        else_: Option<&Block>,
+    ) -> Result<(), InterpError> {
+        let r_init = self.compile_expr(fc, init)?;
+        let (test_reg, bindings) = self.compile_pattern_test(fc, pat, r_init)?;
+
+        let jmp_else = test_reg.map(|r_test| {
+            fc.emit(Op::JmpIfNot {
+                offset: 0,
+                ra: r_test,
+            })
+        });
+
+        // Then-branch: bind pattern variables, compile body.
+        fc.push_scope();
+        for (name, r) in &bindings {
+            fc.vars_mut().insert(name.clone(), *r);
+        }
+        self.compile_block(fc, then_)?;
+        fc.pop_scope();
+
+        let jmp_end = fc.emit(Op::Jmp { offset: 0 });
+        if let Some(jmp) = jmp_else {
+            fc.proto.patch_jump(jmp);
+        }
 
         if let Some(else_block) = else_ {
             fc.push_scope();

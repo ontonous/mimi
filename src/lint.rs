@@ -296,6 +296,15 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
                 collect_refs_in_block(els, info);
             }
         }
+        Stmt::IfLet {
+            init, then_, else_, ..
+        } => {
+            collect_refs_in_expr(init, info);
+            collect_refs_in_block(then_, info);
+            if let Some(els) = else_ {
+                collect_refs_in_block(els, info);
+            }
+        }
         Stmt::While { cond, body }
         | Stmt::WhileLet {
             init: cond, body, ..

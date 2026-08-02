@@ -83,6 +83,19 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                self.check_expr_parasteps_safe(init, scopes);
+                for s in then_ {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+                if let Some(else_) = else_ {
+                    for s in else_ {
+                        self.check_stmt_parasteps_safe(s, scopes);
+                    }
+                }
+            }
             Stmt::While { cond, body } => {
                 self.check_expr_parasteps_safe(cond, scopes);
                 for s in body {
@@ -202,6 +215,19 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::If { then_, else_, .. } => {
+                for s in then_ {
+                    self.collect_shared_writes_in_stmt(s, scopes, writes);
+                }
+                if let Some(else_) = else_ {
+                    for s in else_ {
+                        self.collect_shared_writes_in_stmt(s, scopes, writes);
+                    }
+                }
+            }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                self.collect_shared_writes_in_expr(init, scopes, writes);
                 for s in then_ {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }
@@ -961,6 +987,78 @@ impl<'a> Checker<'a> {
                 } else {
                     // No else branch: conservatively restore pre-branch state
                     // (the then branch might not execute).
+                    self.session_residuals = pre_residuals;
+                }
+            }
+            Stmt::IfLet {
+                pat,
+                init,
+                then_,
+                else_,
+            } => {
+                // v0.34.3: `if let pat = init` — infer init, bind the pattern
+                // in a fresh scope for the then-branch, then merge residuals
+                // like If (then-branch may not run when pattern fails).
+                let it = self.infer_expr(init, scopes);
+                let pre_residuals = self.session_residuals.clone();
+                self.var_scopes.push(HashMap::new());
+                scopes.push(HashMap::new());
+                self.check_pattern(pat, &it, scopes);
+                self.check_block(then_, ret, scopes);
+                scopes.pop();
+                self.var_scopes.pop();
+                let then_residuals = self.session_residuals.clone();
+                if let Some(else_) = else_ {
+                    self.session_residuals = pre_residuals.clone();
+                    self.var_scopes.push(HashMap::new());
+                    self.check_block(else_, ret, scopes);
+                    self.var_scopes.pop();
+                    // Merge: both branches must agree on every tracked endpoint.
+                    let all_keys: std::collections::HashSet<&String> = then_residuals
+                        .keys()
+                        .chain(self.session_residuals.keys())
+                        .collect();
+                    let mut mismatches: Vec<(String, String, String)> = Vec::new();
+                    for key in all_keys {
+                        let then_r = then_residuals.get(key);
+                        let else_r = self.session_residuals.get(key);
+                        match (then_r, else_r) {
+                            (Some(t), Some(e)) if t != e => {
+                                mismatches.push((
+                                    key.clone(),
+                                    crate::session::fmt_session(t),
+                                    crate::session::fmt_session(e),
+                                ));
+                            }
+                            (Some(t), None) => {
+                                mismatches.push((
+                                    key.clone(),
+                                    crate::session::fmt_session(t),
+                                    "absent".to_string(),
+                                ));
+                            }
+                            (None, Some(e)) => {
+                                mismatches.push((
+                                    key.clone(),
+                                    "absent".to_string(),
+                                    crate::session::fmt_session(e),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    for (var, then_s, else_s) in mismatches {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0425,
+                            format!(
+                                "session endpoint '{}' has divergent residuals across branches: \
+                                 then-branch `{}` vs else-branch `{}`",
+                                var, then_s, else_s
+                            ),
+                        );
+                    }
+                    self.session_residuals = then_residuals;
+                } else {
                     self.session_residuals = pre_residuals;
                 }
             }

@@ -482,6 +482,14 @@ pub enum ResolvedStmtKind {
         initializer: ResolvedExpr,
         body: ResolvedBlock,
     },
+    /// v0.34.3: `if let pat = init { then } else { else }` — pattern-match
+    /// guard (symmetric to WhileLet, statement-only; no value form).
+    IfLet {
+        pattern: ResolvedPattern,
+        initializer: ResolvedExpr,
+        then_block: ResolvedBlock,
+        else_block: Option<ResolvedBlock>,
+    },
     Loop(ResolvedBlock),
     For {
         pattern: ResolvedPattern,
@@ -772,6 +780,24 @@ impl BodyValidator<'_> {
                     );
                 }
                 self.visit_block(body);
+            }
+            ResolvedStmtKind::IfLet {
+                pattern,
+                initializer,
+                then_block,
+                else_block,
+            } => {
+                self.visit_expr(initializer);
+                if pattern.ty != initializer.ty {
+                    self.error(
+                        &statement.node_id,
+                        "if-let pattern type disagrees with initializer type",
+                    );
+                }
+                self.visit_block(then_block);
+                if let Some(else_block) = else_block {
+                    self.visit_block(else_block);
+                }
             }
             ResolvedStmtKind::Loop(body) => self.visit_block(body),
             ResolvedStmtKind::For {

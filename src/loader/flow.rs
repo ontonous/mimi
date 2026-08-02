@@ -493,6 +493,20 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             }
             Ok(())
         }
+        Stmt::IfLet {
+            pat,
+            init,
+            then_,
+            else_,
+        } => {
+            remap_pattern_spans(pat, remap)?;
+            remap_expr_spans(init, remap)?;
+            remap_block_spans(then_, remap)?;
+            if let Some(else_) = else_ {
+                remap_block_spans(else_, remap)?;
+            }
+            Ok(())
+        }
         Stmt::While { cond, body } => {
             remap_expr_spans(cond, remap)?;
             remap_block_spans(body, remap)

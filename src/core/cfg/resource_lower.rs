@@ -229,6 +229,19 @@ impl<'a> ActionEmitter<'a> {
                     self.catalog_expr(initializer);
                     self.catalog_block(body);
                 }
+                ResolvedStmtKind::IfLet {
+                    pattern,
+                    initializer,
+                    then_block,
+                    else_block,
+                } => {
+                    self.catalog_pattern(pattern, None);
+                    self.catalog_expr(initializer);
+                    self.catalog_block(then_block);
+                    if let Some(else_block) = else_block {
+                        self.catalog_block(else_block);
+                    }
+                }
                 ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
                     self.catalog_block(body);
                 }
@@ -499,6 +512,18 @@ impl<'a> ActionEmitter<'a> {
             } => {
                 self.visit_expr(initializer, None);
                 self.visit_block(body, false);
+            }
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.visit_expr(initializer, None);
+                self.visit_block(then_block, false);
+                if let Some(else_block) = else_block {
+                    self.visit_block(else_block, false);
+                }
             }
             ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
                 self.visit_block(body, false);

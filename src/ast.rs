@@ -444,6 +444,15 @@ pub enum Stmt {
         then_: Block,
         else_: Option<Block>,
     },
+    /// v0.34.3: `if let pattern = expr { } else { }` — pattern-match guard.
+    /// Symmetric to WhileLet; desugaring to match cannot expose pattern
+    /// bindings to the then-block, so it gets its own variant.
+    IfLet {
+        pat: Pattern,
+        init: Expr,
+        then_: Block,
+        else_: Option<Block>,
+    },
     While {
         cond: Expr,
         body: Block,
