@@ -444,6 +444,7 @@ fn collect_nested_function_syntax<'a>(
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
             | Stmt::Do(body)
             | Stmt::Parasteps(body)
@@ -947,6 +948,10 @@ impl BodyLowerer<'_> {
             },
             Stmt::Unsafe(body) => ResolvedStmtKind::Scope {
                 kind: super::ResolvedScopeKind::Unsafe,
+                body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
+            },
+            Stmt::IeeeFloat(body) => ResolvedStmtKind::Scope {
+                kind: super::ResolvedScopeKind::IeeeFloat,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
             Stmt::OnFailure(body) => ResolvedStmtKind::Scope {

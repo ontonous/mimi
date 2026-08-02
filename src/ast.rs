@@ -487,6 +487,9 @@ pub enum Stmt {
     Arena(Block),
     /// Unsafe block — allows operations that are normally forbidden
     Unsafe(Block),
+    /// v0.34.10a (SD-9): `ieee_float { }` — IEEE 754 escape hatch. Inside,
+    /// float results may be NaN/Inf without tripping the finiteness trap.
+    IeeeFloat(Block),
     /// Drop a capability
     Drop(Expr),
     /// Defer block — executes when control leaves the current scope (LIFO order)

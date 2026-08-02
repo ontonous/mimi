@@ -520,6 +520,7 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
         | Stmt::Block(body)
         | Stmt::Arena(body)
         | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
         | Stmt::Parasteps(body)

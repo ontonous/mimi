@@ -173,6 +173,11 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_stmt(s, uses);
                 }
             }
+            Stmt::IeeeFloat(body) => {
+                for s in body {
+                    Self::collect_uses_in_stmt(s, uses);
+                }
+            }
             Stmt::For { iterable, body, .. } => {
                 Self::collect_uses_in_expr(iterable, uses);
                 for s in body {

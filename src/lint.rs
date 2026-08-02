@@ -341,9 +341,11 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
             collect_refs_in_expr(target, info);
             collect_refs_in_expr(value, info);
         }
-        Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::OnFailure(body) | Stmt::Parasteps(body) => {
-            collect_refs_in_block(body, info)
-        }
+        Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
+        | Stmt::OnFailure(body)
+        | Stmt::Parasteps(body) => collect_refs_in_block(body, info),
         Stmt::Drop(e) => collect_refs_in_expr(e, info),
         Stmt::Defer(body) => collect_refs_in_block(body, info),
         Stmt::SharedLet { init, .. } => collect_refs_in_expr(init, info),
@@ -523,6 +525,7 @@ fn detect_eq_bool_in_stmt(stmt: &Stmt, diagnostics: &mut Vec<Diagnostic>, func_p
         | Stmt::Block(body)
         | Stmt::Arena(body)
         | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
         | Stmt::Parasteps(body)
         | Stmt::Alloc { body, .. } => {
@@ -799,6 +802,7 @@ fn calls_self_directly(block: &[Stmt], name: &str) -> bool {
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
             | Stmt::Parasteps(body)
             | Stmt::Alloc { body, .. } => {
@@ -1190,6 +1194,7 @@ fn collect_names_in_block(block: &[Stmt], names: &mut std::collections::HashSet<
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
             | Stmt::Parasteps(body)
             | Stmt::Alloc { body, .. } => collect_names_in_block(body, names),
@@ -1853,9 +1858,10 @@ fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
             walk_stmts(body, visit)
         }
         Stmt::WhileLet { body, .. } => walk_stmts(body, visit),
-        Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Alloc { body, .. } => {
-            walk_stmts(body, visit)
-        }
+        Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
+        | Stmt::Alloc { body, .. } => walk_stmts(body, visit),
         // audit (MEDIUM): recurse into nested function bodies and pinned
         // blocks so W012 escape-hatch detection covers all scopes.
         Stmt::Pinned { body, .. } => walk_stmts(body, visit),

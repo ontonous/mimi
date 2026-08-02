@@ -2947,6 +2947,7 @@ fn collect_nested_function_records(
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
             | Stmt::Do(body)
             | Stmt::Parasteps(body)
@@ -3237,9 +3238,10 @@ fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
             Stmt::For { iterable, body, .. } => {
                 expr_has_cross_boundary(iterable) || body.iter().any(stmt_has_cross_boundary)
             }
-            Stmt::Block(stmts) | Stmt::Arena(stmts) | Stmt::Unsafe(stmts) => {
-                stmts.iter().any(stmt_has_cross_boundary)
-            }
+            Stmt::Block(stmts)
+            | Stmt::Arena(stmts)
+            | Stmt::Unsafe(stmts)
+            | Stmt::IeeeFloat(stmts) => stmts.iter().any(stmt_has_cross_boundary),
             Stmt::Drop(e) => expr_has_cross_boundary(e),
             _ => false,
         }
@@ -4510,6 +4512,7 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::Assign { target, .. } => format!("assign:{}", expr_semantic_key(target)),
         Stmt::Arena(_) => "arena".into(),
         Stmt::Unsafe(_) => "unsafe".into(),
+        Stmt::IeeeFloat(_) => "ieee-float".into(),
         Stmt::Drop(expr) => format!("drop:{}", expr_semantic_key(expr)),
         Stmt::Defer(_) => "defer".into(),
         Stmt::SharedLet { name, .. } => format!("shared-let:{name}"),
@@ -4550,6 +4553,7 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::Assign { .. } => "stmt.assign",
         Stmt::Arena(_) => "stmt.arena",
         Stmt::Unsafe(_) => "stmt.unsafe",
+        Stmt::IeeeFloat(_) => "stmt.ieee_float",
         Stmt::Drop(_) => "stmt.drop",
         Stmt::Defer(_) => "stmt.defer",
         Stmt::SharedLet { .. } => "stmt.shared_let",
@@ -4864,6 +4868,7 @@ fn collect_stmt_meta(
         | Stmt::Block(body)
         | Stmt::Arena(body)
         | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
         | Stmt::Parasteps(body)
@@ -6629,6 +6634,7 @@ fn collect_stmt_call_sites(
         | Stmt::Block(body)
         | Stmt::Arena(body)
         | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
         | Stmt::Parasteps(body)

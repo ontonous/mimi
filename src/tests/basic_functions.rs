@@ -625,3 +625,44 @@ fn optional_chain_after_expression() {
     // This should at least parse without error.
     parse(src);
 }
+
+#[test]
+fn ieee_float_escape_hatch_suspends_finiteness_trap() {
+    // v0.34.10a (SD-9): `ieee_float { }` suspends the finiteness trap —
+    // NaN/Inf are legitimate IEEE 754 values inside.
+    let src = r#"
+func main() -> i32 {
+    let mut x = 0.0
+    ieee_float {
+        x = sqrt(-1.0)
+    }
+    if is_nan(x) { 1 } else { 0 }
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "ieee_float should type check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(crate::interp::Value::Int(1))
+    );
+}
+
+#[test]
+fn float_finiteness_trap_active_outside_ieee_float() {
+    // v0.34.10a: outside ieee_float, sqrt(-1) still traps (E0813).
+    let src = r#"
+func main() -> i32 {
+    let x = sqrt(-1.0)
+    0
+}
+"#;
+    let err = run_source_bytecode_result(src).expect_err("must trap outside ieee_float");
+    assert!(
+        err.contains("E0813") || err.contains("invalid floating-point"),
+        "unexpected: {}",
+        err
+    );
+}

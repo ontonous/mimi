@@ -1251,6 +1251,18 @@ impl BytecodeCompiler {
                     }
                 }
 
+                Stmt::IeeeFloat(block) => {
+                    // v0.34.10a (SD-9): suspend finiteness trap inside.
+                    fc.emit(Op::IeeeEnter);
+                    fc.push_scope();
+                    let result = self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                    fc.emit(Op::IeeeExit);
+                    if is_last {
+                        last_reg = result;
+                    }
+                }
+
                 Stmt::Arena(block) => {
                     // Interpreter doesn't do region-based memory — just compile the block.
                     fc.push_scope();
@@ -4876,7 +4888,10 @@ impl BytecodeCompiler {
             Stmt::Drop(e) => {
                 self.collect_free_vars_expr(e, local_vars, free_vars);
             }
-            Stmt::Defer(block) | Stmt::Unsafe(block) | Stmt::Arena(block) => {
+            Stmt::Defer(block)
+            | Stmt::Unsafe(block)
+            | Stmt::Arena(block)
+            | Stmt::IeeeFloat(block) => {
                 self.collect_free_vars_block(block, local_vars, free_vars);
             }
             _ => {}
@@ -5496,6 +5511,9 @@ fn quoted_ast_to_stmt(
         QuotedAst::Unsafe(body) => {
             Stmt::Unsafe(quoted_ast_to_block(body, interp_counter, interp_values))
         }
+        QuotedAst::IeeeFloat(body) => {
+            Stmt::IeeeFloat(quoted_ast_to_block(body, interp_counter, interp_values))
+        }
         QuotedAst::Drop(e) => Stmt::Drop(quoted_ast_to_expr(e, interp_counter, interp_values)),
         QuotedAst::Defer(body) => {
             Stmt::Defer(quoted_ast_to_block(body, interp_counter, interp_values))
@@ -5690,6 +5708,7 @@ fn quoted_ast_to_expr(
         | QuotedAst::Assign(_, _)
         | QuotedAst::Arena(_)
         | QuotedAst::Unsafe(_)
+        | QuotedAst::IeeeFloat(_)
         | QuotedAst::Drop(_)
         | QuotedAst::Defer(_)
         | QuotedAst::SharedLet { .. }
