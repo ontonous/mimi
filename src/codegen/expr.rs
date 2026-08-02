@@ -2122,6 +2122,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 mod access;
 pub(super) mod call;
 mod control;
+mod fault;
 mod lambda;
 mod literal;
 mod r#match;

@@ -421,6 +421,9 @@ pub struct CodeGenerator<'ctx> {
     /// v0.34.16: target state names of the current multi-target transition,
     /// in declared order (ordinal = tag).
     multi_target_states: Vec<String>,
+    /// v0.34.18a: source state name of the transition currently being compiled.
+    /// Used by panic→Fault absorption (expr/fault.rs) to fill `Fault.last_state`.
+    current_from_state: String,
     /// Set of function qualified_names that the resolved emitter attempted to
     /// compile but failed (e.g., due to a coercion error in the body emission).
     /// These functions may have partial basic blocks (entry block without
@@ -613,6 +616,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_fails_transition: false,
             in_multi_target_transition: false,
             multi_target_states: Vec::new(),
+            current_from_state: String::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
         }
     }
@@ -1301,7 +1305,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// ptrtoint-encoded into the uniform i64 payload slot so targets with
     /// differing layouts share one return type.
     pub(super) fn wrap_multi_target_value(
-        &mut self,
+        &self,
         state_val: BasicValueEnum<'ctx>,
         tag: u64,
         state_ty: Option<BasicTypeEnum<'ctx>>,
@@ -1320,24 +1324,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             other => other,
         };
         // Box the state struct. C2 (MEM-C8): size the box from the actual
-        // LLVM type size via size_of(), NOT field_count × 8. A nested record
-        // field (state Foo { inner: Bar } with Bar = { i32, i32, i32 }) lowers
-        // to { { i32, i32, i32 } }: count_fields() == 1 but the store writes
-        // 12 bytes, so field_count × 8 == 8 undersizes the box and the store
-        // overflows the heap. size_of() accounts for nesting, padding and
-        // alignment (same pattern as registry/types.rs:293).
+        // LLVM type size, NOT field_count × 8. A nested record field
+        // (state Foo { inner: Bar } with Bar = { i32, i32, i32 }) lowers to
+        // { { i32, i32, i32 } }: count_fields() == 1 but the store writes
+        // 12 bytes. v0.34.18a: use llvm_type_size_bytes (recursive, alignment
+        // aware) instead of size_of().get_zero_extended_constant() — the latter
+        // returns None for the deeply nested Fault record (3 strings + nested
+        // SystemTrace/MemoryDump/PanicPayload, ~176 bytes), and the old
+        // .unwrap_or(64) fallback undersized the box → heap overflow on the
+        // panic→Fault absorption store.
         let state_ty = state_val.get_type();
-        let box_bytes: u64 = match state_ty {
-            BasicTypeEnum::StructType(st) => st
-                .size_of()
-                .and_then(|sv| sv.get_zero_extended_constant())
-                // size_of virtually always succeeds for StructType; 64 covers
-                // any pathological payload (matches registry/types.rs MEM-C8).
-                .unwrap_or(64),
-            // Scalar states (i32/i64/f64/pointer) are all ≤ 8 bytes.
-            _ => 8,
-        }
-        .max(8);
+        let box_bytes: u64 = self.llvm_type_size_bytes(state_ty).max(8);
         let size = self.context.i64_type().const_int(box_bytes, false);
         // TODO(L6): this payload box is never freed. The match-dispatch unwrap
         // (pattern.rs find_variant_ordinal + inttoptr/load) extracts the fields
@@ -2531,6 +2528,94 @@ impl<'ctx> CodeGenerator<'ctx> {
                 name
             ))),
         }
+    }
+
+    /// v0.34.18a: Resolve a variant name to its ordinal *scoped to the
+    /// scrutinee's enum type* when known, falling back to the global lookup.
+    ///
+    /// The global `find_variant_ordinal` searches every registered enum and
+    /// returns the first hit, which is ambiguous when a variant name appears in
+    /// multiple enums. This bites the synthetic per-flow `__MultiTarget` unions:
+    /// every flow that can fault has a `Fault` variant, so a program with two
+    /// fallible flows (`Calc::__MultiTarget` and `FCalc::__MultiTarget`) makes a
+    /// bare `find_variant_ordinal("Fault")` resolve to whichever enum the
+    /// `type_defs` HashMap yields first — nondeterministically mis-tagging the
+    /// match arms. Scoping to the scrutinee's enum makes the dispatch agree with
+    /// the tag the transition return / panic-absorption path produces.
+    pub(super) fn find_variant_ordinal_scoped(
+        &self,
+        name: &str,
+        scrutinee_type: Option<&crate::ast::Type>,
+    ) -> Result<u64, CompileError> {
+        if let Some(owner) = scrutinee_type.and_then(|ty| self.owner_enum_of_scrutinee(ty)) {
+            if let Some(td) = self.type_defs.get(&owner) {
+                if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                    let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+                    sorted.sort_by_key(|v| &v.name);
+                    if let Some(i) = sorted.iter().position(|v| v.name == name) {
+                        return Ok(i as u64);
+                    }
+                }
+            }
+        }
+        self.find_variant_ordinal(name)
+    }
+
+    /// v0.34.18a: Determine the owning enum type name for a match scrutinee's
+    /// type, so variant-ordinal resolution can be scoped to it.
+    ///
+    /// A multi-target transition result is typed (at the AST level) as a
+    /// `Result(Ok_state, ...)` rather than the synthetic `__MultiTarget` enum
+    /// name, so we cannot key off the type name directly. Instead we extract an
+    /// *anchor* variant name from the scrutinee type (the `Ok` state name, e.g.
+    /// `S`/`F`) and look up which registered enum owns it. State names are
+    /// flow-specific, so the anchor uniquely identifies the flow's
+    /// `__MultiTarget` enum — disambiguating the shared `Fault` variant that
+    /// appears in every fallible flow's union.
+    fn owner_enum_of_scrutinee(&self, ty: &crate::ast::Type) -> Option<String> {
+        let anchor = self.extract_anchor_variant(ty)?;
+        // The anchor may itself be an enum type name (ordinary enum scrutinee).
+        if let Some(td) = self.type_defs.get(&anchor) {
+            if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
+                return Some(self.resolve_enum_alias(&anchor));
+            }
+        }
+        // Otherwise the anchor is a variant name; resolve its owning enum.
+        self.find_variant_info(&anchor).map(|(owner, _)| owner)
+    }
+
+    /// Extract a variant/type name usable as an enum anchor from a scrutinee
+    /// type: unwrap Result/Option to the payload `Name`.
+    fn extract_anchor_variant(&self, ty: &crate::ast::Type) -> Option<String> {
+        match ty.unlocated() {
+            crate::ast::Type::Name(n, _) => Some(n.clone()),
+            crate::ast::Type::Result(ok, _) => self.extract_anchor_variant(ok),
+            crate::ast::Type::Option(inner) => self.extract_anchor_variant(inner),
+            crate::ast::Type::Located { ty: inner, .. } => self.extract_anchor_variant(inner),
+            _ => None,
+        }
+    }
+
+    /// Follow `Alias` type_defs (e.g. `__MultiTarget_Calc` →
+    /// `flow::Calc::__MultiTarget`) to the underlying enum type name. Returns the
+    /// input unchanged if it is not an alias.
+    fn resolve_enum_alias(&self, name: &str) -> String {
+        let mut current = name.to_string();
+        // Bound the chain so a cyclic alias cannot loop forever.
+        for _ in 0..8 {
+            let Some(td) = self.type_defs.get(&current) else {
+                break;
+            };
+            if let crate::ast::TypeDefKind::Alias(crate::ast::Type::Name(target, _)) = &td.kind {
+                if *target == current {
+                    break;
+                }
+                current = target.clone();
+            } else {
+                break;
+            }
+        }
+        current
     }
 
     /// G2: Find the owning type name and ordinal of an enum variant name.

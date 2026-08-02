@@ -1058,11 +1058,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let func = Self::transition_to_func(flow, t);
                 self.in_multi_target_transition = true;
                 self.multi_target_states = t.to_states.clone();
+                self.current_from_state = t.from_state.clone();
                 let result = self
                     .compile_func_legacy(&func)
                     .map_err(|e| e.at(t.meta.span));
                 self.in_multi_target_transition = false;
                 self.multi_target_states = Vec::new();
+                self.current_from_state = String::new();
                 result?;
                 continue;
             }

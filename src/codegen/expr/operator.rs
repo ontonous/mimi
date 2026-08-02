@@ -332,15 +332,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_conditional_branch(is_zero, trap_bb, cont_bb)
                 .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
 
-            // Emit trap call.
+            // Emit trap call — or absorb into Fault in a fallible transition
+            // (v0.34.18a: `-> S | Fault` bottoms out a div-by-zero to the Fault
+            // variant instead of aborting; mirrors the bytecode VM absorption).
             self.builder.position_at_end(trap_bb);
-            let trap_fn = self.get_runtime_fn("mimi_trap_div_by_zero")?;
-            self.builder
-                .build_call(trap_fn, &[], "")
-                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-            self.builder
-                .build_unreachable()
-                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+            if self.in_fallible_multi_target() {
+                self.emit_panic_fault_return("E0801")?;
+            } else {
+                let trap_fn = self.get_runtime_fn("mimi_trap_div_by_zero")?;
+                self.builder
+                    .build_call(trap_fn, &[], "")
+                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+            }
 
             // Continue with safe division.
             self.builder.position_at_end(cont_bb);
@@ -368,13 +374,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
 
             self.builder.position_at_end(trap_ovf_bb);
-            let trap_ovf_fn = self.get_runtime_fn("mimi_trap_div_overflow")?;
-            self.builder
-                .build_call(trap_ovf_fn, &[], "")
-                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-            self.builder
-                .build_unreachable()
-                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+            if self.in_fallible_multi_target() {
+                self.emit_panic_fault_return("E0801")?;
+            } else {
+                let trap_ovf_fn = self.get_runtime_fn("mimi_trap_div_overflow")?;
+                self.builder
+                    .build_call(trap_ovf_fn, &[], "")
+                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+            }
 
             self.builder.position_at_end(safe_bb);
 
@@ -459,31 +469,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(overflow_flag, trap_bb, ok_bb)
             .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
 
-        // Trap block.
+        // Trap block — or absorb into Fault in a fallible transition (v0.34.18a).
         self.builder.position_at_end(trap_bb);
-        let trap_fn = self.get_runtime_fn("mimi_trap_overflow")?;
-        let op_name_str = match op {
-            BinOp::Add => "addition",
-            BinOp::Sub => "subtraction",
-            BinOp::Mul => "multiplication",
-            _ => "operation",
-        };
-        let op_cstr = self
-            .builder
-            .build_global_string_ptr(op_name_str, "op_name")
-            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
-        self.builder
-            .build_call(
-                trap_fn,
-                &[BasicMetadataValueEnum::PointerValue(
-                    op_cstr.as_pointer_value(),
-                )],
-                "",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        if self.in_fallible_multi_target() {
+            self.emit_panic_fault_return("E0801")?;
+        } else {
+            let trap_fn = self.get_runtime_fn("mimi_trap_overflow")?;
+            let op_name_str = match op {
+                BinOp::Add => "addition",
+                BinOp::Sub => "subtraction",
+                BinOp::Mul => "multiplication",
+                _ => "operation",
+            };
+            let op_cstr = self
+                .builder
+                .build_global_string_ptr(op_name_str, "op_name")
+                .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+            self.builder
+                .build_call(
+                    trap_fn,
+                    &[BasicMetadataValueEnum::PointerValue(
+                        op_cstr.as_pointer_value(),
+                    )],
+                    "",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        }
 
         // OK block: result_val is already available (trap block is unreachable).
         self.builder.position_at_end(ok_bb);
@@ -566,32 +580,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(not_finite, trap_bb, ok_bb)
             .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
 
-        // Trap block.
+        // Trap block — or absorb into Fault in a fallible transition (v0.34.18a).
         self.builder.position_at_end(trap_bb);
-        let trap_fn = self.get_runtime_fn("mimi_trap_float_not_finite")?;
-        let op_name_str = match op {
-            BinOp::Add => "addition",
-            BinOp::Sub => "subtraction",
-            BinOp::Mul => "multiplication",
-            BinOp::Div => "division",
-            _ => "operation",
-        };
-        let op_cstr = self
-            .builder
-            .build_global_string_ptr(op_name_str, "float_op_name")
-            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
-        self.builder
-            .build_call(
-                trap_fn,
-                &[BasicMetadataValueEnum::PointerValue(
-                    op_cstr.as_pointer_value(),
-                )],
-                "",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        if self.in_fallible_multi_target() {
+            self.emit_panic_fault_return("E0813")?;
+        } else {
+            let trap_fn = self.get_runtime_fn("mimi_trap_float_not_finite")?;
+            let op_name_str = match op {
+                BinOp::Add => "addition",
+                BinOp::Sub => "subtraction",
+                BinOp::Mul => "multiplication",
+                BinOp::Div => "division",
+                _ => "operation",
+            };
+            let op_cstr = self
+                .builder
+                .build_global_string_ptr(op_name_str, "float_op_name")
+                .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+            self.builder
+                .build_call(
+                    trap_fn,
+                    &[BasicMetadataValueEnum::PointerValue(
+                        op_cstr.as_pointer_value(),
+                    )],
+                    "",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        }
 
         // OK block.
         self.builder.position_at_end(ok_bb);
