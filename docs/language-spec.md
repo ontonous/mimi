@@ -455,18 +455,26 @@ let (reply, client2) = recv(client1)
 close(client2)
 ```
 
-Stable rules:
+**`[stable]` — checker-level linearity (implemented):**
 
 - Old endpoint invalid after operation;
 - Endpoint must not implicitly convert to integer;
 - Alias, fields, return values, and branch merge preserve residual;
 - Cannot skip check when unable to track endpoint; must error;
 - Non-`end` endpoint leaving scope must explicitly return, transfer, or error;
-- Session runtime and checker use the same protocol ID.
+- Session runtime and checker use the same protocol ID;
+- Typed residual diagnostics: scope-exit residual (E0425), use-after-alias (E0426), double-close (E0304), protocol-conformance × linearity / payload downgrade (E0427);
+- Endpoint as function argument consumes residual; branch partial-consume rejected.
 
 Any Session program that cannot prove residual completeness must be rejected.
 
-Minimum dual-end linear Session is a 1.0 core goal; any unclosed item blocks RC. Recursive protocols, dynamic participants, delegation, multiparty Session, and cross-version residual upgrade remain experimental.
+**`[experimental]` — not yet closed:**
+
+- codegen residual lowering (the native backend does not yet fully lower session residuals; the checker linearity above is authoritative);
+- cross-turn exactly-once and Fault-path resource cleanup;
+- recursive protocols, dynamic participants, delegation, multiparty Session, and cross-version residual upgrade.
+
+Minimum dual-end linear Session is a 1.0 core goal; any unclosed item blocks RC. The stable checker linearity is not downgraded by the experimental codegen residual lowering — the two layers are tracked separately (0.34 §4.1 ruling).
 
 ### 3.11 Resources and State `[stable]`
 

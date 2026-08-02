@@ -131,7 +131,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test session_ -- --test-threads=1"
-evidence = "0.31.12: typed session residual — E0425 scope exit check (non-end residual rejected), E0426 use-after-alias (let b = a consumes a), alias residual transfer, branch merge consistency. 0.31.13: session endpoint as function arg consumes residual, double-close (E0304), branch partial consume (E0425). 0.31.14 追加 A: protocol conformance × linearity (payload downgrade E0427). Remaining: cross-turn exactly-once, Fault path resource cleanup."
+evidence = "0.34 §4.1 分层标注：checker 线性诊断 [stable]（E0425 scope-exit residual / E0426 use-after-alias / E0304 double-close / E0427 protocol-conformance×linearity，endpoint 作参数消费 residual，分支 partial-consume 拒绝，typed residual 追踪）；codegen residual lowering [experimental]（native 后端未完全 lower session residual，checker 线性为权威）；高级 Session [experimental]（recursive/dynamic participants/delegation/multiparty/cross-version residual upgrade）。不因 codegen residual 未闭合而整体降级。0.31.12: typed session residual — E0425 scope exit check (non-end residual rejected), E0426 use-after-alias (let b = a consumes a), alias residual transfer, branch merge consistency. 0.31.13: session endpoint as function arg consumes residual, double-close (E0304), branch partial consume (E0425). 0.31.14 追加 A: protocol conformance × linearity (payload downgrade E0427). Remaining: codegen residual lowering, cross-turn exactly-once, Fault path resource cleanup."
 
 [[support]]
 requirement = "RESOURCE-LINEAR-001"
