@@ -1008,6 +1008,7 @@ impl<'a> Checker<'a> {
             | "mutex_lock"
             | "channel_new"
             | "actor_mailbox_depth"
+            | "actor_is_faulted"
             | "actor_is_muted"
             | "actor_spawn_count"
             | "actor_max_children" => {

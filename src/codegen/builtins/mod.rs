@@ -3513,6 +3513,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "actor_mailbox_depth" => {
                 self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth")
             }
+            "actor_is_faulted" => self.compile_actor_mailbox_query(args, "mimi_actor_is_faulted"),
             "actor_is_muted" => self.compile_actor_mailbox_query(args, "mimi_actor_is_muted"),
             "actor_set_mailbox_depth" => self.compile_actor_set_mailbox_depth(args),
             "actor_set_max_children" => self.compile_actor_set_max_children(args),
