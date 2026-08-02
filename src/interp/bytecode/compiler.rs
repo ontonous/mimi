@@ -5232,12 +5232,8 @@ fn value_to_const_expr(value: &crate::interp::Value) -> Expr {
                 ))
             }
         }
-        Value::Tuple(elems) => synth(Expr::Tuple(
-            elems.iter().map(value_to_const_expr).collect(),
-        )),
-        Value::List(elems) => synth(Expr::List(
-            elems.iter().map(value_to_const_expr).collect(),
-        )),
+        Value::Tuple(elems) => synth(Expr::Tuple(elems.iter().map(value_to_const_expr).collect())),
+        Value::List(elems) => synth(Expr::List(elems.iter().map(value_to_const_expr).collect())),
         Value::Set(elems) => synth(Expr::SetLiteral(
             elems.iter().map(value_to_const_expr).collect(),
         )),
@@ -5388,7 +5384,11 @@ pub fn quoted_ast_to_block(
             .map(|s| quoted_ast_to_stmt(s, interp_counter, interp_values))
             .collect(),
         // A single expression node becomes a one-statement block.
-        other => vec![Stmt::Expr(quoted_ast_to_expr(other, interp_counter, interp_values))],
+        other => vec![Stmt::Expr(quoted_ast_to_expr(
+            other,
+            interp_counter,
+            interp_values,
+        ))],
     }
 }
 
@@ -5409,9 +5409,7 @@ fn quoted_ast_to_stmt(
             mut_: false,
             ref_: false,
         },
-        QuotedAst::ExprStmt(e) => {
-            Stmt::Expr(quoted_ast_to_expr(e, interp_counter, interp_values))
-        }
+        QuotedAst::ExprStmt(e) => Stmt::Expr(quoted_ast_to_expr(e, interp_counter, interp_values)),
         QuotedAst::Return(e) => Stmt::Return(
             e.as_ref()
                 .map(|inner| quoted_ast_to_expr(inner, interp_counter, interp_values)),
@@ -5448,9 +5446,7 @@ fn quoted_ast_to_stmt(
         QuotedAst::Unsafe(body) => {
             Stmt::Unsafe(quoted_ast_to_block(body, interp_counter, interp_values))
         }
-        QuotedAst::Drop(e) => {
-            Stmt::Drop(quoted_ast_to_expr(e, interp_counter, interp_values))
-        }
+        QuotedAst::Drop(e) => Stmt::Drop(quoted_ast_to_expr(e, interp_counter, interp_values)),
         QuotedAst::Defer(body) => {
             Stmt::Defer(quoted_ast_to_block(body, interp_counter, interp_values))
         }

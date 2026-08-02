@@ -552,5 +552,3 @@ unsafe fn callback_trampoline_inner(
         }
     }
 }
-
-

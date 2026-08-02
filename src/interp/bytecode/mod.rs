@@ -1095,7 +1095,6 @@ func main() -> i32 {
         eprintln!("BC total:        {:?}", compile_time + bc_time);
     }
 
-
     // ═══ Disassembler ════════════════════════════════════════
 
     #[test]

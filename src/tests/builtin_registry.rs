@@ -168,11 +168,9 @@ mod tests {
                 }
             }
         }
-        let registry_src = std::fs::read_to_string(format!(
-            "{}/src/interp/bytecode/registry.rs",
-            manifest
-        ))
-        .expect("read bytecode/registry.rs");
+        let registry_src =
+            std::fs::read_to_string(format!("{}/src/interp/bytecode/registry.rs", manifest))
+                .expect("read bytecode/registry.rs");
         let interp_src = format!("{bytecode_src}\n{registry_src}\n");
         // Type inference for builtins lives under infer/call/simple.rs (and helpers).
         let infer_dir = format!("{}/src/core/infer", manifest);

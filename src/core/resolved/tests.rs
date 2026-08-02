@@ -99,7 +99,9 @@ fn checked_program_owns_its_migration_body_input() {
         .compile_file(program.raw_ast())
         .expect("bytecode compile owned checked program");
     let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
-    let result = vm.call_named("main", vec![]).expect("run owned checked program");
+    let result = vm
+        .call_named("main", vec![])
+        .expect("run owned checked program");
     assert!(matches!(result, crate::interp::Value::Int(42)));
 }
 
