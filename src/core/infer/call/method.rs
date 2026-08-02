@@ -294,6 +294,81 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Generic type parameter with declared trait bound:
+            // `x.clone()` where x: T and T: Clone dispatches to the bound
+            // trait's method signature, instantiated with the type param
+            // (0.34.19 CHECKER-GAP: bound methods were unresolved → E0221).
+            if !self.types.contains_key(type_name) {
+                let func_name = self
+                    .current_callable_owner
+                    .as_ref()
+                    .map(|owner| owner.0.strip_prefix("function:").unwrap_or(&owner.0))
+                    .map(|name| name.rsplit("::").next().unwrap_or(name))
+                    .unwrap_or_default();
+                let bounds: Vec<String> = self
+                    .func_generics
+                    .get(func_name)
+                    .map(|generics| {
+                        generics
+                            .iter()
+                            .filter(|gp| gp.name == *type_name)
+                            .flat_map(|gp| gp.bounds.iter().cloned())
+                            .collect()
+                    })
+                    .filter(|bs: &Vec<String>| !bs.is_empty())
+                    .or_else(|| {
+                        self.where_clauses.get(func_name).map(|entries| {
+                            entries
+                                .iter()
+                                .filter(|(tp, _)| tp == type_name)
+                                .flat_map(|(_, bs)| bs.iter().cloned())
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default();
+                if !bounds.is_empty() {
+                    // Built-in Clone bound: `clone` copies the value (Mimi
+                    // assignment semantics) — signature clone(x: T) -> T.
+                    if bounds.iter().any(|b| b == "Clone") && method_name == "clone" {
+                        return Type::Name(type_name.clone(), type_args.to_vec());
+                    }
+                    // User trait bound: look up the declared method signature
+                    // and instantiate the trait generics with the type args.
+                    for bound in &bounds {
+                        if let Some((_, ret)) = self
+                            .trait_method_sigs
+                            .get(&(bound.clone(), method_name.to_string()))
+                            .cloned()
+                        {
+                            let ret = if let Some(tg) = self.trait_generics.get(bound) {
+                                if !tg.is_empty() && tg.len() == type_args.len() {
+                                    let type_map: HashMap<String, Type> = tg
+                                        .iter()
+                                        .zip(type_args.iter())
+                                        .map(|(g, a)| (g.clone(), a.clone()))
+                                        .collect();
+                                    let gen_slice: Vec<GenericParam> = tg
+                                        .iter()
+                                        .map(|name| GenericParam {
+                                            meta: AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
+                                                "infer.bound_generic_substitution",
+                                            )),
+                                            name: name.clone(),
+                                            bounds: vec![],
+                                        })
+                                        .collect();
+                                    subst_type_params(&ret, &gen_slice, &type_map)
+                                } else {
+                                    ret
+                                }
+                            } else {
+                                ret
+                            };
+                            return ret;
+                        }
+                    }
+                }
+            }
             // Check trait methods on this type
             if let Some(methods) = self.type_methods.get(type_name) {
                 if let Some((trait_name, _)) = methods.iter().find(|(_, m)| m == method_name) {
