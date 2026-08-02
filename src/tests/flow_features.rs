@@ -5508,6 +5508,47 @@ func main() -> i32 {
 }
 
 #[test]
+fn multi_target_payload_box_reuse_no_double_free_dual_backend() {
+    // L6 (codegen): the multi-target payload box (wrap_multi_target_value) is
+    // registered in heap_allocs at the transition call site and freed once at
+    // scope exit. Matching the result multiple times must NOT double-free or
+    // use-after-free the box — the decode (inttoptr+load) copies fields out and
+    // does not free. A wrong fix (freeing at decode) would abort the codegen
+    // binary on the second match. valgrind-clean separately ("All heap blocks
+    // were freed"). Bytecode uses Rust deep-clone Value (no box), so both
+    // backends agree. (Flow states are linear: `match` reads without consuming,
+    // but aliasing `let r2 = r` consumes r — so this test re-matches r directly
+    // rather than via an alias.)
+    let src = r#"
+flow F {
+    state Start { v: i32 }
+    state Done { v: i32 }
+    state Skip { v: i32 }
+    transition go(Start) -> Done | Skip {
+        do {
+            if self.v > 0 { return Done { v: self.v } }
+            return Skip { v: 0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Start { v: 5 }
+    let r = F::go(s)
+    let t1 = match r { Done { v } => v, Skip { v } => v }
+    let t2 = match r { Done { v } => v + 100, Skip { v } => v }
+    println(t1)
+    println(t2)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc.trim(), "5\n105", "bytecode multi-target box re-match");
+    let native = compile_and_run(src).expect("codegen multi-target re-match must not double-free");
+    assert_eq!(native.trim(), "5\n105", "codegen multi-target box re-match");
+}
+
+#[test]
 fn multi_target_match_accepted() {
     // A multi-target value may be moved as a whole before it is matched.
     let src2 = r#"

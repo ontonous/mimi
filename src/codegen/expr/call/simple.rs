@@ -6411,6 +6411,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let call_args = self.maybe_pack_enum_ctor_args(&compiled_args, function)?;
                 // emit_direct_call: int width adjust + load list/record allocas
                 // when the ctor takes a by-value struct payload.
+                // L6 (enum Packed payload): the ctor mallocs a heap box for
+                // struct/multi-arg payloads. Registering it here for scope-exit
+                // free is UNSOUND: when the enum value is returned from the
+                // enclosing function (e.g. `func f() -> Shape { Rect(..) }`),
+                // the box is freed at this function's return yet escapes to the
+                // caller → double-free/UAF. A sound fix needs the string-style
+                // return-claim (deep-copy box on return + caller re-registers),
+                // tracked as a follow-up. Left leaking (not crashing) for now.
                 return self.emit_direct_call(function, &call_args, "enum_ctor");
             }
             return Err(format!("enum constructor '{}' not registered", ctor_name).into());
