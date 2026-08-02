@@ -234,14 +234,10 @@ impl<'a> ActionEmitter<'a> {
                 }
                 ResolvedStmtKind::Pinned {
                     value,
-                    timeout,
                     binding,
                     body,
                 } => {
                     self.catalog_expr(value);
-                    if let Some(timeout) = timeout {
-                        self.catalog_expr(timeout);
-                    }
                     if let Some(binding) = binding {
                         if self
                             .body
@@ -533,16 +529,8 @@ impl<'a> ActionEmitter<'a> {
                     self.visit_expr(expression, None);
                 }
             }
-            ResolvedStmtKind::Pinned {
-                value,
-                timeout,
-                body,
-                ..
-            } => {
+            ResolvedStmtKind::Pinned { value, body, .. } => {
                 self.visit_expr(value, None);
-                if let Some(timeout) = timeout {
-                    self.visit_expr(timeout, None);
-                }
                 self.visit_block(body, false);
             }
         }

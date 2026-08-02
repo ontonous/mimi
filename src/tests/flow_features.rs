@@ -411,14 +411,8 @@ flow SafeFFI {
                 _ => body,
             };
             assert!(matches!(do_body[0].unlocated(), Stmt::Pinned { .. }));
-            if let Stmt::Pinned {
-                expr, timeout, var, ..
-            } = do_body[0].unlocated()
-            {
-                assert!(
-                    timeout.is_none(),
-                    "timeout abolished by amendment clause 10"
-                );
+            if let Stmt::Pinned { expr, var, .. } = do_body[0].unlocated() {
+                let _ = expr;
                 assert_eq!(var.as_deref(), Some("ptr"));
                 match expr.unlocated() {
                     Expr::Field(obj, name) => {

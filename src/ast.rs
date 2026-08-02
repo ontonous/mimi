@@ -379,6 +379,16 @@ impl Pattern {
     pub const fn synthetic(kind: PatternKind, origin: AstOrigin) -> Self {
         Self::new(AstNodeMeta::synthetic(origin), kind)
     }
+
+    /// The binding name if this pattern is a single identifier
+    /// (`PatternKind::Variable`). Returns None for tuple/destructuring
+    /// patterns — used by for-loop lowering that only binds one name.
+    pub fn single_var_name(&self) -> Option<&str> {
+        match &self.kind {
+            PatternKind::Variable(name) => Some(name.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -446,8 +456,10 @@ pub enum Stmt {
     },
     /// Infinite loop: loop { break expr }
     Loop(Block),
+    /// v0.34.3: `For.var` upgraded from `String` to `Pattern` so
+    /// `for (k, v) in map` destructuring works (single ident = Pattern::Variable).
     For {
-        var: String,
+        var: Pattern,
         iterable: Expr,
         body: Block,
     },
@@ -489,11 +501,11 @@ pub enum Stmt {
     Stay,
     /// v0.34.1: `delegate` removed — 架构修正案条款 2 废止 subflow 委托
     /// (parser 拒绝，clause 2 负测试见 flow_features.rs)。AST variant 已删除。
-    /// DEAD: 架构修正案条款 10 废除同步 pinned timeout。timeout 字段永远为 None。
+    /// v0.34.3: `timeout` 字段删除 — 条款 10 废除同步 pinned timeout，
+    /// parser 拒绝 timeout 参数，字段恒 None。
     /// Pinned block — pin memory for FFI safety: pinned(expr) |ptr| { ... }
     Pinned {
         expr: Expr,
-        timeout: Option<Expr>,
         var: Option<String>,
         body: Block,
     },

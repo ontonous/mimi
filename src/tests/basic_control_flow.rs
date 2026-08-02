@@ -1337,6 +1337,53 @@ func main() -> i32 {
 }
 
 #[test]
+fn for_tuple_destructuring_bytecode() {
+    // v0.34.3: `for (k, v) in pairs` — pattern-based loop binding.
+    // Checker accepts the tuple pattern; bytecode destructures the element.
+    let src = r#"
+func main() -> i32 {
+    let pairs = [("a", 1), ("b", 2), ("c", 3)]
+    let mut total = 0
+    for (k, v) in pairs {
+        total = total + v
+    }
+    total
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "tuple for-loop should type check: {:?}",
+        check_source(src)
+    );
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(crate::interp::Value::Int(6))
+    );
+}
+
+#[test]
+fn for_tuple_destructuring_codegen_gap_reported() {
+    // v0.34.3: codegen does not yet lower for-loop tuple patterns — it must
+    // fail with a clear capability error, not crash.
+    let src = r#"
+func main() -> i32 {
+    let pairs = [("a", 1)]
+    let mut total = 0
+    for (k, v) in pairs {
+        total = total + v
+    }
+    total
+}
+"#;
+    let err = compile_and_run(src).expect_err("tuple for-loop must fail closed in codegen");
+    assert!(
+        err.contains("for-loop tuple destructuring") || err.contains("E0700"),
+        "unexpected codegen error: {}",
+        err
+    );
+}
+
+#[test]
 #[ignore = "TC-H2: requires ASan/UBSan instrumented mimi object pipeline"]
 fn asan_toolchain_gate() {
     // Placeholder residual: full ASan/UBSan on generated objects is a

@@ -421,22 +421,10 @@ impl<'a> Lowerer<'a> {
                 );
                 Some(current)
             }
-            Stmt::Pinned {
-                expr,
-                timeout,
-                body,
-                ..
-            } => {
+            Stmt::Pinned { expr, body, .. } => {
                 let current = self
                     .lower_expr(expr, current, &format!("{role}.pinned.expr"))
                     .unwrap_or_else(|| self.new_block(meta, "unreachable.pinned"));
-                // DEAD: 架构修正案条款 10 废除同步 pinned timeout。timeout 永远为 None。
-                let current = timeout
-                    .as_ref()
-                    .and_then(|expr| {
-                        self.lower_expr(expr, current.clone(), &format!("{role}.pinned.timeout"))
-                    })
-                    .unwrap_or(current);
                 self.lower_block(body, Some(current), &format!("{role}.pinned.body"))
             }
             Stmt::Block(block)

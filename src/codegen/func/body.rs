@@ -128,12 +128,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Shared implementation for Stmt::For — used by compile_func_legacy and compile_block
     pub(in crate::codegen) fn compile_for_stmt(
         &mut self,
-        var: &str,
+        var: &Pattern,
         iterable: &Expr,
         body: &Block,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+        // v0.34.3: for-loop patterns. Tuple destructuring is handled by the
+        // checker; codegen currently binds a single identifier per iteration.
+        let var = var.single_var_name().ok_or_else(|| {
+            CompileError::Generic(
+                "for-loop tuple destructuring is not yet supported in codegen; \
+                 bind a single identifier and destructure in the body"
+                    .to_string(),
+            )
+        })?;
 
         if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable.unlocated() {
             let start_val = self.compile_expr(start_expr, vars)?;

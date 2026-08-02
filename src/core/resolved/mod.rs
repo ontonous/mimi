@@ -4483,7 +4483,7 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         ),
         Stmt::Loop(_) => "loop".into(),
         Stmt::For { var, iterable, .. } => {
-            format!("for:{var}:{}", expr_semantic_key(iterable))
+            format!("for:{:?}:{}", var.kind, expr_semantic_key(iterable))
         }
         Stmt::Block(_) => "block".into(),
         Stmt::Desc(value, _) => format!("desc:{value}"),
@@ -4814,7 +4814,23 @@ fn collect_stmt_meta(
             out,
             errors,
         ),
-        Stmt::For { iterable, body, .. } => {
+        Stmt::For {
+            var,
+            iterable,
+            body,
+            ..
+        } => {
+            // v0.34.3: for-loop pattern must be registered so lowering can
+            // resolve its NodeMeta (single ident AND tuple destructuring).
+            collect_pattern_meta(
+                var,
+                owner,
+                &format!("{role}.pattern"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             collect_expr_meta(
                 iterable,
                 owner,
@@ -4890,12 +4906,7 @@ fn collect_stmt_meta(
                 errors,
             );
         }
-        Stmt::Pinned {
-            expr,
-            timeout,
-            body,
-            ..
-        } => {
+        Stmt::Pinned { expr, body, .. } => {
             collect_expr_meta(
                 expr,
                 owner,
@@ -4905,17 +4916,6 @@ fn collect_stmt_meta(
                 out,
                 errors,
             );
-            if let Some(timeout) = timeout {
-                collect_expr_meta(
-                    timeout,
-                    owner,
-                    &format!("{role}.timeout"),
-                    fallback,
-                    ids,
-                    out,
-                    errors,
-                );
-            }
             collect_block_meta(
                 body,
                 owner,
@@ -6594,12 +6594,7 @@ fn collect_stmt_call_sites(
                 errors,
             );
         }
-        Stmt::Pinned {
-            expr,
-            timeout,
-            body,
-            ..
-        } => {
+        Stmt::Pinned { expr, body, .. } => {
             collect_expr_call_sites(
                 expr,
                 owner,
@@ -6612,20 +6607,6 @@ fn collect_stmt_call_sites(
                 out,
                 errors,
             );
-            if let Some(timeout) = timeout {
-                collect_expr_call_sites(
-                    timeout,
-                    owner,
-                    &format!("{role}.timeout"),
-                    fallback,
-                    ids,
-                    functions,
-                    externs,
-                    methods,
-                    out,
-                    errors,
-                );
-            }
             collect_block_call_sites(
                 body,
                 owner,

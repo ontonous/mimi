@@ -1030,8 +1030,14 @@ impl<'a> Checker<'a> {
                     }
                 };
                 scopes.push(HashMap::new());
-                if let Some(s) = scopes.last_mut() {
-                    s.insert(var.clone(), elem_ty);
+                // v0.34.3: bind the for-loop pattern (single ident or tuple).
+                if let Some(name) = var.single_var_name() {
+                    if let Some(s) = scopes.last_mut() {
+                        s.insert(name.to_string(), elem_ty.clone());
+                    }
+                } else {
+                    // Destructuring pattern: check bindings against elem type.
+                    self.check_pattern(var, &elem_ty, scopes);
                 }
                 // P0-4: Save/restore session residuals around loop body.
                 // The iterable may be empty, so residuals modified inside
@@ -1637,41 +1643,11 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, scopes);
             }
             Stmt::Pinned {
-                expr,
-                var,
-                body,
-                timeout,
-                ..
+                expr, var, body, ..
             } => {
                 let val_ty = self.infer_expr(expr, scopes);
-                // DEAD: 架构修正案条款 10 废除同步 pinned timeout。Parser 已拒绝
-                // timeout 参数，此分支不可达（timeout 永远为 None）。清理排入后续 sprint。
-                // Validate timeout is an integer if present
-                if let Some(timeout_expr) = timeout {
-                    let t_ty = self.infer_expr(timeout_expr, scopes);
-                    let is_i32 = self
-                        .unification
-                        .unify(&t_ty, &Type::Name("i32".into(), vec![]))
-                        .is_ok();
-                    let is_i64 = self
-                        .unification
-                        .unify(&t_ty, &Type::Name("i64".into(), vec![]))
-                        .is_ok();
-                    if !is_i32 && !is_i64 {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0209,
-                            "pinned timeout must be an integer".to_string(),
-                        );
-                    }
-                    // CK-C4: require a compile-time integer literal so codegen
-                    // can materialize a constant timeout (no runtime expression).
-                    if !matches!(timeout_expr.unlocated(), Expr::Literal(Lit::Int(_))) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0209,
-                            "pinned timeout must be a compile-time integer literal".to_string(),
-                        );
-                    }
-                }
+                // v0.34.3: synchronous pinned timeout abolished (clause 10) —
+                // only pin + body remain.
                 // v0.29.27: enter FFI_Pinned region for the body (no transitions).
                 self.in_pinned_depth += 1;
                 let mut inner_scopes = scopes.clone();
