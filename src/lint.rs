@@ -1586,8 +1586,9 @@ func main() -> i32 {
 
     #[test]
     fn lint_escape_hatch_any_at_let() {
-        // CO-C2 audit: `let x: Any = ...` triggers W012 warning
-        let src = "func main() -> i32 { let x: Any = 42; x }";
+        // v0.34.10: `Any` removed from user syntax — the escape-hatch
+        // warning now targets `_` only.
+        let src = "func main() -> i32 { let x: _ = 42; x }";
         let file = parse_source(src);
         let linter = Linter::new();
         let result = linter.lint(&file, src);
@@ -1596,7 +1597,7 @@ func main() -> i32 {
                 .diagnostics
                 .iter()
                 .any(|d| d.code.as_deref() == Some(W012)),
-            "should detect `Any` escape hatch at let-binding"
+            "should detect `_` escape hatch at let-binding"
         );
     }
 
@@ -1667,7 +1668,7 @@ fn detect_escape_hatch_type_annotations(func: &FuncDef, diagnostics: &mut Vec<Di
                     W012,
                     format!(
                         "type escape hatch `{}` at let-binding bypasses type checks; \
-                         consider using a concrete type or `Any` only at FFI boundaries",
+                         consider using a concrete type (v0.34.10: `Any` removed)",
                         crate::core::helpers::fmt_type(t)
                     ),
                     stmt.meta().map(|meta| meta.span).unwrap_or(Span::UNKNOWN),
@@ -1696,7 +1697,9 @@ fn detect_escape_hatch_type_annotations(func: &FuncDef, diagnostics: &mut Vec<Di
 fn is_escape_hatch_type(t: &Type) -> bool {
     match t.unlocated() {
         Type::Infer => true,
-        Type::Name(n, _) if n == "_" || n == "Any" => true,
+        // v0.34.10: `Any` removed from user syntax (golden §2.4) — only `_`
+        // remains an escape hatch for the W012 check.
+        Type::Name(n, _) if n == "_" => true,
         _ => false,
     }
 }

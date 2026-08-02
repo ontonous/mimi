@@ -681,10 +681,10 @@ func main() -> i32 {
 
 #[test]
 fn w012_lint_detects_escape_hatch_any() {
-    // W012 should detect `let x: Any = ...` at top level.
+    // v0.34.10: `Any` removed from user syntax — W012 targets `_` only.
     let src = r#"
 func main() -> i32 {
-    let x: Any = 42
+    let x: _ = 42
     return x
 }
 "#;
@@ -696,7 +696,7 @@ func main() -> i32 {
             .diagnostics
             .iter()
             .any(|d| d.code.as_deref() == Some("W012")),
-        "W012 should detect Any escape hatch: {:?}",
+        "W012 should detect `_` escape hatch: {:?}",
         result.diagnostics
     );
 }

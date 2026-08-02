@@ -174,7 +174,6 @@ impl<'a> Checker<'a> {
             "Result".into(),
             "Option".into(),
             "Record".into(),
-            "Any".into(),
             "ExecResult".into(),
             "StatResult".into(),
         ]
