@@ -2031,6 +2031,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     _ => {}
                                                 }
                                             }
+                                        } else if let Some(closure_ret) = self
+                                            .var_types
+                                            .get(func_name)
+                                            .and_then(|t| match t.unlocated() {
+                                                Type::Func(_, ret) => Some(ret.as_ref().clone()),
+                                                _ => None,
+                                            })
+                                        {
+                                            // Closure call: the callee is a let-bound
+                                            // closure whose Func type was recorded at
+                                            // its binding. Track the return type name
+                                            // so field access / method dispatch on the
+                                            // call result resolves correctly (otherwise
+                                            // infer_object_type falls back to the
+                                            // variable name and field access fails
+                                            // E0707). Mirrors the named-func branch.
+                                            if let Type::Name(tn, _) = closure_ret.unlocated() {
+                                                let resolved =
+                                                    self.substitute_type_params(&closure_ret);
+                                                let type_name = self
+                                                    .get_full_type_name(&resolved)
+                                                    .unwrap_or_else(|| tn.clone());
+                                                self.var_type_names.insert(name.clone(), type_name);
+                                                self.var_types.insert(name.clone(), closure_ret);
+                                            }
                                         } else if let Some(crate::ast::Type::Name(tn, _)) = self
                                             .extern_func_defs
                                             .get(func_name)
