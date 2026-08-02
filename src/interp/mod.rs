@@ -1,316 +1,114 @@
 #![allow(dead_code)]
 
-mod actor;
-mod builtins;
 pub mod bytecode;
-mod call;
-mod closure_utils;
 pub mod error;
-mod eval;
-mod ffi;
-mod ffi_call;
+pub(crate) mod ffi;
 pub(crate) mod ffi_runtime;
-mod ops;
-mod pattern;
-pub(crate) mod pool;
-mod quote;
-pub(crate) mod resolved;
-mod scope_env;
 mod value;
 
 pub use error::InterpError;
-pub use scope_env::ScopeEnv;
 pub use value::*;
 
 /// Alias for interpreter results.
 pub type InterpResult<T> = std::result::Result<T, InterpError>;
 
 use crate::ast::*;
-use crate::ffi::FfiContract;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
-use closure_utils::collect_free_vars;
-
-/// Internal loop control flow signal
-#[derive(Debug, Clone)]
-pub(crate) enum LoopAction {
-    Continue,
-    Break(Option<Value>),
-}
-
-/// DEAD: 架构修正案条款 3 废止 WAL/@transactional。待清理。
-/// v0.29.14: Persistent-payload transaction state for one flow.
+/// CheckedProgram directory viewer.
 ///
-/// At transition entry we snapshot persistent field values from `self`.
-/// - **Version/dirty strategy (default):** if any non-`@transactional` persistent
-///   field differs from the snapshot at Fault time, `recover` degrades to `reset`.
-/// - **WAL strategy (`@transactional`):** snapshot is a full shadow copy; on Fault
-///   those fields are restored from the snapshot before recover.
-/// - **Metadata shadow strategy (`@metadata_shadow`, v0.29.45):** only metadata
-///   (length for Lists, field count for Records) is snapshotted. On restore,
-///   metadata is reset but underlying data buffer is kept. C4: the dirty check
-///   also stores the full value in `snapshot` for content-aware comparison,
-///   even though the WAL restore is length-only.
-#[derive(Debug, Clone, Default)]
-pub struct FlowPersistentTx {
-    /// Snapshotted values keyed by field name (turn entry).
-    /// C4: for `@metadata_shadow` fields this stores the full value content
-    /// (for dirty checking), while `metadata_snapshot` tracks the length
-    /// (for O(1) WAL restore).
-    pub snapshot: HashMap<String, Value>,
-    /// v0.29.45: Metadata-only snapshots for `@metadata_shadow` fields.
-    /// Stores the length (for Lists) as usize for O(1) snapshot/restore.
-    pub metadata_snapshot: HashMap<String, usize>,
-    /// True after a successful transition commit (snapshot cleared).
-    pub committed: bool,
-}
-
+/// Holds the resolved_* data installed by `from_checked()` and provides
+/// read-only accessor methods.  Execution is handled exclusively by the
+/// bytecode VM (`bytecode::BytecodeVM`).
 pub struct Interpreter<'a> {
     file: &'a File,
-    /// Scope-level evaluation state (variable bindings, mutability, call stack).
-    /// `pub(in crate::interp)` so delegate writeback can bypass the mutability
-    /// check for flow state `self` (implicitly mutable in do blocks).
-    pub(in crate::interp) scope_env: ScopeEnv,
-    constructors: HashMap<String, usize>,
-    /// Set of constructor names that are newtypes (for wrapping result in Value::Newtype)
-    newtype_constructors: HashMap<String, bool>,
-    /// Maps type name to its variants (for Result/Option-like types)
-    type_variants: HashMap<String, Vec<String>>,
-    /// Maps variant name to its parent ADT type name
-    variant_parent: HashMap<String, String>,
-    /// Maps variant name to field-name → position index (for named constructor patterns)
-    variant_field_positions: HashMap<String, HashMap<String, usize>>,
-    /// Variants that represent "failure" (Err, None, *Error, *Fail)
-    failure_variants: HashMap<String, bool>,
-    /// Capability definitions: cap_name -> list of component caps
-    cap_defs: HashMap<String, Vec<String>>,
-    /// Compensation stack for on failure blocks (LIFO) - scope-aware
-    /// Each scope level contains compensation blocks registered in that scope
-    /// Push a new scope when entering a block, pop when exiting
-    compensation_stack: Vec<Vec<Vec<Stmt>>>,
-    /// M12: count of compensation blocks that failed (not silently lost).
-    pub(crate) compensation_error_count: usize,
-    /// 0.31.24: Defer stack for defer blocks (LIFO) - scope-aware
-    /// Each scope level contains defer blocks registered in that scope
-    /// Push a new scope when entering a block, pop when exiting (always runs)
-    defer_stack: Vec<Vec<Block>>,
-    /// I-1 (0.31.55): deferred QuotedAst bodies for LIFO execution at
-    /// quoted block exit. Separate from defer_stack (which uses Block).
-    deferred_quoted: Vec<QuotedAst>,
-    /// Arena memory blocks (arena_id -> Arena)
-    arenas: Vec<Arena>,
-    /// Current arena scope depth (track nesting for error messages)
-    arena_depth: usize,
-    /// Whether to verify contracts at runtime
+    /// Whether to verify contracts at runtime (used by tests).
     pub verify_contracts: bool,
-    /// Trait definitions: trait_name -> TraitDef
-    trait_defs: HashMap<String, TraitDef>,
-    /// Trait implementations: type_name -> trait_name -> list of FuncDef methods
-    type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
-    /// Defensive validation for ASTs constructed without the source parser.
-    /// Normal source input is rejected during parsing; this prevents the
-    /// interpreter's derive expansion from becoming a second fail-open path.
-    derive_expansion_error: Option<InterpError>,
-    /// Extern function declarations + FFI execution context (shared with the
-    /// bytecode VM since 0.33 Phase D: see `ffi_runtime.rs`).
+    /// FFI execution context (shared with the bytecode VM).
     pub(crate) ffi_runtime: ffi_runtime::FfiRuntime,
-    /// Type definitions for reflection: type_name -> (fields, variants)
-    type_defs: HashMap<String, TypeDef>,
-    /// Pre-computed results for comptime functions (no-arg functions evaluated at startup)
-    comptime_results: HashMap<String, Value>,
-    /// 0.31.23: Whether we're currently in comptime evaluation mode.
-    /// When true, FFI calls are forbidden (abort on extern call).
-    in_comptime: bool,
-    /// 0.31.23: Gensym counter for generating unique variable names in quote!.
-    /// Prevents naming conflicts with existing variables and Z3.
-    gensym_counter: usize,
-    /// 0.31.24: Current function's return type for error conversion via From protocol.
-    /// Used by eval_try to determine if error type conversion is needed.
-    current_return_type: Option<Type>,
-    /// Default allocator kind (set by --allocator CLI flag)
-    pub default_allocator: AllocatorKind,
-    /// Current loop control flow action (break/continue signal)
-    loop_action: Option<LoopAction>,
-    /// Early return signal for ? propagation (exception-like, preserves value)
-    early_return: Option<Value>,
-    /// Values of `mutate` parameters captured when the most recent user
-    /// function returned. `eval_call_dispatch` writes them back to caller
-    /// argument bindings, matching the codegen reference ABI.
-    last_mutate_writebacks: Vec<(usize, Value)>,
-    /// Exit code signal from builtin `exit()`; once set, execution stops.
-    exited: Option<i32>,
-    /// Recursion depth guard to prevent stack overflow
-    recursion_depth: usize,
-    /// O(1) function lookup index: name -> FuncDef
-    func_index: HashMap<String, FuncDef>,
-    /// O(1) actor lookup index: name -> ActorDef
-    actor_index: HashMap<String, ActorDef>,
-    /// Flow definitions: flow_name -> FlowDef
-    flow_index: HashMap<String, FlowDef>,
-    /// Canonical transitions from CheckedProgram: (flow, event, source) -> targets.
-    /// When present, transition dispatch prefers this table over re-scanning FlowDef.
+    /// v0.29.24: process-wide max children (None = unlimited).
+    max_children: Option<usize>,
+
+    // ── resolved_* directory fields ──────────────────────────────
     pub(in crate::interp) resolved_transitions:
         Option<HashMap<(String, String, String), Vec<String>>>,
-    /// Fallback/matrix-injected transitions from CheckedProgram.
     pub(in crate::interp) resolved_fallback_transitions:
         Option<std::collections::HashSet<(String, String, String)>>,
-    /// FFI-pinned system transitions from CheckedProgram.
     pub(in crate::interp) resolved_ffi_pinned_transitions:
         Option<std::collections::HashSet<(String, String, String)>>,
-    /// Transition event parameter arity from CheckedProgram.
     pub(in crate::interp) resolved_transition_param_arity:
         Option<HashMap<(String, String, String), usize>>,
     pub(in crate::interp) resolved_transition_params:
         Option<HashMap<(String, String, String), Vec<(String, String)>>>,
-    /// Transitions grouped by flow: flow -> [(event, source, targets, fallback, pinned, argc)].
     pub(in crate::interp) resolved_transitions_by_flow:
         Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
     pub(in crate::interp) resolved_transitions_by_event:
         Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
-    /// P0-11: Send+Sync snapshot of transition tables for actor worker threads.
-    /// Set in from_checked(); passed to ActorHandle::new so the worker can
-    /// validate transitions against the CheckedProgram directory.
     pub(in crate::interp) resolved_transition_tables:
         Option<std::sync::Arc<crate::core::TransitionTables>>,
     pub(in crate::interp) resolved_node_meta_spans:
         Option<HashMap<String, (usize, usize, usize, usize)>>,
-    /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
-    /// Function parameter directories: name -> [(param_name, type display)].
     pub(in crate::interp) resolved_function_params: Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_comptime_functions: Option<std::collections::HashSet<String>>,
-    /// Session type names materialised from CheckedProgram.
     pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
-    /// Session residual type display strings.
     pub(in crate::interp) resolved_session_displays: Option<HashMap<String, String>>,
-    /// Protocol names materialised from CheckedProgram.
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
-    /// Protocol transition records: protocol -> [(event, from, to)].
     pub(in crate::interp) resolved_protocol_transitions:
         Option<HashMap<String, Vec<(String, String, String)>>>,
-    /// Protocol state payloads: "Protocol.State" -> payload type display.
     pub(in crate::interp) resolved_protocol_payloads: Option<HashMap<String, String>>,
-    /// Protocol state name lists: "Protocol" -> [state_name].
     pub(in crate::interp) resolved_protocol_states: Option<HashMap<String, Vec<String>>>,
-    /// Protocol state payload records: "Protocol.State" -> (payload_name, payload_type).
     pub(in crate::interp) resolved_protocol_state_payloads:
         Option<HashMap<String, (String, String)>>,
-    /// Actor method directories materialised from CheckedProgram: actor -> methods.
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
-    /// Actor method signatures: "Actor.method" -> (arity, ret).
     pub(in crate::interp) resolved_actor_method_signatures:
         Option<HashMap<String, (usize, String)>>,
     pub(in crate::interp) resolved_actor_method_params:
         Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_actor_fields:
         Option<HashMap<String, Vec<(String, String, bool)>>>,
-    /// Capability names materialised from CheckedProgram.
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
-    /// Capability combinations: name -> combined_with (if any).
     pub(in crate::interp) resolved_capability_combined: Option<HashMap<String, String>>,
-    /// Constant names materialised from CheckedProgram.
     pub(in crate::interp) resolved_constants: Option<std::collections::HashSet<String>>,
-    /// Constant directory: name -> (type display, encoded value).
     pub(in crate::interp) resolved_constant_values:
         Option<HashMap<String, (Option<String>, String)>>,
-    /// Trait method directories materialised from CheckedProgram.
     pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
-    /// Trait/impl method signatures: "Show.show" / "Show:for:Number.show" -> (arity, ret).
     pub(in crate::interp) resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
-    /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
     pub(in crate::interp) resolved_method_params: Option<HashMap<String, Vec<(String, String)>>>,
-    /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
-    /// Ownership ledger owners materialised from CheckedProgram.
     pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
-    /// Ownership action summaries: owner -> (intro, move, drop, return, merges, maybe_consumed).
     pub(in crate::interp) resolved_ownership_summaries:
         Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
-    /// Ownership resources per owner: owner -> resource names.
     pub(in crate::interp) resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
-    /// Ownership actions: owner -> [(kind, resource)].
     pub(in crate::interp) resolved_ownership_actions:
         Option<HashMap<String, Vec<(String, String)>>>,
-    /// Ownership branch merges: owner -> [(resource, then, else, merged)].
     pub(in crate::interp) resolved_ownership_merges:
         Option<HashMap<String, Vec<(String, String, String, String)>>>,
-    /// Backend capability requirements: (capability, flow).
     pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
-    /// NodeMeta path presence count from CheckedProgram.
     pub(in crate::interp) resolved_node_meta_count: Option<usize>,
-    /// NodeMeta path ids from CheckedProgram.
     pub(in crate::interp) resolved_node_meta_paths: Option<std::collections::HashSet<String>>,
-    /// NodeMeta precision: path -> "exact"|"declaration_fallback".
     pub(in crate::interp) resolved_node_meta_precision: Option<HashMap<String, String>>,
-    /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_type_variants:
         Option<HashMap<String, Vec<(String, Option<String>)>>>,
     pub(in crate::interp) resolved_type_aliases: Option<HashMap<String, String>>,
-    /// Extern function names materialised from CheckedProgram.
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
-    /// Extern function -> ABI string from CheckedProgram.
     pub(in crate::interp) resolved_extern_abis: Option<HashMap<String, String>>,
-    /// Extern function signatures: name -> (arity, ret).
     pub(in crate::interp) resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
     pub(in crate::interp) resolved_extern_params: Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     pub(in crate::interp) resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
-    /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
-    /// Flow state payloads: "Flow.State" -> [(field, type display)].
     pub(in crate::interp) resolved_flow_state_payloads:
         Option<HashMap<String, Vec<(String, String)>>>,
-    /// Flow state names: flow -> [state].
     pub(in crate::interp) resolved_flow_states: Option<HashMap<String, Vec<String>>>,
-    /// Flow event names: flow -> [event].
     pub(in crate::interp) resolved_flow_events: Option<HashMap<String, Vec<String>>>,
-    /// Resolved item kinds: qualified_name -> kind.
     pub(in crate::interp) resolved_item_kinds: Option<HashMap<String, String>>,
-    /// Persistent field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
-    /// Transactional field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
-    /// Metadata-shadow field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
-    /// Flow impl Protocol names materialised from CheckedProgram.
     pub(in crate::interp) resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
-    /// v0.29.24: process-wide max children (None = unlimited).
-    /// Taken from first `@max_children(N)` flow annotation in the file.
-    max_children: Option<usize>,
-    /// v0.29.24: number of actors spawned by this interpreter process.
-    spawn_count: usize,
-    /// v0.29.31: per-actor-type spawn count for per-type max_children quota.
-    actor_spawn_counts: std::collections::HashMap<String, usize>,
-    /// v0.29.14: per-flow persistent-payload transaction state.
-    /// Keyed by flow name. Snapshotted at turn entry; committed on success /
-    /// used for dirty detection + WAL restore on Fault.
-    pub(in crate::interp) flow_tx: HashMap<String, FlowPersistentTx>,
-    /// v0.29.43: current flow state name for delayed Fault context.
-    /// Set when entering `eval_flow_transition`; used by `pinned` blocks
-    /// to route timeout/crash through `make_fault_value` with correct
-    /// `last_state` information.
-    pub(in crate::interp) current_flow_state: Option<String>,
-    /// Global constants defined at top level
-    globals: HashMap<String, Value>,
-    /// CLI arguments forwarded to the program
-    pub cli_args: Vec<String>,
-    /// Registry to keep CStrings alive for FFI calls, preventing leaks.
-    /// IN-C2: CString registry — stores CStrings created by str_to_c_str.
-    /// Dropped when the Interpreter is dropped, freeing all CStrings.
-    /// Uses ownership (not into_raw/from_raw) to guarantee no leaks.
-    cstring_registry: std::cell::RefCell<Vec<std::ffi::CString>>,
-    /// TC-C1: optional stdout capture for dual-backend tests.
-    /// When `Some`, `print`/`println` append here instead of writing the process stdout.
-    /// Actor workers and parasteps receive this buffer explicitly via `set_stdout_buf`
-    /// (there is deliberately no process-wide sink — a global slot raced under
-    /// parallel test scheduling, letting one test's output leak into another's buffer).
-    stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
-    /// v0.31.15: canonical semantic trace collector.
-    /// Disabled by default; enable via `enable_trace()` for trace comparison.
-    pub trace_collector: crate::trace::TraceCollector,
 }
 
 impl<'a> Interpreter<'a> {
@@ -780,7 +578,89 @@ impl<'a> Interpreter<'a> {
         interp
     }
 
-    /// Test/diagnostic access to CheckedProgram function directory.
+    /// Minimal constructor: initializes FFI runtime from the AST and sets
+    /// all resolved_* directory fields to None.  `from_checked()` overwrites
+    /// them from the CheckedProgram.
+    pub(crate) fn new(file: &'a File) -> Self {
+        let ffi_runtime = ffi_runtime::FfiRuntime::from_file(file);
+        // v0.29.24: first `@max_children(N)` among flows sets process spawn quota.
+        let max_children = file.items.iter().find_map(|item| {
+            if let Item::Flow(flow) = item {
+                flow.annotations.iter().find_map(|a| match &a.kind {
+                    crate::ast::FlowAnnotationKind::MaxChildren(n) => Some(*n),
+                    _ => None,
+                })
+            } else {
+                None
+            }
+        });
+        Self {
+            file,
+            verify_contracts: true,
+            ffi_runtime,
+            max_children,
+            resolved_transitions: None,
+            resolved_fallback_transitions: None,
+            resolved_ffi_pinned_transitions: None,
+            resolved_transition_param_arity: None,
+            resolved_transition_params: None,
+            resolved_transitions_by_flow: None,
+            resolved_transitions_by_event: None,
+            resolved_transition_tables: None,
+            resolved_node_meta_spans: None,
+            resolved_functions: None,
+            resolved_function_params: None,
+            resolved_comptime_functions: None,
+            resolved_sessions: None,
+            resolved_session_displays: None,
+            resolved_protocols: None,
+            resolved_protocol_transitions: None,
+            resolved_protocol_payloads: None,
+            resolved_protocol_states: None,
+            resolved_protocol_state_payloads: None,
+            resolved_actors: None,
+            resolved_actor_method_signatures: None,
+            resolved_actor_method_params: None,
+            resolved_actor_fields: None,
+            resolved_capabilities: None,
+            resolved_capability_combined: None,
+            resolved_constants: None,
+            resolved_constant_values: None,
+            resolved_traits: None,
+            resolved_method_signatures: None,
+            resolved_method_params: None,
+            resolved_impls: None,
+            resolved_ownership_owners: None,
+            resolved_ownership_summaries: None,
+            resolved_ownership_resources: None,
+            resolved_ownership_actions: None,
+            resolved_ownership_merges: None,
+            resolved_backend_requirements: None,
+            resolved_node_meta_count: None,
+            resolved_node_meta_paths: None,
+            resolved_node_meta_precision: None,
+            resolved_type_kinds: None,
+            resolved_type_fields: None,
+            resolved_type_variants: None,
+            resolved_type_aliases: None,
+            resolved_extern_funcs: None,
+            resolved_extern_abis: None,
+            resolved_extern_signatures: None,
+            resolved_extern_params: None,
+            resolved_extern_no_panic: None,
+            resolved_extern_unsafe: None,
+            resolved_mailbox_depths: None,
+            resolved_flow_state_payloads: None,
+            resolved_flow_states: None,
+            resolved_flow_events: None,
+            resolved_item_kinds: None,
+            resolved_persistent_fields: None,
+            resolved_transactional_fields: None,
+            resolved_metadata_shadow_fields: None,
+            resolved_flow_protocols: None,
+        }
+    }
+
     /// Enable/disable FFI contract verification (tests, fuzz harness).
     pub(crate) fn set_verify_ffi(&mut self, verify: bool) {
         self.ffi_runtime.verify_ffi = verify;
@@ -1270,1241 +1150,8 @@ impl<'a> Interpreter<'a> {
             .as_ref()
             .and_then(|map| map.get(qualified_name).map(String::as_str))
     }
-
-    pub(crate) fn new(file: &'a File) -> Self {
-        let mut constructors = HashMap::new();
-        let mut newtype_constructors = HashMap::new();
-        let mut type_variants: HashMap<String, Vec<String>> = HashMap::new();
-        let mut variant_parent: HashMap<String, String> = HashMap::new();
-        let mut variant_field_positions: HashMap<String, HashMap<String, usize>> = HashMap::new();
-        let mut failure_variants: HashMap<String, bool> = HashMap::new();
-        let mut cap_defs: HashMap<String, Vec<String>> = HashMap::new();
-        for item in &file.items {
-            Self::collect_constructors(
-                item,
-                &mut constructors,
-                &mut newtype_constructors,
-                &mut type_variants,
-                &mut variant_parent,
-                &mut variant_field_positions,
-                &mut failure_variants,
-            );
-            ffi_runtime::FfiRuntime::collect_caps(item, &mut cap_defs);
-        }
-        // Register built-in Result/Option constructors
-        constructors.insert("Ok".to_string(), 1);
-        constructors.insert("Err".to_string(), 1);
-        constructors.insert("Some".to_string(), 1);
-        constructors.insert("None".to_string(), 0);
-        // Also mark Err and None as failure variants for the ? operator
-        failure_variants.insert("Err".to_string(), true);
-        failure_variants.insert("None".to_string(), true);
-        let mut trait_defs = HashMap::new();
-        let mut type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>> = HashMap::new();
-        let mut extern_funcs: HashMap<String, ExternFunc> = HashMap::new();
-        let mut ffi_contracts: HashMap<String, FfiContract> = HashMap::new();
-        let mut type_defs: HashMap<String, TypeDef> = HashMap::new();
-        for item in &file.items {
-            Self::collect_traits(item, &mut trait_defs, &mut type_impls);
-            ffi_runtime::FfiRuntime::collect_type_defs(item, &mut type_defs);
-        }
-        // Build contracts after type_defs are populated so record type names are known
-        for item in &file.items {
-            ffi_runtime::FfiRuntime::collect_extern_funcs(
-                item,
-                &mut extern_funcs,
-                &mut ffi_contracts,
-                &cap_defs,
-                &type_defs,
-            );
-        }
-        let ffi_runtime =
-            ffi_runtime::FfiRuntime::from_parts(extern_funcs, ffi_contracts, type_defs.clone());
-        // Expand built-in derive macros. Source-parsed files have already been
-        // validated, but programmatically constructed ASTs must also fail closed.
-        let derive_expansion_error =
-            Self::expand_derives(&type_defs, &mut trait_defs, &mut type_impls).err();
-        // Build O(1) function, actor, and flow lookup indices
-        let mut func_index = HashMap::new();
-        let mut actor_index = HashMap::new();
-        let mut flow_index = HashMap::new();
-        Self::build_func_index(&file.items, &mut func_index);
-        Self::build_actor_index(&file.items, &mut actor_index);
-        Self::build_flow_index(&file.items, &mut flow_index);
-        // v0.29.24: first `@max_children(N)` among flows sets process spawn quota.
-        let max_children = flow_index
-            .values()
-            .flat_map(|f| f.annotations.iter())
-            .find_map(|a| match &a.kind {
-                crate::ast::FlowAnnotationKind::MaxChildren(n) => Some(*n),
-                _ => None,
-            });
-        Self {
-            file,
-            scope_env: ScopeEnv::new(),
-            constructors,
-            newtype_constructors,
-            type_variants,
-            variant_parent,
-            variant_field_positions,
-            failure_variants,
-            cap_defs,
-            compensation_stack: Vec::new(),
-            compensation_error_count: 0,
-            defer_stack: Vec::new(),
-            deferred_quoted: Vec::new(),
-            arenas: Vec::new(),
-            arena_depth: 0,
-            verify_contracts: true,
-            trait_defs,
-            type_impls,
-            derive_expansion_error,
-            ffi_runtime,
-            type_defs,
-            comptime_results: HashMap::new(),
-            in_comptime: false,
-            gensym_counter: 0,
-            current_return_type: None,
-            default_allocator: AllocatorKind::System,
-            loop_action: None,
-            early_return: None,
-            last_mutate_writebacks: Vec::new(),
-            exited: None,
-            recursion_depth: 0,
-            func_index,
-            actor_index,
-            flow_index,
-            resolved_transitions: None,
-            resolved_fallback_transitions: None,
-            resolved_ffi_pinned_transitions: None,
-            resolved_transition_param_arity: None,
-            resolved_transition_params: None,
-            resolved_transitions_by_flow: None,
-            resolved_transitions_by_event: None,
-            resolved_transition_tables: None,
-            resolved_node_meta_spans: None,
-            resolved_functions: None,
-            resolved_function_params: None,
-            resolved_comptime_functions: None,
-            resolved_sessions: None,
-            resolved_session_displays: None,
-            resolved_protocols: None,
-            resolved_protocol_transitions: None,
-            resolved_protocol_payloads: None,
-            resolved_protocol_states: None,
-            resolved_protocol_state_payloads: None,
-            resolved_actors: None,
-            resolved_actor_method_signatures: None,
-            resolved_actor_method_params: None,
-            resolved_actor_fields: None,
-            resolved_capabilities: None,
-            resolved_capability_combined: None,
-            resolved_constants: None,
-            resolved_constant_values: None,
-            resolved_traits: None,
-            resolved_method_signatures: None,
-            resolved_method_params: None,
-            resolved_impls: None,
-            resolved_ownership_owners: None,
-            resolved_ownership_summaries: None,
-            resolved_ownership_resources: None,
-            resolved_ownership_actions: None,
-            resolved_ownership_merges: None,
-            resolved_backend_requirements: None,
-            resolved_node_meta_count: None,
-            resolved_node_meta_paths: None,
-            resolved_node_meta_precision: None,
-            resolved_type_kinds: None,
-            resolved_type_fields: None,
-            resolved_type_variants: None,
-            resolved_type_aliases: None,
-            resolved_extern_funcs: None,
-            resolved_extern_abis: None,
-            resolved_extern_signatures: None,
-            resolved_extern_params: None,
-            resolved_extern_no_panic: None,
-            resolved_extern_unsafe: None,
-            resolved_mailbox_depths: None,
-            resolved_flow_state_payloads: None,
-            resolved_flow_states: None,
-            resolved_flow_events: None,
-            resolved_item_kinds: None,
-            resolved_persistent_fields: None,
-            resolved_transactional_fields: None,
-            resolved_metadata_shadow_fields: None,
-            resolved_flow_protocols: None,
-            max_children,
-            spawn_count: 0,
-            actor_spawn_counts: std::collections::HashMap::new(),
-            flow_tx: HashMap::new(),
-            current_flow_state: None,
-            globals: HashMap::new(),
-            cli_args: Vec::new(),
-            cstring_registry: std::cell::RefCell::new(Vec::new()),
-            stdout_capture: None,
-            trace_collector: crate::trace::TraceCollector::new(),
-        }
-    }
-
-    /// TC-C1: redirect `print`/`println` into an in-memory buffer (no process stdout).
-    /// Actor workers share the buffer via `set_stdout_buf` (explicit `Arc`, no global sink).
-    pub fn enable_stdout_capture(&mut self) {
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        self.stdout_capture = Some(buf);
-    }
-
-    /// Set the stdout capture buffer directly. Actor workers and parasteps
-    /// receive the spawning interpreter's buffer this way — the worker owns
-    /// its own reference to the same `Arc` (there is no process-wide sink).
-    pub fn set_stdout_buf(&mut self, buf: std::sync::Arc<std::sync::Mutex<String>>) {
-        self.stdout_capture = Some(buf);
-    }
-
-    /// Take captured stdout and disable further capture.
-    pub fn take_stdout(&mut self) -> String {
-        self.stdout_capture
-            .take()
-            .map(|b| b.lock().map(|g| g.clone()).unwrap_or_default())
-            .unwrap_or_default()
-    }
-
-    /// Borrow a snapshot of captured stdout without disabling capture.
-    pub fn captured_stdout(&self) -> Option<String> {
-        self.stdout_capture
-            .as_ref()
-            .and_then(|b| b.lock().ok().map(|g| g.clone()))
-    }
-
-    pub(in crate::interp) fn emit_stdout(&self, text: &str) {
-        if let Some(buf) = self.resolve_stdout_buf() {
-            if let Ok(mut g) = buf.lock() {
-                g.push_str(text);
-                return;
-            }
-        }
-        print!("{}", text);
-    }
-
-    pub(in crate::interp) fn emit_stdout_line(&self, text: &str) {
-        if let Some(buf) = self.resolve_stdout_buf() {
-            if let Ok(mut g) = buf.lock() {
-                g.push_str(text);
-                g.push('\n');
-                return;
-            }
-        }
-        println!("{}", text);
-    }
-
-    fn resolve_stdout_buf(&self) -> Option<std::sync::Arc<std::sync::Mutex<String>>> {
-        self.stdout_capture.clone()
-    }
-
-    // Default Rust thread stack is 2MB; each interpreter frame is ~2KB.
-    // 768 frames × 2KB = 1.5MB, leaving ~0.5MB headroom.
-    const MAX_RECURSION_DEPTH: usize = 768;
-
-    /// Apply a closure value: push scope, bind captured vars and params,
-    /// eval body, handle early return, pop scope.
-    fn apply_closure_inner(
-        &mut self,
-        params: &[Param],
-        body: &Block,
-        captured: &HashMap<String, Value>,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
-        if params.len() != args.len() {
-            return Err(InterpError::new(format!(
-                "closure expects {} arguments, got {}",
-                params.len(),
-                args.len()
-            )));
-        }
-        let result = self.with_scope(|this| {
-            for (n, v) in captured {
-                this.bind(n, v.clone())?;
-            }
-            for (param, arg) in params.iter().zip(args) {
-                this.bind(&param.name, arg)?;
-            }
-            this.eval_block(body)
-        })?;
-        if self.exited.is_some() {
-            return Ok(result.unwrap_or(Value::Unit));
-        }
-        if let Some(val) = self.early_return.take() {
-            return Ok(val);
-        }
-        Ok(result.unwrap_or(Value::Unit))
-    }
-
-    fn build_func_index(items: &[Item], index: &mut HashMap<String, FuncDef>) {
-        Self::build_func_index_rec(items, "", index);
-    }
-
-    fn build_func_index_rec(items: &[Item], prefix: &str, index: &mut HashMap<String, FuncDef>) {
-        for item in items {
-            match item {
-                Item::Func(f) => {
-                    // Store by unqualified name (first wins)
-                    index.entry(f.name.clone()).or_insert_with(|| f.clone());
-                    // Store by qualified name
-                    if !prefix.is_empty() {
-                        let qualified = format!("{}::{}", prefix, f.name);
-                        index.entry(qualified).or_insert_with(|| f.clone());
-                    }
-                }
-                Item::Module(m) => {
-                    let new_prefix = if prefix.is_empty() {
-                        m.name.clone()
-                    } else {
-                        format!("{}::{}", prefix, m.name)
-                    };
-                    Self::build_func_index_rec(&m.items, &new_prefix, index);
-                }
-                // M13-fix: explicitly list non-indexed variants so new
-                // Item variants trigger a compile warning (uncovered pattern).
-                Item::Type(_)
-                | Item::Actor(_)
-                | Item::Cap(_)
-                | Item::Trait(_)
-                | Item::Impl(_)
-                | Item::ExternBlock(_)
-                | Item::Const { .. }
-                | Item::Flow(_)
-                | Item::Protocol(_)
-                | Item::Session(_) => {}
-            }
-        }
-    }
-
-    fn build_actor_index(items: &[Item], index: &mut HashMap<String, ActorDef>) {
-        for item in items {
-            match item {
-                Item::Actor(a) => {
-                    index.insert(a.name.clone(), a.clone());
-                }
-                Item::Module(m) => Self::build_actor_index(&m.items, index),
-                // M13-fix: explicitly list non-indexed variants
-                Item::Func(_)
-                | Item::Type(_)
-                | Item::Cap(_)
-                | Item::Trait(_)
-                | Item::Impl(_)
-                | Item::ExternBlock(_)
-                | Item::Const { .. }
-                | Item::Flow(_)
-                | Item::Protocol(_)
-                | Item::Session(_) => {}
-            }
-        }
-    }
-
-    fn build_flow_index(items: &[Item], index: &mut HashMap<String, FlowDef>) {
-        for item in items {
-            match item {
-                Item::Flow(f) => {
-                    index.insert(f.name.clone(), f.clone());
-                }
-                Item::Module(m) => Self::build_flow_index(&m.items, index),
-                // M13-fix: explicitly list non-indexed variants
-                Item::Func(_)
-                | Item::Type(_)
-                | Item::Actor(_)
-                | Item::Cap(_)
-                | Item::Trait(_)
-                | Item::Impl(_)
-                | Item::ExternBlock(_)
-                | Item::Const { .. }
-                | Item::Protocol(_)
-                | Item::Session(_) => {}
-            }
-        }
-    }
-
-    fn collect_constructors(
-        item: &Item,
-        out: &mut HashMap<String, usize>,
-        newtype_constructors: &mut HashMap<String, bool>,
-        type_variants: &mut HashMap<String, Vec<String>>,
-        variant_parent: &mut HashMap<String, String>,
-        variant_field_positions: &mut HashMap<String, HashMap<String, usize>>,
-        failure_variants: &mut HashMap<String, bool>,
-    ) {
-        match item {
-            Item::Type(t) => {
-                match &t.kind {
-                    TypeDefKind::Enum(variants) => {
-                        let mut variant_names = Vec::new();
-                        for v in variants {
-                            let arity = match &v.payload {
-                                None => 0,
-                                Some(VariantPayload::Tuple(types)) => types.len(),
-                                Some(VariantPayload::Record(fields)) => {
-                                    // Store field name → position for named constructor patterns
-                                    let mut positions = HashMap::new();
-                                    for (i, f) in fields.iter().enumerate() {
-                                        positions.insert(f.name.clone(), i);
-                                    }
-                                    variant_field_positions.insert(v.name.clone(), positions);
-                                    fields.len()
-                                }
-                            };
-                            out.insert(v.name.clone(), arity);
-                            variant_names.push(v.name.clone());
-                            variant_parent.insert(v.name.clone(), t.name.clone());
-                            // Mark failure-like variants
-                            let name_lower = v.name.to_lowercase();
-                            if name_lower == "err"
-                                || name_lower == "none"
-                                || name_lower.ends_with("error")
-                                || name_lower.ends_with("fail")
-                            {
-                                failure_variants.insert(v.name.clone(), true);
-                            }
-                        }
-                        type_variants.insert(t.name.clone(), variant_names);
-                    }
-                    TypeDefKind::Newtype(_) => {
-                        out.insert(t.name.clone(), 1);
-                        newtype_constructors.insert(t.name.clone(), true);
-                    }
-                    _ => {}
-                }
-            }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_constructors(
-                        inner,
-                        out,
-                        newtype_constructors,
-                        type_variants,
-                        variant_parent,
-                        variant_field_positions,
-                        failure_variants,
-                    );
-                }
-            }
-            Item::Trait(_) | Item::Impl(_) => {
-                // Traits and impls don't define constructors
-            }
-            _ => {}
-        }
-    }
-
-    /// Expand built-in derive macros for types
-    fn expand_derives(
-        type_defs: &HashMap<String, TypeDef>,
-        _trait_defs: &mut HashMap<String, TraitDef>,
-        type_impls: &mut HashMap<String, HashMap<String, Vec<FuncDef>>>,
-    ) -> InterpResult<()> {
-        // Validate the complete input before mutating the implementation table,
-        // so an unsupported derive cannot leave a partially expanded program.
-        for (type_name, type_def) in type_defs {
-            if let Some(derive_name) = type_def
-                .derives
-                .iter()
-                .find(|name| !matches!(name.as_str(), "Debug" | "Clone" | "Eq"))
-            {
-                return Err(InterpError::with_op(
-                    format!(
-                        "unsupported derive `{}` on type `{}`; supported derives: Debug, Clone, Eq",
-                        derive_name, type_name
-                    ),
-                    "derive expansion",
-                ));
-            }
-        }
-
-        for (type_name, type_def) in type_defs {
-            for derive_name in &type_def.derives {
-                let derive_meta = AstNodeMeta::inherited(
-                    type_def.meta.span,
-                    AstOrigin::Desugared("interp.derive_method"),
-                );
-                match derive_name.as_str() {
-                    "Debug" => {
-                        // Generate to_string method for Debug
-                        let to_string_func = FuncDef {
-                            meta: derive_meta,
-                            name: "to_string".to_string(),
-                            pub_: false,
-                            params: vec![],
-                            ret: Some(
-                                Type::Name("string".into(), vec![]).deep_reorigin(derive_meta),
-                            ),
-                            body: vec![],
-                            where_clause: Vec::new(),
-                            generics: vec![],
-                            effects: vec![],
-                            is_comptime: false,
-                            is_async: false,
-                            extern_abi: None,
-                            has_requires: false,
-                            has_ensures: false,
-                            has_mutate_params: false,
-                        };
-                        type_impls
-                            .entry(type_name.clone())
-                            .or_default()
-                            .entry("Debug".to_string())
-                            .or_default()
-                            .push(to_string_func);
-                    }
-                    "Clone" => {
-                        // Generate clone method for Clone
-                        let clone_func = FuncDef {
-                            meta: derive_meta,
-                            name: "clone".to_string(),
-                            pub_: false,
-                            params: vec![],
-                            ret: Some(
-                                Type::Name(type_name.clone(), vec![]).deep_reorigin(derive_meta),
-                            ),
-                            body: vec![],
-                            where_clause: Vec::new(),
-                            generics: vec![],
-                            effects: vec![],
-                            is_comptime: false,
-                            is_async: false,
-                            extern_abi: None,
-                            has_requires: false,
-                            has_ensures: false,
-                            has_mutate_params: false,
-                        };
-                        type_impls
-                            .entry(type_name.clone())
-                            .or_default()
-                            .entry("Clone".to_string())
-                            .or_default()
-                            .push(clone_func);
-                    }
-                    "Eq" => {
-                        // Generate eq method for Eq
-                        let eq_func = FuncDef {
-                            meta: derive_meta,
-                            name: "eq".to_string(),
-                            pub_: false,
-                            params: vec![Param {
-                                meta: derive_meta,
-                                name: "other".to_string(),
-                                ty: Type::Name(type_name.clone(), vec![])
-                                    .deep_reorigin(derive_meta),
-                                mut_: false,
-                                default_value: None,
-                                borrow: None,
-                            }],
-                            ret: Some(Type::Name("bool".into(), vec![]).deep_reorigin(derive_meta)),
-                            body: vec![],
-                            where_clause: Vec::new(),
-                            generics: vec![],
-                            effects: vec![],
-                            is_comptime: false,
-                            is_async: false,
-                            extern_abi: None,
-                            has_requires: false,
-                            has_ensures: false,
-                            has_mutate_params: false,
-                        };
-                        type_impls
-                            .entry(type_name.clone())
-                            .or_default()
-                            .entry("Eq".to_string())
-                            .or_default()
-                            .push(eq_func);
-                    }
-                    _ => unreachable!("derive names were validated before expansion"),
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn collect_traits(
-        item: &Item,
-        trait_defs: &mut HashMap<String, TraitDef>,
-        type_impls: &mut HashMap<String, HashMap<String, Vec<FuncDef>>>,
-    ) {
-        match item {
-            Item::Trait(trait_def) => {
-                trait_defs.insert(trait_def.name.clone(), trait_def.clone());
-            }
-            Item::Impl(impl_def) => {
-                type_impls
-                    .entry(impl_def.type_name.clone())
-                    .or_default()
-                    .insert(impl_def.trait_name.clone(), impl_def.methods.clone());
-            }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_traits(inner, trait_defs, type_impls);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Get the type name of a runtime value
-    fn value_type_name(&self, val: &Value) -> String {
-        match val {
-            Value::Int(_) => "i32".into(),
-            Value::Float(_) => "f64".into(),
-            Value::Bool(_) => "bool".into(),
-            Value::String(_) => "string".into(),
-            Value::Unit => "unit".into(),
-            Value::List(_) => "list".into(),
-            Value::Set(_) => "set".into(),
-            Value::Array(_) => "array".into(),
-            Value::Tuple(_) => "tuple".into(),
-            Value::Variant(name, _) => name.clone(),
-            Value::Record(Some(name), _) => name.clone(),
-            Value::Record(None, _) => "record".into(),
-            Value::Error(_) => "error".into(),
-            Value::Newtype(name, _v) => name.clone(),
-            Value::Type(name) => name.clone(),
-            Value::Closure { .. } => "closure".into(),
-            Value::BytecodeClosure { .. } => "closure".into(),
-            Value::QuoteAst(_) => "AST".into(),
-            Value::Shared(_) => "shared".into(),
-            Value::LocalShared(_) => "local_shared".into(),
-            Value::Ref(_) => "ref".into(),
-            Value::RefMut(_) => "ref_mut".into(),
-            Value::IndexRef { .. } => "borrowed_index".into(),
-            Value::IndexRefMut { .. } => "borrowed_index_mut".into(),
-            Value::PlaceRef { .. } => "borrowed_place".into(),
-            Value::PlaceRefMut { .. } => "borrowed_place_mut".into(),
-            Value::Cap(_) => "cap".into(),
-            Value::Actor(_) => "actor".into(),
-            Value::Future(_) => "future".into(),
-            Value::ArenaRef(_, _, _) => "arena_ref".into(),
-            Value::ArenaBlock(_) => "arena_block".into(),
-            Value::WeakShared(_) | Value::WeakLocal(_) => "weak".into(),
-            Value::Allocator(_) => "Allocator".into(),
-            Value::Slice { .. } => "slice".into(),
-            Value::Range { .. } => "range".into(),
-            Value::CBuffer(_) => "CBuffer".into(),
-            Value::DynTrait { trait_names, .. } => format!("dyn {}", trait_names.join(" + ")),
-        }
-    }
-
-    /// Resolve a Type AST node to a type name string
-    fn resolve_type_name(&self, ty: &Type) -> String {
-        match ty {
-            Type::Located { ty, .. } => self.resolve_type_name(ty),
-            Type::Name(name, _) => name.clone(),
-            Type::Ref(lt, inner) => {
-                if let Some(l) = lt {
-                    format!("&'{} {}", l, self.resolve_type_name(inner))
-                } else {
-                    format!("&{}", self.resolve_type_name(inner))
-                }
-            }
-            Type::RefMut(lt, inner) => {
-                if let Some(l) = lt {
-                    format!("&'{} mut {}", l, self.resolve_type_name(inner))
-                } else {
-                    format!("&mut {}", self.resolve_type_name(inner))
-                }
-            }
-            Type::Option(inner) => format!("Option<{}>", self.resolve_type_name(inner)),
-            Type::Result(ok, err) => format!(
-                "Result<{}, {}>",
-                self.resolve_type_name(ok),
-                self.resolve_type_name(err)
-            ),
-            Type::Tuple(elems) => {
-                let names: Vec<String> = elems.iter().map(|e| self.resolve_type_name(e)).collect();
-                format!("({})", names.join(", "))
-            }
-            Type::Func(args, ret) => {
-                let arg_names: Vec<String> =
-                    args.iter().map(|a| self.resolve_type_name(a)).collect();
-                format!(
-                    "({}) -> {}",
-                    arg_names.join(", "),
-                    self.resolve_type_name(ret)
-                )
-            }
-            Type::Cap(name) => format!("cap {}", name),
-            Type::Shared(inner) => format!("shared {}", self.resolve_type_name(inner)),
-            Type::LocalShared(inner) => format!("local_shared {}", self.resolve_type_name(inner)),
-            Type::Weak(inner) => format!("weak {}", self.resolve_type_name(inner)),
-            Type::WeakLocal(inner) => format!("weak_local {}", self.resolve_type_name(inner)),
-            Type::RawPtr(inner) => format!("*{}", self.resolve_type_name(inner)),
-            Type::RawPtrMut(inner) => format!("*mut {}", self.resolve_type_name(inner)),
-            Type::CShared(inner) => format!("c_shared {}", self.resolve_type_name(inner)),
-            Type::CBorrow(inner) => format!("c_borrow {}", self.resolve_type_name(inner)),
-            Type::CBorrowMut(inner) => format!("c_borrow_mut {}", self.resolve_type_name(inner)),
-            Type::RawString => "raw_string".into(),
-            Type::Infer => "_".into(),
-            Type::ExternFunc(args, ret) => {
-                let args_str: Vec<String> =
-                    args.iter().map(|a| self.resolve_type_name(a)).collect();
-                format!(
-                    "extern \"C\" fn({}) -> {}",
-                    args_str.join(", "),
-                    self.resolve_type_name(ret)
-                )
-            }
-            Type::Newtype(name, _) => name.clone(),
-            Type::Nothing => "nothing".into(),
-            Type::TyErr => "«error»".into(),
-            Type::Allocator => "Allocator".into(),
-            Type::Array(inner, size) => format!("[{}; {}]", self.resolve_type_name(inner), size),
-            Type::Slice(inner) => format!("[{}]", self.resolve_type_name(inner)),
-            Type::ImplTrait(traits) => format!("impl {}", traits.join(" + ")),
-            Type::DynTrait(traits) => format!("dyn {}", traits.join(" + ")),
-            Type::CBuffer(inner) => format!("CBuffer<{}>", self.resolve_type_name(inner)),
-            Type::TypeVar(id) => format!("?T{}", id),
-            Type::ForAll(params, body) => {
-                format!(
-                    "forall {}. {}",
-                    params.join(", "),
-                    self.resolve_type_name(body)
-                )
-            }
-        }
-    }
-
-    /// Get type info for a type name
-    fn type_info_for(&self, type_name: &str) -> Result<Value, InterpError> {
-        if let Some(type_def) = self.type_defs.get(type_name) {
-            let mut fields_map = HashMap::new();
-            match &type_def.kind {
-                TypeDefKind::Record(fields) => {
-                    for f in fields {
-                        let field_info = vec![
-                            (Value::String("name".into()), Value::String(f.name.clone())),
-                            (
-                                Value::String("type".into()),
-                                Value::String(self.resolve_type_name(&f.ty)),
-                            ),
-                        ];
-                        fields_map.insert(
-                            f.name.clone(),
-                            Value::Tuple(field_info.into_iter().map(|(_, v)| v).collect()),
-                        );
-                    }
-                }
-                TypeDefKind::Enum(variants) => {
-                    for v in variants {
-                        let variant_info = vec![
-                            Value::String(v.name.clone()),
-                            Value::Bool(v.payload.is_some()),
-                        ];
-                        fields_map.insert(v.name.clone(), Value::Tuple(variant_info));
-                    }
-                }
-                TypeDefKind::Alias(ty) => {
-                    fields_map.insert("alias_of".into(), Value::String(self.resolve_type_name(ty)));
-                }
-                TypeDefKind::Newtype(ty) => {
-                    fields_map.insert("inner".into(), Value::String(self.resolve_type_name(ty)));
-                }
-                TypeDefKind::Union(fields) => {
-                    for f in fields {
-                        let field_info = vec![
-                            (Value::String("name".into()), Value::String(f.name.clone())),
-                            (
-                                Value::String("type".into()),
-                                Value::String(self.resolve_type_name(&f.ty)),
-                            ),
-                        ];
-                        fields_map.insert(
-                            f.name.clone(),
-                            Value::Tuple(field_info.into_iter().map(|(_, v)| v).collect()),
-                        );
-                    }
-                }
-            }
-            let mut info = HashMap::new();
-            info.insert("name".into(), Value::String(type_name.into()));
-            info.insert(
-                "fields".into(),
-                Value::List(fields_map.into_values().collect()),
-            );
-            Ok(Value::Record(None, info))
-        } else {
-            Err(InterpError::new(format!("unknown type '{}'", type_name)))
-        }
-    }
-
-    pub fn run(&mut self) -> Result<Value, InterpError> {
-        if let Some(error) = &self.derive_expansion_error {
-            return Err(error.clone());
-        }
-        self.eval_comptime_funcs()?;
-        self.eval_consts()?;
-        let main = self
-            .find_function("main")
-            .ok_or_else(|| InterpError::new("no main() function found"))?;
-        self.call_func(&main, vec![])
-    }
-
-    /// Evaluate a `comptime { ... }` block as a standalone expression.
-    /// Runs `eval_comptime_funcs` first so the block can call top-level
-    /// `comptime func` results; this is the canonical fold-time entry
-    /// used by codegen when it encounters an `Expr::Comptime` node.
-    pub fn eval_comptime_block(&mut self, block: &crate::ast::Block) -> Result<Value, InterpError> {
-        if let Some(error) = &self.derive_expansion_error {
-            return Err(error.clone());
-        }
-        self.eval_comptime_funcs()?;
-        self.eval_comptime(block)
-    }
-
-    /// Move all cached `comptime func` results out of the interpreter.
-    /// Used by codegen to seed its `comptime_values` cache after
-    /// `eval_comptime_block` has been called once for bootstrap.
-    pub fn drain_comptime_results(&mut self) -> std::collections::HashMap<String, Value> {
-        std::mem::take(&mut self.comptime_results)
-    }
-
-    /// v0.28.21 — Insert a single pre-folded `comptime func` result so
-    /// the next `eval_comptime_block` can see it without re-evaluating
-    /// the function. Used by codegen to seed a fresh interpreter with
-    /// results it already has.
-    pub fn inject_comptime_result(&mut self, name: String, value: Value) {
-        self.comptime_results.insert(name, value);
-    }
-
-    /// 0.31.23: Generate a unique variable name for quote! hygiene.
-    ///
-    /// Appends a unique suffix to prevent naming conflicts with existing
-    /// variables and Z3's internal naming. The suffix format is `$gensymN`
-    /// where N is a monotonically increasing counter.
-    ///
-    /// Example: `gensym("x")` returns `"x$gensym0"`, `"x$gensym1"`, etc.
-    pub fn gensym(&mut self, base: &str) -> String {
-        let id = self.gensym_counter;
-        self.gensym_counter += 1;
-        format!("{}$gensym{}", base, id)
-    }
-
-    /// Evaluate comptime functions with no arguments at startup
-    ///
-    /// 0.31.23: Sets `in_comptime` flag during evaluation to prevent FFI calls.
-    fn eval_comptime_funcs(&mut self) -> Result<(), InterpError> {
-        let funcs: Vec<FuncDef> = self
-            .file
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Func(f) if f.is_comptime && f.params.is_empty() => Some(f.clone()),
-                _ => None,
-            })
-            .collect();
-        // 0.31.23: Enter comptime mode - FFI calls are forbidden.
-        self.in_comptime = true;
-        let result = (|| {
-            for func in funcs {
-                // I-H9: skip if already cached (e.g. was called as a dependency
-                // from another comptime func's body during its pre-evaluation).
-                if self.comptime_results.contains_key(&func.name) {
-                    continue;
-                }
-                let result = self.call_func(&func, vec![])?;
-                self.comptime_results.insert(func.name.clone(), result);
-            }
-            Ok(())
-        })();
-        // 0.31.23: Exit comptime mode.
-        self.in_comptime = false;
-        result
-    }
-
-    /// Evaluate top-level const declarations at startup
-    fn eval_consts(&mut self) -> Result<(), InterpError> {
-        let consts: Vec<(String, Expr)> = self
-            .file
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Const { name, value, .. } => Some((name.clone(), value.clone())),
-                _ => None,
-            })
-            .collect();
-        for (name, expr) in consts {
-            let val = self.eval_expr(&expr)?;
-            self.globals.insert(name, val);
-        }
-        Ok(())
-    }
-
-    fn find_function(&self, name: &str) -> Option<FuncDef> {
-        // O(1) lookup via pre-built index — try both qualified and unqualified
-        self.func_index
-            .get(name)
-            .cloned()
-            .or_else(|| self.func_index.values().find(|f| f.name == name).cloned())
-    }
-
-    /// Build a qualified path from nested Field(Ident(...), ...) expressions
-    fn build_qualified_path(obj: &Expr, field: &str) -> Option<String> {
-        match obj.unlocated() {
-            Expr::Ident(name) => Some(format!("{}::{}", name, field)),
-            Expr::Field(inner_obj, inner_field) => {
-                Self::build_qualified_path(inner_obj, inner_field)
-                    .map(|base| format!("{}::{}", base, field))
-            }
-            _ => None,
-        }
-    }
-
-    fn find_function_in_module(module: &ModuleDef, prefix: &str, name: &str) -> Option<FuncDef> {
-        let current_prefix = if prefix.is_empty() {
-            module.name.clone()
-        } else {
-            format!("{}::{}", prefix, module.name)
-        };
-        for inner in &module.items {
-            match inner {
-                Item::Func(f) => {
-                    let qualified = format!("{}::{}", current_prefix, f.name);
-                    if qualified == name || f.name == name {
-                        return Some(f.clone());
-                    }
-                }
-                Item::Module(m) => {
-                    if let Some(f) = Self::find_function_in_module(m, &current_prefix, name) {
-                        return Some(f);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    fn find_actor(&self, name: &str) -> Option<ActorDef> {
-        // O(1) lookup via pre-built index
-        self.actor_index.get(name).cloned()
-    }
-
-    pub(in crate::interp) fn find_flow(&self, name: &str) -> Option<FlowDef> {
-        self.flow_index.get(name).cloned()
-    }
-
-    fn push_scope(&mut self) {
-        self.scope_env.push_scope();
-    }
-
-    fn pop_scope(&mut self) {
-        self.scope_env.pop_scope();
-    }
-
-    /// Evaluate a contract expression (FFI requires/ensures) on behalf of the
-    /// shared `FfiRuntime`. Used via the `FfiClosureRunner` trait so the
-    /// Bytecode VM can forward the same contract evaluation through its own
-    /// engine. `result_binding` (ensures) binds `result` in a fresh scope.
-    pub(in crate::interp) fn eval_contract_expr(
-        &mut self,
-        expr: &Expr,
-        result_binding: Option<&Value>,
-    ) -> Result<Value, String> {
-        if let Some(result) = result_binding {
-            self.scope_env.push_scope();
-            let r = self
-                .scope_env
-                .env
-                .last_mut()
-                .map(|env| {
-                    env.insert("result".to_string(), result.clone());
-                })
-                .ok_or_else(|| "no scope after push (impossible)".to_string())
-                .and_then(|_| self.eval_expr(expr).map_err(|e| e.to_string()));
-            self.scope_env.pop_scope();
-            r
-        } else {
-            self.eval_expr(expr).map_err(|e| e.to_string())
-        }
-    }
-
-    /// Run a closure inside a freshly pushed scope, guaranteeing that the
-    /// scope is popped even if the closure returns an error.
-    fn with_scope<F, T>(&mut self, f: F) -> Result<T, InterpError>
-    where
-        F: FnOnce(&mut Self) -> Result<T, InterpError>,
-    {
-        self.scope_env.push_scope();
-        let result = f(self);
-        self.scope_env.pop_scope();
-        result
-    }
-
-    fn push_call(&mut self, func_name: &str) {
-        self.scope_env.push_call(func_name);
-    }
-
-    fn pop_call(&mut self) {
-        self.scope_env.pop_call();
-        // PERF (0.33): recursion depth tracked at call boundaries, not per-expression.
-        self.recursion_depth = self.recursion_depth.saturating_sub(1);
-    }
-
-    /// Convert a string error into an InterpError with current call stack context.
-    fn interp_err(&self, msg: String) -> InterpError {
-        self.scope_env.interp_err(msg)
-    }
-
-    /// Convert a string error with operation context into an InterpError.
-    fn interp_err_op(&self, msg: String, op: &str) -> InterpError {
-        self.scope_env.interp_err_op(msg, op)
-    }
-
-    fn bind(&mut self, name: &str, value: Value) -> Result<(), InterpError> {
-        self.scope_env.bind(name, value)
-    }
-
-    fn bind_mut(&mut self, name: &str, value: Value) -> Result<(), InterpError> {
-        self.scope_env.bind_mut(name, value)
-    }
-
-    fn lookup(&self, name: &str) -> Option<Value> {
-        if let Some(v) = self.scope_env.lookup_ref(name) {
-            return Some(v.clone());
-        }
-        // Check globals
-        self.globals.get(name).cloned()
-    }
-
-    /// Borrowed lookup — avoids deep clone for read-only access.
-    /// Returns `None` if the variable is moved, undefined, or only in globals
-    /// (globals require a clone since they live in a separate HashMap).
-    fn lookup_ref(&self, name: &str) -> Option<&Value> {
-        self.scope_env.lookup_ref(name)
-    }
-
-    fn is_mutable(&self, name: &str) -> bool {
-        self.scope_env.is_mutable(name)
-    }
-
-    fn is_moved(&self, name: &str) -> bool {
-        self.scope_env.is_moved(name)
-    }
-
-    fn mark_moved(&mut self, name: &str) {
-        self.scope_env.mark_moved(name)
-    }
-
-    fn assign(&mut self, name: &str, value: Value) -> Result<(), InterpError> {
-        self.scope_env.assign(name, value)
-    }
-
-    /// Write `value` into a place expression (I-H7 nested record assignment).
-    /// Supports `x`, `x.f`, `x.f.g`, and shared/local_shared record fields.
-    pub(crate) fn write_place_value(
-        &mut self,
-        place: &Expr,
-        value: Value,
-    ) -> Result<(), InterpError> {
-        match place.unlocated() {
-            Expr::Ident(name) => self.assign(name, value),
-            Expr::Field(obj, field) => {
-                if let Expr::Ident(name) = obj.unlocated() {
-                    if name == "self" {
-                        if let Some(Value::Actor(handle)) = self.lookup_ref("self") {
-                            handle
-                                .inner
-                                .write()
-                                .map_err(|e| {
-                                    InterpError::lock_error(format!("actor lock failed: {}", e))
-                                })?
-                                .fields
-                                .insert(field.clone(), value);
-                            return Ok(());
-                        }
-                    }
-                }
-                let obj_val = self.eval_expr(obj)?;
-                match obj_val {
-                    Value::Record(type_name, mut fields) => {
-                        if !fields.contains_key(field.as_str()) {
-                            return Err(InterpError::field_not_found(format!(
-                                "field '{}' not found in record",
-                                field
-                            )));
-                        }
-                        fields.insert(field.clone(), value);
-                        self.write_place_value(obj, Value::Record(type_name, fields))
-                    }
-                    Value::Actor(handle) => {
-                        handle
-                            .inner
-                            .write()
-                            .map_err(|e| {
-                                InterpError::lock_error(format!("actor lock failed: {}", e))
-                            })?
-                            .fields
-                            .insert(field.clone(), value);
-                        Ok(())
-                    }
-                    Value::Shared(arc) => {
-                        let mut inner = arc.write().map_err(|e| {
-                            InterpError::lock_error(format!("shared write lock failed: {}", e))
-                        })?;
-                        match &mut *inner {
-                            Value::Record(_, fields) => {
-                                if !fields.contains_key(field.as_str()) {
-                                    return Err(InterpError::field_not_found(format!(
-                                        "field '{}' not found in shared record",
-                                        field
-                                    )));
-                                }
-                                fields.insert(field.clone(), value);
-                                Ok(())
-                            }
-                            _ => Err(InterpError::new(format!(
-                                "cannot assign to field of non-record shared value (type: {})",
-                                type_name(&inner)
-                            ))),
-                        }
-                    }
-                    Value::LocalShared(rc) => {
-                        let mut inner = rc.lock().unwrap_or_else(|e| e.into_inner());
-                        match &mut *inner {
-                            Value::Record(_, fields) => {
-                                if !fields.contains_key(field.as_str()) {
-                                    return Err(InterpError::field_not_found(format!(
-                                        "field '{}' not found in local_shared record",
-                                        field
-                                    )));
-                                }
-                                fields.insert(field.clone(), value);
-                                Ok(())
-                            }
-                            _ => Err(InterpError::new(format!(
-                                "cannot assign to field of non-record local_shared value (type: {})",
-                                type_name(&inner)
-                            ))),
-                        }
-                    }
-                    other => Err(InterpError::new(format!(
-                        "cannot assign to field of non-record/non-actor value (type: {})",
-                        type_name(&other)
-                    ))),
-                }
-            }
-            _ => Err(InterpError::new(
-                "assignment target is not a writable place",
-            )),
-        }
-    }
-
-    /// Force-update a variable's value, bypassing the mutability check.
-    /// Used by `push()` write-back — push mutates in place in codegen
-    /// regardless of `mut`, so the interpreter must match.
-    fn force_update(&mut self, name: &str, value: Value) {
-        self.scope_env.force_update(name, value);
-    }
-
-    /// Push a new compensation scope level
-    fn push_compensation_scope(&mut self) {
-        self.compensation_stack.push(Vec::new());
-    }
-
-    /// Pop the current compensation scope level
-    /// If run_compensations is true, execute all compensations in LIFO order before popping
-    fn pop_compensation_scope(&mut self, run_compensations: bool) {
-        if run_compensations {
-            // Run compensation blocks in LIFO order for the current scope
-            if let Some(scope) = self.compensation_stack.pop() {
-                // Execute compensations in reverse order (LIFO within this scope)
-                // Note: compensation_stack order is already LIFO across scopes,
-                // but within a scope we want to execute in registration order (first registered = last executed)
-                for block in scope.iter().rev() {
-                    for stmt in block {
-                        if let Err(e) = self.eval_stmt(stmt) {
-                            // M12: surface compensation failures (count + log).
-                            self.compensation_error_count =
-                                self.compensation_error_count.saturating_add(1);
-                            eprintln!(
-                                "compensation error #{}: {} (continuing remaining compensations)",
-                                self.compensation_error_count, e
-                            );
-                        }
-                    }
-                }
-            }
-        } else {
-            // Just discard the scope (normal exit)
-            self.compensation_stack.pop();
-        }
-    }
-
-    /// Run all compensation blocks across all scope levels in LIFO order
-    /// Used when propagation an error up through nested scopes
-    fn run_all_compensations(&mut self) {
-        // Run all remaining compensations in LIFO order
-        while let Some(scope) = self.compensation_stack.pop() {
-            for block in scope.iter().rev() {
-                for stmt in block {
-                    if let Err(e) = self.eval_stmt(stmt) {
-                        // M12: surface compensation failures (count + log).
-                        self.compensation_error_count =
-                            self.compensation_error_count.saturating_add(1);
-                        eprintln!(
-                            "compensation error #{}: {} (continuing remaining compensations)",
-                            self.compensation_error_count, e
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// 0.31.24: Push a new defer scope level
-    fn push_defer_scope(&mut self) {
-        self.defer_stack.push(Vec::new());
-    }
-
-    /// 0.31.24: Pop the current defer scope level and execute all defer blocks in LIFO order.
-    /// Unlike compensation scopes, defer blocks always run (on normal exit and error exit).
-    fn pop_defer_scope(&mut self) {
-        if let Some(scope) = self.defer_stack.pop() {
-            // Execute defer blocks in reverse order (LIFO)
-            for block in scope.iter().rev() {
-                for stmt in block {
-                    if let Err(e) = self.eval_stmt(stmt) {
-                        // Surface defer failures but continue executing remaining defers
-                        eprintln!("defer error: {} (continuing remaining defers)", e);
-                    }
-                }
-            }
-        }
-    }
-
-    /// 0.31.24: Register a defer block in the current scope
-    fn register_defer(&mut self, block: Block) {
-        if let Some(scope) = self.defer_stack.last_mut() {
-            scope.push(block);
-        }
-    }
-
-    /// Find the numeric discriminant (ordinal) of an enum variant by name.
-    /// Returns 0-based index based on alphabetical ordering of variants.
-    fn find_variant_ordinal(&self, variant_name: &str) -> usize {
-        // Check built-in Result/Option variants
-        match variant_name {
-            "Ok" | "Some" => return 1,
-            "Err" | "None" => return 0,
-            _ => {}
-        }
-        // Scan type definitions for matching enum
-        for td in self.type_defs.values() {
-            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
-                let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
-                sorted.sort_by_key(|v| &v.name);
-                for (i, v) in sorted.iter().enumerate() {
-                    if v.name == variant_name {
-                        return i;
-                    }
-                }
-            }
-        }
-        0
-    }
 }
+
 fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> String {
     match value {
         crate::core::ResolvedConstValue::Int(v) => format!("int:{}", v),
@@ -2513,46 +1160,5 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::String(v) => format!("string:{}", v),
         crate::core::ResolvedConstValue::Unit => "unit".into(),
         crate::core::ResolvedConstValue::Complex => "complex".into(),
-    }
-}
-
-#[cfg(test)]
-mod derive_validation_tests {
-    use super::*;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-
-    #[test]
-    fn programmatic_ast_with_unknown_derive_fails_before_execution() {
-        let source = "type Packet { value: i32 }\nfunc main() -> i32 { 1 }";
-        let tokens = Lexer::new(source).tokenize().expect("lex");
-        let mut file = Parser::new(tokens).parse_file().expect("parse");
-        let type_def = file
-            .items
-            .iter_mut()
-            .find_map(|item| match item {
-                Item::Type(type_def) if type_def.name == "Packet" => Some(type_def),
-                _ => None,
-            })
-            .expect("Packet type");
-        type_def.derives.push("Serialize".to_string());
-
-        let mut interpreter = Interpreter::new(&file);
-        let error = interpreter
-            .run()
-            .expect_err("unsupported derive must not be ignored");
-        assert_eq!(error.code(), crate::diagnostic::codes::E0800);
-        assert_eq!(error.ctx().operation.as_deref(), Some("derive expansion"));
-        assert!(error.message().contains("unsupported derive `Serialize`"));
-        assert!(error.message().contains("type `Packet`"));
-
-        let mut direct = Interpreter::new(&file);
-        let direct_error = direct
-            .call_named("main", vec![])
-            .expect_err("direct calls must also fail closed");
-        assert_eq!(
-            direct_error.ctx().operation.as_deref(),
-            Some("derive expansion")
-        );
     }
 }

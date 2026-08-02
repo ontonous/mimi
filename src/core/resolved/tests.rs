@@ -92,11 +92,15 @@ fn checked_program_owns_its_migration_body_input() {
         program.functions().len() > 0,
         "checked program must own functions, not raw AST items"
     );
-    let mut interpreter = crate::interp::Interpreter::from_checked(&program);
-    assert!(matches!(
-        interpreter.run().expect("run owned checked program"),
-        crate::interp::Value::Int(42)
-    ));
+    // 0.33 Phase F: use bytecode VM (tree-walker removed).
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&program);
+    let prog = compiler
+        .compile_file(program.raw_ast())
+        .expect("bytecode compile owned checked program");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+    let result = vm.call_named("main", vec![]).expect("run owned checked program");
+    assert!(matches!(result, crate::interp::Value::Int(42)));
 }
 
 #[test]
