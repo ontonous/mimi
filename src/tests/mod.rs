@@ -167,11 +167,22 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
 
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runtime_rs = manifest.join("src/runtime/standalone.rs");
-    let mod_rs = manifest.join("src/runtime/mod.rs");
+    let runtime_dir = manifest.join("src/runtime");
 
     let mut hasher = DefaultHasher::new();
-    for path in [&runtime_rs, &mod_rs] {
-        let mut f = std::fs::File::open(path).map_err(|e| format!("open {:?}: {}", path, e))?;
+    // The standalone build is `include!("mod.rs")` which pulls in every
+    // `src/runtime/*.rs` module — the cache key must cover all of them, or a
+    // change to e.g. regex.rs/net.rs would silently link a stale runtime.
+    let mut runtime_files: Vec<_> = std::fs::read_dir(&runtime_dir)
+        .map_err(|e| format!("read runtime dir: {}", e))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "rs").unwrap_or(false))
+        .collect();
+    runtime_files.push(runtime_rs.clone());
+    runtime_files.sort();
+    for path in runtime_files {
+        let mut f = std::fs::File::open(&path).map_err(|e| format!("open {:?}: {}", path, e))?;
         let mut buf = Vec::with_capacity(8192);
         f.read_to_end(&mut buf)
             .map_err(|e| format!("read {:?}: {}", path, e))?;

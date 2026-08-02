@@ -838,8 +838,14 @@ pub extern "C" fn mimi_regex_capture_groups(
                 out.push('"');
                 for ch in g.chars() {
                     match ch {
-                        '\\' => out.push_str("\\\\"),
                         '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        c if c < '\x20' => {
+                            out.push_str(&format!("\\u{:04x}", c as u32));
+                        }
                         c => out.push(c),
                     }
                 }
