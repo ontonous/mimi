@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased] — 0.1.4-dev
+
 ## [0.1.3] — 2026-08-02
 
 ### Codegen O1 优化全量回归修复（MIMI_OPT=1 双后端全绿）
