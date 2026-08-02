@@ -3575,30 +3575,66 @@ impl BodyLowerer<'_> {
                             .rsplit_once("::")
                             .is_some_and(|(_, short)| short == name))
             });
-            if let Some((variant_id, def)) = flow_variant {
-                // Build declared fields from the record definition.
-                // Field types use the field_types map when available; the checker
-                // has already validated pattern field types against the state payload.
-                let unit_ty = self.unit.clone();
-                let field_types = self.field_types;
-                let declared: Vec<(String, NodeId, ResolvedTypeId)> =
-                    def.fields
+            // v0.34.15: flow states are NOT Item::Type — they live in the flow
+            // directory (ResolvedFlow.states). Multi-target match arms name the
+            // state constructors (Small/Large), which never appear in type_defs.
+            // Fall through to the flow-state directory lookup.
+            let flow_state_variant: Option<(NodeId, Vec<(String, NodeId, ResolvedTypeId)>)> =
+                flow_variant.map(|(variant_id, def)| {
+                    (
+                        variant_id.clone(),
+                        def.fields
+                            .iter()
+                            .map(|(fname, _)| {
+                                let field_id =
+                                    def.field_ids.get(fname).cloned().unwrap_or_else(|| {
+                                        NodeId(format!("{}/field:{}", variant_id.0, fname))
+                                    });
+                                let ty_id = self
+                                    .field_types
+                                    .get(&field_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| self.unit.clone());
+                                (fname.clone(), field_id, ty_id)
+                            })
+                            .collect(),
+                    )
+                });
+            let flow_state_variant = flow_state_variant.or_else(|| {
+                self.flows.values().find_map(|flow| {
+                    let state = flow.states.get(name)?;
+                    let variant_id = NodeId(format!("state:{}::{}", flow.id.0, state.id.name));
+                    let declared = state
+                        .payload
                         .iter()
-                        .map(|(fname, _)| {
-                            let field_id = def.field_ids.get(fname).cloned().unwrap_or_else(|| {
-                                NodeId(format!("{}/field:{}", variant_id.0, fname))
-                            });
-                            let ty_id = field_types
+                        .map(|(fname, fty)| {
+                            let field_id =
+                                state.field_ids.get(fname).cloned().unwrap_or_else(|| {
+                                    NodeId(format!("{}/field:{}", variant_id.0, fname))
+                                });
+                            // Prefer the field's canonical type from the field
+                            // types table; fall back to unit (the checker has
+                            // already validated pattern fields against the
+                            // state payload — resolved IR only needs a
+                            // consistent slot type for bindings).
+                            let ty_id = self
+                                .field_types
                                 .get(&field_id)
                                 .cloned()
-                                .unwrap_or_else(|| unit_ty.clone());
+                                .or_else(|| self.node_types.get(&field_id).cloned())
+                                .unwrap_or_else(|| self.unit.clone());
+                            let _ = fty;
                             (fname.clone(), field_id, ty_id)
                         })
                         .collect();
+                    Some((variant_id, declared))
+                })
+            });
+            if let Some((variant_id, declared)) = flow_state_variant {
                 let lowered =
                     self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
                 return Ok(Some(ResolvedPatternKind::Constructor {
-                    variant: variant_id.clone(),
+                    variant: variant_id,
                     fields: lowered,
                 }));
             }

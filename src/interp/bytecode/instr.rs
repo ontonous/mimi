@@ -638,6 +638,15 @@ pub enum Op {
         ra: Reg,
         idx: u16,
     },
+    /// v0.34.15: extract a pattern field by NAME. Flow states are
+    /// Record(Some(name), HashMap) — multi-target match arms name fields
+    /// (`Small { v }`), so index-based VariantGet cannot extract them. VM:
+    /// Record → fields.get(name); Variant → _0.._N positional mapping.
+    PatternField {
+        rd: Reg,
+        ra: Reg,
+        field: u16,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Option / Result

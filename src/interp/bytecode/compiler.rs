@@ -3469,13 +3469,17 @@ impl BytecodeCompiler {
                 });
 
                 let mut binding_map = std::collections::HashMap::new();
-                for (i, (field_name, sub_pat)) in pats.iter().enumerate() {
-                    // Extract field i from the variant (safe: variant was checked above).
+                for (field_name, sub_pat) in pats.iter() {
+                    // v0.34.15: extract by NAME (PatternField) — flow states
+                    // are Record(Some(name), HashMap) so index-based VariantGet
+                    // cannot address their fields; Variant payloads keep the
+                    // positional _0.._N mapping inside the VM.
                     let r_field = fc.proto.alloc_reg();
-                    fc.emit(Op::VariantGet {
+                    let field_idx = fc.proto.add_const(ConstValue::Str(field_name.clone())) as u16;
+                    fc.emit(Op::PatternField {
                         rd: r_field,
                         ra: r_subject,
-                        idx: i as u16,
+                        field: field_idx,
                     });
                     // Recursively match the sub-pattern.
                     let (sub_test, sub_bindings) =

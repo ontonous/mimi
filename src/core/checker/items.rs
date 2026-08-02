@@ -1551,38 +1551,12 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    // Codegen currently represents a multi-target result with one
-                    // nominal LLVM struct.  Permit this only when every target has
-                    // the same ordered field types; otherwise choosing the first
-                    // target would silently reinterpret a different layout (M6).
-                    if t.to_states.len() > 1 {
-                        let target_layouts = t.to_states.iter().filter_map(|target| {
-                            f.states
-                                .iter()
-                                .find(|state| state.name == *target)
-                                .map(|state| {
-                                    state
-                                        .payload
-                                        .as_deref()
-                                        .unwrap_or_default()
-                                        .iter()
-                                        .map(|field| self.resolve_type(&field.ty))
-                                        .collect::<Vec<_>>()
-                                })
-                        });
-                        let mut target_layouts = target_layouts;
-                        if let Some(first_layout) = target_layouts.next() {
-                            if target_layouts.any(|layout| layout != first_layout) {
-                                self.emit_code(
-                                    crate::diagnostic::codes::E0419,
-                                    format!(
-                                        "multi-target transition '{}({})' in flow '{}' has incompatible target payload layouts; use states with the same ordered field types or split the transition",
-                                        t.name, t.from_state, f.name
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                    // v0.34.15 (ADR-002, golden §1.2): multi-target results are a
+                    // runtime-tagged union — payload layouts MAY differ across
+                    // targets ("payload layout differences cannot substitute for
+                    // the state tag"). The E0419 incompatible-layout rejection
+                    // (pre-0.34.15) was inverted; runtime dispatch uses the
+                    // state tag, never layout reinterpretation.
                     // Type-check transition body with self in scope
                     if let Some(body) = &t.body {
                         if !t.is_fallback && !self.block_returns_on_all_paths(body) {
