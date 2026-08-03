@@ -3024,6 +3024,78 @@ fn dual_generic_turbofish_explicit() {
     );
 }
 
+// ─── 0.34.21 — 泛型 × 线性边界（§2.3 裁决）────────────────────
+// Generic parameters are not linearly tracked (GenericParameter
+// is_linear() = false). Linear capabilities (Cap/SessionChan/Flow state)
+// are therefore rejected as generic arguments (E0432); containers such as
+// List<cap>/Option<cap> stay legal — their linearity is tracked by the
+// container's own CFG facts.
+
+#[test]
+fn dual_generic_linear_cap_rejected() {
+    // E0432: a Cap value passed into a generic call would escape
+    // exactly-once enforcement. This is a hard L2 contract.
+    let diags = check_source(
+        "cap FileReadCap; func pass_through<T>(x: T) -> T { x } \
+         func main() -> i32 { let c = FileReadCap; let d = pass_through(c); drop(d); println(42); 0 }",
+    )
+    .expect_err("cap as generic argument must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_session_rejected() {
+    // E0432: same contract for SessionChan endpoints.
+    let diags = check_source(
+        "session S = !i32 . ?i32 . end \
+         func pass_through<T>(x: T) -> T { x } \
+         func client(ch: SessionChan<S>) -> i32 { let d = pass_through(ch); session_close(d); 0 } \
+         func main() -> i32 { 0 }",
+    )
+    .expect_err("SessionChan as generic argument must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_container_allowed() {
+    // Containers wrapping linear values are NOT rejected: List<cap> stays
+    // legal (CFG tracks the container facts). The element extracted through
+    // the generic return is consumed afterwards.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        cap FileReadCap;
+        func first<T>(xs: List<T>) -> T { xs[0] }
+        func main() -> i32 {
+            let l = [FileReadCap];
+            let c = first(l);
+            drop(c);
+            println(42);
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
 #[test]
 fn dual_generic_nested_type() {
     if !can_link() {
