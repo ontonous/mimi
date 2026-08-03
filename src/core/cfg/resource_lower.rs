@@ -139,6 +139,21 @@ impl<'a> ActionEmitter<'a> {
     fn is_droppable_type(&self, ty: &ResolvedTypeId) -> bool {
         match self.types.get(ty) {
             Some(ResolvedType::FlowStateSet { .. }) => true,
+            // H2 (audit-type 2026-08-03): builtin container nominals follow
+            // the same rule as structural containers — droppable iff every
+            // linear element is droppable (e.g. List<flow state> yes,
+            // List<cap> no). Keep before the generic Nominal arm.
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) if matches!(
+                item.as_str(),
+                "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set"
+            ) =>
+            {
+                arguments
+                    .iter()
+                    .all(|arg| !self.is_linear(arg) || self.is_droppable_type(arg))
+            }
             Some(resolved @ ResolvedType::Nominal { .. }) => self.is_flow_state_resolved(resolved),
             Some(ResolvedType::Option(inner)) => self.is_droppable_type(inner),
             Some(ResolvedType::Result { ok, error }) => {
@@ -837,7 +852,21 @@ impl<'a> ActionEmitter<'a> {
             // SD-1: read structural flag set at interning time.
             // Replaces `starts_with("state:")` / `ends_with("SessionChan")`
             // string matching. Single source of truth: NominalTypeId::nominal_is_linear().
-            Some(ResolvedType::Nominal { is_linear, .. }) => *is_linear,
+            Some(ResolvedType::Nominal { is_linear, .. }) if *is_linear => true,
+            // H2 (audit-type 2026-08-03): builtin container nominals (List/
+            // Map/Set intern as Nominal, unlike the structural Option/Result/
+            // Array/Slice variants above) are linear when any type argument
+            // is linear. Without this, `func sink(v: List<cap>) { }` could
+            // discard the container — and every element — without consuming
+            // anything, defeating exactly-once in concrete signatures.
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) => {
+                matches!(
+                    item.as_str(),
+                    "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set"
+                ) && arguments.iter().any(|arg| self.is_linear(arg))
+            }
             Some(ResolvedType::Newtype { inner, .. }) => self.is_linear(inner),
             Some(ResolvedType::Tuple(elements)) => {
                 elements.iter().any(|element| self.is_linear(element))
