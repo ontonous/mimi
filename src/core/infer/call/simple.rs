@@ -2386,6 +2386,30 @@ impl<'a> Checker<'a> {
                     .map(|argument| self.infer_expr(argument, scopes))
                     .collect();
 
+                // §2.3 (0.34.21): linear capabilities (Cap/SessionChan/Flow
+                // state) cannot be passed as generic arguments — generic
+                // parameters are not linearly tracked (GenericParameter
+                // is_linear() = false), so a linear value flowing through a
+                // generic call would escape exactly-once enforcement. Only the
+                // instantiation position (a linear ARGUMENT) is rejected:
+                // containers such as List<cap>/Option<cap> stay legal — their
+                // linearity is tracked by the container's own CFG facts, and
+                // the container itself is not a linear surface type.
+                for (index, argument_ty) in arg_tys.iter().enumerate() {
+                    if self.is_linear_surface_type(argument_ty) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0432,
+                            format!(
+                                "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
+                                 generic parameters are not linearly tracked (use a concrete function signature)",
+                                fmt_type(argument_ty),
+                                index + 1,
+                                name
+                            ),
+                        );
+                    }
+                }
+
                 for (i, (actual, expected)) in
                     arg_tys.iter().zip(instantiated_params.iter()).enumerate()
                 {

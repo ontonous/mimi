@@ -130,6 +130,7 @@ pub const E0428: &str = "E0428"; // ? on extern "C" call: FFI failures are Fault
 pub const E0429: &str = "E0429"; // linear resource consumed before fallible operation (? ordering)
 pub const E0430: &str = "E0430"; // from_json::<T> requires concrete type argument
 pub const E0431: &str = "E0431"; // type escape hatch (`_`/Infer) leaked past its top-level inference boundary
+pub const E0432: &str = "E0432"; // linear type (Cap/SessionChan/Flow state) passed as generic argument
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -355,6 +356,7 @@ pub fn describe(code: &str) -> &'static str {
         E0429 => "linear resource consumed before fallible operation",
         E0430 => "from_json requires concrete type argument",
         E0431 => "type escape hatch (`_`/Infer) leaked past its top-level inference boundary",
+        E0432 => "linear type passed as generic argument (generic parameters are not linearly tracked)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -562,6 +564,7 @@ mod tests {
             super::E0428,
             super::E0429,
             super::E0430,
+            super::E0432,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,
