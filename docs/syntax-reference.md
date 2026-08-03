@@ -8,20 +8,9 @@
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
 > See `docs/language-support.toml` for 9-dimension capability matrix.
 >
-> Version: v0.1.4-dev (2026-08-02, regenerated from golden)
+> Version: v0.1.4-dev (2026-08-03, regenerated from golden — 0.34.24 Phase C 收尾)
 > Implementation: v0.1.4-dev (internal sprint 0.34.X)
 > Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
-
----
-
-# Mimi 语法金标准（Parser 实况转录）
-
-> **版本**：0.1.4-dev（内部 sprint 0.34.X）
-> **依据**：`src/parser/`（parse_type.rs / parse_stmt.rs / parse_expr.rs / top_level.rs / pattern.rs）与 `src/lexer/keywords.rs` 的**实际产生式**，逐条手工转录。
-> **权威性**：本文档是 parser 实况的唯一权威描述。`docs/syntax-reference.md` 是本文档的渲染副本（0.34.5 起由 golden 重新生成）。
-> **标记约定**：`[事实]` = 坐标已验证；`[裁决]` = 修正案/SD/ADR 依据；`[建议]` = 待拍板；⚠DEAD = 已废止但仍被 parser 接受的语法（删除清单见 `golden-document.md` §1.1）。
-> **坐标约定**：`file:line` 相对仓库根 `mimi/`。
-> **同步规则**：parser 产生式变更后，本文件必须同步更新；`docs/syntax-reference.md` 以本文件为源重新生成。
 
 ---
 
@@ -305,12 +294,11 @@ Item := [ 'pub' ] [ Attributes ] (
 ```
 FuncDef := 'func' Ident generics '(' Params ')' [ '->' Type ]
            [ 'where' { Ident ':' Ident { '+' Ident } ',' } ]
-           [ 'with' Ident { ',' Ident } ]     (* effects，:774-786 *)
            '{' Block '}'
 Params := { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type [ '=' Expr ] ',' }   (* :854-908 *)
 ```
 
-[事实] `with` 子句解析后存入 `effects: Vec<String>`（top_level.rs:775-786），checker 验证（items.rs:429-438，E0254）——零语料使用，模型为空壳（golden-document.md §4.2）。
+[事实] v0.34.18c（§4.2）：`with` 效果子句**已废除**——parser 拒绝（top_level.rs:774-781，"the `with` effect clause was abolished ... Remove `with ...`"），`with` 保留为 reserved 关键字（负测试）。原 `[ 'with' Ident { ',' Ident } ]` 产生式删除；E0254 双点死代码清理。spec §2.7 仅删 Effect 部分（0.34.18c 完成）。
 
 ### 6.1 Flow（top_level.rs:920-1252）
 
@@ -329,7 +317,7 @@ Flow := 'flow' Ident generics
 ```
 
 [事实] v0.34.1：`@transactional` **已拒绝**（条款 3 诊断，top_level.rs:1061-1070）；`metadata_shadow_fields`/`transactional_fields` FlowDef 字段删除（ast.rs）。
-[事实] v0.34.18b：`@dense` **已拒绝**（架构修正案条款 1 sparse-irreversible，top_level.rs:936-948）。N×M Fault 兜底注入从 flow_matrix.rs 删除；未声明 (state, event) 对 = 编译错误 E0211。要让转移可 fault，声明多目标返回 `-> State | Fault`，运行时 panic 由编译器兜底为 Fault（双后端等价）。`@sparse` 保留为无害的显式默认标记。
+[事实] v0.34.18b（条款 1 sparse-irreversible）：`@dense` **已删除**——parser 拒绝（top_level.rs:935-939，compile error E0211 而非运行时 Fault）；flow_matrix N×M 注入删除；16 @dense 测试迁移（删 4/转 5/迁移 6）。
 [事实] v0.34.1：`delegate` 已拒绝（条款 2 诊断）。`|>` 转移分隔符已拒绝。
 [事实] `fault Variant { ... }` 变体块语法全仓零匹配——仅 `fault Type`（golden-document.md §3.2）。
 [事实] v0.34.3：`for` 绑定为 Pattern（`for (k, v) in m` 解构；单标识符 = Pattern::Variable）——ast.rs For.var。
@@ -409,8 +397,6 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 | protocol | top_level.rs:1389-1468 |
 | session | top_level.rs:1476-1542 |
 | 关键字表 | keywords.rs:102-194 |
-
----
 
 ### 12.2 Codegen 状态对照
 
