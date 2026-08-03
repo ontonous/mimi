@@ -417,6 +417,16 @@ pub struct CodeGenerator<'ctx> {
     /// (Rejected codegen not yet implemented) instead of silently calling
     /// `mimi_try_exit` which would produce wrong dual-backend behavior.
     in_fails_transition: bool,
+    /// 0.34.24: AST return type of the function currently being compiled.
+    /// Needed by block.rs `Stmt::Return` handlers to run the same
+    /// `coerce_variant_value` the func.rs emit_return path applies — without
+    /// it an early `return Err("…")` from a `Result<f64, E>` function emits
+    /// a ret of the wrong struct layout ({i1,i64,i64} instead of
+    /// {i1,double,i64}) — invalid IR → runtime segfault (audit follow-up:
+    /// Result<f64,string> display crash). Every function-body compilation
+    /// entry resets this field; no restore needed because each entry that
+    /// reads it sets it first.
+    current_fn_ret_ty_ast: Option<crate::ast::Type>,
     /// v0.34.16 (ADR-002): true when compiling a multi-target transition.
     /// `Stmt::Return(Some(expr))` wraps the target state struct into the
     /// synthetic `{i32 tag, i64 payload}` union (tag = state ordinal in
@@ -648,6 +658,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             component_ir: None,
             max_children: None,
             in_fails_transition: false,
+            current_fn_ret_ty_ast: None,
             in_multi_target_transition: false,
             multi_target_states: Vec::new(),
             multi_target_global_ordinals: std::collections::HashMap::new(),

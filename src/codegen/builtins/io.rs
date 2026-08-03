@@ -5249,6 +5249,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )?;
                     }
                 }
+                // 0.34.24: scalar float payload (Result<f64, E> Ok arm /
+                // Option<f64> etc.). Pre-fix the float fell through to the
+                // "Ok(?)" catch-all — display divergence vs the VM
+                // (audit follow-up found via the Result<f64,string> crash).
+                BasicTypeEnum::FloatType(_) => {
+                    let fv = val.into_float_value();
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr(
+                            &format!("{}(%g)", if label == "ok" { "Ok" } else { "Err" }),
+                            &format!("res_{}_ffmt", label),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::FloatValue(fv),
+                        ],
+                        &format!("res_{}_snprintf_f", label),
+                    )?;
+                }
                 _ => {
                     let fmt = self
                         .builder

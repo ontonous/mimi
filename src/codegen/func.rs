@@ -1258,7 +1258,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(val)
     }
 
-    fn coerce_variant_value(
+    pub(super) fn coerce_variant_value(
         &self,
         val: BasicValueEnum<'ctx>,
         target_ty: BasicTypeEnum<'ctx>,
@@ -1495,6 +1495,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<ControlFlow<(), BasicValueEnum<'ctx>>> {
         let ret_ty_ast = func.ret.as_ref();
+        self.current_fn_ret_ty_ast = func.ret.clone();
         // audit (MEDIUM): empty function bodies must not silently return a
         // default value of the wrong type (e.g. i64(0) for a struct-returning
         // function). For empty bodies with struct return, use `undef` —
@@ -3003,6 +3004,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.snapshot_old_values(&vars)?;
 
         let ret_ty_ast = func.ret.as_ref();
+        self.current_fn_ret_ty_ast = func.ret.clone();
         let last_expr = func.body.last().and_then(|s| match s.unlocated() {
             Stmt::Expr(e) => Some(e),
             _ => None,
@@ -3127,6 +3129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.snapshot_old_values(&vars)?;
 
         let ret_ty_ast = func.ret.as_ref();
+        self.current_fn_ret_ty_ast = func.ret.clone();
         let last_expr = func.body.last().and_then(|s| match s.unlocated() {
             Stmt::Expr(e) => Some(e),
             _ => None,
