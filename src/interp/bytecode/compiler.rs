@@ -2177,6 +2177,22 @@ impl BytecodeCompiler {
                     "quote! does not support `math` blocks (soundness hole fix).",
                 ));
             }
+            // C1 (audit-syntax 2026-08-03): `if let` (0.34.3) has no quote
+            // opcode — it used to fall into the catch-all and be silently
+            // skipped, desyncing the quote-block statement accounting and
+            // crashing at runtime with a stack underflow (E0800). Reject
+            // cleanly like for-tuple destructuring / contracts.
+            Stmt::IfLet { init, .. } => {
+                let line = init
+                    .meta()
+                    .map(|meta| format!(" (line {})", meta.span.start_line))
+                    .unwrap_or_default();
+                return Err(InterpError::new(format!(
+                    "quote! does not support `if let` statements{} — bind with \
+                     `match` or `while let` inside the quoted block",
+                    line
+                )));
+            }
             // Unsupported statements are skipped (tree-walker parity).
             _ => {}
         }

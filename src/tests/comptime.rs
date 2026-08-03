@@ -204,6 +204,32 @@ func main() -> i32 {
 }
 
 #[test]
+fn quote_if_let_is_rejected_not_silently_skipped() {
+    // C1 (audit-syntax 2026-08-03): an `if let` inside quote! used to fall
+    // into the catch-all and be silently dropped, desyncing the quote-block
+    // accounting and crashing at runtime with an E0800 stack underflow. It
+    // must now be rejected cleanly at bytecode-compile time.
+    let src = r#"
+func main() -> i32 {
+    let q = quote! {
+        let x: Option<i32> = Some(1)
+        if let Some(v) = x {
+            print_line(v)
+        }
+    }
+    println(q)
+    0
+}
+"#;
+    let err =
+        run_source_bytecode_result(src).expect_err("quote! containing `if let` must be rejected");
+    assert!(
+        err.contains("does not support `if let`"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn math_boolean_arithmetic_is_erased() {
     let src = r#"
 func main() -> i32 {
