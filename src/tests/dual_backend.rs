@@ -3199,6 +3199,34 @@ fn dual_local_func_param_shadows_global_dual_backend() {
 }
 
 #[test]
+fn dual_local_closure_shadows_builtin_dual_backend() {
+    // builtin-vs-local shadowing (audit-type 2026-08-03, adjudicated
+    // 2026-08-04): execution precedence is local > global > builtin on all
+    // paths. A let-bound closure shadowing a builtin name intercepts the
+    // call. Pre-fix the resolved emitter's call-site directory recorded
+    // Builtin kind without scope awareness, so codegen ran the builtin (5)
+    // while the VM ran the closure (6) — lower.rs now prefers a shadowing
+    // local closure for Builtin-kind sites (mirror of the C3 Function-kind
+    // guard). The VM builtin_table deliberately stays AFTER locals/user
+    // globals: it contains implementation helpers (`inner`, …) that are not
+    // language builtins, and T400/user_func_not_shadowed_by_builtin fixes
+    // user-global-shadows-builtin as language behavior.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let abs = fn(x: i32) -> i32 { x + 1 }
+            println(abs(5))
+            0
+        }
+        "#,
+        "6"
+    );
+}
+
+#[test]
 fn dual_generic_nested_type() {
     if !can_link() {
         return;

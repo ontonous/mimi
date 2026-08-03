@@ -2997,9 +2997,10 @@ impl BytecodeCompiler {
         let rd = fc.proto.alloc_reg();
 
         if let Expr::Ident(name) = callee.unlocated() {
-            // Resolution order (matches checker scoping — simple.rs checks
-            // scopes before the global function directory, so local
-            // function-value bindings shadow same-named globals):
+            // Resolution order (scope-aware precedence local > global >
+            // builtin, matching checker scoping — simple.rs checks scopes
+            // before the global function directory, so local function-value
+            // bindings shadow same-named globals):
             // 1. Local variables (let-bound closures / function-value params)
             // 2. User functions (top-level named functions)
             // 3. Builtins
@@ -3009,6 +3010,19 @@ impl BytecodeCompiler {
             // user global `func f(...)` hijacked calls to same-named
             // function-value parameters (`compose(f, g)` body `f(g(x))`
             // resolved to the user global), diverging from the checker.
+            //
+            // builtin-vs-local/global shadowing (audit-type 2026-08-03,
+            // adjudicated 2026-08-04): builtin_table must stay LAST. The VM
+            // builtin_table contains implementation helpers that are not
+            // language-level builtins (`inner`, etc.); builtin-first
+            // resolution hijacked same-named user functions (T400
+            // `func sum(x: i32)` must shadow builtin sum; user `func inner()`
+            // must not hit the ownership-method helper). The divergent case
+            // (`let abs = fn(x){x+1}; abs(5)` running the closure here while
+            // codegen's resolved emitter ran the builtin) is fixed on the
+            // CODEGEN side: the call-site directory records Builtin kind
+            // without scope awareness, and resolved lowering now prefers a
+            // shadowing local closure (lower.rs Builtin-kind guard).
             if let Some(callee_reg) = fc.lookup_var(name) {
                 fc.emit(Op::CallIndirect {
                     rd,
@@ -3102,7 +3116,8 @@ impl BytecodeCompiler {
                 });
                 return Ok(rd);
             }
-            // Builtin function.
+            // Builtin function (after locals and user globals — see the
+            // shadowing-precedence note above).
             if let Some(&bidx) = self.builtin_table.get(name.as_str()) {
                 fc.emit(Op::CallBuiltin {
                     rd,
