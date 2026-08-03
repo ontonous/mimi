@@ -302,7 +302,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Integer arithmetic (`+`, `-`, `*`, `/`).
     ///
     /// SD-7 (0.31.51a): add/sub/mul use LLVM checked arithmetic intrinsics.
-    /// On overflow, calls mimi_trap_overflow (E0801).
+    /// On overflow, calls mimi_trap_overflow (E0802 — unified by audit-codegen
+    /// M1; E0801 is reserved for division by zero).
     /// SD-8 (0.31.51a): div/mod check for zero divisor and MIN/-1.
     /// On violation, calls mimi_trap_div_by_zero / mimi_trap_div_overflow.
     fn compile_int_binop(

@@ -2720,6 +2720,51 @@ fn dual_quote_eval_literal() {
     );
 }
 
+// ── quote! constant-fold correctness (SD-7 audit follow-up 2026-08-04) ──
+//
+// codegen's fold_const_binary used to fold bitwise ops through boolean
+// truthiness (`6 & 3` → 1) and compare constants UNSIGNED (`-1 < 1` →
+// false), while the bytecode VM evaluates both correctly — a silent
+// miscompilation on the codegen quote fast path. These dual tests pin the
+// value-correct behavior (int results, which display identically on both
+// backends; the bool-display divergence of ast_eval is tracked separately).
+
+#[test]
+fn dual_quote_fold_bitwise_and_or() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(ast_eval(quote! { 6 & 3 }));
+            println(ast_eval(quote! { 7 | 2 }));
+            println(ast_eval(quote! { 12 & 10 }));
+            0
+        }
+    "#,
+        "2\n7\n8"
+    );
+}
+
+#[test]
+fn dual_quote_fold_negative_arithmetic() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(ast_eval(quote! { -100 - 23 }));
+            println(ast_eval(quote! { -1000 * 3 }));
+            println(ast_eval(quote! { -9 / 2 }));
+            0
+        }
+    "#,
+        "-123\n-3000\n-4"
+    );
+}
+
 #[test]
 fn dual_math_block() {
     if !can_link() {

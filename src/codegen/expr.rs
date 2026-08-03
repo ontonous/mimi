@@ -90,13 +90,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(val) = self.compile_quote_fold(block) {
                     return Ok(val);
                 }
-                if let Ok(val) = self.fold_quote_block(block) {
-                    return Ok(val);
+                match self.fold_quote_block(block) {
+                    Ok(val) => return Ok(val),
+                    Err(e) => {
+                        // SD-7/SD-8/SD-9: if the comptime evaluation hit a
+                        // definedness trap (div-by-zero E0801 / overflow
+                        // E0802 / non-finite E0813), surface the trap as the
+                        // compile error — provably-failing constant
+                        // arithmetic must be reported honestly, never masked
+                        // by the generic "runtime-dependent" message (and
+                        // never silently wrapped).
+                        let msg = e.to_string();
+                        let is_definedness_trap =
+                            ["E0801", "E0802", "E0813"].iter().any(|c| msg.contains(c));
+                        if is_definedness_trap {
+                            return Err(CompileError::Generic(msg));
+                        }
+                        Err(CompileError::Unsupported(
+                            "runtime-dependent quote is unsupported by QuotedAst ABI v1; ast_eval is compile-time only"
+                                .into(),
+                        ))
+                    }
                 }
-                Err(CompileError::Unsupported(
-                    "runtime-dependent quote is unsupported by QuotedAst ABI v1; ast_eval is compile-time only"
-                        .into(),
-                ))
             }
             Expr::QuoteInterpolate(inner) => {
                 // v0.28.21 — `$(expr)` interpolations are evaluated at
@@ -1301,10 +1316,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Helper: only fold when BOTH operands are compile-time constants.
         // If either is a runtime value, the fold must refuse rather than
         // silently substituting 0 — that would be a silent miscompilation.
-        let (a, b) = match (l, r) {
+        // `is_bool` records whether the operands are i1 (Bool) — BitAnd/
+        // BitOr on i1 are logical, on i64 they are bitwise and must fold
+        // to the full bit pattern, not a boolean truthiness value.
+        let (a, b, is_bool) = match (l, r) {
             (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => (
                 a.get_zero_extended_constant()?,
                 b.get_zero_extended_constant()?,
+                a.get_type().get_bit_width() == 1,
             ),
             (BasicValueEnum::FloatValue(a), BasicValueEnum::FloatValue(b)) => {
                 // audit (MEDIUM): fold float constants at compile time.
@@ -1318,15 +1337,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BinOp::Add => fa + fb,
                             BinOp::Sub => fa - fb,
                             BinOp::Mul => fa * fb,
-                            BinOp::Div => {
-                                if fb == 0.0 {
-                                    return None;
-                                } else {
-                                    fa / fb
-                                }
-                            }
+                            // Division by 0.0 yields ±Inf and 0.0/0.0 yields
+                            // NaN — both are caught by the finiteness guard
+                            // below, so no explicit divisor check is needed.
+                            BinOp::Div => fa / fb,
                             _ => return None,
                         };
+                        // SD-9 (finiteness invariant): a NaN/Inf result must
+                        // trap at runtime (E0813 outside `ieee_float { }`).
+                        // Folding it into a constant would silently bake the
+                        // non-finite value in and bypass the runtime guard —
+                        // refuse to fold and let the runtime path decide.
+                        if v.is_nan() || v.is_infinite() {
+                            return None;
+                        }
                         Some(BasicValueEnum::FloatValue(
                             self.context.f64_type().const_float(v),
                         ))
@@ -1352,36 +1376,42 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return None,
         };
         match op {
-            BinOp::Add => Some(
-                self.context
-                    .i64_type()
-                    .const_int(a.wrapping_add(b), false)
-                    .into(),
-            ),
-            BinOp::Sub => Some(
-                self.context
-                    .i64_type()
-                    .const_int(a.wrapping_sub(b), false)
-                    .into(),
-            ),
-            BinOp::Mul => Some(
-                self.context
-                    .i64_type()
-                    .const_int(a.wrapping_mul(b), false)
-                    .into(),
-            ),
+            // SD-7: integer overflow must trap (E0802), never wrap. Folding
+            // with wrapping_* would silently bake a wrapped constant into the
+            // binary — a silent miscompilation that the runtime trap could
+            // never catch. On overflow return None so the unchecked-fold fast
+            // path declines and the fallback evaluates the expression with
+            // checked semantics (bytecode VM checked arithmetic / runtime
+            // E0802 trap).
+            BinOp::Add => {
+                let r = (a as i64).checked_add(b as i64)?;
+                Some(self.context.i64_type().const_int(r as u64, false).into())
+            }
+            BinOp::Sub => {
+                let r = (a as i64).checked_sub(b as i64)?;
+                Some(self.context.i64_type().const_int(r as u64, false).into())
+            }
+            BinOp::Mul => {
+                let r = (a as i64).checked_mul(b as i64)?;
+                Some(self.context.i64_type().const_int(r as u64, false).into())
+            }
+            // checked_div covers both b == 0 and i64::MIN / -1 (both return
+            // None), so no explicit divisor guard is needed — and a raw
+            // `a / b` on MIN/-1 would panic in debug builds.
             BinOp::Div => {
-                if b == 0 {
-                    return None;
-                }
-                Some(self.context.i64_type().const_int(a / b, false).into())
+                let r = (a as i64).checked_div(b as i64)?;
+                Some(self.context.i64_type().const_int(r as u64, false).into())
             }
             BinOp::Mod => {
-                if b == 0 {
-                    return None;
-                }
-                Some(self.context.i64_type().const_int(a % b, false).into())
+                let r = (a as i64).checked_rem(b as i64)?;
+                Some(self.context.i64_type().const_int(r as u64, false).into())
             }
+            // Ordering comparisons must be SIGNED: `a`/`b` are zero-extended
+            // bit patterns from `get_zero_extended_constant()`, and an
+            // unsigned compare would rank negative constants above positive
+            // ones (e.g. fold `-1 < 1` to false) — a silent miscompilation.
+            // ==/!= are bit-equality and unaffected. Matches the bytecode
+            // fold (compiler.rs fold_constants compares i64 signed).
             BinOp::EqCmp => Some(
                 self.context
                     .bool_type()
@@ -1397,39 +1427,69 @@ impl<'ctx> CodeGenerator<'ctx> {
             BinOp::Lt => Some(
                 self.context
                     .bool_type()
-                    .const_int((a < b) as u64, false)
+                    .const_int(((a as i64) < (b as i64)) as u64, false)
                     .into(),
             ),
             BinOp::Le => Some(
                 self.context
                     .bool_type()
-                    .const_int((a <= b) as u64, false)
+                    .const_int(((a as i64) <= (b as i64)) as u64, false)
                     .into(),
             ),
             BinOp::Gt => Some(
                 self.context
                     .bool_type()
-                    .const_int((a > b) as u64, false)
+                    .const_int(((a as i64) > (b as i64)) as u64, false)
                     .into(),
             ),
             BinOp::Ge => Some(
                 self.context
                     .bool_type()
-                    .const_int((a >= b) as u64, false)
+                    .const_int(((a as i64) >= (b as i64)) as u64, false)
                     .into(),
             ),
-            BinOp::And | BinOp::BitAnd => Some(
+            BinOp::And => Some(
                 self.context
                     .bool_type()
                     .const_int(((a != 0) && (b != 0)) as u64, false)
                     .into(),
             ),
-            BinOp::Or | BinOp::BitOr => Some(
+            // BitAnd on i1 keeps boolean semantics; on i64 it is a bitwise
+            // AND — folding `6 & 3` to a boolean true (1) was a silent
+            // miscompilation (runtime Op::BitAnd folds `a & b`, see the
+            // bytecode compiler).
+            BinOp::BitAnd => {
+                if is_bool {
+                    Some(
+                        self.context
+                            .bool_type()
+                            .const_int(((a != 0) && (b != 0)) as u64, false)
+                            .into(),
+                    )
+                } else {
+                    let r = (a as i64) & (b as i64);
+                    Some(self.context.i64_type().const_int(r as u64, false).into())
+                }
+            }
+            BinOp::Or => Some(
                 self.context
                     .bool_type()
                     .const_int(((a != 0) || (b != 0)) as u64, false)
                     .into(),
             ),
+            BinOp::BitOr => {
+                if is_bool {
+                    Some(
+                        self.context
+                            .bool_type()
+                            .const_int(((a != 0) || (b != 0)) as u64, false)
+                            .into(),
+                    )
+                } else {
+                    let r = (a as i64) | (b as i64);
+                    Some(self.context.i64_type().const_int(r as u64, false).into())
+                }
+            }
             _ => None,
         }
     }
@@ -1455,19 +1515,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // unsigned value from `get_zero_extended_constant()`.
                     // While the bit-level arithmetic is correct for
                     // two's complement, it is fragile and unclear.  We
-                    // now interpret the constant as a signed i64 and
-                    // use `wrapping_neg()` for a straightforward signed
-                    // negation, then pass the sign-extended bit pattern
-                    // to `const_int`.
+                    // now interpret the constant as a signed i64.
+                    // SD-7: `-i64::MIN` overflows — refuse to fold it
+                    // (checked_neg returns None) so the runtime checked
+                    // path traps (E0802) instead of folding a wrapped
+                    // silent miscompilation.
                     let n = iv.get_sign_extended_constant()?;
+                    let r = n.checked_neg()?;
                     Some(BasicValueEnum::IntValue(
-                        self.context
-                            .i64_type()
-                            .const_int(n.wrapping_neg() as u64, true),
+                        self.context.i64_type().const_int(r as u64, true),
                     ))
                 }
                 BasicValueEnum::FloatValue(fv) => {
                     let (f, _) = fv.get_constant()?;
+                    // SD-9: negating a non-finite constant stays non-finite;
+                    // refuse to fold so the runtime finiteness guard (E0813)
+                    // decides instead of baking ±Inf/NaN in silently.
+                    if f.is_nan() || f.is_infinite() {
+                        return None;
+                    }
                     Some(BasicValueEnum::FloatValue(
                         self.context.f64_type().const_float(-f),
                     ))

@@ -5429,8 +5429,12 @@ pub fn eval_comptime_block_bytecode(
         .ok_or_else(|| format!("comptime wrapper function '{wrapper_name}' not found"))?;
     let mut vm = super::vm::BytecodeVM::new(&prog);
     vm.verify_contracts = false;
+    // Use Display (not `.message()`) so the diagnostic code ([E0801]/
+    // [E0802]/[E0813] ...) survives into compile-time reports — callers
+    // (codegen quote!/comptime folds) rely on it to surface definedness
+    // traps honestly (SD-7/SD-8/SD-9).
     vm.call_function(fidx, &[])
-        .map_err(|e| format!("comptime eval: {}", e.message()))
+        .map_err(|e| format!("comptime eval: {e}"))
 }
 
 /// Evaluate a single expression using the bytecode VM (for $() interpolation).
