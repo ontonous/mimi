@@ -89,6 +89,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.defer_blocks.push(stmts.clone());
     }
 
+    /// H3 (audit-codegen): drop pending defers WITHOUT executing them — used by
+    /// the panic→Fault absorption return path, mirroring the bytecode VM which
+    /// truncates the frame on absorption (defer never runs there either).
+    pub(super) fn discard_defer_scope(&mut self) {
+        if let Some(start) = self.defer_scope_stack.pop() {
+            self.defer_blocks.truncate(start);
+        }
+    }
+
     /// Compile all registered compensation blocks in LIFO order
     pub(super) fn compile_compensations(
         &mut self,

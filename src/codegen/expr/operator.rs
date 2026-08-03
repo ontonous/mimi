@@ -183,7 +183,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(in crate::codegen) fn compile_binop(
-        &self,
+        &mut self,
         op: BinOp,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
@@ -262,7 +262,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Dispatch arithmetic operators (`+`, `-`, `*`, `/`) to the appropriate
     /// integer, float, or string implementation.
     fn compile_arithmetic_binop(
-        &self,
+        &mut self,
         op: BinOp,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
@@ -306,7 +306,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// SD-8 (0.31.51a): div/mod check for zero divisor and MIN/-1.
     /// On violation, calls mimi_trap_div_by_zero / mimi_trap_div_overflow.
     fn compile_int_binop(
-        &self,
+        &mut self,
         op: BinOp,
         l: IntValue<'ctx>,
         r: IntValue<'ctx>,
@@ -511,7 +511,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Matches interpreter behavior (interp/ops.rs:27 traps on NaN/Inf, E0813).
     /// `ieee_float { }` escape hatch deferred to post-0.31.51b.
     fn compile_float_binop(
-        &self,
+        &mut self,
         op: BinOp,
         l: FloatValue<'ctx>,
         r: FloatValue<'ctx>,
@@ -620,7 +620,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// SD-8 (0.31.51a): delegates to compile_int_binop which handles
     /// zero-divisor and MIN/-1 traps.
     fn compile_mod_binop(
-        &self,
+        &mut self,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
