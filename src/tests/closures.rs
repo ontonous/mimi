@@ -130,10 +130,10 @@ func main() -> i32 {
 fn interp_closure_with_if() {
     let src = r#"
 func main() -> i32 {
-    let abs = fn(x: i32) -> i32 {
+    let my_abs = fn(x: i32) -> i32 {
         if x < 0 { -x } else { x }
     };
-    abs(-5) + abs(3)
+    my_abs(-5) + my_abs(3)
 }
 "#;
     let v = run_source(src);
@@ -167,8 +167,8 @@ func main() -> i32 {
     let a = 10;
     let b = 20;
     let c = 30;
-    let sum = fn(x: i32) -> i32 { x + a + b + c };
-    sum(1)
+    let total = fn(x: i32) -> i32 { x + a + b + c };
+    total(1)
 }
 "#;
     let v = run_source(src);

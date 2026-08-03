@@ -2052,6 +2052,27 @@ impl BodyLowerer<'_> {
             }
         }
         if site.kind == ResolvedCallKind::Builtin {
+            // builtin-vs-local shadowing (audit-type 2026-08-03, adjudicated
+            // 2026-08-04): the call-site collector resolves Ident callees
+            // against builtin names WITHOUT scope awareness (resolved/mod.rs
+            // resolve_named_call_callee), recording `Builtin` even when a
+            // let-bound closure shadows the name. Execution precedence is
+            // local > global > builtin (checker scoping + bytecode VM +
+            // legacy codegen all resolve locals first — T400 user globals
+            // also shadow builtins). Without this guard the resolved emitter
+            // ran the builtin while the VM ran the closure
+            // (`let abs = fn(x){x+1}; abs(5)` → 5 here vs 6 in the VM).
+            if let Expr::Ident(builtin_name) = callee.unlocated() {
+                if let Some(local) = self.lookup_local(builtin_name) {
+                    return self.lower_local_closure_call(
+                        node_id,
+                        local,
+                        arguments,
+                        role,
+                        type_arguments,
+                    );
+                }
+            }
             if !type_arguments.is_empty() && site.callee != "from_json" {
                 return self.unsupported(node_id, "generic arguments on builtin call");
             }
