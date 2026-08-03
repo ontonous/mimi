@@ -31,15 +31,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         let saved_block = self.builder.get_insert_block();
         self.builder.position_at_end(entry);
 
+        // H2 (audit-codegen): an escaping lambda is a STANDALONE LLVM
+        // function, but it is compiled while the enclosing fallible
+        // transition's flag set is live — a trap inside the lambda would
+        // otherwise emit a wrong-typed fault return (ABI garbage / UB:
+        // `define i32 @__lambda_N` returning `{i32,i64}` fault records).
+        // Clear the transition context for the lambda body, restore after.
+        let saved_mt = self.in_multi_target_transition;
+        let saved_states = std::mem::take(&mut self.multi_target_states);
+        let saved_from = std::mem::take(&mut self.current_from_state);
+        self.in_multi_target_transition = false;
+
         let mut lambda_vars = vars.clone();
         let env_ptr_param = lambda_fn
             .get_nth_param(0)
             .ok_or_else(|| "codegen: lambda env_ptr param index out of range".to_string())?
             .into_pointer_value();
-
         self.load_captured_vars(&free_vars, env_ptr_param, &mut lambda_vars)?;
         self.bind_lambda_params(params, lambda_fn, &mut lambda_vars)?;
-        self.emit_lambda_body(body, ret_type, &mut lambda_vars)?;
+
+        let body_result = self.emit_lambda_body(body, ret_type, &mut lambda_vars);
+        self.in_multi_target_transition = saved_mt;
+        self.multi_target_states = saved_states;
+        self.current_from_state = saved_from;
+        body_result?;
 
         if let Some(bb) = saved_block {
             self.builder.position_at_end(bb);
@@ -72,7 +87,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             let saved_var_types = std::mem::take(&mut self.var_types);
             let saved_var_type_names = std::mem::take(&mut self.var_type_names);
             let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
-            self.compile_func_legacy(f)?;
+            // H2 (audit-codegen): same standalone-function guard as
+            // compile_lambda_expr — a nested func compiled inside a fallible
+            // transition must not inherit the fault-return context.
+            let saved_mt = self.in_multi_target_transition;
+            let saved_states = std::mem::take(&mut self.multi_target_states);
+            let saved_from = std::mem::take(&mut self.current_from_state);
+            self.in_multi_target_transition = false;
+            let result = self.compile_func_legacy(f);
+            self.in_multi_target_transition = saved_mt;
+            self.multi_target_states = saved_states;
+            self.current_from_state = saved_from;
+            result?;
             self.var_types = saved_var_types;
             self.var_type_names = saved_var_type_names;
             self.list_elem_llvm_types = saved_list_elem;
