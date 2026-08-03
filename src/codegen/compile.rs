@@ -733,7 +733,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 derives: vec![],
                                 attributes: vec![],
                             };
-                            self.register_type_def(&td)?;
+        self.register_type_def(&td)?;
                         }
                     }
                     // Cache the flow definition for transition compilation.
@@ -940,6 +940,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             attributes: vec![],
         };
         self.register_type_def(&td)?;
+        // C1 fix: build the flow-wide state-name → tag-ordinal map using the
+        // SAME ordering register_type_def applies (variants sorted by name).
+        // Return sites query this map so a transition whose target set is a
+        // proper subset of the flow union still emits the global ordinal —
+        // the receiving match dispatches on the global enum ordinal, and a
+        // subset-relative tag would silently alias a different state.
+        // Bucketed by flow name: each flow's __MultiTarget enum is its own
+        // enum with independent ordinals.
+        {
+            let mut sorted_states = states.clone();
+            sorted_states.sort_unstable();
+            let mut ordinals = std::collections::HashMap::with_capacity(sorted_states.len());
+            for (ord, s) in sorted_states.into_iter().enumerate() {
+                ordinals.insert(s.to_string(), ord as u64);
+            }
+            self.multi_target_global_ordinals
+                .insert(flow.name.clone(), ordinals);
+        }
         // Also register the unqualified alias so `match r { Small { .. } }`
         // resolves the owning enum through find_variant_owner.
         if !self
@@ -1062,6 +1080,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Compile all transitions of a flow as ordinary LLVM functions.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
+        self.current_flow_name = flow.name.clone();
         for t in &flow.transitions {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body

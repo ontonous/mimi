@@ -5303,6 +5303,98 @@ func main() -> i32 {
 }
 
 #[test]
+fn multi_target_disjoint_target_sets_tag_dual_backend() {
+    // C1 (audit 2026-08-03): L1 — when two multi-target transitions declare
+    // DIFFERENT target sets, the return site must tag with the flow-wide
+    // name-sorted ordinal, not the per-transition subset index.
+    // Flow union: {A, B, C} → sorted ordinals A=0, B=1, C=2.
+    // t1 targets {A, B}: returning A → subset 0 == global 0 (coincidentally
+    // correct). t2 targets {A, C}: returning C → subset 1, but global C = 2 —
+    // the old subset-relative tag 1 was silently decoded as B by the match.
+    // Regression: codegen printed "r1 A / r2 B" while bytecode printed
+    // "r1 A / r2 C", exit=0, no diagnostic.
+    let src = r#"
+flow Calc {
+    state A { v: i32 }
+    state B { v: i32 }
+    state C { v: i32 }
+    transition t1(A, d: i32) -> A | B {
+        do { if d == 0 { return A { v: 1 } } return B { v: 2 } }
+    }
+    transition t2(B, d: i32) -> A | C {
+        do { if d == 0 { return C { v: 3 } } return A { v: 4 } }
+    }
+    transition go(A) -> B {
+        do { return B { v: 9 } }
+    }
+}
+func main() -> i32 {
+    let r1 = Calc::t1(A { v: 0 }, 0)
+    match r1 {
+        A { v } => println("r1 A")
+        B { v } => println("r1 B")
+    }
+    let b = Calc::go(A { v: 0 })
+    let r2 = Calc::t2(b, 0)
+    match r2 {
+        A { v } => println("r2 A")
+        B { v } => println("r2 B")
+        C { v } => println("r2 C")
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bytecode_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bytecode_out.trim(), "r1 A\nr2 C");
+    let native = compile_and_run(src).expect("codegen must not mis-tag subset target");
+    assert_eq!(native.trim(), "r1 A\nr2 C");
+}
+
+#[test]
+fn multi_target_disjoint_sets_fault_tag_dual_backend() {
+    // C1 (audit 2026-08-03): the `-> S | Fault` absorption path must also use
+    // the flow-wide ordinal for the Fault tag. Flow union {A, B, Fault} sorted
+    // → A=0, B=1, Fault=2. t2 targets {B, Fault}; the old subset-relative
+    // Fault tag (1) was decoded as state B by the match — the Fault arm never
+    // fired and the payload was mis-read as B's record.
+    let src = r#"
+flow Calc {
+    state A { v: i32 }
+    state B { v: i32 }
+    transition t1(A, d: i32) -> A | B {
+        do { if d == 0 { return A { v: 1 } } return B { v: 2 } }
+    }
+    transition t2(B, d: i32) -> B | Fault {
+        do { return B { v: self.v / d } }
+    }
+    transition go(A) -> B {
+        do { return B { v: 9 } }
+    }
+}
+func main() -> i32 {
+    let r1 = Calc::t1(A { v: 0 }, 0)
+    match r1 {
+        A { v } => println("r1 A")
+        B { v } => println("r1 B")
+    }
+    let b = Calc::go(A { v: 0 })
+    let r2 = Calc::t2(b, 0)
+    match r2 {
+        B { v } => println("r2 B")
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => println(last_state)
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bytecode_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bytecode_out.trim(), "r1 A\nB");
+    let native = compile_and_run(src).expect("codegen must not mis-tag subset Fault");
+    assert_eq!(native.trim(), "r1 A\nB");
+}
+
+#[test]
 fn multi_target_nested_record_payload_box_sized_dual_backend() {
     // C2 (MEM-C8, L1): wrap_multi_target_value must size the payload box from
     // the actual LLVM type size (size_of), NOT field_count × 8. A target state

@@ -425,6 +425,25 @@ pub struct CodeGenerator<'ctx> {
     /// v0.34.16: target state names of the current multi-target transition,
     /// in declared order (ordinal = tag).
     multi_target_states: Vec<String>,
+    /// C1 fix (audit): per-flow global state-name → tag-ordinal map for each
+    /// flow's synthetic `__MultiTarget` enum. Keyed by flow name — two flows'
+    /// unions are separate enums with independent ordinals, so the map must be
+    /// bucketed or the later-registered flow would clobber the earlier one's
+    /// ordinals mid-compilation. Built in `register_flow_multi_target_enums`
+    /// from each flow's deduped union of all multi-target states, sorted by
+    /// name — exactly the ordering `register_type_def` uses to assign variant
+    /// ordinals. Return sites (func.rs / block.rs / fault.rs) MUST look up
+    /// tags here, never in the per-transition `multi_target_states` subset: a
+    /// transition targeting `A | C` would otherwise tag `C` with the subset
+    /// ordinal 1, which the receiving match (dispatched on the global enum
+    /// ordinal) interprets as `B` — a silent L1 violation.
+    multi_target_global_ordinals: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, u64>,
+    >,
+    /// Name of the flow whose transition is currently being compiled.
+    /// Selects the right bucket in `multi_target_global_ordinals`.
+    current_flow_name: String,
     /// v0.34.18a: source state name of the transition currently being compiled.
     /// Used by panic→Fault absorption (expr/fault.rs) to fill `Fault.last_state`.
     current_from_state: String,
@@ -621,6 +640,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_fails_transition: false,
             in_multi_target_transition: false,
             multi_target_states: Vec::new(),
+            multi_target_global_ordinals: std::collections::HashMap::new(),
+            current_flow_name: String::new(),
             current_from_state: String::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
         }
@@ -1559,6 +1580,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into()
                 }
             }
+            // C2 (audit 2026-08-03): the 0.34.6 one-way widening {i32→i64,
+            // i32→f64, i64→f64} must also materialize on assignment in the
+            // legacy emitter (`z = 3` where z: f64). The resolved emitter
+            // covers this via CheckedConversion::NumericWiden, but the legacy
+            // arm (generic / lambda / async / extern-ABI bodies) previously
+            // stored the raw int into the float alloca — silently keeping the
+            // old value or storing a garbage bit pattern (L1 divergence with
+            // the bytecode VM, which materializes IntToFloat in compile_assign).
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(slot_ft)) => self
+                .builder
+                .build_signed_int_to_float(iv, slot_ft, &format!("{}_assign_sitofp", name))
+                .map_err(|e| CompileError::LlvmError(format!("assign sitofp: {}", e)))?
+                .into(),
             _ => val,
         };
         if self.shared_var_names.contains(name) {

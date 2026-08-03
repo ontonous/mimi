@@ -1566,17 +1566,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 ))
                             }
                         };
-                        let mut sorted_states = self.multi_target_states.clone();
-                        sorted_states.sort();
-                        let tag = sorted_states
-                            .iter()
-                            .position(|s| s == &state_name)
+                        // C1 fix: tag = the state's ordinal in the flow-wide
+                        // __MultiTarget enum (name-sorted union of ALL
+                        // multi-target states), NOT the per-transition subset.
+                        // A subset-relative ordinal silently aliases another
+                        // state when two transitions have different target sets.
+                        let tag = self
+                            .multi_target_global_ordinals
+                            .get(&self.current_flow_name)
+                            .and_then(|m| m.get(&state_name))
+                            .copied()
                             .ok_or_else(|| {
                                 CompileError::LlvmError(format!(
-                                    "returned state '{state_name}' is not a target of this multi-target transition (targets: {:?})",
+                                    "returned state '{state_name}' has no global multi-target ordinal (flow: {:?}, transition targets: {:?})",
+                                    self.current_flow_name,
                                     self.multi_target_states
                                 ))
-                            })? as u64;
+                            })?;
                         let state_ty = self.type_llvm.get(&state_name).copied();
                         val = self.wrap_multi_target_value(val, tag, state_ty)?;
                     }
