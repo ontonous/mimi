@@ -1081,6 +1081,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Compile all transitions of a flow as ordinary LLVM functions.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
         self.current_flow_name = flow.name.clone();
+        // H4 (audit-codegen): persistent field names for the panic→Fault
+        // shadow, taken from the FlowDef so BOTH compilation entry points
+        // (compile_checked + legacy compile_file) see them.
+        self.current_persistent_fields = flow.persistent_fields.clone();
         for t in &flow.transitions {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body
@@ -1098,6 +1102,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.in_multi_target_transition = false;
                 self.multi_target_states = Vec::new();
                 self.current_from_state = String::new();
+                self.fault_self_entry = None;
                 result?;
                 continue;
             }

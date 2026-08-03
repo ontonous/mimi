@@ -6510,6 +6510,45 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_panic_absorption_persistent_shadow_dual_backend() {
+    // H4 (audit-codegen 2026-08-03): persistent draft values must survive a
+    // panic→Fault absorption — the Fault record shadows the from-state's
+    // persistent fields (interp: shadow_persistent_into_fault). Before the fix
+    // codegen defaulted them (printed 0 where interp printed the draft 10).
+    let src = r#"
+flow Calc {
+    persistent state S { v: i32 }
+    transition go(S, d: i32) -> S | Fault { do { return S { v: self.v / d } } }
+}
+func main() -> i32 {
+    let r = Calc::go(S { v: 10 }, 0)
+    match r {
+        S { v } => println(v)
+        Fault { last_state, unexpected_event, snapshot: _, trace: _, v } => {
+            println(last_state)
+            println(unexpected_event)
+            println(v)
+        }
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        bc.trim(),
+        "S\npanic:E0801\n10",
+        "bytecode shadows persistent draft into Fault"
+    );
+    let native = compile_and_run(src).expect("codegen must absorb div-by-zero, not abort");
+    assert_eq!(
+        native.trim(),
+        "S\npanic:E0801\n10",
+        "codegen must shadow the persistent draft value (10), not the default (0)"
+    );
+}
+
+#[test]
 fn flow_panic_absorption_normal_path_returns_state_dual_backend() {
     // v0.34.18a: when no panic occurs, the `-> S | Fault` transition returns the
     // state variant normally (the absorption path is not taken).
