@@ -1,9 +1,12 @@
-//! Flow transition expansion: system verbs + optional N×M completion.
+//! Flow transition expansion: system verbs.
 //!
-//! v0.31.25: Sparse is now the DEFAULT. Without annotation, undefined
-//! (state, event) pairs are compile-time errors. `@dense` opts into
-//! N×M auto-completion (missing pairs → implicit Fault fallback).
-//! `@sparse` is accepted but redundant (backward compatibility).
+//! v0.31.25: Sparse is the DEFAULT. Without annotation, undefined
+//! (state, event) pairs are compile-time errors.
+//! v0.34.18b (amendment clause 1, sparse-irreversible): `@dense` (N×M
+//! auto-completion, missing pairs → implicit Fault fallback) is REPEALED —
+//! the parser rejects it and the `Dense` annotation kind was removed
+//! (audit-syntax M7). `@sparse` is accepted but redundant (backward
+//! compatibility).
 //!
 //! System verbs (reset/recover/peer_fault/ffi_crash) are always injected
 //! regardless of sparse/dense mode.

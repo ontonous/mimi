@@ -828,6 +828,27 @@ impl LspServer {
                     }
                 }
             }
+            // M3 (audit-syntax 2026-08-03): if-let is first-class syntax
+            // (native codegen since 0.34.24) — its bodies must participate in
+            // field scanning like If/WhileLet.
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                Self::scan_expr_for_field(init, word, locals, file, out);
+                for s in then_ {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+                if let Some(eb) = else_ {
+                    for s in eb {
+                        Self::scan_stmt_for_field(s, word, locals, file, out);
+                    }
+                }
+            }
+            Stmt::IeeeFloat(body) => {
+                for s in body {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+            }
             _ => {}
         }
     }

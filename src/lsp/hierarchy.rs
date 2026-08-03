@@ -113,6 +113,25 @@ fn collect_calls_from_exprs(
             } => {
                 collect_calls_from_exprs(body, text, items, uri, calls, visited);
             }
+            // M3 (audit-syntax 2026-08-03): walk if-let / while-let / ieee_float
+            // bodies — before this fix calls inside them were invisible to the
+            // call hierarchy (silent `_ => {}` skip).
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                collect_calls_from_expr(init, text, items, uri, calls, visited);
+                collect_calls_from_exprs(then_, text, items, uri, calls, visited);
+                if let Some(els) = else_ {
+                    collect_calls_from_exprs(els, text, items, uri, calls, visited);
+                }
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                collect_calls_from_expr(init, text, items, uri, calls, visited);
+                collect_calls_from_exprs(body, text, items, uri, calls, visited);
+            }
+            Stmt::IeeeFloat(body) => {
+                collect_calls_from_exprs(body, text, items, uri, calls, visited);
+            }
             _ => {}
         }
     }

@@ -65,8 +65,11 @@ fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
         name: "Main".to_string(),
         pub_: false,
         generics: vec![],
+        // M7 (audit-syntax 2026-08-03): Dense was dead (parser rejects
+        // @dense per amendment clause 1; Sparse is the irreversible default).
+        // The implicit Main flow now carries the honest Sparse marker.
         annotations: vec![FlowAnnotation::synthetic(
-            FlowAnnotationKind::Dense,
+            FlowAnnotationKind::Sparse,
             AstOrigin::RuntimeSystem("progressive.main"),
         )],
         states: vec![StateDef {
@@ -203,7 +206,7 @@ mod tests {
         assert_eq!(flow.annotations.len(), 1);
         assert!(matches!(
             flow.annotations[0].kind,
-            FlowAnnotationKind::Dense
+            FlowAnnotationKind::Sparse
         ));
 
         let Item::Func(main) = &file.items[1] else {

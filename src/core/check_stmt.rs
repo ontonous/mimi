@@ -1100,15 +1100,28 @@ impl<'a> Checker<'a> {
                     Type::Name(n, _) if n == "Range" => Type::Name("i32".into(), vec![]),
                     Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
                     Type::Name(n, args) if n == "Set" && args.len() == 1 => args[0].clone(),
-                    Type::Name(n, _) if n == "Map" || n == "Record" => Type::Tuple(vec![
-                        Type::Name("string".into(), vec![]),
-                        Type::Name("Any".into(), vec![]),
-                    ]),
+                    Type::Name(n, _) if n == "Map" || n == "Record" => {
+                        // M5 (audit-syntax 2026-08-03): Map/Record iteration is
+                        // not supported on ANY backend — resolved lowering
+                        // rejects it ("non-canonical iterable type") and the
+                        // bytecode/legacy paths fail as well (pre-existing).
+                        // This arm used to type the element as (string, Any)
+                        // and let the check pass, surfacing the internal
+                        // TOOL-RESOLUTION-001 code to the user afterwards.
+                        // Reject early with actionable guidance instead.
+                        self.emit_code(
+                            crate::diagnostic::codes::E0212,
+                            format!(
+                                "for loop over {n} is not supported yet; iterate `keys(m)` or `values(m)` instead"
+                            ),
+                        );
+                        Type::Name("unknown".into(), vec![])
+                    }
                     _ => {
                         self.emit_code(
                             crate::diagnostic::codes::E0212,
                             format!(
-                                "for loop requires a List, Range, string, Set, or Map, found {}",
+                                "for loop requires a List, Range, string, or Set, found {}",
                                 fmt_type(&it)
                             ),
                         );

@@ -1133,10 +1133,10 @@ pub enum FlowAnnotationKind {
     /// v0.31.25: Now the DEFAULT behavior. Kept for backward compatibility
     /// (accepted but redundant).
     Sparse,
-    /// v0.31.25: Dense transition graph — opt-in for N×M auto-completion.
-    /// Missing (state, event) pairs are filled with implicit `→ Fault` fallbacks.
-    /// This was the default before 0.31.25.
-    Dense,
+    // M7 (audit-syntax 2026-08-03): the `Dense` variant was removed — it was
+    // unreachable from user code (the parser rejects `@dense` per amendment
+    // clause 1, sparse-irreversible) and only synthesized by progressive.rs,
+    // which now emits Sparse. No consumer ever branched on Dense.
 }
 
 #[derive(Debug, Clone)]

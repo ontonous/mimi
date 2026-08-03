@@ -4344,7 +4344,6 @@ fn collect_item_meta(
                         format!("annotation.max_children.{max}")
                     }
                     crate::ast::FlowAnnotationKind::Sparse => "annotation.sparse".to_string(),
-                    crate::ast::FlowAnnotationKind::Dense => "annotation.dense".to_string(),
                 };
                 insert_child_meta(
                     annotation.meta,
@@ -5964,7 +5963,7 @@ fn collect_flow(
         match &annotation.kind {
             crate::ast::FlowAnnotationKind::MaxChildren(n) => max_children = Some(*n),
             crate::ast::FlowAnnotationKind::MailboxDepth(n) => mailbox_depth = Some(*n),
-            crate::ast::FlowAnnotationKind::Sparse | crate::ast::FlowAnnotationKind::Dense => {}
+            crate::ast::FlowAnnotationKind::Sparse => {}
         }
     }
     let resolved_flow = ResolvedFlow {
