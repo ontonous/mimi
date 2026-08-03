@@ -1141,6 +1141,24 @@ impl BytecodeCompiler {
                         if let PatternKind::Variable(name) = &pat.kind {
                             let ty = if coerced_to_float {
                                 VarType::Float
+                            } else if let Some(decl_ty) = ty {
+                                // M4 (audit-codegen 2026-08-03): a declared
+                                // `dyn Trait` annotation must win over the
+                                // init-expression's inferred type. Without
+                                // this, `let d: dyn Show = b` tracked `d` as
+                                // User(Bar)/Unknown, var_is_dyn stayed false,
+                                // and the method call statically resolved to
+                                // the FIRST impl (m4f: d2.show() on a Bar
+                                // printed "foo"; unsafe_cast_protocol(5)
+                                // dispatched Foo_show with an Int receiver) —
+                                // diverging from codegen's runtime vtable
+                                // dispatch. With VarType::Dyn the call
+                                // compiles to Op::DynMethodCall and resolves
+                                // by the receiver's concrete type at runtime.
+                                match decl_ty.unlocated() {
+                                    Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
+                                    _ => self.infer_expr_type(fc, init_expr),
+                                }
                             } else {
                                 self.infer_expr_type(fc, init_expr)
                             };

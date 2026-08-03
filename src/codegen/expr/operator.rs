@@ -375,7 +375,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             self.builder.position_at_end(trap_ovf_bb);
             if self.in_fallible_multi_target() {
-                self.emit_panic_fault_return("E0801")?;
+                // M1 (audit-codegen 2026-08-03): MIN/-1 is integer OVERFLOW,
+                // not div-by-zero — E0802 per docs/error-codes.md (the
+                // bytecode VM also reports E0802 IntegerOverflow here).
+                self.emit_panic_fault_return("E0802")?;
             } else {
                 let trap_ovf_fn = self.get_runtime_fn("mimi_trap_div_overflow")?;
                 self.builder
@@ -472,7 +475,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Trap block — or absorb into Fault in a fallible transition (v0.34.18a).
         self.builder.position_at_end(trap_bb);
         if self.in_fallible_multi_target() {
-            self.emit_panic_fault_return("E0801")?;
+            // M1 (audit-codegen 2026-08-03): add/sub/mul overflow is E0802
+            // (integer overflow) per docs/error-codes.md — E0801 is reserved
+            // for division by zero.
+            self.emit_panic_fault_return("E0802")?;
         } else {
             let trap_fn = self.get_runtime_fn("mimi_trap_overflow")?;
             let op_name_str = match op {

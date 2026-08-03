@@ -292,6 +292,81 @@ func main() -> i32 {
 }
 
 #[test]
+fn dyn_trait_local_let_binding_multi_impl() {
+    // M4 (audit-codegen 2026-08-03): a LOCAL `let d: dyn Trait = value`
+    // binding with MULTIPLE impls must dispatch by the receiver's concrete
+    // type at runtime. Before the fix the bytecode compiler tracked the
+    // binding with infer_expr_type (the init's concrete/unknown type) instead
+    // of the declared `dyn` annotation, so var_is_dyn stayed false and the
+    // method call statically resolved to the FIRST impl — d2.show() on a Bar
+    // printed "foo" (diverging from codegen's runtime vtable dispatch).
+    let v = run_source(
+        r#"
+trait Show {
+    func show() -> string;
+}
+
+type Foo { x: i32 }
+type Bar { y: i32 }
+
+impl Show for Foo {
+    func show() -> string { "foo" }
+}
+impl Show for Bar {
+    func show() -> string { "bar" }
+}
+
+func main() -> i32 {
+    let d1: dyn Show = Foo { x: 1 }
+    let d2: dyn Show = Bar { y: 2 }
+    if d1.show() == "foo" && d2.show() == "bar" { 1 } else { 0 }
+}
+"#,
+    );
+    assert_eq!(
+        v,
+        interp::Value::Int(1),
+        "dyn dispatch must follow the receiver's concrete type"
+    );
+}
+
+#[test]
+fn dyn_trait_local_let_binding_multi_impl_dual_backend() {
+    // L1: the M4 fix must hold on both backends (codegen already dispatched
+    // correctly via the runtime vtable; the bytecode VM is the side fixed).
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+trait Show {
+    func show() -> string;
+}
+
+type Foo { x: i32 }
+type Bar { y: i32 }
+
+impl Show for Foo {
+    func show() -> string { "foo" }
+}
+impl Show for Bar {
+    func show() -> string { "bar" }
+}
+
+func main() -> i32 {
+    let d1: dyn Show = Foo { x: 1 }
+    let d2: dyn Show = Bar { y: 2 }
+    println(d1.show())
+    println(d2.show())
+    0
+}
+"#;
+    let (_, interp_out) = run_source_with_stdout(src);
+    assert_eq!(interp_out.trim(), "foo\nbar", "bytecode dyn dispatch");
+    let native = compile_and_run(src).expect("codegen must run dyn dispatch");
+    assert_eq!(native.trim(), "foo\nbar", "codegen dyn dispatch");
+}
+
+#[test]
 fn adt_trait_method_with_self() {
     let v = run_source(
         r#"
