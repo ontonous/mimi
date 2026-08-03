@@ -2534,7 +2534,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     }
 
     fn emit_unary(
-        &self,
+        &mut self,
         op: ResolvedUnaryOp,
         value: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {

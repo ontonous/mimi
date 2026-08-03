@@ -19,8 +19,8 @@
 //! All Fault payload fields are compile-time constants at the trap site
 //! (`last_state` = the transition's source state, `unexpected_event` =
 //! `"panic:<code>"`), so the record is built directly at the LLVM level without
-//! needing the variable map — this lets the hook live inside `&self` expression
-//! compilation (`compile_int_binop`).
+//! needing the variable map — this lets the hook live inside expression
+//! compilation (`compile_int_binop`, a `&mut self` context).
 
 use crate::ast::{Type, TypeDefKind};
 use crate::codegen::CodeGenerator;
@@ -44,8 +44,19 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Caller must have checked `in_fallible_multi_target()`. `panic_code` is the
     /// diagnostic code embedded as `unexpected_event = "panic:<code>"`
     /// (e.g. `"E0801"` for division by zero / overflow, `"E0813"` for float).
+    ///
+    /// H3 (audit-codegen): before returning, run the same cleanup sequence as
+    /// the normal return path (block.rs) — otherwise every heap allocation the
+    /// transition body made before the trap site (string concat, list push,
+    /// closure env…) leaks per absorption (valgrind: N absorbs × M heap
+    /// objects definitely lost). The fault record itself is stack-allocated
+    /// with `.rodata` string constants, so no claim is needed; the multi-target
+    /// payload box is registered by the CALLER (method.rs), not here, so
+    /// flushing cannot free it. Defers are intentionally NOT run: the bytecode
+    /// VM truncates the frame on absorption without running defers either
+    /// (dual-backend parity, audit M2).
     pub(in crate::codegen) fn emit_panic_fault_return(
-        &self,
+        &mut self,
         panic_code: &str,
     ) -> Result<(), CompileError> {
         let last_state = self.current_from_state.clone();
@@ -73,6 +84,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let fault_ty = self.type_llvm.get("Fault").copied();
 
         let union_val = self.wrap_multi_target_value(fault_val, tag, fault_ty)?;
+        // H3: cleanup before return (parity with block.rs normal return path,
+        // minus ensures/defer which the interp absorber also skips).
+        self.emit_all_shared_releases()?;
+        self.discard_shared_scope();
+        self.flush_heap_scopes_to_boundary()?;
+        self.discard_defer_scope();
+        self.pop_comp_scope();
         self.builder
             .build_return(Some(&union_val))
             .map_err(|e| CompileError::LlvmError(format!("fault return error: {}", e)))?;

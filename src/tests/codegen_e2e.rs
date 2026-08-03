@@ -2111,6 +2111,52 @@ fn e2e_valgrind_b9_closure_env() {
 }
 
 #[test]
+fn e2e_valgrind_fault_return_heap_cleanup() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    // H3 (audit-codegen 2026-08-03): the panic→Fault absorption return path
+    // must run the same heap cleanup as the normal return path. Before the
+    // fix, every absorption leaked all heap allocations the transition body
+    // made before the trap site (string concat + list push here) —
+    // valgrind reported 15 definitely-lost blocks over 5 iterations.
+    let stdout = compile_and_run_valgrind(
+        r#"
+flow Calc {
+    state S { v: i32 }
+    transition go(S, d: i32) -> S | Fault {
+        do {
+            let s = "hello" + " " + "world"
+            let mut lst = [1, 2, 3]
+            push(lst, 4)
+            return S { v: self.v / d }
+        }
+    }
+}
+func main() -> i32 {
+    let mut n = 0
+    while n < 5 {
+        let r = Calc::go(S { v: 10 }, 0)
+        match r {
+            S { v } => println(v)
+            Fault { last_state, unexpected_event, snapshot: _, trace: _ } => println(unexpected_event)
+        }
+        n = n + 1
+    }
+    0
+}
+"#,
+    )
+    .expect("fault return path must run under valgrind without leaks");
+    assert_eq!(stdout.trim(), "panic:E0801\npanic:E0801\npanic:E0801\npanic:E0801\npanic:E0801");
+}
+
+#[test]
 fn e2e_shared_var_copy() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

@@ -1113,20 +1113,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             incoming_bbs.push(body_bb);
         }
 
-        // Unreachable else block. Call mimi_match_panic (runtime trap) before
-        // build_unreachable() so that if a non-exhaustive match is reached at
-        // runtime, the program prints a diagnostic and aborts instead of UB.
+        // Unreachable else block. In a fallible multi-target transition the
+        // panic is absorbed into the Fault variant (parity with the bytecode
+        // VM, which reports a non-exhaustive match as panic:E0805); everywhere
+        // else call mimi_match_panic (runtime trap) before build_unreachable()
+        // so that if a non-exhaustive match is reached at runtime, the program
+        // prints a diagnostic and aborts instead of UB.
         self.builder.position_at_end(else_bb);
-        let match_panic_fn = self
-            .module
-            .get_function("mimi_match_panic")
-            .ok_or("mimi_match_panic not declared")?;
-        self.builder
-            .build_call(match_panic_fn, &[], "match_panic")
-            .map_err(|e| CompileError::LlvmError(format!("match_panic call: {}", e)))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|e| CompileError::LlvmError(format!("match else unreachable: {}", e)))?;
+        if self.in_fallible_multi_target() {
+            // H1 (audit-codegen): the trap site is lexically inside the
+            // transition body — absorbing keeps dual-backend parity (interp
+            // E0805). Callers (helper/泛型) compiled as standalone functions
+            // have the flag cleared (H2) and fall through to the abort path.
+            // build_return terminates else_bb; the phi below only merges arm
+            // blocks, so nothing flows in from here.
+            self.emit_panic_fault_return("E0805")?;
+        } else {
+            let match_panic_fn = self
+                .module
+                .get_function("mimi_match_panic")
+                .ok_or("mimi_match_panic not declared")?;
+            self.builder
+                .build_call(match_panic_fn, &[], "match_panic")
+                .map_err(|e| CompileError::LlvmError(format!("match_panic call: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("match else unreachable: {}", e)))?;
+        }
 
         // Merge block - use phi to select the right value
         self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)
