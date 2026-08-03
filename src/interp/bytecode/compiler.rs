@@ -3096,10 +3096,17 @@ impl BytecodeCompiler {
                     && (method == "spawn" || method == "spawn_detached")
                 {
                     let actor_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
-                    fc.emit(Op::ActorSpawn {
-                        rd,
-                        actor: actor_idx,
-                    });
+                    if method == "spawn_detached" {
+                        fc.emit(Op::ActorSpawnDetached {
+                            rd,
+                            actor: actor_idx,
+                        });
+                    } else {
+                        fc.emit(Op::ActorSpawn {
+                            rd,
+                            actor: actor_idx,
+                        });
+                    }
                     return Ok(rd);
                 }
                 // ── Flow transition call: FlowName::method(state, args) ──

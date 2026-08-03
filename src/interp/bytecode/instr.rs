@@ -741,7 +741,14 @@ pub enum Op {
     // Actor / Flow / Session (Phase D)
     // ═══════════════════════════════════════════════════════════
     /// rd = spawn actor by name (constant pool string).
+    /// detached=true → ActorSpawnDetached: the child survives SystemKill
+    /// cascade (0.34.23 §12 actor 决策：interp 此前恒 false，双端级联语义
+    /// 不一致)。
     ActorSpawn {
+        rd: Reg,
+        actor: ConstIdx,
+    },
+    ActorSpawnDetached {
         rd: Reg,
         actor: ConstIdx,
     },

@@ -664,6 +664,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Item::Cap(cap) => {
                     self.cap_type_names.insert(cap.name.clone());
+                    let components = if let Some(ref combined) = cap.combined_with {
+                        let parts: Vec<String> = combined
+                            .split(" + ")
+                            .map(|s| s.trim().to_string())
+                            .collect();
+                        if parts.len() > 1 {
+                            parts
+                        } else {
+                            vec![cap.name.clone(), combined.trim().to_string()]
+                        }
+                    } else {
+                        vec![cap.name.clone()]
+                    };
+                    self.cap_components.insert(cap.name.clone(), components);
                 }
                 Item::Trait(t) => {
                     self.trait_defs.insert(t.name.clone(), t.clone());

@@ -301,19 +301,32 @@ impl<'a> ActionEmitter<'a> {
         self.linear_bindings(pattern, &mut bindings);
         // P1-10: Positional matching only works when sources and bindings
         // have the same length. For tuple destructuring of a single source
-        // (e.g., `let (a, b) = some_linear_tuple`), sources=[tuple] (1)
-        // vs bindings=[a,b] (2) — positional matching gives b a wrong
-        // ResourceId. When counts mismatch, each binding gets its own
-        // ResourceId (conservative but correct).
+        // (e.g., `let (r, w) = c.split()`, sources=[c] (1) vs bindings=[r,w]
+        // (2)), visit_stmt's Bind Move gives the FIRST binding the source
+        // resource (r ← c) and introduces the rest (w). The catalog must
+        // mirror that split so later Drop(r)/Drop(w) resolve the same
+        // ResourceIds the dataflow facts were keyed by. 0.34.23 §12 capability
+        // decision: previously every binding got its own id while the Move
+        // used the source id → Drop(r) missed the c-keyed fact → E0256.
         if sources.len() == bindings.len() {
             for (index, local) in bindings.into_iter().enumerate() {
                 let resource = self.resource_for_place(&sources[index]);
                 self.resources.insert(local, resource);
             }
+        } else if let Some(source) = sources.first() {
+            let mut bindings = bindings.into_iter();
+            if let Some(first) = bindings.next() {
+                let resource = self.resource_for_place(source);
+                self.resources.insert(first, resource);
+            }
+            for local in bindings {
+                let resource = ResourceId(local.0.clone());
+                self.resources.insert(local, resource);
+            }
         } else {
             for local in bindings {
-                self.resources
-                    .insert(local.clone(), ResourceId(local.0.clone()));
+                let resource = ResourceId(local.0.clone());
+                self.resources.insert(local, resource);
             }
         }
     }
