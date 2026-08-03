@@ -904,11 +904,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::If { cond, then_, else_ } => {
                     self.compile_if_stmt(cond, then_, else_, vars, true)?;
                 }
-                Stmt::IfLet { .. } => {
-                    return Err(CompileError::Generic(
-                        "if-let is not yet supported in native codegen; use a match                          expression or bind the value explicitly (E0700 family)"
-                            .to_string(),
-                    ));
+                Stmt::IfLet {
+                    pat,
+                    init,
+                    then_,
+                    else_,
+                } => {
+                    // C2 (audit-syntax): desugar to match (see compile_if_let_stmt).
+                    self.compile_if_let_stmt(pat, init, then_, else_, vars)?;
                 }
                 Stmt::Break(_) => {
                     self.compile_break_stmt()?;
@@ -1302,6 +1305,62 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Both branches returned; the merge block is unreachable.
             Ok(Some(then_val))
         }
+    }
+
+    /// C2 (audit-syntax 2026-08-03): native lowering for `if let`.
+    ///
+    /// `if let PAT = INIT { THEN } else { ELSE }` desugars to the match
+    /// expression
+    ///
+    /// ```text
+    /// match INIT {
+    ///     PAT => { THEN; () }
+    ///     _   => { ELSE; () }      // bare () when there is no else branch
+    /// }
+    /// ```
+    ///
+    /// Statement form discards the result; both arms are normalized to unit
+    /// (trailing `()` appended) so the merge phi is type-consistent regardless
+    /// of what the branch bodies evaluate to. Reuses the existing match
+    /// codegen (constructor/literal/wildcard dispatch) — no new pattern
+    /// machinery. Mirrors the bytecode VM and the checker, both of which
+    /// already support if-let.
+    pub(in crate::codegen) fn compile_if_let_stmt(
+        &mut self,
+        pat: &Pattern,
+        init: &Expr,
+        then_: &Block,
+        else_: &Option<Block>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        let meta = AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("codegen.if_let_lowering"));
+        let unit_tail = Stmt::Expr(Expr::Literal(Lit::Unit));
+        let mut then_body = then_.clone();
+        then_body.push(unit_tail.clone());
+        let else_body = match else_ {
+            Some(block) => {
+                let mut b = block.clone();
+                b.push(unit_tail);
+                Expr::Block(b)
+            }
+            None => Expr::Literal(Lit::Unit),
+        };
+        let arms = vec![
+            MatchArm {
+                meta,
+                pat: pat.clone(),
+                guard: None,
+                body: Expr::Block(then_body),
+            },
+            MatchArm {
+                meta,
+                pat: Pattern::new(meta, PatternKind::Wildcard),
+                guard: None,
+                body: else_body,
+            },
+        ];
+        self.compile_match_expr(init, &arms, vars)?;
+        Ok(())
     }
 
     /// Call @llvm.stacksave() to capture the current stack pointer for arena region management
@@ -1709,11 +1768,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         last_val = v;
                     }
                 }
-                Stmt::IfLet { .. } => {
-                    return Err(CompileError::Generic(
-                        "if-let is not yet supported in native codegen; use a match                          expression or bind the value explicitly (E0700 family)"
-                            .to_string(),
-                    ));
+                Stmt::IfLet {
+                    pat,
+                    init,
+                    then_,
+                    else_,
+                } => {
+                    // C2 (audit-syntax): desugar to match; if-let yields unit, so
+                    // it does not contribute to the block's last value.
+                    self.compile_if_let_stmt(pat, init, then_, else_, vars)?;
                 }
                 Stmt::Break(_) => {
                     self.compile_break_stmt()?;

@@ -134,15 +134,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
-        // v0.34.3: for-loop patterns. Tuple destructuring is handled by the
-        // checker; codegen currently binds a single identifier per iteration.
-        let var = var.single_var_name().ok_or_else(|| {
-            CompileError::Generic(
-                "for-loop tuple destructuring is not yet supported in codegen; \
-                 bind a single identifier and destructure in the body"
-                    .to_string(),
-            )
-        })?;
+        // v0.34.3: for-loop patterns. A tuple pattern is desugared to a
+        // single-element loop with a let-destructure at the top of the body:
+        // `for (k, v) in xs { B }` → `for __for_elem_N in xs { let (k, v) =
+        // __for_elem_N; B }` (let-tuple lowering already exists in codegen).
+        // C2 (audit-syntax 2026-08-03).
+        let var: &str = match var.single_var_name() {
+            Some(name) => name,
+            None => {
+                if matches!(var.kind, PatternKind::Tuple(_)) {
+                    let fresh = format!("__for_elem_{}", self.spawn_counter);
+                    self.spawn_counter += 1;
+                    let mut lowered_body: Block = Vec::with_capacity(body.len() + 1);
+                    lowered_body.push(Stmt::Let {
+                        pat: var.clone(),
+                        ty: None,
+                        init: Some(Expr::Ident(fresh.clone())),
+                        mut_: false,
+                        ref_: false,
+                    });
+                    lowered_body.extend(body.iter().cloned());
+                    return self.compile_for_stmt(
+                        &Pattern::new(var.meta, PatternKind::Variable(fresh)),
+                        iterable,
+                        &lowered_body,
+                        vars,
+                    );
+                }
+                return Err(CompileError::Generic(
+                    "for-loop pattern must be a single identifier or a tuple pattern".to_string(),
+                ));
+            }
+        };
 
         if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable.unlocated() {
             let start_val = self.compile_expr(start_expr, vars)?;
@@ -1042,6 +1065,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Fallback: parse infer_object_type result (e.g. "List<User>" -> User)
         let obj_type = self.infer_object_type(iterable, vars);
+        // C2 (audit-syntax 2026-08-03): use the tuple/generic-aware parser so
+        // tuple elements (`List<(string, i32)>`) resolve to Type::Tuple — the
+        // naive `Type::Name("(string, i32)")` broke for-loop tuple lowering.
+        if let Some(parsed) = crate::codegen::extract_list_elem_type(&obj_type) {
+            return Some(parsed);
+        }
         let inner = obj_type.strip_prefix("List<").map(|s| {
             let mut depth = 0u32;
             for (i, ch) in s.char_indices() {
