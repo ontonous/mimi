@@ -656,6 +656,11 @@ pub enum ResolveError {
     UnboundVar(u32),
     BindingCycle(u32),
     ResidualType(String),
+    /// H4 (audit-type 2026-08-03): a user-written type escape hatch (`_` /
+    /// `Infer` / `unknown`) survived to a finalization boundary instead of
+    /// being substituted at its let-init site. Distinct from generic residual
+    /// artifacts so the checker can surface E0431 instead of the generic E0200.
+    EscapeHatch(String),
 }
 
 impl std::fmt::Display for ResolveError {
@@ -667,6 +672,13 @@ impl std::fmt::Display for ResolveError {
                 write!(f, "cyclic binding for type variable T{}", id)
             }
             ResolveError::ResidualType(msg) => write!(f, "residual type: {}", msg),
+            ResolveError::EscapeHatch(msg) => {
+                write!(
+                    f,
+                    "type escape hatch leaked past inference boundary: {}",
+                    msg
+                )
+            }
         }
     }
 }
@@ -681,8 +693,8 @@ pub fn scan_residual(ty: &Type) -> Result<(), ResolveError> {
         Type::ForAll(_, _) => Err(ResolveError::ResidualType(
             "unresolved ForAll quantifier".into(),
         )),
-        Type::Infer => Err(ResolveError::ResidualType("Infer placeholder".into())),
-        Type::Name(name, _) if name == "_" || name == "unknown" => Err(ResolveError::ResidualType(
+        Type::Infer => Err(ResolveError::EscapeHatch("Infer placeholder".into())),
+        Type::Name(name, _) if name == "_" || name == "unknown" => Err(ResolveError::EscapeHatch(
             format!("non-final type name '{name}'"),
         )),
         Type::TyErr => Err(ResolveError::ResidualType(
@@ -941,10 +953,32 @@ mod tests {
     #[test]
     fn zonk_rejects_unknown_cascade_placeholder() {
         let mut table = UnificationTable::new();
+        // H4: `unknown` is an escape hatch, classified distinctly from generic
+        // residual artifacts.
         assert!(matches!(
             table.zonk(&Type::Name("unknown".into(), vec![])),
+            Err(ResolveError::EscapeHatch(_))
+        ));
+    }
+
+    #[test]
+    fn scan_residual_classifies_escape_hatches() {
+        // H4 (audit-type): `_` / Infer / unknown residuals surface as
+        // EscapeHatch so the checker emits E0431; TypeVar/ForAll/TyErr stay
+        // generic residuals (E0200).
+        assert!(matches!(
+            scan_residual(&Type::Infer),
+            Err(ResolveError::EscapeHatch(_))
+        ));
+        assert!(matches!(
+            scan_residual(&Type::Name("_".into(), vec![])),
+            Err(ResolveError::EscapeHatch(_))
+        ));
+        assert!(matches!(
+            scan_residual(&Type::TyErr),
             Err(ResolveError::ResidualType(_))
         ));
+        assert!(scan_residual(&i32_ty()).is_ok());
     }
 
     // ── 0.31.42: TyErr poison type tests ──

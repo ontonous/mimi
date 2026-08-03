@@ -944,3 +944,50 @@ func f(x: i32) -> i32 {
             .collect::<Vec<_>>()
     );
 }
+
+// ── H4 (audit-type 2026-08-03): E0431 escape-hatch emission contract ──
+
+#[test]
+fn h4_infer_return_type_escapes_with_e0431_not_e0200() {
+    // `_` / Infer surviving a function-signature finalization boundary is a
+    // type escape-hatch leak. It must surface as E0431, not the generic E0200
+    // TOOL-RESOLUTION-001 bucket, so tooling can distinguish escape leaks.
+    let src = r#"
+func f() -> _ { 5 }
+func main() -> i32 { f() }
+"#;
+    let diagnostics = check_source(src).expect_err("`_` return type must not finalize");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code.as_deref() == Some(crate::diagnostic::codes::E0431)),
+        "expected E0431 escape-hatch diagnostic, got: {:?}",
+        diagnostics
+            .iter()
+            .map(|d| (&d.code, &d.message))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !diagnostics.iter().any(
+            |d| d.code.as_deref() == Some(crate::diagnostic::codes::E0200)
+                && d.message.contains("did not finalize to a monotype")
+        ),
+        "escape-hatch residual must not be reported as generic E0200"
+    );
+}
+
+#[test]
+fn h4_let_init_underscore_is_sanctioned_and_passes() {
+    // `_` at a let-init position is the sanctioned inference boundary
+    // (init type substitutes). It must NOT trip E0431.
+    let src = r#"
+func main() -> i32 {
+    let x: _ = 5
+    x
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "let-init `_` is a valid inference boundary"
+    );
+}
