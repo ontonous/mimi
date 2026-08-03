@@ -108,6 +108,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::ClearFaultPc => "CLEAR_FAULT_PC",
         Op::FaultRetEarly => "FAULT_RET_EARLY",
         Op::ActorSpawn { .. } => "ACTOR_SPAWN",
+        Op::ActorSpawnDetached { .. } => "ACTOR_SPAWN_DETACHED",
         Op::FlowTransition { .. } => "FLOW_TRANSITION",
         Op::DynMethodCall { .. } => "DYN_METHOD_CALL",
         Op::SharedNew { .. } => "SHARED_NEW",
@@ -606,7 +607,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::Nop | Op::IeeeEnter | Op::IeeeExit => {
             format!("{:04}  {:<16}", pc, name)
         }
-        Op::ActorSpawn { rd, actor } => {
+        Op::ActorSpawn { rd, actor } | Op::ActorSpawnDetached { rd, actor } => {
             let a = proto
                 .constants
                 .get(*actor as usize)

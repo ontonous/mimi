@@ -739,7 +739,7 @@ fn builtin_spawn_detached(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     let name = args[0]
         .as_string()
         .ok_or_else(|| InterpError::new("spawn_detached expects a string"))?;
-    vm.spawn_actor(name)
+    vm.spawn_actor(name, true)
 }
 
 fn builtin_test_sandbox(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -749,7 +749,7 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
         if let Some(Value::List(actor_names)) = fields.get("actors") {
             for actor_val in actor_names {
                 if let Value::String(name) = actor_val {
-                    match vm.spawn_actor(name) {
+                    match vm.spawn_actor(name, false) {
                         Ok(_) => results.push(Value::String(format!("spawned:{}", name))),
                         Err(e) => results.push(Value::String(format!("failed:{}:{}", name, e))),
                     }

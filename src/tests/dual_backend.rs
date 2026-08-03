@@ -3767,6 +3767,33 @@ fn dual_cap_split_returns_tuple() {
     );
 }
 
+#[test]
+fn dual_cap_split_tuple_destructure() {
+    // 0.34.23 §12 capability：split 语义补齐（codegen 组件 register + tuple
+    // 构造）+ tuple 解构绑定（P1-10 catalog 与 Bind Move 资源 id 对齐）。
+    // 此前 `let (r, w) = c.split()` 双后端 check 失败（E0256：Move 用 source
+    // 资源 c 而 Drop(r) 查 r 资源）。
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        cap FileReadCap;
+        cap FileWriteCap;
+        cap FullAccess = FileReadCap + FileWriteCap;
+        func main() -> i32 {
+            let c = FullAccess;
+            let (r, w) = c.split();
+            drop(r);
+            drop(w);
+            println(42);
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
 // ─── 34.  合约 Contracts (4 tests) ─────────────────────────────
 
 #[test]

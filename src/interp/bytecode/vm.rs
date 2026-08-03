@@ -2461,7 +2461,19 @@ impl<'a> BytecodeVM<'a> {
                         ConstValue::Str(s) => s.clone(),
                         _ => return Err(InterpError::new("ActorSpawn: invalid actor name")),
                     };
-                    let val = self.spawn_actor(&actor_name)?;
+                    let val = self.spawn_actor(&actor_name, false)?;
+                    self.set_reg(rd, val);
+                }
+
+                Op::ActorSpawnDetached { rd, actor } => {
+                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
+                    let actor_name = match &proto.constants[actor as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => {
+                            return Err(InterpError::new("ActorSpawnDetached: invalid actor name"))
+                        }
+                    };
+                    let val = self.spawn_actor(&actor_name, true)?;
                     self.set_reg(rd, val);
                 }
 
@@ -3434,7 +3446,11 @@ impl<'a> BytecodeVM<'a> {
     /// Spawn an actor by name, reusing the ActorHandle infrastructure.
     /// The actor's worker thread uses BytecodeVM internally (v0.33 migration).
     /// Main program and actor workers both run on bytecode.
-    pub(crate) fn spawn_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
+    pub(crate) fn spawn_actor(
+        &mut self,
+        actor_name: &str,
+        detached: bool,
+    ) -> Result<Value, InterpError> {
         use crate::interp::value::{ActorHandle, ActorInstance};
         use std::collections::HashMap;
 
@@ -3535,7 +3551,7 @@ impl<'a> BytecodeVM<'a> {
                     Some(id)
                 }
             }),
-            is_detached: false,
+            is_detached: detached,
             producers: Vec::new(),
         };
 

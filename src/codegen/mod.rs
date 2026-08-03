@@ -166,6 +166,10 @@ pub struct CodeGenerator<'ctx> {
     type_llvm: HashMap<String, BasicTypeEnum<'ctx>>,
     cap_vars: Vec<HashMap<String, (inkwell::values::PointerValue<'ctx>, bool)>>,
     cap_type_names: std::collections::HashSet<String>,
+    /// Combined capability components: cap name → component names
+    /// (cap FullAccess = FileReadCap + FileWriteCap → [FileReadCap, FileWriteCap]).
+    /// Used by `c.split()` to materialize single-component cap handles.
+    cap_components: std::collections::HashMap<String, Vec<String>>,
     type_map: HashMap<String, crate::ast::Type>,
     func_defs: HashMap<String, FuncDef>,
     var_type_names: HashMap<String, String>,
@@ -483,6 +487,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             type_llvm: HashMap::new(),
             cap_vars: vec![HashMap::new()],
             cap_type_names: std::collections::HashSet::new(),
+            cap_components: std::collections::HashMap::new(),
             type_map: HashMap::new(),
             func_defs: HashMap::new(),
             var_type_names: HashMap::new(),

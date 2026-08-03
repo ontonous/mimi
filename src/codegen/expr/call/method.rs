@@ -102,10 +102,61 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // 1.7. Cap method dispatch: split() for capability types
         if self.cap_type_names.contains(&obj_type) && method_name == "split" {
-            // For now, return a dummy i64 value.
-            // The result is not used in current tests; a proper runtime
-            // mimi_cap_split function would be needed for real usage.
-            return Ok(self.context.i64_type().const_int(0, false).into());
+            // 0.34.23 §12 capability 决策：split 不再返回 dummy 0 —— 为每个
+            // 组件注册独立 cap handle（与 interp 的 Value::Cap 组件语义等价），
+            // 构造 tuple 返回。receiver 被消费（与 interp 一致）。
+            if let Expr::Ident(receiver_name) = obj.unlocated() {
+                self.consume_cap(receiver_name)?;
+            }
+            let components = self
+                .cap_components
+                .get(&obj_type)
+                .cloned()
+                .unwrap_or_else(|| vec![obj_type.clone()]);
+            let mut field_vals = Vec::new();
+            let mut field_tys = Vec::new();
+            if let Some(register_fn) = self.module.get_function("mimi_cap_register") {
+                for (i, component) in components.iter().enumerate() {
+                    let name_global = self
+                        .builder
+                        .build_global_string_ptr(
+                            &format!("{}\0", component),
+                            &format!("cap_split_{}_{}", obj_type, i),
+                        )
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("string global error: {}", e))
+                        })?;
+                    let name_ptr = name_global.as_pointer_value();
+                    let handle = self
+                        .builder
+                        .build_call(
+                            register_fn,
+                            &[BasicMetadataValueEnum::PointerValue(name_ptr)],
+                            &format!("cap_split_register_{}_{}", obj_type, i),
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("cap_register error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_cap_register returned void")?;
+                    field_vals.push(handle);
+                    field_tys.push(handle.get_type());
+                }
+            }
+            let struct_ty = self.context.struct_type(&field_tys, false);
+            self.tuple_type_stack.push(struct_ty);
+            let alloca = self.build_alloca(struct_ty, "cap_split_tuple")?;
+            for (i, val) in field_vals.iter().enumerate() {
+                let gep = self
+                    .gep()
+                    .build_struct_gep(struct_ty, alloca, i as u32, &format!("cap_split_{}", i))
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.build_store(gep, *val)?;
+            }
+            let loaded = self.build_load(
+                BasicTypeEnum::StructType(struct_ty),
+                alloca,
+                "cap_split_tuple_val",
+            )?;
+            return Ok(loaded);
         }
 
         // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
