@@ -2622,7 +2622,9 @@ impl BytecodeCompiler {
             return self.compile_short_circuit(fc, op, l, r);
         }
 
-        // Range operator: a..b → compile as Expr::Range (builds a list).
+        // Range operator: a..b is the BinOp::Range path (the Expr::Range AST
+        // variant no longer exists — 0.34.x). compile_range_loop materializes
+        // the range into a list value.
         if matches!(op, BinOp::Range) {
             let r_start = self.compile_expr(fc, l)?;
             let r_end = self.compile_expr(fc, r)?;

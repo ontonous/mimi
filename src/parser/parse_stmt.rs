@@ -14,6 +14,25 @@ impl Parser {
         stmt.with_meta(self.consumed_meta(start_pos, AstOrigin::User))
     }
 
+    /// M6 (audit-syntax 2026-08-03): lookahead for the abolished `delegate`
+    /// forms. Returns true only when the token immediately following the
+    /// current `delegate` token is `view`, `mutate`, or `consume` — the three
+    /// keywords of the clause-2-removed delegation syntax. A bare `delegate`
+    /// used as an identifier (`delegate()`, `delegate.field`) returns false so
+    /// the match guard falls through to the expression path.
+    fn delegate_followed_by_abolished_kw(&self) -> bool {
+        let next = self.pos + 1;
+        if next >= self.tokens.len() {
+            return false;
+        }
+        match &self.tokens[next].kind {
+            TokenKind::View | TokenKind::Mutate => true,
+            // `consume` was removed from the keyword table (softened to Ident).
+            TokenKind::Ident(s) => s == "consume",
+            _ => false,
+        }
+    }
+
     fn parse_stmt_kind(&mut self) -> Result<Stmt, ParseError> {
         match self.peek_kind() {
             TokenKind::Let | TokenKind::Const => self.parse_let(),
@@ -128,13 +147,21 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::Do(body))
             }
-            TokenKind::Ident(s) if s == "delegate" => {
+            TokenKind::Ident(s) if s == "delegate" && self.delegate_followed_by_abolished_kw() => {
                 // v0.34.1 / golden §1.1+§1.4: `delegate` abolished by amendment
                 // clause 2 (no nested Flow delegation) and removed from the
                 // keyword table (softened to an identifier, like subflow/consume,
                 // 89→80 keyword diet). It is still recognized in statement
                 // position to reject with a clause-referencing diagnostic
                 // (governance §9.2: every abolished syntax keeps a negative test).
+                //
+                // M6 (audit-syntax 2026-08-03): reject ONLY the abolished forms
+                // `delegate view|mutate|consume(...)`. A bare `delegate` used as
+                // a real identifier (e.g. `delegate()`, `delegate.x = 1`) must
+                // fall through to the expression path — the previous blanket
+                // rejection clobbered legitimate identifiers. The guard
+                // (delegate_followed_by_abolished_kw) keeps the clause-2
+                // negative tests green while freeing the identifier.
                 self.advance();
                 let tok = self.tokens[self.pos.saturating_sub(1)].clone();
                 return Err(ParseError::new(
@@ -164,10 +191,31 @@ impl Parser {
                     ));
                 }
                 self.expect(TokenKind::RParen, "`)`")?;
-                let var = if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
+                let var = if self.at(&TokenKind::PipeArrow) {
+                    // M8 (audit-syntax 2026-08-03): `|>` was abolished as a
+                    // separator by ADR-002; the pinned binder EBNF is
+                    // `[ '|' Ident '|' ]`. Reject explicitly instead of
+                    // silently accepting the zombie spelling.
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        "`|>` was abolished as a separator (ADR-002); pinned binder syntax is \
+                         `pinned(expr) | name | { ... }` (use `|`)",
+                        tok.line,
+                        tok.col,
+                    ));
+                } else if self.at(&TokenKind::BitOr) {
                     self.advance();
                     let v = self.expect_ident()?;
-                    if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
+                    if self.at(&TokenKind::PipeArrow) {
+                        let tok = self.peek();
+                        return Err(ParseError::new(
+                            "`|>` was abolished as a separator (ADR-002); pinned binder syntax is \
+                             `pinned(expr) | name | { ... }` (use `|`)",
+                            tok.line,
+                            tok.col,
+                        ));
+                    }
+                    if self.at(&TokenKind::BitOr) {
                         self.advance();
                     }
                     Some(v)
