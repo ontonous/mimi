@@ -99,6 +99,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // L6: claim a returned custom-enum payload box so the callee's
                     // scope-exit free skips it (caller re-registers via EnumBox).
                     self.claim_returned_enum_box(val, ret_type)?;
+                    // 0.34.24: same variant-layout coercion as the func.rs
+                    // emit_return path — returning a differently-laid Result/
+                    // Option variant (e.g. `return Err("…")` from
+                    // `Result<f64, string>`) without it emits a ret of the
+                    // wrong struct type (invalid IR → segfault at runtime).
+                    val = self.coerce_variant_value(
+                        val,
+                        ret_type,
+                        self.current_fn_ret_ty_ast.as_ref(),
+                    )?;
                     val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
@@ -1471,6 +1481,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // callee's scope-exit free skips it (caller re-registers
                     // via EnumBox). Mirrors the func.rs emit_return path.
                     self.claim_returned_enum_box(val, ret_type)?;
+                    // 0.34.24: variant-layout coercion (mirror of handler
+                    // above and func.rs emit_return) — see the comment there.
+                    val = self.coerce_variant_value(
+                        val,
+                        ret_type,
+                        self.current_fn_ret_ty_ast.as_ref(),
+                    )?;
                     val = self.load_return_value_if_needed(val)?;
                     self.flush_heap_scopes_to_boundary()?;
                     self.build_return(Some(&val))?;

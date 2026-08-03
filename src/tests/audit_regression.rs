@@ -1392,3 +1392,72 @@ func main() -> i32 { 0 }
 "#;
     check_source(src).expect("single-target fails transitions must still typecheck");
 }
+
+#[test]
+fn result_float_early_return_no_segfault_display_parity() {
+    // 0.34.24 session finding: `return Err("…")` from a `Result<f64, string>`
+    // function segfaulted on codegen. Root cause: block.rs `Stmt::Return`
+    // handlers lacked the `coerce_variant_value` step the func.rs emit_return
+    // path applies — the Err variant was built as {i1,i64,i64} and returned
+    // as-is from a function whose LLVM return type is {i1,double,i64} —
+    // invalid IR (ret type mismatch, dead coercion code after the ret) →
+    // garbage machine code → SIGSEGV (PC=0). Both backends must agree,
+    // including display ("Ok(5)"/"Err(neg)" — the io.rs Result display also
+    // gained the missing Float payload arm; pre-fix codegen printed "Ok(?)").
+    let src = r#"
+func half(x: f64) -> Result<f64, string> {
+    if x < 0.0 { return Err("neg") }
+    Ok(x / 2.0)
+}
+func main() -> i32 {
+    println(half(10.0))
+    println(half(0.0 - 3.0))
+    0
+}
+"#;
+    check_source(src).expect("Result<f64,string> early-return source must typecheck");
+    let (_, interp_stdout) = run_source_with_stdout(src);
+    assert_eq!(interp_stdout.trim(), "Ok(5)\nErr(neg)", "VM display");
+    let codegen_stdout =
+        compile_and_run(src).expect("codegen must not segfault on Result<f64,string> early return");
+    assert_eq!(
+        codegen_stdout.trim(),
+        "Ok(5)\nErr(neg)",
+        "codegen display parity"
+    );
+}
+
+#[test]
+fn result_float_early_return_ok_branch_value_correct() {
+    // Consuming the early-return Result via match: both backends must agree
+    // on the discriminant semantics (guards the coerce fix end-to-end).
+    let src = r#"
+func half(x: f64) -> Result<f64, string> {
+    if x < 0.0 { return Err("neg") }
+    Ok(x / 2.0)
+}
+func main() -> i32 {
+    let r = half(10.0)
+    match r {
+        Ok(v) => println(v),
+        Err(_) => println(0 - 1),
+    }
+    let e = half(0.0 - 4.0)
+    match e {
+        Ok(_) => println(0 - 2),
+        Err(_) => println(99),
+    }
+    0
+}
+"#;
+    // Note: binding the Err string payload (`Err(msg)`) is a separate
+    // pre-existing codegen lowering gap (heap-string payload misread,
+    // registered audit-codegen follow-up 2026-08-04 #2); this test pins the
+    // discriminant routing + Ok payload, which the coerce fix enables.
+    check_source(src).expect("Result<f64,string> match source must typecheck");
+    let (_, interp_stdout) = run_source_with_stdout(src);
+    assert_eq!(interp_stdout.trim(), "5\n99", "VM match semantics");
+    let codegen_stdout =
+        compile_and_run(src).expect("codegen must match VM on Result<f64,string> early return");
+    assert_eq!(codegen_stdout.trim(), "5\n99", "codegen match semantics");
+}
