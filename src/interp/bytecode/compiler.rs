@@ -2981,11 +2981,27 @@ impl BytecodeCompiler {
         let rd = fc.proto.alloc_reg();
 
         if let Expr::Ident(name) = callee.unlocated() {
-            // Resolution order (matches tree-walker scoping):
-            // 1. User functions (top-level named functions)
-            // 2. Local variables (closures bound via let)
+            // Resolution order (matches checker scoping — simple.rs checks
+            // scopes before the global function directory, so local
+            // function-value bindings shadow same-named globals):
+            // 1. Local variables (let-bound closures / function-value params)
+            // 2. User functions (top-level named functions)
             // 3. Builtins
             // 4. Variant constructors
+            //
+            // C3 (audit-type 2026-08-03): func_table was consulted FIRST — a
+            // user global `func f(...)` hijacked calls to same-named
+            // function-value parameters (`compose(f, g)` body `f(g(x))`
+            // resolved to the user global), diverging from the checker.
+            if let Some(callee_reg) = fc.lookup_var(name) {
+                fc.emit(Op::CallIndirect {
+                    rd,
+                    callee: callee_reg,
+                    args_base,
+                    argc: effective_args.len() as u16,
+                });
+                return Ok(rd);
+            }
             if let Some(&fidx) = self.func_table.get(name.as_str()) {
                 let proto = &self.functions[fidx as usize];
                 let mut targets: Vec<Reg> = Vec::new();
@@ -3065,16 +3081,6 @@ impl BytecodeCompiler {
                 fc.emit(Op::Call {
                     rd,
                     func: fidx,
-                    args_base,
-                    argc: effective_args.len() as u16,
-                });
-                return Ok(rd);
-            }
-            // Local variable holding a closure (shadows builtins).
-            if let Some(callee_reg) = fc.lookup_var(name) {
-                fc.emit(Op::CallIndirect {
-                    rd,
-                    callee: callee_reg,
                     args_base,
                     argc: effective_args.len() as u16,
                 });

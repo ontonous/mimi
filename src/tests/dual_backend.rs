@@ -3119,6 +3119,32 @@ fn dual_generic_linear_container_allowed() {
 }
 
 #[test]
+fn dual_local_func_param_shadows_global_dual_backend() {
+    // C3 (audit-type 2026-08-03): a user global function named `f`/`g` used to
+    // clobber same-named function-value PARAMETERS — prelude higher-order
+    // helpers (`compose`/`pipe`/`apply` declare `f`/`g` params) resolved their
+    // body calls `f(g(x))` to the user global, rejecting whole files with
+    // TOOL-RESOLUTION-001 (resolved IR) and diverging at runtime (bytecode VM).
+    // The checker scopes locals first (simple.rs); lowering + bytecode now do
+    // the same, so all three paths agree on local-closure resolution.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func f(x: i32) -> i32 { x * 10 }
+        func apply2<T, U>(v: T, f: func(T) -> U) -> U { f(v) }
+        func main() -> i32 {
+            println(apply2(5, fn(x: i32) -> i32 { x + 1 }))
+            println(f(5))
+            0
+        }
+        "#,
+        "6\n50"
+    );
+}
+
+#[test]
 fn dual_generic_nested_type() {
     if !can_link() {
         return;
