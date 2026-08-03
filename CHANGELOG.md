@@ -2,6 +2,28 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.24 审计战役（/tmp/opencode/audit-{codegen,flow,type,syntax}.md 四份报告驱动）
+
+**CRITICAL 全部闭环**：
+- **audit-codegen C1**：multi-target turn 标签 + box 尺寸修复。
+- **audit-type C1**：Any 移除后 stdlib Set dispatch 前置豁免。
+- **audit-type C2**：turbofish 显式实例化绕过 E0432 线性逃逸封堵（`infer_turbofish` 补线性检查）。
+- **audit-type C3**：prelude `f`/`g` 高阶参数被用户同名全局函数遮蔽误拒整文件——resolved lowering + bytecode 解析顺序对齐 checker（local 优先）。
+- **audit-syntax C1**：`quote!` 内 `if let` 静默丢弃导致 E0800 栈下溢 → 编译期干净拒绝。
+- **audit-syntax C2**：`if let` / `for (k, v)` 解构 native codegen 落地（desugar 到 match / let-tuple），L1 双后端目标测试 un-ignore。
+
+**HIGH**：
+- **audit-flow H3**：单组件 cap split 双后端分歧 → check 期 E0221 统一拒绝。
+- **audit-codegen H2**：fallible 转移上下文泄漏进逃逸 lambda → 错型 fault return UB 消除。
+- **audit-codegen H3/H1**：fault return 路径堆清理（valgrind 0 泄漏）+ 非穷尽 match 吸收对齐。
+- **audit-codegen H4**：persistent 字段 Fault shadow 双后端分歧修复。
+- **audit-codegen H5**：`unsafe_cast_protocol` 非 record ICE → E0713。
+- **audit-type H4**：E0431 自分配后从未发射 → finalize 边界逃逸泄漏（`_`/Infer/unknown 残基）现发射 E0431（ResolveError::EscapeHatch 变分码），let-init `_` 合法边界不变。
+- **audit-type H2**：容器线性逃逸封堵——`List/Option/Map<cap>` 禁止穿越泛型边界（E0432，表面类型深度线性化）；具体签名容器参数 CFG 整体视为线性，必须整体消费（E0256，valgrind 实证 drop 后 0 泄漏）。旧"容器放行"豁免被证明是 exactly-once 逃逸，契约测试翻转 + §2.3 注释与 AGENTS.md 诚实改写；元素级消费（match/for）为既有分析缺口，fail-closed 而非静默泄漏。
+- **audit-type H3**（文档）：0.34.19 切片 G 名实更正——测试契约改判而非 checker 变严，"CHECKER-GAP 归零"表述修正；0.34.21 容器放行判定标注推翻。
+
+**附带**：release 构建断链修复（`consumed_resources` cfg 门禁误加）。
+
 ## [0.1.3] — 2026-08-02
 
 ### Codegen O1 优化全量回归修复（MIMI_OPT=1 双后端全绿）
