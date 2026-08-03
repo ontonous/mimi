@@ -187,9 +187,13 @@ func process() -> i32 {
 
 parasteps 提供结构化并发保证：
 
-- 所有子任务在块退出前完成（或被取消）
-- 任一子任务失败时，取消其余子任务
-- 子任务的 `on failure` 先独立执行
+- 所有 spawn 子任务在块退出前 join（隐式 await）
+- 非 spawn 语句顺序执行
+- **无失败取消语义**（v1.0）：`on failure` 按 0.34.17 Fault 范围收缩独立执行，但任一子任务失败**不会**取消其余子任务——它们正常 join 完成
+
+> 0.34.23 §12 决策：README 旧版宣称的"任一失败取消其余子任务"未实现且不承诺，
+> v1.0 移除。interp（`mimi run`）当前顺序执行 spawn（降级求值，结果等价）；
+> codegen（`mimi build`）对 spawn 起真线程。并行化确定性语义 post-1.0 评估。
 
 ```mimi
 func process() -> Result<i32, string> {
@@ -219,6 +223,10 @@ parasteps "同时加载用户数据" {
     await (profile, orders)
 }
 ```
+
+> **注意**：带字符串标签的形态是规划语法，v1.0 parser 尚不支持（只接受
+> `parasteps { ... }`）。0.34.23 §12 决策：标签语法不进入 1.0，保持无标签
+> 形态。
 
 ---
 

@@ -4099,10 +4099,9 @@ fn dual_numeric_coercion_i64_f64_mul() {
 // v1.0 concurrency model:
 // - spawn uses mimi_spawn_future (real thread) + mimi_await_future (spin-wait)
 // - parasteps: same mechanism, tracked via parasteps_future_ptrs
-// - Actor spawn is interpreter-only
-//
-// Known gaps documented in AGENTS.mimi.md §12:
-// - Actor spawn not supported in codegen
+// - Actor spawn is dual-backend (codegen/actors.rs + runtime/actor.rs),
+//   covered by the dual_actor_* tests below.
+// 0.34.23 §12: stale "interpreter-only" notes removed.
 
 #[test]
 fn dual_parasteps_no_spawn() {
