@@ -1367,8 +1367,16 @@ impl<'a> Checker<'a> {
                         // Re-check value with expected type so empty lists (and other
                         // context-sensitive literals) inherit the variable's element type.
                         value_ty = self.check_expr(&target_ty, value, scopes);
+                        // C2 (audit 2026-08-03): mirror the annotated-let coercion
+                        // (line ~688) on assignment — the 0.34.6 one-way numeric
+                        // widening {i32→i64, i32→f64, i64→f64} applies to
+                        // `z = 3` where z: f64 just as it does to `let z: f64 = 3`.
+                        // Without it the checker rejects (E0209) what both backends
+                        // would otherwise execute, and the VM value-layer widening
+                        // fix is unreachable for user code.
+                        let coerced = is_numeric_coercion(&target_ty, &value_ty);
                         // C2: use unification for assignment type checking
-                        if self.unification.unify(&target_ty, &value_ty).is_err() {
+                        if !coerced && self.unification.unify(&target_ty, &value_ty).is_err() {
                             self.errors.push(
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0209,

@@ -4094,6 +4094,59 @@ fn dual_numeric_coercion_i64_f64_mul() {
     );
 }
 
+#[test]
+fn dual_big_int_literal_f64_value_preserved() {
+    // C2 (audit 2026-08-03): L1 — an integer literal outside the i32 range
+    // must NOT be truncated by codegen. `let x: f64 = 9007199254740993`
+    // previously compiled to `store double 1.0` (literal lowered against the
+    // i32 canonical type: 9007199254740993 mod 2^32 == 1) while the bytecode
+    // VM kept the full i64 value — a silent L1 divergence with exit=0.
+    // Fix: value-aware literal typing (out-of-range → i64) + value-layer
+    // widening in the VM. Both backends now round to the same f64
+    // (2^53, the nearest double — f64 cannot represent 2^53+1 exactly).
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x: f64 = 9007199254740993
+            if x > 9007199254740992.0 { println("big") } else { println("small") }
+            let y: i64 = 9007199254740993
+            if y > 9007199254740992 { println("y big") } else { println("y small") }
+            0
+        }
+    "#,
+        "small\ny big"
+    );
+}
+
+#[test]
+fn dual_annotated_f64_let_materializes_float() {
+    // C2 (audit 2026-08-03): `let x: f64 = 1` must bind a Float VALUE, not an
+    // Int — the 0.34.6 one-way widening was checker-only; the bytecode VM
+    // stored the raw Int and later Float arithmetic crashed with E0800
+    // ("expected Float, got 1") while codegen produced a double.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x: f64 = 1
+            let r = if x > 0.5 { 7 } else { 3 }
+            println(r)
+            let mut z: f64 = 2
+            z = 3
+            let r2 = if z > 2.5 { 9 } else { 4 }
+            println(r2)
+            0
+        }
+    "#,
+        "7\n9"
+    );
+}
+
 // ===== Stage 4: Concurrency — dual-backend equivalence tests =====
 //
 // v1.0 concurrency model:
@@ -14467,3 +14520,4 @@ fn dual_mutate_param_multiple_calls() {
         "3"
     );
 }
+

@@ -53,17 +53,23 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let fault_val = self.build_fault_record(&last_state, &unexpected_event)?;
 
-        // Tag = sorted ordinal of "Fault" among the multi-target states (must
-        // match register_flow_multi_target_enums variant ordering, same rule as
-        // the normal multi-target return path in func.rs/block.rs).
-        let mut sorted = self.multi_target_states.clone();
-        sorted.sort();
-        let tag = sorted.iter().position(|s| s == "Fault").ok_or_else(|| {
-            CompileError::LlvmError(
-                "emit_panic_fault_return: 'Fault' is not a multi-target of this transition"
-                    .to_string(),
-            )
-        })? as u64;
+        // C1 fix: tag = 'Fault' ordinal in the flow-wide name-sorted
+        // __MultiTarget enum (must match register_flow_multi_target_enums
+        // variant ordering, same rule as the normal multi-target return path
+        // in func.rs/block.rs). The per-transition subset ordinal would
+        // silently alias another state when the transition's target set is a
+        // proper subset of the flow union.
+        let tag = self
+            .multi_target_global_ordinals
+            .get(&self.current_flow_name)
+            .and_then(|m| m.get("Fault"))
+            .copied()
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "emit_panic_fault_return: 'Fault' has no global multi-target ordinal (flow: {:?})",
+                    self.current_flow_name
+                ))
+            })?;
         let fault_ty = self.type_llvm.get("Fault").copied();
 
         let union_val = self.wrap_multi_target_value(fault_val, tag, fault_ty)?;

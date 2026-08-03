@@ -1098,7 +1098,7 @@ impl BytecodeCompiler {
                     }
                 }
                 Stmt::Let {
-                    pat, init, mut_, ..
+                    pat, init, ty, mut_, ..
                 } => {
                     if let Some(init_expr) = init {
                         // Detect borrow: let x = &mut place / &place.
@@ -1110,10 +1110,36 @@ impl BytecodeCompiler {
                                 fc.borrow_aliases.insert(name.clone(), *place.clone());
                             }
                         }
-                        let r = self.compile_expr(fc, init_expr)?;
+                        let mut r = self.compile_expr(fc, init_expr)?;
+                        // C2 fix (audit 2026-08-03): materialize the 0.34.6
+                        // one-way numeric widening {i32→i64, i32→f64, i64→f64}
+                        // at the VALUE layer for annotated lets. `let x: f64 =
+                        // 1` compiles the literal as Int; without a conversion
+                        // the binding holds an Int and later Float arithmetic /
+                        // comparisons crash with E0800 ("expected Float, got
+                        // <int>") while codegen produces a double — an L1
+                        // divergence. (Explicit `as f64` already emits
+                        // IntToFloat in the Cast path.)
+                        let mut coerced_to_float = false;
+                        if let Some(decl_ty) = ty {
+                            let want_float = matches!(
+                                decl_ty.unlocated(),
+                                Type::Name(n, _) if n == "f64" || n == "f32"
+                            );
+                            if want_float && self.infer_expr_type(fc, init_expr) == VarType::Int {
+                                let rd = fc.proto.alloc_reg();
+                                fc.emit(Op::IntToFloat { rd, ra: r });
+                                r = rd;
+                                coerced_to_float = true;
+                            }
+                        }
                         // Track variable type for int/float dispatch.
                         if let PatternKind::Variable(name) = &pat.kind {
-                            let ty = self.infer_expr_type(fc, init_expr);
+                            let ty = if coerced_to_float {
+                                VarType::Float
+                            } else {
+                                self.infer_expr_type(fc, init_expr)
+                            };
                             fc.set_reg_type(name, ty);
                             fc.set_var_mut(name, *mut_);
                             // Copy to a new register so subsequent mutation of the
@@ -4412,10 +4438,24 @@ impl BytecodeCompiler {
                         }
                     }
                 }
-                let r_val = self.compile_expr(fc, value)?;
+                let mut r_val = self.compile_expr(fc, value)?;
                 let r_var = fc.get_or_bind(name);
+                // C2 fix (audit 2026-08-03): value-layer numeric widening on
+                // assignment too — `x = 1` where x is an f64 binding must
+                // produce a Float value, mirroring the annotated-let fix.
+                if fc.reg_is_float(name)
+                    && self.infer_expr_type(fc, value) == VarType::Int
+                {
+                    let rd = fc.proto.alloc_reg();
+                    fc.emit(Op::IntToFloat { rd, ra: r_val });
+                    r_val = rd;
+                }
                 // Track type for int/float dispatch.
-                let ty = self.infer_expr_type(fc, value);
+                let ty = if fc.reg_is_float(name) {
+                    VarType::Float
+                } else {
+                    self.infer_expr_type(fc, value)
+                };
                 fc.set_reg_type(name, ty);
                 if r_val != r_var {
                     fc.emit(Op::Mov {
