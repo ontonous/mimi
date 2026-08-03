@@ -368,6 +368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     || Self::type_references_generic(ret, generic_name)
             }
             Type::Cap(_)
+            | Type::CapAtom(_)
             | Type::Nothing
             | Type::Allocator
             | Type::Infer

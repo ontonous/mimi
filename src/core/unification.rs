@@ -344,6 +344,7 @@ impl UnificationTable {
             | Type::Allocator
             | Type::RawString
             | Type::Cap(_)
+            | Type::CapAtom(_)
             | Type::ImplTrait(_)
             | Type::DynTrait(_)
             | Type::TyErr => ty.clone(),
@@ -603,7 +604,10 @@ impl UnificationTable {
             (Type::Nothing, Type::Nothing)
             | (Type::Allocator, Type::Allocator)
             | (Type::RawString, Type::RawString) => Ok(()),
-            (Type::Cap(a), Type::Cap(b)) => {
+            (Type::Cap(a), Type::Cap(b))
+            | (Type::CapAtom(a), Type::CapAtom(b))
+            | (Type::CapAtom(a), Type::Cap(b))
+            | (Type::Cap(a), Type::CapAtom(b)) => {
                 if a == b {
                     Ok(())
                 } else {

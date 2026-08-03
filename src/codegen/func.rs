@@ -1476,7 +1476,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.register_list_elem_type(&param.name, &resolved);
 
                 // Track capability parameters
-                if matches!(param.ty.unlocated(), Type::Cap(_)) {
+                if matches!(param.ty.unlocated(), Type::Cap(_) | Type::CapAtom(_)) {
                     self.register_cap(&param.name, alloca);
                 }
             }
@@ -1761,7 +1761,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let dyn_type_str = crate::core::fmt_type(ty_ref);
                         self.var_type_names.insert(name.clone(), dyn_type_str);
                         vars.insert(name.clone(), (fat_alloca, fat_ty));
-                        if let Some(Type::Cap(_)) = ty.as_ref().map(Type::unlocated) {
+                        if let Some(Type::Cap(_) | Type::CapAtom(_)) =
+                            ty.as_ref().map(Type::unlocated)
+                        {
                             self.register_cap(&name, fat_alloca);
                         }
                         continue;
@@ -2250,7 +2252,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_list_elem_type(name, decl_ty);
                         }
                         // Track capability variables
-                        if let Some(Type::Cap(_)) = ty.as_ref().map(Type::unlocated) {
+                        if let Some(Type::Cap(_) | Type::CapAtom(_)) =
+                            ty.as_ref().map(Type::unlocated)
+                        {
                             if let Some(&(alloca, _)) = vars.get(name) {
                                 self.register_cap(name, alloca);
                             }

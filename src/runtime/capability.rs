@@ -51,6 +51,20 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
     })
 }
 
+/// H4 (audit 2026-08-03): release a capability handle. `mimi_cap_register`
+/// only ever appended to CAP_TABLE and `mimi_cap_consume` only flips a flag —
+/// entries never left the table, so `c.split()` inside a loop grew the
+/// registry linearly while the bytecode VM (pure Value::Cap, no runtime
+/// registry) stayed flat: a silent codegen-only memory leak. drop() now
+/// removes the entry entirely; a dropped handle fails any later check.
+#[no_mangle]
+pub extern "C" fn mimi_cap_drop(cap: i64) {
+    CAP_TABLE.with(|table| {
+        let mut state = table.lock().unwrap_or_else(|e| e.into_inner());
+        state.entries.retain(|e| e.id != cap);
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> bool {
     let n = if name.is_null() {

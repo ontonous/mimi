@@ -59,7 +59,7 @@ impl<'a> Checker<'a> {
             ),
             // T-7 (0.31.50): recurse into ownership wrapper inner types so that
             // type aliases inside wrappers are resolved (e.g. Shared<MyAlias>).
-            Type::Cap(_) => ty.clone(),
+            Type::Cap(_) | Type::CapAtom(_) => ty.clone(),
             Type::Shared(inner) => Type::Shared(Box::new(self.resolve_type(inner))),
             Type::LocalShared(inner) => Type::LocalShared(Box::new(self.resolve_type(inner))),
             Type::Weak(inner) => Type::Weak(Box::new(self.resolve_type(inner))),
@@ -117,7 +117,7 @@ impl<'a> Checker<'a> {
                     ))
             }
             // Capabilities
-            Type::Cap(_) => true,
+            Type::Cap(_) | Type::CapAtom(_) => true,
             // Raw pointers and FFI passport types
             Type::RawPtr(_)
             | Type::RawPtrMut(_)
@@ -338,7 +338,12 @@ impl<'a> Checker<'a> {
                 }
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
-            Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer | Type::TyErr => {}
+            Type::Cap(_)
+            | Type::CapAtom(_)
+            | Type::Nothing
+            | Type::Allocator
+            | Type::Infer
+            | Type::TyErr => {}
             Type::Array(inner, _) | Type::Slice(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
@@ -408,7 +413,12 @@ impl<'a> Checker<'a> {
             }
             Type::CBuffer(inner) => Self::type_contains_passport(inner),
             Type::Newtype(_, inner) => Self::type_contains_passport(inner),
-            Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer | Type::TyErr => false,
+            Type::Cap(_)
+            | Type::CapAtom(_)
+            | Type::Nothing
+            | Type::Allocator
+            | Type::Infer
+            | Type::TyErr => false,
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
             Type::TypeVar(_) => false,

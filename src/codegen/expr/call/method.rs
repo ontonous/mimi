@@ -106,6 +106,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             // 组件注册独立 cap handle（与 interp 的 Value::Cap 组件语义等价），
             // 构造 tuple 返回。receiver 被消费（与 interp 一致）。
             if let Expr::Ident(receiver_name) = obj.unlocated() {
+                // H4 (audit 2026-08-03): the consumed receiver's runtime handle
+                // must be released — the split components get their own fresh
+                // handles, so keeping the original in CAP_TABLE leaks one entry
+                // per split (loop-invariant: bytecode VM has no registry).
+                if let Some(drop_fn) = self.module.get_function("mimi_cap_drop") {
+                    if let Some((alloca, _)) = vars.get(receiver_name) {
+                        let handle = self
+                            .build_load(self.context.i64_type(), *alloca, "cap_split_old_handle")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!(
+                                    "cap split old-handle load error: {}",
+                                    e
+                                ))
+                            })?;
+                        let _ = self.builder.build_call(
+                            drop_fn,
+                            &[handle.into()],
+                            "cap_split_old_drop",
+                        );
+                    }
+                }
                 self.consume_cap(receiver_name)?;
             }
             let components = self

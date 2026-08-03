@@ -409,7 +409,7 @@ impl<'a> Checker<'a> {
     /// shared/borrow wrapping of linear types.
     pub(crate) fn is_linear_surface_type(&self, ty: &crate::ast::Type) -> bool {
         match ty.unlocated() {
-            crate::ast::Type::Cap(_) => true,
+            crate::ast::Type::Cap(_) | crate::ast::Type::CapAtom(_) => true,
             crate::ast::Type::Name(name, args) => {
                 self.flow_state_type_names.contains(name)
                     || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())

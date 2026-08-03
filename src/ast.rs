@@ -838,6 +838,12 @@ pub enum Type {
     CBuffer(Box<Type>),
     /// Capability type for linear capabilities
     Cap(String),
+    /// Atomic capability component produced by `combined.split()` — cannot be
+    /// split again (H5, audit 2026-08-03). Distinct from `Cap` so the checker
+    /// can reject nested splits at compile time instead of diverging between
+    /// the bytecode VM (runtime E0800) and codegen (E0700 on the opaque i64
+    /// handle).
+    CapAtom(String),
     /// Shared ownership (atomic refcount, thread-safe)
     Shared(Box<Type>),
     /// Local shared ownership (non-atomic, single-thread)
@@ -955,6 +961,7 @@ impl Type {
             ),
             Type::CBuffer(inner) => Type::CBuffer(Box::new((*inner).deep_reorigin(meta))),
             Type::Cap(name) => Type::Cap(name),
+            Type::CapAtom(name) => Type::CapAtom(name),
             Type::Shared(inner) => Type::Shared(Box::new((*inner).deep_reorigin(meta))),
             Type::LocalShared(inner) => Type::LocalShared(Box::new((*inner).deep_reorigin(meta))),
             Type::Weak(inner) => Type::Weak(Box::new((*inner).deep_reorigin(meta))),
@@ -1047,6 +1054,7 @@ impl PartialEq for Type {
                 a_args == b_args && a_ret == b_ret
             }
             (Cap(a), Cap(b)) => a == b,
+            (CapAtom(a), CapAtom(b)) => a == b,
             (Newtype(a_name, a), Newtype(b_name, b)) => a_name == b_name && a == b,
             (Nothing, Nothing)
             | (Allocator, Allocator)
