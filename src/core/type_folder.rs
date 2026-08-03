@@ -47,6 +47,7 @@ pub fn type_any(ty: &Type, pred: &dyn Fn(&Type) -> bool) -> bool {
         | Type::Allocator
         | Type::RawString
         | Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => false,
@@ -107,6 +108,7 @@ pub fn type_try_visit<E>(ty: &Type, pred: &dyn Fn(&Type) -> Result<(), E>) -> Re
         | Type::Allocator
         | Type::RawString
         | Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => Ok(()),
@@ -222,6 +224,7 @@ pub fn walk_type(ty: Type, folder: &mut dyn TypeFolder) -> Type {
         | Type::Allocator
         | Type::RawString
         | Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => folder.fold_leaf(ty),

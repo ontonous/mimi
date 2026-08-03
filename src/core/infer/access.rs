@@ -93,6 +93,7 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: u32) -> Typ
         | Type::Allocator
         | Type::RawString
         | Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => ty.clone(),

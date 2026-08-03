@@ -728,6 +728,7 @@ impl ResolvedTypeTable {
                 ResolvedType::CBuffer(self.intern_type(inner, capabilities, resolve_name)?)
             }
             Type::Cap(name) => ResolvedType::Capability(resolve_nominal(name, resolve_name)?),
+            Type::CapAtom(name) => ResolvedType::Capability(resolve_nominal(name, resolve_name)?),
             Type::Shared(inner)
             | Type::LocalShared(inner)
             | Type::Weak(inner)

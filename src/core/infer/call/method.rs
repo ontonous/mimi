@@ -114,9 +114,36 @@ impl<'a> Checker<'a> {
         // Interp: Value::Cap(components); split() → Tuple of single-component
         // caps, drop() → unit. Checker mirrors the component count from the
         // cap declaration (0.34.19 CHECKER-GAP: aliases were unresolved).
-        if let Type::Cap(cap_name) = obj_ty.unlocated() {
+        //
+        // H5 (audit 2026-08-03): split components are ATOMIC — `Type::CapAtom`.
+        // Previously the checker returned `Type::Cap(component)` and happily
+        // re-expanded a split-out component (`ab.split()` where ab = A+B) while
+        // the bytecode VM rejected it at runtime (E0800: single-component cap)
+        // and codegen rejected it at compile time with a misleading E0700
+        // ("method 'split' not compiled for type 'i64'" — the component had
+        // degraded to an opaque handle). Three paths, three behaviors. Now the
+        // checker rejects nested split on CapAtom, so run and build agree at
+        // check time; the VM's E0800 stays as a defensive runtime guard.
+        let cap_atom = matches!(obj_ty.unlocated(), Type::CapAtom(_));
+        if let Type::Cap(cap_name) | Type::CapAtom(cap_name) = obj_ty.unlocated() {
             match method_name {
                 "split" => {
+                    if cap_atom {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0221,
+                                format!(
+                                    "capability '{}' is a split component and cannot be split again",
+                                    cap_name
+                                ),
+                                self.diagnostic_span(),
+                            )
+                            .with_help(
+                                "split() applies to a combined capability (e.g., cap FullAccess = Read + Write)",
+                            ),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
                     let components = self
                         .cap_components
                         .get(cap_name)
@@ -124,7 +151,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| vec![cap_name.clone()]);
                     let parts: Vec<Type> = components
                         .iter()
-                        .map(|component| Type::Cap(component.clone()))
+                        .map(|component| Type::CapAtom(component.clone()))
                         .collect();
                     return Type::Tuple(parts);
                 }

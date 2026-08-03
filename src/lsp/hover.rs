@@ -614,6 +614,7 @@ impl LspServer {
             Type::DynTrait(ts) => format!("dyn {}", ts.join(" + ")),
             Type::RawString => "RawString".to_string(),
             Type::Cap(name) => format!("cap {}", name),
+            Type::CapAtom(name) => format!("cap {}", name),
             Type::CBuffer(inner) => format!("CBuffer<{}>", Self::type_display(inner)),
             Type::Nothing => "!".to_string(),
             Type::TyErr => "«error»".to_string(),

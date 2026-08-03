@@ -273,6 +273,7 @@ fn contains_dynamic_type(ty: &Type) -> bool {
         | Type::Allocator
         | Type::RawString
         | Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => false,

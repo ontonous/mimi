@@ -3460,7 +3460,7 @@ pub(crate) fn type_kind(ty: &Type) -> &'static str {
         Type::Func(_, _) => "type.function",
         Type::ExternFunc(_, _) => "type.extern_function",
         Type::CBuffer(_) => "type.c_buffer",
-        Type::Cap(_) => "type.capability",
+        Type::Cap(_) | Type::CapAtom(_) => "type.capability",
         Type::Shared(_) => "type.shared",
         Type::LocalShared(_) => "type.local_shared",
         Type::Weak(_) => "type.weak",
@@ -3626,6 +3626,7 @@ fn collect_type_meta(
             );
         }
         Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::Nothing
         | Type::Allocator
         | Type::ImplTrait(_)

@@ -394,7 +394,7 @@ impl FfiArgContract {
                     }
                 }
             }
-            Type::Cap(_) => FfiArgContract::Cap(CapMode::Move),
+            Type::Cap(_) | Type::CapAtom(_) => FfiArgContract::Cap(CapMode::Move),
             Type::RawPtr(inner) => FfiArgContract::RawPtr(inner.clone()),
             Type::RawPtrMut(inner) => FfiArgContract::RawPtrMut(inner.clone()),
             Type::CShared(inner) => FfiArgContract::CShared(inner.clone()),

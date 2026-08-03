@@ -107,6 +107,7 @@ fn occurs_check(name: &str, ty: &Type, _generics: &[GenericParam]) -> bool {
         Type::Array(inner, _) => occurs_check(name, inner, _generics),
         Type::Slice(inner) => occurs_check(name, inner, _generics),
         Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::Nothing
         | Type::RawString
         | Type::Allocator
@@ -201,6 +202,7 @@ pub fn subst_type_params(
             Box::new(subst_type_params(inner, generics, type_map)),
         ),
         Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::Nothing
         | Type::RawString
         | Type::Allocator
@@ -285,6 +287,7 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
                 && same_type(a_ret, b_ret)
         }
         (Type::Cap(a), Type::Cap(b)) => a == b,
+        (Type::CapAtom(a), Type::CapAtom(b)) => a == b,
         (Type::Shared(a), Type::Shared(b)) => same_type(a, b),
         (Type::LocalShared(a), Type::LocalShared(b)) => same_type(a, b),
         (Type::Weak(a), Type::Weak(b)) => same_type(a, b),
@@ -543,6 +546,7 @@ pub fn fmt_type(t: &Type) -> String {
             fmt_type(ret)
         ),
         Type::Cap(name) => format!("cap {}", name),
+        Type::CapAtom(name) => format!("cap {}", name),
         Type::Shared(inner) => format!("shared {}", fmt_type(inner)),
         Type::LocalShared(inner) => format!("local_shared {}", fmt_type(inner)),
         Type::Weak(inner) => format!("weak {}", fmt_type(inner)),

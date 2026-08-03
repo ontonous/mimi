@@ -804,6 +804,7 @@ fn remap_type_spans(ty: &mut Type, remap: &SourceIdRemap) -> Result<(), String> 
             remap_type_spans(ret, remap)
         }
         Type::Cap(_)
+        | Type::CapAtom(_)
         | Type::Nothing
         | Type::Allocator
         | Type::ImplTrait(_)
@@ -1457,6 +1458,7 @@ mod tests {
                 collect_type_source_ids(ret, source_ids);
             }
             Type::Cap(_)
+            | Type::CapAtom(_)
             | Type::Nothing
             | Type::Allocator
             | Type::ImplTrait(_)

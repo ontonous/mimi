@@ -392,7 +392,7 @@ impl CHeaderGenerator {
                 format!("{}*", inner_type)
             }
             Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => "MimiHandle".to_string(),
-            Type::Cap(_) => "MimiCap".to_string(),
+            Type::Cap(_) | Type::CapAtom(_) => "MimiCap".to_string(),
             Type::RawString => "char*".to_string(),
             Type::Infer => "void".to_string(),
             Type::Shared(inner) | Type::LocalShared(inner) => {

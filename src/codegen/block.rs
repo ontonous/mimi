@@ -657,6 +657,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     | Type::ExternFunc(..)
                                                     | Type::CBuffer(..)
                                                     | Type::Cap(..)
+                                                    | Type::CapAtom(..)
                                                     | Type::Shared(..)
                                                     | Type::LocalShared(..)
                                                     | Type::Weak(..)
@@ -926,6 +927,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Drop(expr) => {
                     // Drop: evaluate expression and discard result (for linear capabilities)
+                    // H4 (audit 2026-08-03): also release the runtime cap handle.
+                    // mimi_cap_register only ever appended to CAP_TABLE; without
+                    // this, every `drop(cap)` in a loop leaked an entry while the
+                    // bytecode VM (pure Value::Cap, no registry) stayed flat.
+                    if let Expr::Ident(name) = expr.unlocated() {
+                        if self.is_cap_var(name) {
+                            if let Some(drop_fn) = self.module.get_function("mimi_cap_drop") {
+                                if let Some((alloca, _)) = vars.get(name) {
+                                    let handle = self
+                                        .build_load(
+                                            self.context.i64_type(),
+                                            *alloca,
+                                            "cap_drop_handle",
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "cap drop load error: {}",
+                                                e
+                                            ))
+                                        })?;
+                                    let _ = self.builder.build_call(
+                                        drop_fn,
+                                        &[handle.into()],
+                                        "cap_drop",
+                                    );
+                                }
+                            }
+                            self.consume_cap(name)?;
+                        }
+                    }
                     self.compile_expr(expr, vars)?;
                 }
                 Stmt::Defer(block) => {

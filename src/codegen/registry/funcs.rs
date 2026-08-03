@@ -790,7 +790,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         wrapper_fn: inkwell::values::FunctionValue<'ctx>,
     ) -> MimiResult<()> {
         for (i, p) in ef.params.iter().enumerate() {
-            if let crate::ast::Type::Cap(cap_name) = p.ty.unlocated() {
+            if let crate::ast::Type::Cap(cap_name) | crate::ast::Type::CapAtom(cap_name) =
+                p.ty.unlocated()
+            {
                 let param = wrapper_fn
                     .get_nth_param(i as u32)
                     .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;

@@ -72,6 +72,7 @@ fn type_to_string(ty: &Type) -> String {
         }
         Type::CBuffer(inner) => format!("c_buffer<{}>", type_to_string(inner)),
         Type::Cap(name) => format!("cap {}", name),
+        Type::CapAtom(name) => format!("cap {}", name),
         Type::Shared(inner) => format!("shared<{}>", type_to_string(inner)),
         Type::LocalShared(inner) => format!("local_shared<{}>", type_to_string(inner)),
         Type::Weak(inner) => format!("weak<{}>", type_to_string(inner)),
