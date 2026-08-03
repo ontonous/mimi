@@ -99,6 +99,14 @@ fn lower_resolved_type<'ctx>(
                 context.struct_type(&elements, false),
             ))
         }
+        ResolvedType::DynamicAny { .. } => {
+            // C3 (audit 2026-08-03): Any (stdlib map/set value type) lowers to
+            // an opaque i64 handle — the same ABI as Map/Set handles and the
+            // runtime map value box (map_set packs values into i64/ptr slots).
+            // This lets stdlib wrappers like `set(m, "k", 1)` and
+            // `get(m, "k").1` flow through per-function dispatch.
+            Ok(BasicTypeEnum::IntType(context.i64_type()))
+        }
         ResolvedType::Function {
             abi,
             parameters,

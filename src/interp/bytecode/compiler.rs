@@ -1098,7 +1098,11 @@ impl BytecodeCompiler {
                     }
                 }
                 Stmt::Let {
-                    pat, init, ty, mut_, ..
+                    pat,
+                    init,
+                    ty,
+                    mut_,
+                    ..
                 } => {
                     if let Some(init_expr) = init {
                         // Detect borrow: let x = &mut place / &place.
@@ -4443,9 +4447,7 @@ impl BytecodeCompiler {
                 // C2 fix (audit 2026-08-03): value-layer numeric widening on
                 // assignment too — `x = 1` where x is an f64 binding must
                 // produce a Float value, mirroring the annotated-let fix.
-                if fc.reg_is_float(name)
-                    && self.infer_expr_type(fc, value) == VarType::Int
-                {
+                if fc.reg_is_float(name) && self.infer_expr_type(fc, value) == VarType::Int {
                     let rd = fc.proto.alloc_reg();
                     fc.emit(Op::IntToFloat { rd, ra: r_val });
                     r_val = rd;

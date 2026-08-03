@@ -14,6 +14,20 @@ impl<'a> Checker<'a> {
         let t = self.infer_expr(e, scopes);
         match op {
             UnOp::Neg => {
+                // C2 complement (audit 2026-08-03): fold negative literals at
+                // inference. `-2147483648` parses as Neg(2147483648); the
+                // positive literal alone exceeds i32::MAX and value-aware
+                // widening (literal.rs) promotes it to i64, breaking i32 call
+                // sites (dual_actor_negative_int_field regressed with E0211).
+                // The *folded* value is exactly i32::MIN, so keep it i32 —
+                // matches pre-C2 typing and both backends' wrapped value.
+                if let Expr::Literal(Lit::Int(v)) = e.unlocated() {
+                    if let Some(neg) = v.checked_neg() {
+                        if neg >= i32::MIN as i64 && neg <= i32::MAX as i64 {
+                            return Type::Name("i32".into(), vec![]);
+                        }
+                    }
+                }
                 if is_numeric(&t) {
                     t
                 } else {

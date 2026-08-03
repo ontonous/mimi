@@ -3465,7 +3465,13 @@ fn origin_catalog_rejects_missing_parent_and_cycles() {
 }
 
 #[test]
-fn resolved_ir_rejects_nested_erased_state_payloads() {
+fn resolved_ir_allows_any_but_rejects_unknown_in_state_payloads() {
+    // C3 (audit 2026-08-03): `Any` is a legitimate internal polymorphic
+    // marker (stdlib maps/set signatures), removed from user syntax in
+    // 0.34.10 — the checker's E0407 gates the boundary, so resolved no
+    // longer rejects it (the old rejection was the 0.31-era exit gate for
+    // a user-writable escape hatch). `unknown` / `_` / `Infer` still
+    // rejected here: those mean inference failed, which is always a bug.
     let file = parse(
         r#"
 flow Cache {
@@ -3473,11 +3479,21 @@ flow Cache {
 }
 "#,
     );
-    let diagnostics = CheckedProgram::from_checked_file(&file).expect_err("IR must reject Any");
+    let _resolved = CheckedProgram::from_checked_file(&file)
+        .expect("List<Any> state payload must lower (Any is internal)");
+
+    let file = parse(
+        r#"
+flow Cache {
+    state Ready { values: List<unknown> }
+}
+"#,
+    );
+    let diagnostics = CheckedProgram::from_checked_file(&file).expect_err("IR must reject unknown");
     assert!(diagnostics.iter().any(|diagnostic| diagnostic
         .message
         .contains("TOOL-RESOLUTION-001")
-        && diagnostic.message.contains("List<Any>")));
+        && diagnostic.message.contains("List<unknown>")));
     assert!(diagnostics
         .iter()
         .all(|diagnostic| diagnostic.span.start_line > 0));

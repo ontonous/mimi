@@ -8965,10 +8965,16 @@ fn canonicalize_declaration_member<R>(
 }
 
 fn contains_unresolved_type(ty: &Type) -> bool {
+    // C3 (audit 2026-08-03): `Any` removed — it is a legitimate internal
+    // polymorphic marker (builtin `map_get` returns `(bool, Any)`), not an
+    // unresolved type. 0.34.10 (golden §2.4) removed it from user syntax, so
+    // the only producers are internal signatures (stdlib maps/set wrappers,
+    // builtin map ops). Rejecting it here failed stdlib trait signatures
+    // with TOOL-RESOLUTION-001 before codegen could even run.
     crate::core::type_folder::type_any(ty, &|t| match t {
         Type::Infer | Type::TypeVar(_) | Type::TyErr => true,
         Type::ForAll(_, _) => true,
-        Type::Name(name, _) => name == "Any" || name == "_" || name == "unknown",
+        Type::Name(name, _) => name == "_" || name == "unknown",
         _ => false,
     })
 }

@@ -10350,6 +10350,82 @@ fn dual_set_contains() {
 }
 
 #[test]
+fn dual_set_stdlib_wrapper_no_trait_recursion() {
+    // C3 (audit 2026-08-03): std/set.mimi's `impl SetExt for Set` methods
+    // (`self.size()` etc.) used to be hijacked by codegen's trait dispatch —
+    // `contains(s, 7)` → `Set__SetExt__contains` → `self.contains(value)` →
+    // the same trait method → infinite recursion (SIGSEGV, exit 139). The
+    // bytecode VM routed the impl body through runtime DynMethodCall with
+    // builtin precedence, so only codegen crashed. Builtin Set dispatch now
+    // runs BEFORE trait impl lookup (method.rs 1.9).
+    if !can_link() {
+        return;
+    }
+    let stdlib = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/set.mimi"),
+    )
+    .expect("read std/set.mimi");
+    let src = format!(
+        r#"{stdlib}
+func main() -> i32 {{
+    let s = {{7, 9}}
+    println(contains(s, 7))
+    println(contains(s, 8))
+    println(size(s))
+    let s2 = insert(s, 11)
+    println(size(s2))
+    let s3 = remove(s2, 7)
+    println(contains(s3, 7))
+    0
+}}
+"#
+    );
+    // CHECKER-GAP: test harness concatenates std/set.mimi into the test
+    // source, so its items carry the test file's SourceKey, not the
+    // "stdlib:" prefix the real loader stamps (loader/flow.rs:126). The
+    // C3 stdlib-Any E0407 exemption keys on that prefix; the real
+    // `use std::set` path is covered by loader_std_set_import_typechecks
+    // in loader.rs. The dispatch-order fix (method.rs 1.9) is what this
+    // test pins down, and it needs no stdlib key.
+    dual_assert_soft!(src.as_str(), "true\nfalse\n2\n3\nfalse");
+}
+
+#[test]
+fn dual_maps_stdlib_wrapper_any() {
+    // C3 (audit 2026-08-03): `use std::maps` emitted 55 × E0407
+    // ("unknown type 'Any'") because the checker rejected stdlib 'Any'
+    // signatures, and even when that was waived the strict unify() path
+    // rejected Any↔concrete unification (E0211/E0252). Interp survived via
+    // the lenient unify_inference() path; codegen failed at resolved
+    // lowering. Now: stdlib Any exempt from E0407, Any unpacked via
+    // DynamicAnyPack at the resolved boundary, containers lenient when one
+    // side is bare (ContainerErase).
+    if !can_link() {
+        return;
+    }
+    let stdlib = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/maps.mimi"),
+    )
+    .expect("read std/maps.mimi");
+    let src = format!(
+        r#"{stdlib}
+func main() -> i32 {{
+    let m = new()
+    let m2 = set(m, "k", 1)
+    let r = get(m2, "k")
+    if r.0 {{ println(r.1) }} else {{ println("missing") }}
+    0
+}}
+"#
+    );
+    // CHECKER-GAP: same concatenation limitation as
+    // dual_set_stdlib_wrapper_no_trait_recursion — the C3 Any exemption
+    // keys on the loader's "stdlib:" SourceKey. Real `use std::maps` path
+    // is covered by loader_std_maps_import_typechecks in loader.rs.
+    dual_assert_soft!(src.as_str(), "1");
+}
+
+#[test]
 fn dual_set_size() {
     if !can_link() {
         return;
@@ -14520,4 +14596,3 @@ fn dual_mutate_param_multiple_calls() {
         "3"
     );
 }
-

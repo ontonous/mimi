@@ -507,6 +507,18 @@ impl UnificationTable {
                 self.unify_inference_inner(ok, &args[0])?;
                 self.unify_inference_inner(err, &args[1])
             }
+            // C3 (audit 2026-08-03): bare container annotations (`List`/`Set`/
+            // `Map` without arguments, as spelled in std/set.mimi signatures)
+            // accept any element parameterization. The stdlib set API is
+            // heterogeneous (`insert(value: Any)`), so `Set<i32>` from a set
+            // literal must flow into `Set` parameters without an E0211.
+            (Type::Name(na, aa), Type::Name(nb, ab))
+                if na == nb
+                    && (aa.is_empty() || ab.is_empty())
+                    && matches!(na.as_str(), "List" | "Set" | "Map") =>
+            {
+                Ok(())
+            }
             // Same constructors — unify structurally
             (Type::Name(na, aa), Type::Name(nb, ab)) if na == nb && aa.len() == ab.len() => {
                 for (a, b) in aa.iter().zip(ab.iter()) {
@@ -613,10 +625,22 @@ impl UnificationTable {
 }
 
 fn is_escape_type(ty: &Type) -> bool {
+    // C3 (audit 2026-08-03): `Any` removed from this set. 0.34.10 (golden
+    // §2.4) deleted `Any` from the user-facing grammar (builtin_type_names),
+    // so the only producers left are internal artifacts: builtin signatures
+    // (`map_get` returns `(bool, Any)`), stdlib wrappers (std/maps.mimi,
+    // std/set.mimi) and unification's own Any arms (unify_inference_inner).
+    // Keep rejecting `Any` here made `use std::maps` / `use std::set`
+    // unusable — every call into the wrappers died on E0211 and the impl
+    // signature parity check died on E0252, while the SAME operations through
+    // the builtins (map_get/map_set) worked fine. The user-facing syntax
+    // boundary (E0407) is the entry gate; the checked-unify rejection was the
+    // 0.31-era exit gate for a user-writable escape hatch that no longer
+    // exists. `_` / `Infer` / `unknown` stay rejected.
     crate::core::type_folder::type_any(ty, &|t| match t {
         Type::Infer => true,
         Type::ForAll(_, _) => true,
-        Type::Name(name, _) => name == "Any" || name == "_" || name == "unknown",
+        Type::Name(name, _) => name == "_" || name == "unknown",
         _ => false,
     })
 }
@@ -823,11 +847,15 @@ mod tests {
     }
 
     #[test]
-    fn checked_unify_rejects_nested_escape_types() {
+    fn checked_unify_allows_nested_any() {
+        // C3 (audit 2026-08-03): nested `Any` inside containers unifies on
+        // the checked path too — the stdlib wrappers (`Option<Any>`,
+        // `List<Any>` in maps/set signatures) must lower through resolved
+        // codegen, and the strict path is now the only path they take.
         let mut table = UnificationTable::new();
         let option_any = Type::Option(Box::new(Type::Name("Any".into(), vec![])));
         let option_i32 = Type::Option(Box::new(i32_ty()));
-        assert!(table.unify(&option_any, &option_i32).is_err());
+        assert!(table.unify(&option_any, &option_i32).is_ok());
         assert!(table.unify_inference(&option_any, &option_i32).is_ok());
     }
 
@@ -855,10 +883,17 @@ mod tests {
     #[test]
     fn checked_never_allows_escape_on_either_side() {
         let mut table = UnificationTable::new();
+        // C3 (audit 2026-08-03): `Any` is no longer an escape type — it is
+        // the internal polymorphic marker for builtin/stdlib heterogeneous
+        // values (map_get returns `(bool, Any)`), and 0.34.10 (golden §2.4)
+        // removed it from user syntax (E0407 gates the boundary). Checked
+        // unify therefore ACCEPTS Any↔concrete; `_` / `Infer` stay rejected.
         let any = Type::Name("Any".into(), vec![]);
         let infer = Type::Infer;
         let underscore = Type::Name("_".into(), vec![]);
-        for escape in [&any, &infer, &underscore] {
+        assert!(table.unify(&any, &i32_ty()).is_ok());
+        assert!(table.unify(&i32_ty(), &any).is_ok());
+        for escape in [&infer, &underscore] {
             assert!(table.unify(escape, &i32_ty()).is_err());
             assert!(table.unify(&i32_ty(), escape).is_err());
         }

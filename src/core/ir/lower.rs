@@ -4799,6 +4799,36 @@ impl BodyLowerer<'_> {
             }
             _ => None,
         };
+        // C3 (audit 2026-08-03): bare container annotation (`Set` with no
+        // arguments, as spelled in std/set.mimi) accepts any element
+        // parameterization — mirrors the unification lenient branch. Uses a
+        // dedicated kind because Identity refuses to change the canonical type
+        // (the element parameter does not affect the LLVM layout: Set/List
+        // handles are opaque i64s).
+        if let (
+            Some(ResolvedType::Nominal {
+                item: from_item,
+                arguments: from_args,
+                ..
+            }),
+            Some(ResolvedType::Nominal {
+                item: to_item,
+                arguments: to_args,
+                ..
+            }),
+        ) = (self.types.get(from), self.types.get(to))
+        {
+            if from_item == to_item
+                && matches!(from_item.as_str(), "builtin:type:List" | "builtin:type:Set")
+                && (from_args.is_empty() || to_args.is_empty())
+            {
+                return Ok(CheckedConversion {
+                    kind: CheckedConversionKind::ContainerErase,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
         if let Some((from_inner, to_inner)) = container_payloads {
             let payload_match = if from_inner == to_inner {
                 true
@@ -4836,6 +4866,32 @@ impl BodyLowerer<'_> {
         ) {
             return Ok(CheckedConversion {
                 kind: CheckedConversionKind::FlowStateInject,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        // C3 (audit 2026-08-03): Any → DynamicAny injection. stdlib maps/set
+        // wrappers declare heterogeneous map/set values with `Any`; the
+        // checker admits any concrete argument (unify Any arm) and this
+        // conversion admits it at the resolved layer. The runtime map value
+        // box is an i64/ptr slot, so no packing code is needed — the value
+        // flows through as-is (see apply_conversion DynamicAnyPack).
+        if matches!(self.types.get(to), Some(ResolvedType::DynamicAny { .. })) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::DynamicAnyPack,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        if matches!(
+            (self.types.get(from), self.types.get(to)),
+            (
+                Some(ResolvedType::DynamicAny { .. }),
+                Some(ResolvedType::DynamicAny { .. })
+            )
+        ) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::Identity,
                 from: from.clone(),
                 to: to.clone(),
             });
