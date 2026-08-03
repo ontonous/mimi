@@ -1374,14 +1374,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let state_ty = state_val.get_type();
         let box_bytes: u64 = self.llvm_type_size_bytes(state_ty).max(8);
         let size = self.context.i64_type().const_int(box_bytes, false);
-        // TODO(L6): this payload box is never freed. The match-dispatch unwrap
-        // (pattern.rs find_variant_ordinal + inttoptr/load) extracts the fields
-        // but does not free the box → one leak per multi-target transition result
-        // (valgrind: "2 allocs, 1 frees"). Part of a broader payload-boxing leak
-        // (the enum Packed payload at registry/types.rs:293 likely leaks too).
-        // A correct fix must free the box AFTER all arm fields are copied out
-        // (freeing earlier = use-after-free), so it needs a payload-lifetime
-        // analysis across the match arms — not a spot fix.
+        // L1 (audit-codegen 2026-08-03): former TODO(L6) "this payload box is
+        // never freed" is STALE — 0714504c + method.rs (L6 multi-target fix,
+        // the `Register the box in heap_allocs` block after the transition
+        // call) implemented single-owner call-site registration: the box is
+        // freed exactly once at the owning call's scope exit via
+        // free_heap_allocs. The match decode copies fields out without
+        // freeing; copies of the result are Ident reads of the same box, not
+        // new owners, so no double-free.
         let box_ptr = self.malloc_or_abort(size, "mt_box")?;
         self.build_store(box_ptr, state_val)
             .map_err(|e| CompileError::LlvmError(format!("mt box store: {}", e)))?;
@@ -1641,7 +1641,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .unwrap_or(ptr);
         if slot != ptr {
-            let _ = self.build_store(slot, ptr);
+            if let Err(e) = self.build_store(slot, ptr) {
+                // L2 (audit-codegen 2026-08-03): do not silently swallow —
+                // a failed store leaves the slot undef → free(undef) at
+                // scope exit. Registration contexts cannot propagate
+                // (fn returns ()), so surface the failure loudly.
+                eprintln!("[mimi codegen] warning: heap-slot store failed: {}", e);
+            }
         }
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
@@ -1682,13 +1688,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else if let Some(parent) = slot_inst.get_parent() {
                     self.builder.position_at_end(parent);
                 }
-                let _ = self.build_store(slot, ptr_ty.const_null());
+                if let Err(e) = self.build_store(slot, ptr_ty.const_null()) {
+                    // L2 (audit-codegen 2026-08-03): do not silently swallow —
+                    // a failed store leaves the slot undef → free(undef) at
+                    // scope exit. Registration contexts cannot propagate
+                    // (fn returns ()), so surface the failure loudly.
+                    eprintln!("[mimi codegen] warning: heap-slot store failed: {}", e);
+                }
             }
             if let Some(saved) = saved {
                 self.builder.position_at_end(saved);
             }
             // Store the actual box pointer at the current (ctor call) position.
-            let _ = self.build_store(slot, box_ptr);
+            if let Err(e) = self.build_store(slot, box_ptr) {
+                // L2 (audit-codegen 2026-08-03): do not silently swallow —
+                // a failed store leaves the slot undef → free(undef) at
+                // scope exit. Registration contexts cannot propagate
+                // (fn returns ()), so surface the failure loudly.
+                eprintln!("[mimi codegen] warning: heap-slot store failed: {}", e);
+            }
         }
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
@@ -1722,7 +1740,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     self.builder.position_at_end(entry_bb);
                 }
-                let _ = self.build_store(slot, struct_ty.const_zero());
+                if let Err(e) = self.build_store(slot, struct_ty.const_zero()) {
+                    // L2 (audit-codegen 2026-08-03): do not silently swallow —
+                    // a failed store leaves the slot undef → free(undef) at
+                    // scope exit. Registration contexts cannot propagate
+                    // (fn returns ()), so surface the failure loudly.
+                    eprintln!("[mimi codegen] warning: heap-slot store failed: {}", e);
+                }
             }
         }
         if let Some(saved) = saved {

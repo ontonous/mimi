@@ -19144,7 +19144,10 @@ pub extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
     extern "C" {
         fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     }
-    const PREFIX: &[u8] = b"[E0801] integer overflow in ";
+    // M1 (audit-codegen 2026-08-03): integer overflow is E0802 per
+    // docs/error-codes.md (E0801 is reserved for division by zero); the
+    // bytecode VM's IntegerOverflow also maps to E0802.
+    const PREFIX: &[u8] = b"[E0802] integer overflow in ";
     const SUFFIX: &[u8] =
         b"\nHint: use wrapping_add/wrapping_sub/wrapping_mul for wrap-around semantics.\n";
     // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
@@ -19186,7 +19189,8 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
     extern "C" {
         fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     }
-    const MSG: &[u8] = b"[E0801] integer division overflow (MIN / -1)\n";
+    // M1: MIN/-1 division overflow is E0802 (integer overflow), not E0801.
+    const MSG: &[u8] = b"[E0802] integer division overflow (MIN / -1)\n";
     // SAFETY: writing static byte buffer to stderr (fd 2) is async-signal-safe.
     unsafe {
         let _ = write(2, MSG.as_ptr() as *const std::ffi::c_void, MSG.len());
