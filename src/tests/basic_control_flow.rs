@@ -1362,9 +1362,13 @@ func main() -> i32 {
 }
 
 #[test]
-fn for_tuple_destructuring_codegen_gap_reported() {
-    // v0.34.3: codegen does not yet lower for-loop tuple patterns — it must
-    // fail with a clear capability error, not crash.
+fn for_tuple_destructuring_dual_backend() {
+    // C2 (audit-syntax 2026-08-03): codegen lowers for-loop tuple patterns by
+    // desugaring `for (k, v) in xs { B }` to
+    // `for __for_elem_N in xs { let (k, v) = __for_elem_N; B }` plus a
+    // tuple-aware loop-element type resolution. Formerly this test asserted
+    // the E0700 fail-closed gap (for_tuple_destructuring_codegen_gap_reported);
+    // the gap is now closed, so it asserts dual-backend equivalence instead.
     let src = r#"
 func main() -> i32 {
     let pairs = [("a", 1)]
@@ -1372,15 +1376,15 @@ func main() -> i32 {
     for (k, v) in pairs {
         total = total + v
     }
-    total
+    println(total)
+    0
 }
 "#;
-    let err = compile_and_run(src).expect_err("tuple for-loop must fail closed in codegen");
-    assert!(
-        err.contains("for-loop tuple destructuring") || err.contains("E0700"),
-        "unexpected codegen error: {}",
-        err
-    );
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc_out.trim(), "1", "bytecode for-tuple");
+    let native_out = compile_and_run(src).expect("codegen for-tuple");
+    assert_eq!(native_out.trim(), "1", "codegen for-tuple");
 }
 
 #[test]
@@ -1445,8 +1449,11 @@ func main() -> i32 {
 }
 
 #[test]
-fn if_let_codegen_gap_reported() {
-    // v0.34.3: native codegen does not yet lower if-let — fails closed.
+fn if_let_codegen_lowered_dual_backend() {
+    // C2 (audit-syntax 2026-08-03): native codegen lowers if-let by
+    // desugaring to a match with a wildcard arm. Formerly this test asserted
+    // the E0700 fail-closed gap (if_let_codegen_gap_reported); the gap is now
+    // closed, so it asserts dual-backend equivalence instead.
     let src = r#"
 func main() -> i32 {
     let x = Some(42)
@@ -1456,15 +1463,18 @@ func main() -> i32 {
     } else {
         result = -1
     }
-    result
+    println(result)
+    0
 }
 "#;
-    let err = compile_and_run(src).expect_err("if-let must fail closed in codegen");
-    assert!(err.contains("if-let"), "unexpected codegen error: {}", err);
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc_out.trim(), "42", "bytecode if-let");
+    let native_out = compile_and_run(src).expect("codegen if-let");
+    assert_eq!(native_out.trim(), "42", "codegen if-let");
 }
 
 #[test]
-#[ignore = "M4: if-let has no native codegen lowering yet (codegen fails closed with E0700 — see if_let_codegen_gap_reported). Un-ignore once if-let is lowered in codegen (e.g. desugared to a match with a wildcard else arm); this asserts L1 dual-backend equivalence."]
 fn if_let_dual_backend_equivalence_goal() {
     // Forward marker (IDD §14.4): the L1 goal for if-let. Bytecode already
     // produces 42 / 99; once codegen lowers if-let, both backends must agree.

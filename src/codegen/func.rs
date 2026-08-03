@@ -2720,12 +2720,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.compile_block(body, vars)?;
                 }
-                Stmt::IfLet { .. } => {
-                    return Err(CompileError::Generic(
-                        "if-let is not yet supported in native codegen; use a match \
-                         expression or bind the value explicitly (E0700 family)"
-                            .to_string(),
-                    ));
+                Stmt::IfLet {
+                    pat,
+                    init,
+                    then_,
+                    else_,
+                } => {
+                    // C2 (audit-syntax): desugar to match (see compile_if_let_stmt).
+                    self.compile_if_let_stmt(pat, init, then_, else_, vars)?;
                 }
                 _ => {}
             }
