@@ -1338,3 +1338,57 @@ fn positive_overflow_literal_still_rejected() {
         "bare positive overflow literal must stay a parse error, got: {errors:?}"
     );
 }
+
+#[test]
+fn m3_fails_with_multi_target_rejected_e0433_no_internal_leak() {
+    // M3 (audit-codegen 2026-08-04): `fails E` + multi-target used to reach
+    // the resolved IR conversion check and leak an internal
+    // TOOL-RESOLUTION-001 diagnostic with raw type IDs ("explicit checked
+    // conversion is required from 'rt:...' to 'rt:...'"). Root cause: the
+    // AST checker synthesizes Result<FirstTarget, (source, E)> while the
+    // resolved IR lowers multi-target to a tagged-state-union enum — the
+    // wrapped types never unify, and the backends disagree on the wrapped
+    // result semantics when consumed (VM: Ok(tagged); codegen: Err side).
+    // The combination is now fail-closed at declaration with E0433.
+    let src = r#"
+flow Decision {
+    state Pending { value: i32 }
+    state Approved { value: i32 }
+    state Rejected { value: i32 }
+    transition decide(Pending) -> Approved | Rejected fails string {
+        do { return Approved { value: self.value } }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let diagnostics = check_source(src).expect_err("fails + multi-target must be rejected");
+    let rendered = diagnostics
+        .iter()
+        .map(|d| format!("{} {}", d.code.clone().unwrap_or_default(), d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0433"),
+        "expected E0433 fail-closed diagnostic, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("TOOL-RESOLUTION-001") && !rendered.contains("rt:"),
+        "internal resolution codes/type IDs must not leak, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn single_target_fails_still_accepted() {
+    // Companion to m3_fails_with_multi_target_rejected_e0433_no_internal_leak:
+    // plain single-target `fails E` transitions remain fully supported.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        do { return Active { balance: self.balance - amount } }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    check_source(src).expect("single-target fails transitions must still typecheck");
+}

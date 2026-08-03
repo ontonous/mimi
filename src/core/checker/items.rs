@@ -1011,6 +1011,28 @@ impl<'a> Checker<'a> {
                     *transition_name_counts.entry(t.name.as_str()).or_insert(0) += 1;
                 }
                 for t in &f.transitions {
+                    // M3 (audit-codegen 2026-08-04): `fails E` + multi-target
+                    // is fail-closed until the combination is implemented
+                    // consistently. The AST checker synthesizes
+                    // Result<FirstTarget, (source, E)> while the resolved IR
+                    // lowers multi-target to a tagged-state-union enum — the
+                    // wrapped types never unify (leaked internal
+                    // TOOL-RESOLUTION-001 type-ID diagnostics), and the two
+                    // backends disagree on the wrapped result semantics when
+                    // consumed (VM: Ok(tagged union); codegen: Err side).
+                    // Reject at declaration with a clear diagnostic; the
+                    // signature is still registered (first-target wrapping)
+                    // so call sites diagnose cleanly downstream.
+                    if t.fails.is_some() && t.to_states.len() > 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0433,
+                            format!(
+                                "transition '{}' combines `fails` with a multi-target return ({}); this combination is not yet supported — split it into separate transitions, or drop `fails` and model the error branch as an explicit target state",
+                                t.name,
+                                t.to_states.join(" | ")
+                            ),
+                        );
+                    }
                     let t_key = format!("{}::{}::{}", qualified, t.name, t.from_state);
                     let mut params: Vec<Type> = Vec::new();
                     // First arg is the from-state payload (self)
