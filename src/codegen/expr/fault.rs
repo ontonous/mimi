@@ -101,6 +101,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// panic context and the structured `trace` mirroring them. Field set is
     /// read from `type_defs["Fault"]` so the conditional typed-`error` field is
     /// handled (defaulted) automatically.
+    ///
+    /// H4 (audit-codegen): persistent fields are shadowed from the from-state
+    /// payload (`fault_self_entry`) instead of defaulted — parity with the
+    /// bytecode VM's `shadow_persistent_into_fault`.
     fn build_fault_record(
         &self,
         last_state: &str,
@@ -127,8 +131,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // → make_fault_value(from_state, "panic:<code>", "")) — L1 parity.
                 "snapshot" => self.build_const_string("")?,
                 "trace" => self.build_system_trace(last_state, unexpected_event)?,
+                // H4: persistent draft shadow from the from-state payload;
                 // typed `error` field (or anything else) — default value.
-                _ => self.build_default_value(&field.ty, field_llvm_ty)?,
+                _ => match self.load_persistent_shadow(&field.name, field_llvm_ty)? {
+                    Some(v) => v,
+                    None => self.build_default_value(&field.ty, field_llvm_ty)?,
+                },
             };
             let gep = self
                 .gep()
@@ -137,6 +145,51 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_store(gep, val)?;
         }
         self.build_load(BasicTypeEnum::StructType(sty), alloca, "fault_val")
+    }
+
+    /// H4 (audit-codegen): load a persistent draft field value from the
+    /// transition's from-state payload (`fault_self_entry`) for shadowing into
+    /// the Fault record. Returns None (→ caller defaults) when: outside a
+    /// fallible transition, the flow has no persistent fields, the field is not
+    /// persistent, the from-state lacks the field, or the from-state field's
+    /// LLVM type differs from the Fault field's (defensive: default rather than
+    /// risk a miscompiled store). Mirrors the bytecode VM's
+    /// `shadow_persistent_into_fault` (interp keeps draft values on Fault).
+    fn load_persistent_shadow(
+        &self,
+        field_name: &str,
+        fault_field_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let Some((self_ptr, self_ty)) = self.fault_self_entry else {
+            return Ok(None);
+        };
+        let names = &self.current_persistent_fields;
+        if !names.iter().any(|n| n == field_name) {
+            return Ok(None);
+        }
+        let BasicTypeEnum::StructType(self_sty) = self_ty else {
+            return Ok(None);
+        };
+        // Defensive: the from-state must still be a registered record (it is —
+        // states are registered type defs — but never assume at a trap site).
+        let Ok(self_fields) = self.record_fields_of_type(&self.current_from_state) else {
+            return Ok(None);
+        };
+        let Some(src_idx) = self_fields.iter().position(|f| f.name == field_name) else {
+            return Ok(None);
+        };
+        let Some(src_ty) = self_sty.get_field_type_at_index(src_idx as u32) else {
+            return Ok(None);
+        };
+        if src_ty != fault_field_ty {
+            return Ok(None);
+        }
+        let src_gep = self
+            .gep()
+            .build_struct_gep(self_sty, self_ptr, src_idx as u32, "persistent_src")
+            .map_err(|e| CompileError::LlvmError(format!("persistent shadow gep: {}", e)))?;
+        let val = self.build_load(src_ty, src_gep, "persistent_val")?;
+        Ok(Some(val))
     }
 
     /// Build the structured `SystemTrace` mirroring `flow_matrix::make_fault_value`

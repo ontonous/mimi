@@ -2984,6 +2984,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         self.bind_func_params(func, function, &mut vars)?;
 
+        // H4 (audit-codegen): inside a fallible multi-target transition, the
+        // `self` parameter IS the from-state payload. Capture its slot so the
+        // panic→Fault absorption epilogue can shadow persistent draft field
+        // values into the Fault record (interp parity). The H2 lambda/nested-func
+        // guards clear in_multi_target_transition before compiling standalone
+        // functions, so this guard never fires outside the real transition body.
+        if self.in_fallible_multi_target() {
+            if let Some(&(slot, ty)) = vars.get("self") {
+                self.fault_self_entry = Some((slot, ty));
+            }
+        }
+
         // Prepare and compile function contracts.
         self.prepare_func_contracts(func, &vars)?;
         self.snapshot_old_values(&vars)?;

@@ -445,6 +445,18 @@ pub struct CodeGenerator<'ctx> {
     /// v0.34.18a: source state name of the transition currently being compiled.
     /// Used by panic→Fault absorption (expr/fault.rs) to fill `Fault.last_state`.
     current_from_state: String,
+    /// H4 (audit-codegen 2026-08-03): the `self` (from-state payload) slot of
+    /// the fallible transition currently being compiled, captured right after
+    /// parameter binding. Panic→Fault absorption uses it to shadow persistent
+    /// draft field values into the Fault record — parity with the bytecode VM's
+    /// `shadow_persistent_into_fault` (interp keeps draft values; before the
+    /// fix codegen defaulted them, diverging at runtime). None outside a
+    /// fallible transition body.
+    fault_self_entry: Option<(inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+    /// H4 (audit-codegen): persistent field names of the flow currently being
+    /// compiled (from FlowDef, available on both compile_checked and legacy
+    /// compile_file paths — resolved_persistent_fields is CheckedProgram-only).
+    current_persistent_fields: Vec<String>,
     /// Set of function qualified_names that the resolved emitter attempted to
     /// compile but failed (e.g., due to a coercion error in the body emission).
     /// These functions may have partial basic blocks (entry block without
@@ -641,6 +653,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             multi_target_global_ordinals: std::collections::HashMap::new(),
             current_flow_name: String::new(),
             current_from_state: String::new(),
+            fault_self_entry: None,
+            current_persistent_fields: Vec::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
         }
     }
