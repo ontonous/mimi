@@ -4029,8 +4029,9 @@ fn e2e_datetime_time_constants() {
 // Both standalone spawn and spawn inside parasteps use
 // mimi_spawn_future (real thread) + mimi_await_future (spin-wait).
 //
-// Known gaps documented in AGENTS.mimi.md §12:
-// - Actor spawn not supported in codegen
+// 0.34.23 §12: actor codegen IS implemented (src/codegen/actors.rs +
+// runtime/actor.rs: true threads + mpsc mailbox + backpressure/SystemKill).
+// See actor_concurrent.rs + dual_actor_* for the runtime/dual coverage.
 
 #[test]
 fn e2e_parasteps_spawn_discard() {
