@@ -40,7 +40,7 @@ Mimi 语言需要为系统编程提供并发能力，同时保持其核心定位
 - `actor.method(args)` 通过 mailbox 发送消息，异步执行方法。
 - `await actor.method(args)` 发送消息并阻塞等待返回值。
 - **解释器路径完全实现**（`src/interp/eval/expr.rs:586-628`，`src/interp/value.rs:ActorMailboxMsg`）。
-- **codegen 路径仅为 Actor 结构体生成代码**（`src/codegen/actors.rs:67-109`），邮箱/线程部分**未实现**——actor 在编译路径退化为普通结构体，方法为同步调用。
+- **codegen 路径已实现**（0.31.30+，`src/codegen/actors.rs` + `src/runtime/actor.rs`）：真线程 + mpsc 邮箱 + 自调用直连 + 背压/配额/SystemKill/Fault，与 interp 双后端等价（25 个 dual_actor_* 测试）。0.34.23 §12 修正本 ADR 的过期状态（此前声称 codegen 未实现）。
 
 ### 网络套接字配置
 
@@ -70,7 +70,7 @@ Pthread 最适合 Mimi 的"生产编译后端"定位：简单、可预测、与 
 
 ### 负面
 
-1. **Actor codegen 未完成**：`type Actor { ... }` 在编译路径退化为同步结构体，邮箱/线程机制仅在解释器生效。这意味着 actor 在 `mimi build` 编译后的行为与 `mimi run` 不同（违反 IDD L1 不变量）。
+1. **Actor codegen 已完成**（0.34.23 §12 修正过期状态）：真并发已实现，双后端等价（dual_actor_* 25 测试）。剩余缺口：codegen `runs_flow` actor（登记 0.2）、interp `await` actor 语法残留（0.1.4 删除）、256B blob ABI 上限。
 2. **缺少 async/await 语法 codegen**：`async func` / `await` 的 LLVM codegen 计划在 v0.15 实现（当前仅解释器支持）。
 3. **1:1 线程模型的开销**：每个 `spawn` 创建一个 OS 线程，不适合细粒度任务（缺乏工作窃取调度器）。
 4. **Z3 验证限制**：actor 方法内部的合约在邮箱异步执行的上下文中无法被 Z3 跟踪。

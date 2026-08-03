@@ -57,7 +57,7 @@ Mimi 是 MimiSpec 意图描述的生产编译后端。作为编译型语言，�
 | 特性 | 解释器 | Codegen | 原因 |
 |------|--------|---------|------|
 | struct-by-value FFI | ✅ | ❌ | LLVM ABI struct 传递不匹配（X86\_64 ABI 规则复杂） |
-| actor spawn/await | ✅ | ❌ | spawn 涉及运行时线程池，codegen 路径未实现 |
+| actor spawn/await | ✅ | ✅ | 0.34.23 §12 修正：codegen 真并发已实现（codegen/actors.rs + runtime/actor.rs），25 个 dual_actor_* 双后端等价 |
 | HTTP server（net 模块） | ✅ | ❌ | tcp_accept/recv/send codegen 路径未补齐 |
 | async/await 结构化并发 | ✅ | ❌ | interpreter-only，codegen 未实现协程升降级 |
 
