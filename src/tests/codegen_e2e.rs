@@ -2153,7 +2153,10 @@ func main() -> i32 {
 "#,
     )
     .expect("fault return path must run under valgrind without leaks");
-    assert_eq!(stdout.trim(), "panic:E0801\npanic:E0801\npanic:E0801\npanic:E0801\npanic:E0801");
+    assert_eq!(
+        stdout.trim(),
+        "panic:E0801\npanic:E0801\npanic:E0801\npanic:E0801\npanic:E0801"
+    );
 }
 
 #[test]

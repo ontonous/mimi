@@ -2029,6 +2029,28 @@ impl BodyLowerer<'_> {
                 }
             }
         }
+        // C3 (audit-type 2026-08-03): the call-site collector resolves Ident
+        // callees against global directories without scope awareness
+        // (resolved/mod.rs resolve_named_call_callee) — it records `Function`
+        // whenever a same-named global exists, even though the checker scopes
+        // locals FIRST (simple.rs) and typed the call as a local closure call.
+        // A user global `func f(...)` thereby clobbers same-named function-value
+        // parameters (`func apply(v, f: func(T) -> U) { f(v) }`). Prefer the
+        // resolved local so lowering matches the checker's resolution. When no
+        // local shadows, lookup_local returns None and behavior is unchanged.
+        if site.kind == ResolvedCallKind::Function {
+            if let Expr::Ident(name) = callee.unlocated() {
+                if let Some(local) = self.lookup_local(name) {
+                    return self.lower_local_closure_call(
+                        node_id,
+                        local,
+                        arguments,
+                        role,
+                        type_arguments,
+                    );
+                }
+            }
+        }
         if site.kind == ResolvedCallKind::Builtin {
             if !type_arguments.is_empty() && site.callee != "from_json" {
                 return self.unsupported(node_id, "generic arguments on builtin call");
