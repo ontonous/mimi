@@ -153,7 +153,7 @@
 | E0416 | transition under pinned FFI anchor |
 | E0417 | mutate parameter reassign (realloc/swap banned) |
 | E0418 | subflow cannot be conservatively projected to flat protocol |
-| E0419 | multi-target transition states have incompatible payload layouts |
+| E0419 | retired — ADR-002 (v0.34.15): incompatible payload layouts no longer rejected (see retired-code table) |
 | E0420 | multi-target transition result must be exhaustively matched |
 | E0421 | flow state forgery: non-root state constructed outside transition |
 | E0422 | flow state nominal distinctness: unqualified name shadowed by another flow |
@@ -165,6 +165,9 @@
 | E0428 | ? on extern C call: FFI failures are Faults, not Rejected |
 | E0429 | linear resource consumed before fallible operation |
 | E0430 | from_json requires concrete type argument |
+| E0431 | type escape hatch (`_`/Infer) leaked past its top-level inference boundary |
+| E0432 | linear type (Cap/SessionChan/Flow state) passed as generic argument |
+| E0433 | fails E combined with a multi-target transition — not yet supported (fail-closed) |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |

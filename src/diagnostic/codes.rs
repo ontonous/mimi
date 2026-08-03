@@ -131,6 +131,7 @@ pub const E0429: &str = "E0429"; // linear resource consumed before fallible ope
 pub const E0430: &str = "E0430"; // from_json::<T> requires concrete type argument
 pub const E0431: &str = "E0431"; // type escape hatch (`_`/Infer) leaked past its top-level inference boundary
 pub const E0432: &str = "E0432"; // linear type (Cap/SessionChan/Flow state) passed as generic argument
+pub const E0433: &str = "E0433"; // fails E combined with a multi-target transition — not yet supported (fail-closed)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
