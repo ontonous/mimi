@@ -1302,3 +1302,39 @@ func main() -> i32 {
 "#;
     check_source(src).expect("user global shadowing builtin len must typecheck");
 }
+
+#[test]
+fn i64_min_literal_parses_to_min_value() {
+    // audit-codegen L3 (0.34.24): -9223372036854775808 previously failed to
+    // parse ("invalid integer") because the positive half is out of i64
+    // range. The parser now folds the sign into the literal directly
+    // (standard C/Rust behavior).
+    let file = parse("func main() -> i32 { -9223372036854775808 }");
+    let Some(f) = file.items.iter().find_map(|item| match item {
+        crate::ast::Item::Func(f) if f.name == "main" => Some(f),
+        _ => None,
+    }) else {
+        panic!("expected main func item");
+    };
+    let Some(stmt) = f.body.first() else {
+        panic!("expected expression body");
+    };
+    match stmt.unlocated() {
+        crate::ast::Stmt::Expr(e) => match e.unlocated() {
+            crate::ast::Expr::Literal(crate::ast::Lit::Int(v)) => assert_eq!(*v, i64::MIN),
+            other => panic!("expected MIN literal, got {other:?}"),
+        },
+        other => panic!("expected expression body, got {other:?}"),
+    }
+}
+
+#[test]
+fn positive_overflow_literal_still_rejected() {
+    // Only the SIGNED form folds to MIN; the bare positive literal remains
+    // out of range (matches Rust/C).
+    let errors = parse_error_messages("func main() -> i32 { 9223372036854775808 }");
+    assert!(
+        errors.iter().any(|e| e.contains("invalid integer")),
+        "bare positive overflow literal must stay a parse error, got: {errors:?}"
+    );
+}

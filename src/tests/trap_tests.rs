@@ -365,12 +365,12 @@ func main() -> i64 {
 #[test]
 fn trap_i64_min() {
     // i64::MIN should be representable.
-    // Note: the literal 9223372036854775808 overflows the parser,
-    // so we construct it as 0 - (i64::MAX + 1) using wrapping.
+    // 0.34.24: the parser now folds `-9223372036854775808` directly into
+    // the i64::MIN literal (audit-codegen L3) — no arithmetic workaround
+    // needed.
     let src = r#"
 func main() -> i64 {
-    let max = 9223372036854775807
-    let min = 0 - max - 1
+    let min = -9223372036854775808
     return min
 }
 "#;
@@ -380,11 +380,10 @@ func main() -> i64 {
 #[test]
 fn trap_negation_of_min() {
     // Negating i64::MIN overflows (two's complement asymmetry).
-    // FINDING: Mimi throws IntegerOverflow for 0 - MIN.
+    // Mimi throws IntegerOverflow for 0 - MIN (E0802).
     let src = r#"
 func main() -> i64 {
-    let max = 9223372036854775807
-    let min = 0 - max - 1
+    let min = -9223372036854775808
     let result = 0 - min
     return result
 }

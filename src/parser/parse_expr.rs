@@ -137,6 +137,18 @@ impl Parser {
             TokenKind::If => self.parse_if_expr(),
             TokenKind::Minus => {
                 self.advance();
+                // i64::MIN literal: `-9223372036854775808`. The positive
+                // literal 9223372036854775808 exceeds the i64 positive range
+                // and cannot be parsed and then negated, so fold the sign
+                // into the literal directly (standard C/Rust behavior;
+                // decimal form only — `--MIN` still traps via checked neg).
+                if let TokenKind::Int(s) = self.peek_kind() {
+                    let cleaned = s.replace('_', "");
+                    if cleaned == "9223372036854775808" {
+                        self.advance();
+                        return Ok(Expr::Literal(Lit::Int(i64::MIN)));
+                    }
+                }
                 Ok(self.parse_unary()?.unary(UnOp::Neg))
             }
             TokenKind::Bang | TokenKind::NotOp | TokenKind::Not => {
