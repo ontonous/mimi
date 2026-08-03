@@ -149,6 +149,28 @@ impl<'a> Checker<'a> {
                         .get(cap_name)
                         .cloned()
                         .unwrap_or_else(|| vec![cap_name.clone()]);
+                    // audit-flow H3 (2026-08-03): a single-component cap's
+                    // split() diverged — interp rejected at runtime (E0800
+                    // "requires a combined capability") while codegen compiled
+                    // and ran successfully (L1 divergence). Reject here at
+                    // check time so all three paths agree; the VM's E0800 stays
+                    // as a defensive runtime guard.
+                    if components.len() <= 1 {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0221,
+                                format!(
+                                    "capability '{}' is a single capability and cannot be split",
+                                    cap_name
+                                ),
+                                self.diagnostic_span(),
+                            )
+                            .with_help(
+                                "split() applies to a combined capability (e.g., cap FullAccess = Read + Write)",
+                            ),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
                     let parts: Vec<Type> = components
                         .iter()
                         .map(|component| Type::CapAtom(component.clone()))

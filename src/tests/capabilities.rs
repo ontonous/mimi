@@ -213,6 +213,38 @@ func main() -> i32 {
 }
 
 #[test]
+fn cap_single_split_rejected_at_check_time() {
+    // audit-flow H3 (2026-08-03): a single-component cap's split() diverged —
+    // interp rejected at runtime (E0800 "requires a combined capability"),
+    // codegen compiled and ran successfully (L1 divergence). Reject at check
+    // time so run/build/check all agree; VM E0800 stays as runtime guard.
+    let src = r#"
+cap SingleCap;
+
+func main() -> i32 {
+    let c = SingleCap;
+    let parts = c.split();
+    let x = parts.0;
+    drop(x);
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "single-cap split must be rejected by the checker"
+    );
+    let diags = result.unwrap_err();
+    assert!(
+        diags.iter().any(|d| {
+            d.message.contains("single capability") && d.message.contains("cannot be split")
+        }),
+        "expected E0221 single-cap split diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn cap_component_passed_to_declared_cap_param() {
     // H5 companion: a split component IS a legitimate value of the declared
     // cap type (`take(p: cap A)` accepts `a` from `c.split()`). CapAtom
