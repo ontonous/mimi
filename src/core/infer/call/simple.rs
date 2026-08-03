@@ -13,8 +13,19 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        // d1f43c22 shadow adjudication (2026-08-04): runtime resolution order
+        // is local > global > builtin (VM compile_call: lookup_var →
+        // func_table → builtin_table; codegen lower.rs mirrors it). The
+        // builtin dispatch below must NOT fire when a local binding or a
+        // user-defined global function shadows the name — otherwise the
+        // checker types the call against the builtin signature while both
+        // runtimes execute the user's definition (false-positive E02xx,
+        // e.g. user `func len(x: i32)` rejected by the builtin `len` arm).
+        let shadowed = scopes.iter().rev().any(|scope| scope.contains_key(name))
+            || self.funcs.contains_key(name);
+
         // 0.31.24: Comptime purity enforcement — reject impure calls in comptime functions
-        if self.in_comptime {
+        if self.in_comptime && !shadowed {
             if is_impure_builtin(name) {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,
@@ -37,347 +48,296 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        // Builtins
-        match name {
-            "unsafe_cast_protocol" => {
-                // 条款 11 escape hatch — typed at the call site by the
-                // expected dyn type (check_expr). Without a dyn context the
-                // target type is unknowable; a fresh Infer binds to the
-                // surrounding expectation and residual Infer is rejected by
-                // scan_residual, so the user must annotate the target.
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "unsafe_cast_protocol expects 1 argument (the concrete value to cast)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Infer;
+        // Builtins (only when not shadowed — see the shadow adjudication above).
+        'builtin_dispatch: {
+            if shadowed {
+                break 'builtin_dispatch;
             }
-            "println" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "assert" => {
-                if args.len() != 1 && args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "assert expects 1 or 2 arguments (condition, optional message)",
-                    );
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_bool(&t) {
+            match name {
+                "unsafe_cast_protocol" => {
+                    // 条款 11 escape hatch — typed at the call site by the
+                    // expected dyn type (check_expr). Without a dyn context the
+                    // target type is unknowable; a fresh Infer binds to the
+                    // surrounding expectation and residual Infer is rejected by
+                    // scan_residual, so the user must annotate the target.
+                    if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("assert expects bool, found {}", fmt_type(&t)),
+                            "unsafe_cast_protocol expects 1 argument (the concrete value to cast)",
                         );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
                     }
-                    if args.len() == 2 {
-                        let msg_ty = self.infer_expr(&args[1], scopes);
-                        if !crate::core::helpers::is_string(&msg_ty) {
+                    return Type::Infer;
+                }
+                "println" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
+                "assert" => {
+                    if args.len() != 1 && args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "assert expects 1 or 2 arguments (condition, optional message)",
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_bool(&t) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0242,
-                                format!(
-                                    "assert message must be a string, found {}",
-                                    fmt_type(&msg_ty)
-                                ),
+                                format!("assert expects bool, found {}", fmt_type(&t)),
                             );
                         }
-                    }
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "range" => {
-                if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "range expects 2 arguments");
-                } else {
-                    let t1 = self.infer_expr(&args[0], scopes);
-                    let t2 = self.infer_expr(&args[1], scopes);
-                    if !is_int(&t1) || !is_int(&t2) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            "range expects integer arguments",
-                        );
-                    }
-                }
-                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
-            }
-            "sqrt" => {
-                if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "sqrt expects 1 argument");
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_numeric(&t) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            "sqrt expects a numeric argument",
-                        );
-                    }
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "ln"
-            | "log2" | "log10" | "exp" | "exp2" | "cbrt" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_numeric(&t) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!("{} expects a numeric argument", name),
-                        );
-                    }
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            "log" => {
-                if args.is_empty() || args.len() > 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "log expects 1 or 2 arguments",
-                    );
-                } else {
-                    let t1 = self.infer_expr(&args[0], scopes);
-                    if !is_numeric(&t1) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            "log expects a numeric first argument",
-                        );
-                    }
-                    if args.len() == 2 {
-                        let t2 = self.infer_expr(&args[1], scopes);
-                        if !is_numeric(&t2) {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0242,
-                                "log expects a numeric base argument",
-                            );
-                        }
-                    }
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            "atan2" => {
-                if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "atan2 expects 2 arguments");
-                } else {
-                    let t1 = self.infer_expr(&args[0], scopes);
-                    let t2 = self.infer_expr(&args[1], scopes);
-                    if !is_numeric(&t1) || !is_numeric(&t2) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            "atan2 expects numeric arguments",
-                        );
-                    }
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            "len" => {
-                if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "len expects 1 argument");
-                } else {
-                    // T-H18: require List/string/Map/Set rather than any type.
-                    let arg_ty = self.infer_expr(&args[0], scopes);
-                    let ok = matches!(
-                        &arg_ty,
-                        Type::Name(n, _)
-                            if n == "List"
-                                || n == "list"
-                                || n == "string"
-                                || n == "String"
-                                || n == "Map"
-                                || n == "map"
-                                || n == "Set"
-                                || n == "set"
-                    );
-                    if !ok {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!(
-                                "len expects List/string/Map/Set, found {}",
-                                crate::core::fmt_type(&arg_ty)
-                            ),
-                        );
-                    }
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "to_string" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "to_string expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "to_int" => {
-                if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "to_int expects 1 argument");
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "to_float" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "to_float expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            "abs" => {
-                if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "abs expects 1 argument");
-                    return Type::Name("unknown".into(), vec![]);
-                }
-                let t = self.infer_expr(&args[0], scopes);
-                if !is_numeric(&t) {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "abs expects a numeric argument",
-                    );
-                    return Type::Name("unknown".into(), vec![]);
-                }
-                return t;
-            }
-            "push" => {
-                if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "push expects 2 arguments");
-                } else {
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    let value_ty = self.infer_expr(&args[1], scopes);
-                    if let Type::Name(name, elements) = list_ty.unlocated() {
-                        if name == "List" && elements.len() == 1 {
-                            // T-1 (0.31.49): unify element type with value type.
-                            // Previously `let _ =` silently dropped the result,
-                            // allowing push(list_of_i32, "hello") to pass.
-                            // Slice<X> is compatible with X (slice views are
-                            // coerced to their target type at runtime).
-                            let value_for_unify = match value_ty.unlocated() {
-                                Type::Slice(inner) => *inner.clone(),
-                                _ => value_ty.clone(),
-                            };
-                            if self
-                                .unification
-                                .unify(&elements[0], &value_for_unify)
-                                .is_err()
-                            {
+                        if args.len() == 2 {
+                            let msg_ty = self.infer_expr(&args[1], scopes);
+                            if !crate::core::helpers::is_string(&msg_ty) {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0242,
                                     format!(
-                                        "push expects value of type {}, found {}",
-                                        fmt_type(&elements[0]),
-                                        fmt_type(&value_ty)
+                                        "assert message must be a string, found {}",
+                                        fmt_type(&msg_ty)
                                     ),
                                 );
                             }
                         }
                     }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                // push mutates in place; returns Unit (not List) so block-ending
-                // push() doesn't propagate the list as the block's return value.
-                return Type::Name("unit".into(), vec![]);
-            }
-            "pop" => {
-                if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "pop expects 1 argument");
-                    return Type::Name("unknown".into(), vec![]);
+                "range" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "range expects 2 arguments",
+                        );
+                    } else {
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        if !is_int(&t1) || !is_int(&t2) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "range expects integer arguments",
+                            );
+                        }
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
                 }
-                let list_ty = self.infer_expr(&args[0], scopes);
-                let elem_ty = match list_ty.unlocated() {
-                    Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
-                    _ => Type::Name("unknown".into(), vec![]),
-                };
-                return elem_ty;
-            }
-            "min" | "max" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments", name),
-                    );
-                    return Type::Name("unknown".into(), vec![]);
+                "sqrt" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "sqrt expects 1 argument");
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_numeric(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "sqrt expects a numeric argument",
+                            );
+                        }
+                    }
+                    return Type::Name("f64".into(), vec![]);
                 }
-                let t1 = self.infer_expr(&args[0], scopes);
-                let t2 = self.infer_expr(&args[1], scopes);
-                // IF residual: unify so TypeVars resolve; return resolved type.
-                if self.unification.unify(&t1, &t2).is_err() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!(
-                            "{} expects matching types, found {} and {}",
-                            name,
-                            fmt_type(&t1),
-                            fmt_type(&t2)
-                        ),
-                    );
-                    return Type::Name("unknown".into(), vec![]);
+                "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh"
+                | "ln" | "log2" | "log10" | "exp" | "exp2" | "cbrt" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_numeric(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects a numeric argument", name),
+                            );
+                        }
+                    }
+                    return Type::Name("f64".into(), vec![]);
                 }
-                return self.unification.resolve(&t1);
-            }
-            "contains" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "contains expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "log" => {
+                    if args.is_empty() || args.len() > 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "log expects 1 or 2 arguments",
+                        );
+                    } else {
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        if !is_numeric(&t1) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "log expects a numeric first argument",
+                            );
+                        }
+                        if args.len() == 2 {
+                            let t2 = self.infer_expr(&args[1], scopes);
+                            if !is_numeric(&t2) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    "log expects a numeric base argument",
+                                );
+                            }
+                        }
+                    }
+                    return Type::Name("f64".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            // v0.31.6: function-call forms of the string builtins. These were
-            // only recognized in method-call position (s.char_at(i)); the
-            // verifier's contract language uses function syntax char_at(s, i) /
-            // starts_with(s, p), which previously fell through to "undefined
-            // function" and left a residual `unknown` type (TOOL-RESOLUTION-001).
-            "char_at" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "char_at expects 2 arguments (string, index)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "atan2" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "atan2 expects 2 arguments",
+                        );
+                    } else {
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        if !is_numeric(&t1) || !is_numeric(&t2) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "atan2 expects numeric arguments",
+                            );
+                        }
+                    }
+                    return Type::Name("f64".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "starts_with" | "ends_with" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments (string, string)", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "len" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "len expects 1 argument");
+                    } else {
+                        // T-H18: require List/string/Map/Set rather than any type.
+                        let arg_ty = self.infer_expr(&args[0], scopes);
+                        let ok = matches!(
+                            &arg_ty,
+                            Type::Name(n, _)
+                                if n == "List"
+                                    || n == "list"
+                                    || n == "string"
+                                    || n == "String"
+                                    || n == "Map"
+                                    || n == "map"
+                                    || n == "Set"
+                                    || n == "set"
+                        );
+                        if !ok {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "len expects List/string/Map/Set, found {}",
+                                    crate::core::fmt_type(&arg_ty)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Name("i32".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "assert_eq" | "assert_ne" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments", name),
-                    );
-                } else {
+                "to_string" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "to_string expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "to_int" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "to_int expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "to_float" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "to_float expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("f64".into(), vec![]);
+                }
+                "abs" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "abs expects 1 argument");
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                    let t = self.infer_expr(&args[0], scopes);
+                    if !is_numeric(&t) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "abs expects a numeric argument",
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                    return t;
+                }
+                "push" => {
+                    if args.len() != 2 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "push expects 2 arguments");
+                    } else {
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        let value_ty = self.infer_expr(&args[1], scopes);
+                        if let Type::Name(name, elements) = list_ty.unlocated() {
+                            if name == "List" && elements.len() == 1 {
+                                // T-1 (0.31.49): unify element type with value type.
+                                // Previously `let _ =` silently dropped the result,
+                                // allowing push(list_of_i32, "hello") to pass.
+                                // Slice<X> is compatible with X (slice views are
+                                // coerced to their target type at runtime).
+                                let value_for_unify = match value_ty.unlocated() {
+                                    Type::Slice(inner) => *inner.clone(),
+                                    _ => value_ty.clone(),
+                                };
+                                if self
+                                    .unification
+                                    .unify(&elements[0], &value_for_unify)
+                                    .is_err()
+                                {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0242,
+                                        format!(
+                                            "push expects value of type {}, found {}",
+                                            fmt_type(&elements[0]),
+                                            fmt_type(&value_ty)
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // push mutates in place; returns Unit (not List) so block-ending
+                    // push() doesn't propagate the list as the block's return value.
+                    return Type::Name("unit".into(), vec![]);
+                }
+                "pop" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "pop expects 1 argument");
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let elem_ty = match list_ty.unlocated() {
+                        Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
+                        _ => Type::Name("unknown".into(), vec![]),
+                    };
+                    return elem_ty;
+                }
+                "min" | "max" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments", name),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
                     let t1 = self.infer_expr(&args[0], scopes);
                     let t2 = self.infer_expr(&args[1], scopes);
+                    // IF residual: unify so TypeVars resolve; return resolved type.
                     if self.unification.unify(&t1, &t2).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
@@ -388,130 +348,194 @@ impl<'a> Checker<'a> {
                                 fmt_type(&t2)
                             ),
                         );
+                        return Type::Name("unknown".into(), vec![]);
                     }
+                    return self.unification.resolve(&t1);
                 }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "assert_approx_eq" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "assert_approx_eq expects 2 arguments",
-                    );
-                } else {
-                    let t1 = self.infer_expr(&args[0], scopes);
-                    let t2 = self.infer_expr(&args[1], scopes);
-                    if self.unification.unify(&t1, &t2).is_err() {
+                "contains" => {
+                    if args.len() != 2 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!(
-                                "assert_approx_eq expects matching types, found {} and {}",
-                                fmt_type(&t1),
-                                fmt_type(&t2)
-                            ),
+                            "contains expects 2 arguments",
                         );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
                     }
+                    return Type::Name("bool".into(), vec![]);
                 }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "enumerate" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "enumerate expects 1 argument (list)",
-                    );
-                    return Type::Name("unknown".into(), vec![]);
-                }
-                let list_ty = self.infer_expr(&args[0], scopes);
-                let element = match list_ty.unlocated() {
-                    Type::Name(name, elements) if name == "List" && elements.len() == 1 => {
-                        elements[0].clone()
-                    }
-                    _ => {
+                // v0.31.6: function-call forms of the string builtins. These were
+                // only recognized in method-call position (s.char_at(i)); the
+                // verifier's contract language uses function syntax char_at(s, i) /
+                // starts_with(s, p), which previously fell through to "undefined
+                // function" and left a residual `unknown` type (TOOL-RESOLUTION-001).
+                "char_at" => {
+                    if args.len() != 2 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("enumerate expects a list, found {}", fmt_type(&list_ty)),
+                            "char_at expects 2 arguments (string, index)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "starts_with" | "ends_with" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments (string, string)", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "assert_eq" | "assert_ne" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments", name),
+                        );
+                    } else {
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        if self.unification.unify(&t1, &t2).is_err() {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "{} expects matching types, found {} and {}",
+                                    name,
+                                    fmt_type(&t1),
+                                    fmt_type(&t2)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
+                "assert_approx_eq" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "assert_approx_eq expects 2 arguments",
+                        );
+                    } else {
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        if self.unification.unify(&t1, &t2).is_err() {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "assert_approx_eq expects matching types, found {} and {}",
+                                    fmt_type(&t1),
+                                    fmt_type(&t2)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
+                "enumerate" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "enumerate expects 1 argument (list)",
                         );
                         return Type::Name("unknown".into(), vec![]);
                     }
-                };
-                return Type::Name(
-                    "List".into(),
-                    vec![Type::Tuple(vec![Type::Name("i32".into(), vec![]), element])],
-                );
-            }
-            "exit" => {
-                if args.len() > 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "exit expects 0 or 1 argument (exit code)",
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let element = match list_ty.unlocated() {
+                        Type::Name(name, elements) if name == "List" && elements.len() == 1 => {
+                            elements[0].clone()
+                        }
+                        _ => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("enumerate expects a list, found {}", fmt_type(&list_ty)),
+                            );
+                            return Type::Name("unknown".into(), vec![]);
+                        }
+                    };
+                    return Type::Name(
+                        "List".into(),
+                        vec![Type::Tuple(vec![Type::Name("i32".into(), vec![]), element])],
                     );
-                } else if args.len() == 1 {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_int(&t) {
+                }
+                "exit" => {
+                    if args.len() > 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            "exit expects an integer exit code",
+                            "exit expects 0 or 1 argument (exit code)",
                         );
+                    } else if args.len() == 1 {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_int(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "exit expects an integer exit code",
+                            );
+                        }
                     }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "lexer" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "lexer expects 1 argument (source string)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "mms_parse" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "parse expects 1 argument (source string)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "args" => {
-                if !args.is_empty() {
-                    self.emit_code(crate::diagnostic::codes::E0242, "args expects 0 arguments");
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "getenv" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "getenv expects 1 argument (name)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Result(
-                    Box::new(Type::Name("string".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
-            }
-            "to_json" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "to_json expects 1 argument",
-                    );
-                } else {
-                    let arg_ty = self.infer_expr(&args[0], scopes);
-                    // CG-H2 (audit): reject complex types at type-check time so the user
-                    // gets a clear diagnostic instead of an opaque codegen error.
-                    // to_json is only implemented in codegen for primitive scalars and strings.
-                    if !is_json_serializable(&arg_ty) {
+                "lexer" => {
+                    if args.len() != 1 {
                         self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "lexer expects 1 argument (source string)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "mms_parse" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "parse expects 1 argument (source string)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "args" => {
+                    if !args.is_empty() {
+                        self.emit_code(crate::diagnostic::codes::E0242, "args expects 0 arguments");
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "getenv" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "getenv expects 1 argument (name)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("string".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+                "to_json" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "to_json expects 1 argument",
+                        );
+                    } else {
+                        let arg_ty = self.infer_expr(&args[0], scopes);
+                        // CG-H2 (audit): reject complex types at type-check time so the user
+                        // gets a clear diagnostic instead of an opaque codegen error.
+                        // to_json is only implemented in codegen for primitive scalars and strings.
+                        if !is_json_serializable(&arg_ty) {
+                            self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
                                 "to_json: cannot serialize type `{}`; \
@@ -520,125 +544,127 @@ impl<'a> Checker<'a> {
                                 crate::core::helpers::fmt_type(&arg_ty)
                             ),
                         );
+                        }
                     }
+                    return Type::Name("string".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "from_int" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "from_int expects 1 argument",
-                    );
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_int(&t) {
+                "from_int" => {
+                    if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            "from_int expects an integer argument",
+                            "from_int expects 1 argument",
                         );
-                    }
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "input" => {
-                if !args.is_empty() {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "map" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map expects 2 arguments (list, closure)",
-                    );
-                } else {
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    let elem_ty = match list_ty.unlocated() {
-                        Type::Name(_, args) if args.len() == 1 => args[0].clone(),
-                        _ => Type::Name("unknown".into(), vec![]),
-                    };
-                    let closure_ty = self.infer_expr(&args[1], scopes);
-                    let ret_ty = match closure_ty.unlocated() {
-                        Type::Func(_, ret) => ret.as_ref().clone(),
-                        // P1-30: Non-function second argument is an error.
-                        _ => {
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_int(&t) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0242,
-                                format!(
-                                    "map expects a function as second argument, found {}",
-                                    fmt_type(&closure_ty)
-                                ),
+                                "from_int expects an integer argument",
                             );
-                            elem_ty.clone()
                         }
-                    };
-                    return Type::Name("List".into(), vec![ret_ty]);
+                    }
+                    return Type::Name("i32".into(), vec![]);
                 }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "filter" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "filter expects 2 arguments (list, closure)",
-                    );
-                } else {
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    let elem_ty = match list_ty.unlocated() {
-                        Type::Name(_, args) if args.len() == 1 => args[0].clone(),
-                        _ => Type::Name("unknown".into(), vec![]),
-                    };
-                    // P1-31: Validate that the predicate is a function.
-                    let pred_ty = self.infer_expr(&args[1], scopes);
-                    if !matches!(pred_ty.unlocated(), Type::Func(..)) {
+                "input" => {
+                    if !args.is_empty() {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "map" => {
+                    if args.len() != 2 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!(
-                                "filter expects a predicate function as second argument, found {}",
-                                fmt_type(&pred_ty)
-                            ),
+                            "map expects 2 arguments (list, closure)",
                         );
-                    }
-                    return Type::Name("List".into(), vec![elem_ty]);
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "reduce" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "reduce expects 3 arguments",
-                    );
-                } else {
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    let func_ty = self.infer_expr(&args[1], scopes);
-                    let init_ty = self.infer_expr(&args[2], scopes);
-                    // T-4 (0.31.49): validate reduce signature.
-                    // reduce(list: List<T>, f: func(U, T) -> U, init: U) -> U
-                    // The accumulator type U is independent of element type T.
-                    let elem_ty = match list_ty.unlocated() {
-                        Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
-                        _ => Type::Name("unknown".into(), vec![]),
-                    };
-                    // Validate the reducer function signature: func(U, T) -> U.
-                    if let Type::Func(params, ret) = func_ty.unlocated() {
-                        if params.len() == 2 {
-                            // Unify accumulator param with init type.
-                            if self.unification.unify(&params[0], &init_ty).is_err() {
+                    } else {
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        let elem_ty = match list_ty.unlocated() {
+                            Type::Name(_, args) if args.len() == 1 => args[0].clone(),
+                            _ => Type::Name("unknown".into(), vec![]),
+                        };
+                        let closure_ty = self.infer_expr(&args[1], scopes);
+                        let ret_ty = match closure_ty.unlocated() {
+                            Type::Func(_, ret) => ret.as_ref().clone(),
+                            // P1-30: Non-function second argument is an error.
+                            _ => {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0242,
                                     format!(
+                                        "map expects a function as second argument, found {}",
+                                        fmt_type(&closure_ty)
+                                    ),
+                                );
+                                elem_ty.clone()
+                            }
+                        };
+                        return Type::Name("List".into(), vec![ret_ty]);
+                    }
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                "filter" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "filter expects 2 arguments (list, closure)",
+                        );
+                    } else {
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        let elem_ty = match list_ty.unlocated() {
+                            Type::Name(_, args) if args.len() == 1 => args[0].clone(),
+                            _ => Type::Name("unknown".into(), vec![]),
+                        };
+                        // P1-31: Validate that the predicate is a function.
+                        let pred_ty = self.infer_expr(&args[1], scopes);
+                        if !matches!(pred_ty.unlocated(), Type::Func(..)) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                "filter expects a predicate function as second argument, found {}",
+                                fmt_type(&pred_ty)
+                            ),
+                            );
+                        }
+                        return Type::Name("List".into(), vec![elem_ty]);
+                    }
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                "reduce" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "reduce expects 3 arguments",
+                        );
+                    } else {
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        let func_ty = self.infer_expr(&args[1], scopes);
+                        let init_ty = self.infer_expr(&args[2], scopes);
+                        // T-4 (0.31.49): validate reduce signature.
+                        // reduce(list: List<T>, f: func(U, T) -> U, init: U) -> U
+                        // The accumulator type U is independent of element type T.
+                        let elem_ty = match list_ty.unlocated() {
+                            Type::Name(n, inner) if n == "List" && inner.len() == 1 => {
+                                inner[0].clone()
+                            }
+                            _ => Type::Name("unknown".into(), vec![]),
+                        };
+                        // Validate the reducer function signature: func(U, T) -> U.
+                        if let Type::Func(params, ret) = func_ty.unlocated() {
+                            if params.len() == 2 {
+                                // Unify accumulator param with init type.
+                                if self.unification.unify(&params[0], &init_ty).is_err() {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0242,
+                                        format!(
                                         "reduce init type {} does not match accumulator type {}",
                                         fmt_type(&init_ty),
                                         fmt_type(&params[0])
                                     ),
-                                );
-                            }
-                            // Unify element param with list element type.
-                            if self.unification.unify(&params[1], &elem_ty).is_err() {
-                                self.emit_code(
+                                    );
+                                }
+                                // Unify element param with list element type.
+                                if self.unification.unify(&params[1], &elem_ty).is_err() {
+                                    self.emit_code(
                                     crate::diagnostic::codes::E0242,
                                     format!(
                                         "reduce function element type {} does not match list element type {}",
@@ -646,10 +672,10 @@ impl<'a> Checker<'a> {
                                         fmt_type(&elem_ty)
                                     ),
                                 );
-                            }
-                            // Unify return type with accumulator type.
-                            if self.unification.unify(ret, &params[0]).is_err() {
-                                self.emit_code(
+                                }
+                                // Unify return type with accumulator type.
+                                if self.unification.unify(ret, &params[0]).is_err() {
+                                    self.emit_code(
                                     crate::diagnostic::codes::E0242,
                                     format!(
                                         "reduce function return type {} does not match accumulator type {}",
@@ -657,1442 +683,1446 @@ impl<'a> Checker<'a> {
                                         fmt_type(&params[0])
                                     ),
                                 );
+                                }
+                                return init_ty;
                             }
-                            return init_ty;
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "reduce expects a function with 2 parameters, found {}",
+                                    params.len()
+                                ),
+                            );
+                        } else {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "reduce expects a function as second argument, found {}",
+                                    fmt_type(&func_ty)
+                                ),
+                            );
                         }
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!(
-                                "reduce expects a function with 2 parameters, found {}",
-                                params.len()
-                            ),
-                        );
-                    } else {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!(
-                                "reduce expects a function as second argument, found {}",
-                                fmt_type(&func_ty)
-                            ),
-                        );
+                        return init_ty;
                     }
-                    return init_ty;
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "sort" | "reverse" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
                     return Type::Name("unknown".into(), vec![]);
                 }
-                let arg_ty = self.infer_expr(&args[0], scopes);
-                // Extract element type from input list to propagate to result
-                let elem_ty = match arg_ty.unlocated() {
-                    Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
-                    _ => Type::Name("unknown".into(), vec![]),
-                };
-                return Type::Name("List".into(), vec![elem_ty]);
-            }
-            "flatten" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "flatten expects 1 argument",
-                    );
-                    return Type::Name("unknown".into(), vec![]);
-                }
-                let list_ty = self.infer_expr(&args[0], scopes);
-                let element = match list_ty.unlocated() {
-                    Type::Name(name, outer) if name == "List" && outer.len() == 1 => {
-                        match outer[0].unlocated() {
-                            Type::Name(inner_name, inner)
-                                if inner_name == "List" && inner.len() == 1 =>
-                            {
-                                inner[0].clone()
-                            }
-                            _ => outer[0].clone(),
-                        }
-                    }
-                    _ => {
+                "sort" | "reverse" => {
+                    if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("flatten expects a list, found {}", fmt_type(&list_ty)),
+                            format!("{} expects 1 argument", name),
                         );
                         return Type::Name("unknown".into(), vec![]);
                     }
-                };
-                return Type::Name("List".into(), vec![element]);
-            }
-            "sort_f64" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "sort_f64 expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("f64".into(), vec![])]);
-            }
-            "sort_str" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "sort_str expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "zip" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "zip expects 2 arguments (list, list)",
-                    );
-                    return Type::Name("unknown".into(), vec![]);
-                }
-                let left = self.infer_expr(&args[0], scopes);
-                let right = self.infer_expr(&args[1], scopes);
-                let element = |ty: &Type| match ty.unlocated() {
-                    Type::Name(name, elements) if name == "List" && elements.len() == 1 => {
-                        Some(elements[0].clone())
-                    }
-                    _ => None,
-                };
-                let (Some(left_element), Some(right_element)) = (element(&left), element(&right))
-                else {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!(
-                            "zip expects two lists, found {} and {}",
-                            fmt_type(&left),
-                            fmt_type(&right)
-                        ),
-                    );
-                    return Type::Name("unknown".into(), vec![]);
-                };
-                return Type::Name(
-                    "List".into(),
-                    vec![Type::Tuple(vec![left_element, right_element])],
-                );
-            }
-            "sum" => {
-                if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "sum expects 1 argument");
-                } else {
-                    // P1-32: Infer element type from the list instead of
-                    // always returning i32. sum([1.5, 2.5]) should be f64.
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    let elem_ty = match list_ty.unlocated() {
-                        Type::Name(_, type_args) if type_args.len() == 1 => type_args[0].clone(),
-                        _ => Type::Name("i32".into(), vec![]),
+                    let arg_ty = self.infer_expr(&args[0], scopes);
+                    // Extract element type from input list to propagate to result
+                    let elem_ty = match arg_ty.unlocated() {
+                        Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
+                        _ => Type::Name("unknown".into(), vec![]),
                     };
-                    return elem_ty;
+                    return Type::Name("List".into(), vec![elem_ty]);
                 }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "pow" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            "floor" | "ceil" | "round" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("f64".into(), vec![]);
-            }
-            // SD-7 escape hatches: wrapping arithmetic (no overflow trap).
-            "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments", name),
-                    );
-                } else {
-                    let t1 = self.infer_expr(&args[0], scopes);
-                    let t2 = self.infer_expr(&args[1], scopes);
-                    if !is_int(&t1) || !is_int(&t2) {
+                "flatten" => {
+                    if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("{} expects integer arguments", name),
+                            "flatten expects 1 argument",
                         );
+                        return Type::Name("unknown".into(), vec![]);
                     }
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let element = match list_ty.unlocated() {
+                        Type::Name(name, outer) if name == "List" && outer.len() == 1 => {
+                            match outer[0].unlocated() {
+                                Type::Name(inner_name, inner)
+                                    if inner_name == "List" && inner.len() == 1 =>
+                                {
+                                    inner[0].clone()
+                                }
+                                _ => outer[0].clone(),
+                            }
+                        }
+                        _ => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("flatten expects a list, found {}", fmt_type(&list_ty)),
+                            );
+                            return Type::Name("unknown".into(), vec![]);
+                        }
+                    };
+                    return Type::Name("List".into(), vec![element]);
                 }
-                return Type::Name("i64".into(), vec![]);
-            }
-            // SD-9 support: float classification.
-            "is_nan" | "is_infinite" | "is_finite" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_numeric(&t) {
+                "sort_f64" => {
+                    if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("{} expects a float argument", name),
+                            "sort_f64 expects 1 argument",
                         );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
                     }
+                    return Type::Name("List".into(), vec![Type::Name("f64".into(), vec![])]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            // SD-10 escape hatches: explicit float comparison.
-            "is_close" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "is_close expects 3 arguments (a, b, epsilon)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "f64_eq_exact" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "f64_eq_exact expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "random" => {
-                return Type::Name("f64".into(), vec![]);
-            }
-            "pi" => {
-                return Type::Name("f64".into(), vec![]);
-            }
-            "now" | "timestamp" | "now_ms" | "timestamp_ms" => {
-                return Type::Name("i64".into(), vec![]);
-            }
-            "sleep" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "sleep expects 1 argument (milliseconds)",
-                    );
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_int(&t) {
+                "sort_str" => {
+                    if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            "sleep expects an integer argument",
+                            "sort_str expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "zip" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "zip expects 2 arguments (list, list)",
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                    let left = self.infer_expr(&args[0], scopes);
+                    let right = self.infer_expr(&args[1], scopes);
+                    let element = |ty: &Type| match ty.unlocated() {
+                        Type::Name(name, elements) if name == "List" && elements.len() == 1 => {
+                            Some(elements[0].clone())
+                        }
+                        _ => None,
+                    };
+                    let (Some(left_element), Some(right_element)) =
+                        (element(&left), element(&right))
+                    else {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "zip expects two lists, found {} and {}",
+                                fmt_type(&left),
+                                fmt_type(&right)
+                            ),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    };
+                    return Type::Name(
+                        "List".into(),
+                        vec![Type::Tuple(vec![left_element, right_element])],
+                    );
+                }
+                "sum" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "sum expects 1 argument");
+                    } else {
+                        // P1-32: Infer element type from the list instead of
+                        // always returning i32. sum([1.5, 2.5]) should be f64.
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        let elem_ty = match list_ty.unlocated() {
+                            Type::Name(_, type_args) if type_args.len() == 1 => {
+                                type_args[0].clone()
+                            }
+                            _ => Type::Name("i32".into(), vec![]),
+                        };
+                        return elem_ty;
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "pow" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("f64".into(), vec![]);
+                }
+                "floor" | "ceil" | "round" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("f64".into(), vec![]);
+                }
+                // SD-7 escape hatches: wrapping arithmetic (no overflow trap).
+                "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments", name),
+                        );
+                    } else {
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        if !is_int(&t1) || !is_int(&t2) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects integer arguments", name),
+                            );
+                        }
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                // SD-9 support: float classification.
+                "is_nan" | "is_infinite" | "is_finite" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_numeric(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects a float argument", name),
+                            );
+                        }
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                // SD-10 escape hatches: explicit float comparison.
+                "is_close" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "is_close expects 3 arguments (a, b, epsilon)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "f64_eq_exact" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "f64_eq_exact expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "random" => {
+                    return Type::Name("f64".into(), vec![]);
+                }
+                "pi" => {
+                    return Type::Name("f64".into(), vec![]);
+                }
+                "now" | "timestamp" | "now_ms" | "timestamp_ms" => {
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "sleep" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "sleep expects 1 argument (milliseconds)",
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_int(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "sleep expects an integer argument",
+                            );
+                        }
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
+                "type_name" | "type_fields" | "type_variants" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "keys" | "values" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "has_key" => {
+                    // has_key can be called as a 2-arg global function (json, key)
+                    // or as a 1-arg trait method (key) with implicit self.
+                    // Only validate arg count for the 2-arg form; the 1-arg form
+                    // is handled by trait method dispatch.
+                    if args.len() == 2 {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    } else if args.len() == 1 {
+                        self.infer_expr(&args[0], scopes);
+                    } else {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "has_key expects 1 or 2 arguments",
                         );
                     }
+                    return Type::Name("bool".into(), vec![]);
                 }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "type_name" | "type_fields" | "type_variants" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "map_new" => {
+                    return Type::Name("Record".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "keys" | "values" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "has_key" => {
-                // has_key can be called as a 2-arg global function (json, key)
-                // or as a 1-arg trait method (key) with implicit self.
-                // Only validate arg count for the 2-arg form; the 1-arg form
-                // is handled by trait method dispatch.
-                if args.len() == 2 {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                } else if args.len() == 1 {
-                    self.infer_expr(&args[0], scopes);
-                } else {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "has_key expects 1 or 2 arguments",
-                    );
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "map_new" => {
-                return Type::Name("Record".into(), vec![]);
-            }
-            "map_get" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map_get expects 2 arguments (map, key)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Tuple(vec![
-                    Type::Name("bool".into(), vec![]),
-                    Type::Name("Any".into(), vec![]),
-                ]);
-            }
-            "map_set" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map_set expects 3 arguments (map, key, value)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
-                }
-                return Type::Name("Record".into(), vec![]);
-            }
-            "map_remove" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map_remove expects 2 arguments (map, key)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("Record".into(), vec![]);
-            }
-            "map_size" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map_size expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "map_from_list" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map_from_list expects 1 argument (list of (key, value) tuples)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("Record".into(), vec![]);
-            }
-            // v0.28.20 — concurrency primitives; handle types are uniform i64.
-            "atomic_i32_new"
-            | "atomic_i32_drop"
-            | "atomic_i64_new"
-            | "atomic_i64_drop"
-            | "atomic_bool_new"
-            | "atomic_bool_drop"
-            | "mutex_new"
-            | "mutex_lock"
-            | "channel_new"
-            | "actor_mailbox_depth"
-            | "actor_is_faulted"
-            | "actor_is_muted"
-            | "actor_spawn_count"
-            | "actor_max_children" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "broadcast" => {
-                // broadcast(list, method_name) -> List (Vec of Result / values)
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "broadcast expects 2 arguments (targets, method_name)".to_string(),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
-            }
-            // The dynamic string form cannot be compiled safely: codegen needs
-            // the actor type at compile time. Keep the typed method form as the
-            // single portable API instead of accepting an interpreter-only call.
-            "spawn_detached" => {
-                for arg in args {
-                    self.infer_expr(arg, scopes);
-                }
-                self.emit_code(
-                    crate::diagnostic::codes::E0242,
-                    "bare spawn_detached(name) is not portable; use ActorType.spawn_detached()"
-                        .to_string(),
-                );
-                return Type::Name("i64".into(), vec![]);
-            }
-            // v0.29.38: assert_state(flow_instance, state_name) -> unit
-            "assert_state" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            // v0.29.38: inject_fault(flow_instance) -> Fault record
-            "inject_fault" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("Fault".into(), vec![]);
-            }
-            // v0.29.44: shadow memory tagging builtins
-            "shadow_alloc" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "shadow_tag" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "shadow_check" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "shadow_free" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            // v0.29.48: test_sandbox(config) -> List<string>
-            "test_sandbox" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "atomic_i32_load"
-            | "atomic_i32_compare_exchange"
-            | "atomic_i32_fetch_add"
-            | "atomic_i64_fetch_add" => {
-                if args.is_empty() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects at least 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    for a in &args[1..] {
-                        self.infer_expr(a, scopes);
+                "map_get" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_get expects 2 arguments (map, key)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
                     }
+                    return Type::Tuple(vec![
+                        Type::Name("bool".into(), vec![]),
+                        Type::Name("Any".into(), vec![]),
+                    ]);
                 }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "atomic_i64_load" | "mutex_get" | "channel_recv" | "channel_try_recv" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "map_set" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_set expects 3 arguments (map, key, value)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("Record".into(), vec![]);
                 }
-                return Type::Name("i64".into(), vec![]);
-            }
-            // atomic_bool_load yields the loaded boolean (i1 on the codegen
-            // side), not i64. Previously grouped with the i64 loads, producing
-            // "condition must be bool, found i64" on `if atomic_bool_load(c)`
-            // (0.34.19 CHECKER-GAP E0205).
-            "atomic_bool_load" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "map_remove" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_remove expects 2 arguments (map, key)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("Record".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "atomic_i32_store"
-            | "atomic_i64_store"
-            | "atomic_bool_store"
-            | "mutex_set"
-            | "mutex_unlock"
-            | "mutex_drop"
-            | "channel_send"
-            | "channel_drop"
-            | "actor_set_mailbox_depth"
-            | "actor_set_max_children" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
+                "map_size" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_size expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
                 }
-                return Type::Name("unit".into(), vec![]);
-            }
-            // v0.29.19 — session endpoint ops with compile-time order checking.
-            "session_send" => {
-                return self.check_session_send(args, scopes);
-            }
-            "session_recv" => {
-                return self.check_session_recv(args, scopes);
-            }
-            "session_close" => {
-                return self.check_session_close(args, scopes);
-            }
-            "session_open" => {
-                // session_open::<S>() returns SessionChan residual S.
-                for a in args {
-                    self.infer_expr(a, scopes);
+                "map_from_list" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_from_list expects 1 argument (list of (key, value) tuples)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("Record".into(), vec![]);
                 }
-                return Type::Name("SessionChan".into(), vec![]);
-            }
-            "session_pair" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
-            }
-
-            "print" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "ast_dump" | "ast_eval" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                // v0.34.10a (golden §7.6): return the registered "AST" type
-                // instead of "unknown" — unknown poisoned downstream
-                // unification; AST is a legal nominal type name that unifies
-                // with quote! results.
-                return Type::Name("AST".into(), vec![]);
-            }
-            "allocator_system" | "allocator_arena" | "allocator_bump" => {
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "alloc" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "arena_reset" | "bump_used" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "read_file" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "read_file expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Result(
-                    Box::new(Type::Name("string".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
-            }
-            "write_file" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "write_file expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Result(
-                    Box::new(Type::Name("unit".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
-            }
-            "file_exists" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "file_exists expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "listdir" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "listdir expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "is_dir" | "is_file" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "is_dir/is_file expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "path_join" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "path_join expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "path_ext" | "path_basename" | "path_dirname" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "path_ext/basename/dirname expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "walk_dir" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "walk_dir expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "mkdir_p" | "remove_file" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "mkdir_p/remove_file expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "exec" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "exec expects 1 argument (command)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("ExecResult".into(), vec![]);
-            }
-            "exec_safe" => {
-                if args.is_empty() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "exec_safe expects at least 1 argument (program)",
-                    );
-                } else {
+                // v0.28.20 — concurrency primitives; handle types are uniform i64.
+                "atomic_i32_new"
+                | "atomic_i32_drop"
+                | "atomic_i64_new"
+                | "atomic_i64_drop"
+                | "atomic_bool_new"
+                | "atomic_bool_drop"
+                | "mutex_new"
+                | "mutex_lock"
+                | "channel_new"
+                | "actor_mailbox_depth"
+                | "actor_is_faulted"
+                | "actor_is_muted"
+                | "actor_spawn_count"
+                | "actor_max_children" => {
                     for a in args {
                         self.infer_expr(a, scopes);
                     }
+                    return Type::Name("i64".into(), vec![]);
                 }
-                return Type::Name("ExecResult".into(), vec![]);
-            }
-            "exec_pipe" => {
-                if args.len() != 1 {
+                "broadcast" => {
+                    // broadcast(list, method_name) -> List (Vec of Result / values)
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "broadcast expects 2 arguments (targets, method_name)".to_string(),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
+                }
+                // The dynamic string form cannot be compiled safely: codegen needs
+                // the actor type at compile time. Keep the typed method form as the
+                // single portable API instead of accepting an interpreter-only call.
+                "spawn_detached" => {
+                    for arg in args {
+                        self.infer_expr(arg, scopes);
+                    }
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
-                        "exec_pipe expects 1 argument (command)",
+                        "bare spawn_detached(name) is not portable; use ActorType.spawn_detached()"
+                            .to_string(),
                     );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                    return Type::Name("i64".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "file_stat" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "file_stat expects 1 argument (path)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                // v0.29.38: assert_state(flow_instance, state_name) -> unit
+                "assert_state" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                return Type::Name("StatResult".into(), vec![]);
-            }
-            "append_file" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "append_file expects 2 arguments (path, content)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                // v0.29.38: inject_fault(flow_instance) -> Fault record
+                "inject_fault" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("Fault".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "set_env" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "set_env expects 2 arguments (key, value)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                // v0.29.44: shadow memory tagging builtins
+                "shadow_alloc" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "read_file_partial" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "read_file_partial expects 2 arguments (path, max_bytes)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "shadow_tag" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "read_file_bytes" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "read_file_bytes expects 1 argument (path)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "shadow_check" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "write_file_bytes" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "write_file_bytes expects 2 arguments (path, data)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "shadow_free" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "read_lines_each" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "read_lines_each expects 2 arguments (path, callback)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                // v0.29.48: test_sandbox(config) -> List<string>
+                "test_sandbox" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
                 }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "read_lines_json" | "read_lines_json_builtin" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "read_lines_json expects 1 argument (path)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "atomic_i32_load"
+                | "atomic_i32_compare_exchange"
+                | "atomic_i32_fetch_add"
+                | "atomic_i64_fetch_add" => {
+                    if args.is_empty() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects at least 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        for a in &args[1..] {
+                            self.infer_expr(a, scopes);
+                        }
+                    }
+                    return Type::Name("i32".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "sha256" | "base64_encode" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "sha256/base64_encode expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "atomic_i64_load" | "mutex_get" | "channel_recv" | "channel_try_recv" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "base64_decode" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "base64_decode expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                // atomic_bool_load yields the loaded boolean (i1 on the codegen
+                // side), not i64. Previously grouped with the i64 loads, producing
+                // "condition must be bool, found i64" on `if atomic_bool_load(c)`
+                // (0.34.19 CHECKER-GAP E0205).
+                "atomic_bool_load" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
                 }
-                return Type::Result(
-                    Box::new(Type::Name("string".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
-            }
-            "str_split" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_split expects 2 arguments (string, delimiter)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "atomic_i32_store"
+                | "atomic_i64_store"
+                | "atomic_bool_store"
+                | "mutex_set"
+                | "mutex_unlock"
+                | "mutex_drop"
+                | "channel_send"
+                | "channel_drop"
+                | "actor_set_mailbox_depth"
+                | "actor_set_max_children" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
-            "str_join" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_join expects 2 arguments (list, separator)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                // v0.29.19 — session endpoint ops with compile-time order checking.
+                "session_send" => {
+                    return self.check_session_send(args, scopes);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_trim" | "str_to_upper" | "str_to_lower" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 1 argument", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "session_recv" => {
+                    return self.check_session_recv(args, scopes);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_starts_with" | "str_ends_with" | "str_contains" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "session_close" => {
+                    return self.check_session_close(args, scopes);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "regex_match" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "regex_match expects 2 arguments (text, pattern)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "session_open" => {
+                    // session_open::<S>() returns SessionChan residual S.
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("SessionChan".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "regex_find" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "regex_find expects 2 arguments (text, pattern)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "session_pair" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "regex_replace" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "regex_replace expects 3 arguments (text, pattern, replacement)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
+
+                "print" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "regex_find_all" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "regex_find_all expects 2 arguments (text, pattern)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "ast_dump" | "ast_eval" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    // v0.34.10a (golden §7.6): return the registered "AST" type
+                    // instead of "unknown" — unknown poisoned downstream
+                    // unification; AST is a legal nominal type name that unifies
+                    // with quote! results.
+                    return Type::Name("AST".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "regex_capture_groups" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "regex_capture_groups expects 2 arguments (text, pattern)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_replace" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_replace expects 3 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_repeat" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_repeat expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "char_code" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "char_code expects 2 arguments (string, index)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "chr" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "chr expects 1 argument (code point)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_char_at" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_char_at expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_substring" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_substring expects 3 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_count_substring" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_count_substring expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "str_index_of" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_index_of expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Option(Box::new(Type::Name("i32".into(), vec![])));
-            }
-            "option_value_or" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "option_value_or expects 2 arguments",
-                    );
+                "allocator_system" | "allocator_arena" | "allocator_bump" => {
                     return Type::Name("unknown".into(), vec![]);
                 }
-                // P1-33: Relate Option payload type with default type.
-                // Previously the Option was inferred and discarded, allowing
-                // option_value_or(Some(1), "not an int").
-                let opt_ty = self.infer_expr(&args[0], scopes);
-                let default_ty = self.infer_expr(&args[1], scopes);
-                let payload_ty = match opt_ty.unlocated() {
-                    Type::Option(inner) => inner.as_ref().clone(),
-                    Type::Name(n, type_args) if n == "Option" && type_args.len() == 1 => {
-                        type_args[0].clone()
+                "alloc" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
                     }
-                    _ => default_ty.clone(),
-                };
-                if self.unification.unify(&payload_ty, &default_ty).is_err() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!(
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                "arena_reset" | "bump_used" => {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
+                "read_file" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "read_file expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("string".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+                "write_file" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "write_file expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("unit".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+                "file_exists" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "file_exists expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "listdir" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "listdir expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "is_dir" | "is_file" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "is_dir/is_file expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "path_join" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "path_join expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "path_ext" | "path_basename" | "path_dirname" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "path_ext/basename/dirname expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "walk_dir" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "walk_dir expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "mkdir_p" | "remove_file" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "mkdir_p/remove_file expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "exec" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "exec expects 1 argument (command)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("ExecResult".into(), vec![]);
+                }
+                "exec_safe" => {
+                    if args.is_empty() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "exec_safe expects at least 1 argument (program)",
+                        );
+                    } else {
+                        for a in args {
+                            self.infer_expr(a, scopes);
+                        }
+                    }
+                    return Type::Name("ExecResult".into(), vec![]);
+                }
+                "exec_pipe" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "exec_pipe expects 1 argument (command)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "file_stat" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "file_stat expects 1 argument (path)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("StatResult".into(), vec![]);
+                }
+                "append_file" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "append_file expects 2 arguments (path, content)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "set_env" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "set_env expects 2 arguments (key, value)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "read_file_partial" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "read_file_partial expects 2 arguments (path, max_bytes)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "read_file_bytes" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "read_file_bytes expects 1 argument (path)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "write_file_bytes" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "write_file_bytes expects 2 arguments (path, data)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "read_lines_each" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "read_lines_each expects 2 arguments (path, callback)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "read_lines_json" | "read_lines_json_builtin" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "read_lines_json expects 1 argument (path)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "sha256" | "base64_encode" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "sha256/base64_encode expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "base64_decode" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "base64_decode expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("string".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+                "str_split" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_split expects 2 arguments (string, delimiter)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "str_join" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_join expects 2 arguments (list, separator)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_trim" | "str_to_upper" | "str_to_lower" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_starts_with" | "str_ends_with" | "str_contains" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "regex_match" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "regex_match expects 2 arguments (text, pattern)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "regex_find" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "regex_find expects 2 arguments (text, pattern)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "regex_replace" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "regex_replace expects 3 arguments (text, pattern, replacement)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "regex_find_all" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "regex_find_all expects 2 arguments (text, pattern)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "regex_capture_groups" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "regex_capture_groups expects 2 arguments (text, pattern)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_replace" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_replace expects 3 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_repeat" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_repeat expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "char_code" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "char_code expects 2 arguments (string, index)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "chr" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "chr expects 1 argument (code point)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_char_at" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_char_at expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_substring" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_substring expects 3 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_count_substring" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_count_substring expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "str_index_of" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_index_of expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Option(Box::new(Type::Name("i32".into(), vec![])));
+                }
+                "option_value_or" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "option_value_or expects 2 arguments",
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                    // P1-33: Relate Option payload type with default type.
+                    // Previously the Option was inferred and discarded, allowing
+                    // option_value_or(Some(1), "not an int").
+                    let opt_ty = self.infer_expr(&args[0], scopes);
+                    let default_ty = self.infer_expr(&args[1], scopes);
+                    let payload_ty = match opt_ty.unlocated() {
+                        Type::Option(inner) => inner.as_ref().clone(),
+                        Type::Name(n, type_args) if n == "Option" && type_args.len() == 1 => {
+                            type_args[0].clone()
+                        }
+                        _ => default_ty.clone(),
+                    };
+                    if self.unification.unify(&payload_ty, &default_ty).is_err() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
                             "option_value_or: Option payload type {} doesn't match default type {}",
                             fmt_type(&payload_ty),
                             fmt_type(&default_ty)
                         ),
-                    );
-                }
-                return default_ty;
-            }
-            "str_parse_int" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_parse_int expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Tuple(vec![
-                    Type::Name("bool".into(), vec![]),
-                    Type::Name("i64".into(), vec![]),
-                ]);
-            }
-            "str_parse_float" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_parse_float expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Tuple(vec![
-                    Type::Name("bool".into(), vec![]),
-                    Type::Name("f64".into(), vec![]),
-                ]);
-            }
-            "eprintln" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("unit".into(), vec![]);
-            }
-            "format" => {
-                if args.is_empty() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "format expects at least 1 argument (template string)",
-                    );
-                } else {
-                    let tpl = self.infer_expr(&args[0], scopes);
-                    if !crate::core::helpers::is_string(&tpl) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!(
-                                "format expects a string template as first argument, found {}",
-                                fmt_type(&tpl)
-                            ),
                         );
                     }
-                    for a in &args[1..] {
+                    return default_ty;
+                }
+                "str_parse_int" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_parse_int expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Tuple(vec![
+                        Type::Name("bool".into(), vec![]),
+                        Type::Name("i64".into(), vec![]),
+                    ]);
+                }
+                "str_parse_float" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_parse_float expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Tuple(vec![
+                        Type::Name("bool".into(), vec![]),
+                        Type::Name("f64".into(), vec![]),
+                    ]);
+                }
+                "eprintln" => {
+                    for a in args {
                         self.infer_expr(a, scopes);
                     }
+                    return Type::Name("unit".into(), vec![]);
                 }
-                return Type::Name("string".into(), vec![]);
-            }
-            "str_to_c_str" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "str_to_c_str expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Tuple(vec![
-                    Type::Name("i64".into(), vec![]),
-                    Type::Name("i64".into(), vec![]),
-                ]);
-            }
-            "c_str_to_string" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "c_str_to_string expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "from_json" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "from_json expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("Record".into(), vec![]);
-            }
-            "json_is_valid" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "json_is_valid expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "json_get_string" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "json_get_string expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "json_get_int" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "json_get_int expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "json_array_length" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "json_array_length expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "json_get_element" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "json_get_element expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "json_has_key" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "json_has_key expects 2 arguments",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "socket" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "socket expects 3 arguments (domain, type, protocol)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "connect" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "connect expects 3 arguments (fd, host, port)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "bind" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "bind expects 2 arguments (fd, port)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "listen" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "listen expects 2 arguments (fd, backlog)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "accept" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "accept expects 1 argument (fd)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "send" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "send expects 2 arguments (fd, data)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "recv" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "recv expects 2 arguments (fd, buf_size)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "close_fd" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "close_fd expects 1 argument (fd)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("i64".into(), vec![]);
-            }
-            "http_get" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "http_get expects 1 argument (url)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            "http_post" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "http_post expects 2 arguments (url, body)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                }
-                return Type::Name("string".into(), vec![]);
-            }
-            // Higher-order list operations (shared across backends)
-            "map_list" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "map_list expects 2 arguments (list, fn)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    let fn_ty = self.infer_expr(&args[1], scopes);
-                    if let Type::Func(_, ret_ty) = fn_ty.into_unlocated() {
-                        return Type::Name("List".into(), vec![*ret_ty]);
+                "format" => {
+                    if args.is_empty() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "format expects at least 1 argument (template string)",
+                        );
+                    } else {
+                        let tpl = self.infer_expr(&args[0], scopes);
+                        if !crate::core::helpers::is_string(&tpl) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "format expects a string template as first argument, found {}",
+                                    fmt_type(&tpl)
+                                ),
+                            );
+                        }
+                        for a in &args[1..] {
+                            self.infer_expr(a, scopes);
+                        }
                     }
+                    return Type::Name("string".into(), vec![]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
-            }
-            "filter_list" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "filter_list expects 2 arguments (list, pred)",
-                    );
-                } else {
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    return list_ty;
+                "str_to_c_str" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "str_to_c_str expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Tuple(vec![
+                        Type::Name("i64".into(), vec![]),
+                        Type::Name("i64".into(), vec![]),
+                    ]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
-            }
-            "reduce_list" => {
-                if args.len() != 3 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "reduce_list expects 3 arguments (list, fn, init)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
-                    let init_ty = self.infer_expr(&args[2], scopes);
-                    return init_ty;
+                "c_str_to_string" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "c_str_to_string expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
                 }
-                return Type::Name("i32".into(), vec![]);
-            }
-            "sort_list" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "sort_list expects 1 argument (list)",
-                    );
-                } else {
-                    let list_ty = self.infer_expr(&args[0], scopes);
-                    return list_ty;
+                "from_json" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "from_json expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("Record".into(), vec![]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
-            }
-            "find" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "find expects 2 arguments (list, target)",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "json_is_valid" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "json_is_valid expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
                 }
-                return Type::Tuple(vec![
-                    Type::Name("bool".into(), vec![]),
-                    Type::Name("i32".into(), vec![]),
-                ]);
-            }
-            "any" | "all" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        format!("{} expects 2 arguments (list, pred)", name),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                "json_get_string" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "json_get_string expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
-            }
-            "is_empty" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "is_empty expects 1 argument",
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                "json_get_int" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "json_get_int expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
                 }
-                return Type::Name("bool".into(), vec![]);
+                "json_array_length" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "json_array_length expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "json_get_element" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "json_get_element expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "json_has_key" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "json_has_key expects 2 arguments",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "socket" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "socket expects 3 arguments (domain, type, protocol)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "connect" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "connect expects 3 arguments (fd, host, port)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        self.infer_expr(&args[2], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "bind" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "bind expects 2 arguments (fd, port)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "listen" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "listen expects 2 arguments (fd, backlog)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "accept" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "accept expects 1 argument (fd)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "send" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "send expects 2 arguments (fd, data)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "recv" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "recv expects 2 arguments (fd, buf_size)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "close_fd" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "close_fd expects 1 argument (fd)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "http_get" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "http_get expects 1 argument (url)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "http_post" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "http_post expects 2 arguments (url, body)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                // Higher-order list operations (shared across backends)
+                "map_list" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_list expects 2 arguments (list, fn)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        let fn_ty = self.infer_expr(&args[1], scopes);
+                        if let Type::Func(_, ret_ty) = fn_ty.into_unlocated() {
+                            return Type::Name("List".into(), vec![*ret_ty]);
+                        }
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
+                }
+                "filter_list" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "filter_list expects 2 arguments (list, pred)",
+                        );
+                    } else {
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        return list_ty;
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
+                }
+                "reduce_list" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "reduce_list expects 3 arguments (list, fn, init)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        let init_ty = self.infer_expr(&args[2], scopes);
+                        return init_ty;
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "sort_list" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "sort_list expects 1 argument (list)",
+                        );
+                    } else {
+                        let list_ty = self.infer_expr(&args[0], scopes);
+                        return list_ty;
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
+                }
+                "find" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "find expects 2 arguments (list, target)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Tuple(vec![
+                        Type::Name("bool".into(), vec![]),
+                        Type::Name("i32".into(), vec![]),
+                    ]);
+                }
+                "any" | "all" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 2 arguments (list, pred)", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "is_empty" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "is_empty expects 1 argument",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                _ => {}
             }
-            _ => {}
-        }
+        } // 'builtin_dispatch
 
         // Local variables (including function parameters) shadow global
         // functions. Check scopes first before falling back to global function
