@@ -1111,3 +1111,36 @@ func main() -> i32 {
         );
     }
 }
+
+#[test]
+fn m5_map_for_loop_rejected_without_internal_code_leak() {
+    // M5 (audit-syntax 2026-08-03): `for (k, v) in map` used to pass the AST
+    // checker (element typed (string, Any)) and then leak the internal
+    // TOOL-RESOLUTION-001 lowering error to the user. No backend supports Map
+    // iteration, so the checker now rejects early with E0212 + keys()/values()
+    // guidance.
+    let src = r#"
+func main() -> i32 {
+    let m = map_new()
+    map_set(m, "a", 1)
+    for (k, v) in m {
+        println(k)
+    }
+    0
+}
+"#;
+    let diagnostics = check_source(src).expect_err("Map for-loop must be rejected");
+    let rendered = diagnostics
+        .iter()
+        .map(|d| format!("{} {}", d.code.clone().unwrap_or_default(), d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0212") && rendered.contains("keys(m)"),
+        "expected E0212 with keys()/values() guidance, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("TOOL-RESOLUTION-001"),
+        "internal resolution code must not leak, got:\n{rendered}"
+    );
+}

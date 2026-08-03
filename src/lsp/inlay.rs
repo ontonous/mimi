@@ -133,6 +133,25 @@ impl LspServer {
                 } => {
                     self.collect_hints_from_block(body, text, hints, func_params, current_func);
                 }
+                // M3 (audit-syntax 2026-08-03): if-let / while-let / ieee_float
+                // bodies were silently skipped (no arms) — param hints inside
+                // them never surfaced.
+                Stmt::IfLet {
+                    init, then_, else_, ..
+                } => {
+                    self.collect_param_hints(init, text, hints, func_params, current_func);
+                    self.collect_hints_from_block(then_, text, hints, func_params, current_func);
+                    if let Some(els) = else_ {
+                        self.collect_hints_from_block(els, text, hints, func_params, current_func);
+                    }
+                }
+                Stmt::WhileLet { init, body, .. } => {
+                    self.collect_param_hints(init, text, hints, func_params, current_func);
+                    self.collect_hints_from_block(body, text, hints, func_params, current_func);
+                }
+                Stmt::IeeeFloat(body) => {
+                    self.collect_hints_from_block(body, text, hints, func_params, current_func);
+                }
                 _ => {}
             }
         }
