@@ -3073,6 +3073,28 @@ fn dual_generic_linear_session_rejected() {
 }
 
 #[test]
+fn dual_generic_linear_cap_rejected_turbofish() {
+    // C2 (audit-type 2026-08-03): E0432 was only checked on the inferred
+    // instantiation path; `func::<cap X>(cap_value)` turbofish syntax escaped
+    // exactly-once entirely. The turbofish instantiation path now enforces the
+    // same linear-argument rejection.
+    let diags = check_source(
+        "cap FileReadCap; func swallow<T>(x: T) -> i32 { 1 } \
+         func main() -> i32 { let c = FileReadCap; swallow::<cap FileReadCap>(c) }",
+    )
+    .expect_err("cap as turbofish generic argument must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
 fn dual_generic_linear_container_allowed() {
     // Containers wrapping linear values are NOT rejected: List<cap> stays
     // legal (CFG tracks the container facts). The element extracted through

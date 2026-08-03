@@ -906,6 +906,24 @@ impl<'a> Checker<'a> {
             // Check arguments with substituted types
             for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                 let at = self.infer_expr(arg, scopes);
+                // C2 (audit-type 2026-08-03): the turbofish instantiation path
+                // must enforce the same linear-argument rejection as the
+                // inferred-instantiation path in check_call (simple.rs) —
+                // otherwise `func::<cap X>(cap_value)` silently escapes
+                // exactly-once (E0432). Non-generic callees keep concrete
+                // linear tracking (no rejection).
+                if !generics.is_empty() && self.is_linear_surface_type(&at) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0432,
+                        format!(
+                            "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
+                             generic parameters are not linearly tracked (use a concrete function signature)",
+                            fmt_type(&at),
+                            i + 1,
+                            name
+                        ),
+                    );
+                }
                 let subst_param = if !type_map.is_empty() {
                     subst_type_params(param, &generics, &type_map)
                 } else {
