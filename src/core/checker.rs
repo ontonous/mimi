@@ -326,7 +326,16 @@ impl<'a> Checker<'a> {
                     // failures that add no user-facing value when the root cause
                     // (e.g. undefined function, type mismatch) is already reported.
                     if self.errors.is_empty() {
-                        self.errors.push(Diagnostic::error(
+                        let code = if matches!(
+                            error,
+                            crate::core::unification::ResolveError::EscapeHatch(_)
+                        ) {
+                            crate::diagnostic::codes::E0431
+                        } else {
+                            crate::diagnostic::codes::E0200
+                        };
+                        self.errors.push(Diagnostic::error_code(
+                            code,
                             format!(
                                 "TOOL-RESOLUTION-001: expression in '{}' did not finalize to a monotype: {}",
                                 owner.0, error
@@ -365,10 +374,23 @@ impl<'a> Checker<'a> {
             Ok(signature) => {
                 self.zonked_nested_func_types.insert(owner, signature);
             }
-            Err(error) => self.errors.push(Diagnostic::error(
-                format!("TOOL-RESOLUTION-001: nested callable signature is not zonked: {error}"),
-                self.diagnostic_span(),
-            )),
+            Err(error) => {
+                let code = if matches!(
+                    error,
+                    crate::core::unification::ResolveError::EscapeHatch(_)
+                ) {
+                    crate::diagnostic::codes::E0431
+                } else {
+                    crate::diagnostic::codes::E0200
+                };
+                self.errors.push(Diagnostic::error_code(
+                    code,
+                    format!(
+                        "TOOL-RESOLUTION-001: nested callable signature is not zonked: {error}"
+                    ),
+                    self.diagnostic_span(),
+                ))
+            }
         }
     }
 
@@ -769,8 +791,19 @@ impl<'a> Checker<'a> {
                 Err(error) => {
                     let span = function_span(&self.file.items, "", &name)
                         .unwrap_or_else(|| self.diagnostic_span());
+                    // H4 (audit-type 2026-08-03): E0431 for escape-hatch leaks
+                    // (`_`/Infer/unknown surviving finalization), E0200 for other
+                    // resolution artifacts (unbound TypeVar, ForAll, depth…).
+                    let code = if matches!(
+                        error,
+                        crate::core::unification::ResolveError::EscapeHatch(_)
+                    ) {
+                        crate::diagnostic::codes::E0431
+                    } else {
+                        crate::diagnostic::codes::E0200
+                    };
                     self.errors.push(Diagnostic::error_code(
-                        crate::diagnostic::codes::E0200,
+                        code,
                         format!(
                             "TOOL-RESOLUTION-001: function '{}' did not finalize to a monotype: {}",
                             name, error
