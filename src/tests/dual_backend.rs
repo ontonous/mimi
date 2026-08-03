@@ -11759,6 +11759,43 @@ fn dual_unsafe_cast_protocol_requires_dyn_target() {
 }
 
 #[test]
+fn codegen_unsafe_cast_protocol_non_record_rejected() {
+    // H5 (audit-codegen 2026-08-03): unsafe_cast_protocol on a scalar
+    // (non-record) concrete type used to panic the compiler — the dyn
+    // fat-pointer data slot load produced an i32 and the old
+    // `into_pointer_value()` called the panicking variant (user-reachable
+    // ICE). Must now surface a clean CompileError (E0713) instead.
+    let src = r#"
+trait Show {
+    func show() -> string;
+}
+type Foo {
+    value: i32
+}
+impl Show for Foo {
+    func show() -> string { "foo" }
+}
+func main() -> i32 {
+    let x: i32 = 5
+    let d: dyn Show = unsafe_cast_protocol(x)
+    println(d.show())
+    0
+}
+"#;
+    let result = compile_and_run(src);
+    assert!(
+        result.is_err(),
+        "codegen must reject non-record unsafe_cast_protocol, got: {:?}",
+        result
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("is not a record"),
+        "expected E0713 non-record diagnostic, got: {err}"
+    );
+}
+
+#[test]
 fn dual_newtype_pattern() {
     // Newtype constructor patterns must destructure the transparent inner
     // value instead of loading an enum tag/payload.

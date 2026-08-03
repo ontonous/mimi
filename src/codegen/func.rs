@@ -1698,9 +1698,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // method's `self: &Type` receives — not the address of
                         // the staging alloca (that would double-indirect).
                         // Load the stored value, then cast it to i8*.
-                        let data_ptr = self
-                            .build_load(concrete_ty, data_alloca, &format!("{}_data_val", name))?
-                            .into_pointer_value();
+                        // H5 (audit-codegen 2026-08-03): a non-record concrete
+                        // type (e.g. `unsafe_cast_protocol(5)` with x: i32)
+                        // makes the load produce a non-pointer — the old
+                        // `into_pointer_value()` panicked (user-reachable ICE).
+                        // Reject explicitly instead: dyn dispatch needs a
+                        // record-shaped self (pointer semantics); scalar
+                        // values cannot form a valid fat data slot.
+                        let loaded = self
+                            .build_load(concrete_ty, data_alloca, &format!("{}_data_val", name))
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!(
+                                    "unsafe_cast_protocol: concrete type '{}' is not a record \
+                                     (load produced a non-pointer: {}); dyn trait dispatch \
+                                     requires a record-typed value",
+                                    concrete_type, e
+                                ))
+                            })?;
+                        let data_ptr = match loaded {
+                            BasicValueEnum::PointerValue(ptr) => ptr,
+                            _ => {
+                                return Err(CompileError::LlvmError(format!(
+                                    "unsafe_cast_protocol: concrete type '{}' is not a record \
+                                     (value is not a pointer); dyn trait dispatch requires a \
+                                     record-typed value",
+                                    concrete_type
+                                )))
+                            }
+                        };
                         let data_ptr = self
                             .builder
                             .build_pointer_cast(data_ptr, i8_ptr, &format!("{}_data_i8", name))
