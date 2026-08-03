@@ -40,9 +40,10 @@ struct ActionEmitter<'a> {
     /// - Same resource consumed twice in one basic block (real bug)
     /// - Same resource consumed in different branches (legal)
     /// - Alias-induced duplicate tracking (legal)
-    /// Kept for future use; do not remove without re-enabling the assertion.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
+    /// Linear-resource double-drop tracker (RESOURCE-LINEAR-001 debug signal).
+    /// Referenced by the always-on mimi_assert! in emit_drop — must exist in
+    /// ALL build profiles (a previous #[cfg(debug_assertions)] gate broke
+    /// `cargo build --release`: mimi_assert! is not compiled out in release).
     consumed_resources: BTreeSet<ResourceId>,
 }
 
@@ -79,7 +80,6 @@ impl<'a> ActionEmitter<'a> {
             actions: Vec::new(),
             loans: Vec::new(),
             errors: Vec::new(),
-            #[cfg(debug_assertions)]
             consumed_resources: BTreeSet::new(),
         }
     }
