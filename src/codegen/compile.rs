@@ -733,7 +733,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 derives: vec![],
                                 attributes: vec![],
                             };
-        self.register_type_def(&td)?;
+                            self.register_type_def(&td)?;
                         }
                     }
                     // Cache the flow definition for transition compilation.

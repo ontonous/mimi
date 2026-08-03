@@ -233,7 +233,23 @@ impl<'a> Checker<'a> {
                     }
                     return;
                 }
-                if !Self::is_builtin_type(name)
+                // C3 (audit 2026-08-03): golden §2.4 removed `Any` from the
+                // user-facing grammar (0.34.10), but std/maps.mimi and
+                // std/set.mimi still use `Any` to spell heterogeneous map/set
+                // values in their trait/function signatures. Those signatures
+                // load with `use std::maps` / `use std::set` and previously
+                // exploded into ~55 E0407s, making both modules unusable.
+                // Exempt ONLY stdlib sources (SourceKey "stdlib:...") and ONLY
+                // the exact name "Any" — user code keeps the error, and any
+                // other unknown name inside stdlib still reports.
+                let stdlib_any = name == "Any"
+                    && self
+                        .source_registry
+                        .record(self.current_span.source_id)
+                        .map(|r| r.key.as_str().starts_with("stdlib:"))
+                        .unwrap_or(false);
+                if !stdlib_any
+                    && !Self::is_builtin_type(name)
                     && !self.types.contains_key(name)
                     && !self.generic_scope.contains(name)
                 {

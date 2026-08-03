@@ -159,6 +159,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(loaded);
         }
 
+        // 1.9. Set built-in method dispatch — BEFORE trait impl lookup.
+        // C3 (audit 2026-08-03): std/set.mimi's `impl SetExt for Set` registers
+        // `Set__SetExt__size` etc.; if trait dispatch won, `s.size()` would call
+        // the trait method whose body (`self.size()`) dispatches back to the
+        // trait method — infinite recursion (codegen segfaulted; the bytecode
+        // VM routes the impl body through runtime DynMethodCall with builtin
+        // precedence and ran fine). Builtin semantics win for the fixed
+        // Set method table (size/len/is_empty/contains/insert/remove/to_list).
+        if obj_type == "set" || obj_type.starts_with("Set") || obj_type.starts_with("set") {
+            return self.compile_set_method(obj, method_name, args, vars);
+        }
+
         // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
         // Impl blocks are keyed by the base type name (e.g. "List") even when the
         // call site sees a concrete instantiation like "List<T>" or "List<i32>".
@@ -316,11 +328,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(function) = self.module.get_function(&ctor_name) {
                 return self.compile_enum_constructor_call(args, vars, function);
             }
-        }
-
-        // 5. Set built-in method dispatch
-        if obj_type == "set" || obj_type.starts_with("Set") || obj_type.starts_with("set") {
-            return self.compile_set_method(obj, method_name, args, vars);
         }
 
         // 5b. Builtin string method fallback: s.trim() → str_trim(s)

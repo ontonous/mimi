@@ -364,6 +364,84 @@ func main() -> i64 {
     cleanup(&dir);
 }
 
+#[test]
+fn loader_std_set_import_typechecks() {
+    // C3 (audit 2026-08-03): `use std::set` previously exploded into ~55
+    // E0407s ("unknown type 'Any'") because std/set.mimi spells its
+    // heterogeneous values as `Any` (golden §2.4 removed Any from user
+    // grammar in 0.34.10, but stdlib signatures still need it). The real
+    // loader path stamps stdlib sources with the "stdlib:" SourceKey
+    // (loader/flow.rs:126) and the checker exempts exactly that scope —
+    // this test pins the end-to-end `use std::set` typecheck.
+    let dir = temp_dir("std_set");
+    let main_path = dir.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use std::set
+
+func main() -> i32 {
+    let s = {7, 9}
+    let s2 = insert(s, 11)
+    if contains(s2, 7) { size(s2) } else { 0 }
+}
+"#,
+    )
+    .expect("src/tests/loader.rs: std_set write failed");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("loading main with std::set import should succeed");
+    let merged = loader
+        .merge_all()
+        .expect("merging std::set import should succeed");
+    let result = crate::core::check(&merged);
+    assert!(
+        result.is_ok(),
+        "use std::set should typecheck: {:?}",
+        result.err()
+    );
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_std_maps_import_typechecks() {
+    // C3 (audit 2026-08-03): same stdlib-Any story as std::set, for
+    // std/maps.mimi (`Any` in get/set/remove/get_or_default/...).
+    let dir = temp_dir("std_maps");
+    let main_path = dir.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use std::maps
+
+func main() -> i32 {
+    let m = new()
+    let m2 = set(m, "k", 1)
+    let r = get(m2, "k")
+    if r.0 { 1 } else { 0 }
+}
+"#,
+    )
+    .expect("src/tests/loader.rs: std_maps write failed");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("loading main with std::maps import should succeed");
+    let merged = loader
+        .merge_all()
+        .expect("merging std::maps import should succeed");
+    let result = crate::core::check(&merged);
+    assert!(
+        result.is_ok(),
+        "use std::maps should typecheck: {:?}",
+        result.err()
+    );
+    cleanup(&dir);
+}
+
 // Regression for v0.28.25: `use pkgname::func` and `use pkgname` should both
 // resolve a path dependency's entry file (from mimi.toml) without requiring
 // the entry file name in the use path.

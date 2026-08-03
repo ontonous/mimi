@@ -2572,10 +2572,39 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             | CheckedConversionKind::AliasWrap
             | CheckedConversionKind::AliasUnwrap
             | CheckedConversionKind::NewtypeWrap
-            | CheckedConversionKind::NewtypeUnwrap => Ok(value),
+            | CheckedConversionKind::NewtypeUnwrap
+            | CheckedConversionKind::ContainerErase => Ok(value),
             CheckedConversionKind::NumericWiden | CheckedConversionKind::NumericNarrowChecked => {
                 let target = self.lower_type(&conversion.to)?;
                 self.numeric_convert(value, target)
+            }
+            // C3 (audit 2026-08-03): concrete → Any. DynamicAny lowers to i64
+            // (resolved/types.rs); sub-64-bit ints widen to match the map value
+            // box ABI, everything else flows through untouched. This mirrors
+            // how the builtin map_set accepts arbitrary values.
+            CheckedConversionKind::DynamicAnyPack => {
+                let target = self.lower_type(&conversion.to)?;
+                match value {
+                    BasicValueEnum::IntValue(iv) => {
+                        let i64_ty = self.generator.context.i64_type();
+                        if iv.get_type().get_bit_width() == 64 {
+                            Ok(value)
+                        } else {
+                            let widened = self.generator.builder.build_int_s_extend(
+                                iv,
+                                i64_ty,
+                                "dynany_sext",
+                            ).map_err(|e| CompileError::LlvmError(format!("dynany sext: {}", e)))?;
+                            Ok(BasicValueEnum::IntValue(widened))
+                        }
+                    }
+                    _ if target == value.get_type() => Ok(value),
+                    _ => Err(CompileError::TypeMismatch(format!(
+                        "DynamicAnyPack: cannot pack {} into {}",
+                        value.get_type(),
+                        target
+                    ))),
+                }
             }
             other => Err(CompileError::Unsupported(format!(
                 "resolved conversion {other:?} escaped resolved native eligibility"

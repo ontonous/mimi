@@ -437,10 +437,8 @@ pub struct CodeGenerator<'ctx> {
     /// transition targeting `A | C` would otherwise tag `C` with the subset
     /// ordinal 1, which the receiving match (dispatched on the global enum
     /// ordinal) interprets as `B` — a silent L1 violation.
-    multi_target_global_ordinals: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, u64>,
-    >,
+    multi_target_global_ordinals:
+        std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
     /// Name of the flow whose transition is currently being compiled.
     /// Selects the right bucket in `multi_target_global_ordinals`.
     current_flow_name: String,

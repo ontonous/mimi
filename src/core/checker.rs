@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
+use crate::span::{SourceRegistry, Span};
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -8,6 +8,13 @@ use super::unification::UnificationTable;
 
 pub(crate) struct Checker<'a> {
     pub(crate) file: &'a File,
+    /// Registry backing `file.sources` — lets the type checker tell stdlib
+    /// sources (SourceKey "stdlib:...") apart from user sources. Used by the
+    /// C3 (audit 2026-08-03) stdlib exemption: `Any` stays removed from the
+    /// user-facing grammar (golden §2.4), but std/maps.mimi + std/set.mimi
+    /// still spell heterogeneous map/set values with `Any`; those signatures
+    /// are loader-internal (not user syntax) and must keep type-checking.
+    pub(crate) source_registry: &'a SourceRegistry,
     pub(crate) errors: Vec<Diagnostic>,
     pub(crate) warnings: Vec<Diagnostic>,
     pub(crate) funcs: HashMap<String, (Vec<Type>, Type)>,
@@ -228,6 +235,7 @@ impl<'a> Checker<'a> {
     pub(crate) fn new(file: &'a File) -> Self {
         Self {
             file,
+            source_registry: &file.sources,
             errors: Vec::new(),
             warnings: Vec::new(),
             funcs: HashMap::new(),

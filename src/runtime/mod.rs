@@ -1708,6 +1708,7 @@ fn safe_c_string_from_handle(handle: ValueHandle) -> Option<String> {
     None
 }
 
+#[no_mangle]
 pub extern "C" fn mimi_map_from_list(
     keys: *mut ValueHandle,
     values: *mut ValueHandle,
