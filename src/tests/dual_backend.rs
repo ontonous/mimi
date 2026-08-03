@@ -3327,6 +3327,26 @@ fn dual_trait_impl_method_shadows_same_name_builtin() {
 }
 
 #[test]
+fn dual_i64_min_literal() {
+    // audit-codegen L3 (0.34.24): the i64::MIN literal parses and behaves
+    // identically on both backends; MIN-1 traps (E0802) rather than wrapping.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = -9223372036854775808
+            println(x)
+            println(x + 1)
+            0
+        }
+        "#,
+        "-9223372036854775808\n-9223372036854775807"
+    );
+}
+
+#[test]
 fn dual_generic_nested_type() {
     if !can_link() {
         return;
