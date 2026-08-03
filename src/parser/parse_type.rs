@@ -399,7 +399,11 @@ impl Parser {
                 self.advance();
                 self.skip_newlines();
                 let is_record = self.peek_kind().clone();
-                let is_record = if let TokenKind::Ident(_) = is_record {
+                // M4 (audit-syntax 2026-08-03): soft keywords (and/or/not/…)
+                // are valid FIRST field names — use the same ident-like set
+                // as expect_ident, else `type Rec { and: i32 }` misclassifies
+                // as enum.
+                let is_record = if super::helpers::is_ident_like_kind(&is_record) {
                     let mut pos = self.pos + 1;
                     while pos < self.tokens.len() {
                         match &self.tokens[pos].kind {
@@ -492,7 +496,9 @@ impl Parser {
     }
 
     fn lookahead_is_record(&self) -> bool {
-        if let TokenKind::Ident(_) = self.peek_kind() {
+        // M4 (audit-syntax 2026-08-03): ident-like set includes soft keywords
+        // (see super::helpers::is_ident_like_kind).
+        if super::helpers::is_ident_like_kind(self.peek_kind()) {
             let mut pos = self.pos + 1;
             while pos < self.tokens.len() {
                 match &self.tokens[pos].kind {

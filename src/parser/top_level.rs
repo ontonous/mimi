@@ -1081,6 +1081,20 @@ impl Parser {
                         tok.col,
                     ));
                 }
+                // M1 (audit-syntax 2026-08-03): `@metadata_shadow` removed with
+                // the 0.34.1 zombie-syntax sweep (clause 3). Without a dedicated
+                // rejection it fell into generic annotation parsing and failed
+                // opaquely at `expect(LParen)` with "expected `(`". Reject with
+                // the clause reference, mirroring @transactional.
+                if ann_name == "metadata_shadow" {
+                    let tok = self.tokens[self.pos.saturating_sub(1)].clone();
+                    return Err(ParseError::new(
+                        "`@metadata_shadow` was abolished by architecture amendment clause 3 \
+                         (metadata shadow fields removed). Remove the attribute.",
+                        tok.line,
+                        tok.col,
+                    ));
+                }
                 // Restore and parse as flow annotation @name(...).
                 self.pos = saved;
                 let annotation_start = self.pos;
@@ -1340,6 +1354,18 @@ impl Parser {
             if self.at(&TokenKind::BitOr) {
                 self.advance();
                 self.skip_newlines();
+            } else if self.at(&TokenKind::PipeArrow) {
+                // M2 (audit-syntax 2026-08-03): dedicated diagnostic — the
+                // generic fallthrough reported "expected `state` or
+                // `transition` in flow body, found |>" (+cascade), which
+                // points nowhere near the actual problem.
+                let tok = self.peek();
+                return Err(ParseError::new(
+                    "`|>` was abolished as a transition-target separator (0.34.1, ADR-002); \
+                     use `|` to separate multiple target states",
+                    tok.line,
+                    tok.col,
+                ));
             } else {
                 break;
             }

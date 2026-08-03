@@ -991,3 +991,123 @@ func main() -> i32 {
         "let-init `_` is a valid inference boundary"
     );
 }
+
+// ── audit-syntax M items (2026-08-03, fixed 2026-08-04) ──
+
+fn parse_error_messages(src: &str) -> Vec<String> {
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    match crate::parser::Parser::new(tokens).parse_file() {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![e.message.clone()],
+    }
+}
+
+#[test]
+fn m1_metadata_shadow_rejected_with_clause_reference() {
+    // M1: `@metadata_shadow` at flow-body level must fail with the clause-3
+    // diagnostic, not the opaque generic-annotation "expected `(`" error.
+    let src = r#"
+flow F {
+    state S { v: i32 }
+    @metadata_shadow(persistent)
+    transition t(S) -> S {
+        do { return S { v: 1 } }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let diagnostics = parse_error_messages(src);
+    let rendered = diagnostics.join("\n");
+    assert!(
+        rendered.contains("@metadata_shadow") && rendered.contains("clause 3"),
+        "expected clause-3 @metadata_shadow diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn m2_pipe_arrow_transition_separator_rejected_with_dedicated_message() {
+    // M2: `-> A |> B` must report the abolished-separator diagnostic, not
+    // "expected `state` or `transition` in flow body" + cascade.
+    let src = r#"
+flow Counter {
+    state Zero
+    state One
+    transition inc(Zero) -> Zero |> One {
+        do { return One { } }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let diagnostics = parse_error_messages(src);
+    let rendered = diagnostics.join("\n");
+    assert!(
+        rendered.contains("`|>` was abolished as a transition-target separator"),
+        "expected dedicated |> diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn m4_soft_keyword_first_record_field_parses() {
+    // M4: soft keywords (and/or/not/view/…) are valid FIRST field names —
+    // lookahead_is_record must use the ident-like set, else the type is
+    // misclassified as an enum (`expected \`}\`, found :`).
+    let src = r#"
+type Rec { and: i32 }
+type Rec2 { x: i32, or: i32 }
+type Rec3 { not: i32, view: i32 }
+
+func main() -> i32 {
+    let r = Rec { and: 5 }
+    let r2 = Rec2 { x: 1, or: 2 }
+    let r3 = Rec3 { not: 3, view: 4 }
+    r.and + r2.or + r3.not + r3.view
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "soft-keyword first fields must parse as records"
+    );
+    let v = run_source(src);
+    assert_eq!(
+        v,
+        interp::Value::Int(14),
+        "dual value through soft-keyword fields"
+    );
+}
+
+#[test]
+fn m6_delegate_identifier_freed_abolished_forms_kept() {
+    // M6: `delegate` as a real identifier (call / binding / field) must parse
+    // and run; the abolished `delegate view|mutate|consume(...)` forms keep
+    // their clause-2 rejection.
+    let ok_call = r#"
+func delegate() -> i32 { 42 }
+func main() -> i32 { delegate() }
+"#;
+    assert!(
+        check_source(ok_call).is_ok(),
+        "delegate() call must be legal"
+    );
+    assert_eq!(run_source(ok_call), interp::Value::Int(42));
+
+    let ok_let = r#"
+func main() -> i32 {
+    let delegate = 5
+    delegate + 1
+}
+"#;
+    assert!(check_source(ok_let).is_ok(), "let delegate must be legal");
+    assert_eq!(run_source(ok_let), interp::Value::Int(6));
+
+    for kw in ["view", "mutate", "consume"] {
+        let abolished = format!(
+            "flow Parent {{\n    state Active\n\n    transition run(Active) -> Active {{\n        do {{\n            delegate {kw}(self.buffer) to sub_flow;\n            return Active {{ }}\n        }}\n    }}\n}}\nfunc main() -> i32 {{ 0 }}\n"
+        );
+        let diagnostics = parse_error_messages(&abolished);
+        let rendered = diagnostics.join("\n");
+        assert!(
+            rendered.contains("clause 2"),
+            "delegate {kw}(...) must keep clause-2 rejection, got:\n{rendered}"
+        );
+    }
+}

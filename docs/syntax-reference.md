@@ -55,7 +55,7 @@ raw_string arena alloc cap trait impl dyn where extern
 if else for fault fails in while return reset recover break continue
 match use pub drop defer await async unsafe spawn parasteps
 quote comptime failure requires ensures invariant math desc rule old mms
-flow state transition protocol delegate pinned persistent view mutate
+flow state transition protocol pinned persistent view mutate
 do session dual end with loop as
 true false unit i32 nothing
 ```
@@ -63,17 +63,13 @@ true false unit i32 nothing
 v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 - **移出关键字表**：`subflow`（条款 2）、`steps`（MimiSpec-only）、`consume`（随 delegate 死）——现在 tokenize 为 Ident。
 - **软关键字化**：`and`/`or`/`not` 仍 tokenize 为运算符 kind，但**不是硬关键字**（绑定位置可作标识符）。
-- `delegate` 保留为硬关键字（parser 拒绝并报条款 2 诊断）。
+- `delegate` **已软化为标识符**（tokenize 为 Ident，keywords.rs:242 测试断言；`let delegate = 5` / `func delegate()` 合法）；仅语句起始位置保留条款 2 拒绝诊断（parse_stmt.rs:131，与 `on` 同模式，parse_stmt.rs:182）。
 - [建议] 再审查：`reset`/`recover`（仅系统注入 transition 名）、`nothing`。
 - **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。当前 81 个 `=> TokenKind` 映射（83−2，含 and/or/not 软关键字映射）。
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
 `old view mutate do persistent and or not session dual end`
-
-### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
-
-`old view mutate consume do persistent subflow session dual end`
 
 ---
 
@@ -160,7 +156,7 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
       | 'if' Expr '{' Block '}' [ 'else' ('if' ... | '{' Block '}') ]       (* :562-591 *)
       | 'while' [ 'let' Pattern '=' Expr ] Expr '{' Block '}'                (* :593-614 *)
       | 'loop' '{' Block '}'                                                 (* :616-622 *)
-      | 'for' Ident 'in' Expr '{' Block '}'                                  (* :624-637，仅单标识符 *)
+      | 'for' Pattern 'in' Expr '{' Block '}'                                (* :624-637；ast.rs For.var: Pattern。v0.34.3 起绑定为 Pattern（`(k, v)` 解构）；0.34.24 起解释器与 native codegen 均支持单标识符与 tuple 解构（audit-syntax C2，880384bc） *)
       | 'arena' '{' Block '}' ';'                                            (* :298-305 *)
       | 'unsafe' '{' Block '}' ';'                                           (* :307-314 *)
       | 'alloc' '(' (Ident|'arena') ')' '{' Block '}'                        (* :316-359，System/Arena/Bump *)

@@ -248,3 +248,29 @@ impl Parser {
         }
     }
 }
+
+/// M4 (audit-syntax 2026-08-03): token kinds that `expect_ident` accepts —
+/// plain identifiers plus soft keywords usable as binding names. Lookahead
+/// decisions (record-vs-enum discrimination in parse_type.rs) must use the
+/// same set, otherwise `type Rec { and: i32 }` (soft keyword as FIRST field)
+/// is misclassified as an enum and fails with `expected \`}\`, found :`.
+pub(crate) fn is_ident_like_kind(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident(_)
+            | TokenKind::Old
+            | TokenKind::View
+            | TokenKind::Mutate
+            | TokenKind::Do
+            | TokenKind::Persistent
+            | TokenKind::Session
+            | TokenKind::Dual
+            | TokenKind::End
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Not
+            | TokenKind::Fault
+            | TokenKind::Reset
+            | TokenKind::Recover
+    )
+}
