@@ -501,6 +501,16 @@ impl BytecodeCompiler {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
                     let idx = self.functions.len() as FuncIdx;
                     self.func_table.insert(mangled_name.clone(), idx);
+                    // 0.34.24: also register the (type, method) → mangled
+                    // mapping here, not only in install_checked_program —
+                    // callers that compile a raw file without a
+                    // CheckedProgram (test harness, disasm) still need
+                    // receiver-aware method dispatch (the builtin-shadow
+                    // gate and the G1 table both read method_table).
+                    self.method_table.insert(
+                        (impl_def.type_name.clone(), method.name.clone()),
+                        mangled_name.clone(),
+                    );
                     // +1 for implicit `self` parameter.
                     self.functions.push(FunctionProto::new(
                         mangled_name,
@@ -3328,8 +3338,31 @@ impl BytecodeCompiler {
 
             // If the method matches a known actor method, use DynMethodCall
             // (actor methods shadow builtins with the same name, e.g. `format`).
-            if !is_actor_method {
-                // Try builtin methods (only if not an actor method).
+            //
+            // 0.34.24 (builtin-shadow ruling, method level): trait-impl
+            // methods shadow same-named builtins for receivers whose static
+            // type has an impl — `s.has_key(k)` on a string must dispatch to
+            // JsonExt::has_key, not the 2-param map builtin `has_key(map, k)`
+            // (which trapped E0800 on string receivers). Mirrors the call
+            // resolution ruling local > global > builtin (d1f43c22).
+            let receiver_impl_types: Vec<String> = match obj.unlocated() {
+                Expr::Literal(Lit::String(_)) => vec!["string".to_string()],
+                Expr::Ident(var) => match fc.var_types.get(var) {
+                    Some(VarType::String) => vec!["string".to_string()],
+                    Some(VarType::User(t)) => vec![t.clone()],
+                    Some(VarType::Int) => vec!["i64".to_string(), "i32".to_string()],
+                    Some(VarType::Float) => vec!["f64".to_string()],
+                    _ => vec![], // Dyn/Unknown: keep existing dispatch order
+                },
+                _ => vec![],
+            };
+            let impl_shadows_builtin = !receiver_impl_types.is_empty()
+                && receiver_impl_types
+                    .iter()
+                    .any(|t| self.method_table.contains_key(&(t.clone(), method.clone())));
+            if !is_actor_method && !impl_shadows_builtin {
+                // Try builtin methods (only if not an actor method and not
+                // shadowed by a receiver-typed trait impl).
                 if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
                     fc.emit(Op::CallBuiltin {
                         rd,
@@ -3351,7 +3384,16 @@ impl BytecodeCompiler {
                 Expr::Ident(name) if fc.var_is_dyn(name)
             );
             if !recv_is_dyn {
-                for type_name in &self.impl_type_names.clone() {
+                // Receiver's own impl types first (0.34.24): the historic
+                // loop tried all impl types in insertion order, which could
+                // pick another type's same-named method.
+                let mut ordered: Vec<String> = receiver_impl_types.clone();
+                for t in &self.impl_type_names {
+                    if !ordered.contains(t) {
+                        ordered.push(t.clone());
+                    }
+                }
+                for type_name in &ordered {
                     if let Some(mangled) =
                         self.method_table.get(&(type_name.clone(), method.clone()))
                     {

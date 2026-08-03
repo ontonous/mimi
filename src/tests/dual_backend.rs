@@ -3272,6 +3272,61 @@ fn dual_local_closure_shadows_builtin_dual_backend() {
 }
 
 #[test]
+fn dual_user_global_shadows_builtin_len() {
+    // builtin-vs-local shadowing (adjudicated 2026-08-04): a USER GLOBAL
+    // function shadowing a builtin name wins over the builtin on all paths
+    // (local > global > builtin). Pre-fix the checker dispatched builtin
+    // names through the giant builtin match FIRST, so `func len(x: i32)`
+    // was typed against the builtin `len` (List/string/Map/Set only) and the
+    // valid shadow call `len(5)` was rejected with a false-positive E0242
+    // even though both runtimes executed the user's function.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func len(x: i32) -> i32 { x * 2 }
+        func main() -> i32 {
+            println(len(5))
+            0
+        }
+        "#,
+        "10"
+    );
+}
+
+#[test]
+fn dual_trait_impl_method_shadows_same_name_builtin() {
+    // Method-level shadow (0.34.24): `s.has_key(k)` on a string receiver
+    // must dispatch to the trait impl method, not the 2-param map builtin
+    // `has_key(map, key)`. Pre-fix the VM's method compiler consulted
+    // builtin_table before the CheckedProgram method_table, so a STRING
+    // receiver calling `.has_key` was routed to the map builtin and trapped
+    // (E0800 "expected (map, string key)"); codegen's resolved emitter
+    // already dispatched by receiver type, so the backends diverged. The VM
+    // now gates the builtin path on receiver-typed impl shadowing.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        trait Keyed {
+            func has_key(key: string) -> bool
+        }
+        impl Keyed for string {
+            func has_key(key: string) -> bool { json_has_key(self, key) }
+        }
+        func main() -> i32 {
+            let s = "{\"a\":1}"
+            println(s.has_key("a"))
+            0
+        }
+        "#,
+        "true"
+    );
+}
+
+#[test]
 fn dual_generic_nested_type() {
     if !can_link() {
         return;

@@ -53,8 +53,12 @@ impl JsonExt for string {
     }
     // SD-12 (0.31.51b): RFC 8259 rejects NaN/Inf. get_float returns Result.
     // str_parse_float rejects "NaN"/"inf" strings (see interp/builtins/string.rs).
+    // 0.34.24: bare `has_key(key)` here relied on the checker's builtin-first
+    // dispatch by accident — at runtime it resolved to the 2-param top-level
+    // `has_key(json, key)` and trapped (E0800, verified). Call the builtin
+    // directly, matching every other method in this impl.
     func get_float(key: string) -> Result<f64, string> {
-        if !has_key(key) { return Err("key not found") }
+        if !json_has_key(self, key) { return Err("key not found") }
         let v = json_get_string(self, key)
         let parsed = str_parse_float(v)
         if parsed.0 { Ok(parsed.1) } else { Err("not a valid float") }

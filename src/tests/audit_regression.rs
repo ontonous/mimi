@@ -1262,3 +1262,43 @@ func main() -> i32 {
         "codegen must fold signed comparisons as SIGNED (true=1, false=0)"
     );
 }
+
+#[test]
+fn shadow_non_function_local_rejects_call() {
+    // builtin-vs-local shadowing (adjudicated 2026-08-04): a non-function
+    // local binding shadows the builtin name — calling it is E0223 (matches
+    // the VM, which binds the local first and traps on CallIndirect over a
+    // non-callable). Pre-fix the checker dispatched the builtin `len` arm
+    // and silently accepted code the runtime rejects.
+    let src = r#"
+func main() -> i32 {
+    let len = 5
+    len(3)
+    0
+}
+"#;
+    let diagnostics = check_source(src).expect_err("non-function local call must be rejected");
+    let rendered = diagnostics
+        .iter()
+        .map(|d| format!("{} {}", d.code.clone().unwrap_or_default(), d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0223"),
+        "expected E0223 not-a-function, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn shadow_user_global_len_accepted_by_checker() {
+    // Companion to dual_user_global_shadows_builtin_len: the checker must
+    // ACCEPT a user global shadowing a builtin (pre-fix false-positive E0242
+    // "len expects List/string/Map/Set").
+    let src = r#"
+func len(x: i32) -> i32 { x * 2 }
+func main() -> i32 {
+    len(5)
+}
+"#;
+    check_source(src).expect("user global shadowing builtin len must typecheck");
+}
