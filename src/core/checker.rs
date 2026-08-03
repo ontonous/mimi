@@ -429,12 +429,34 @@ impl<'a> Checker<'a> {
     /// 0.31.13 追加 A: check whether a surface `Type` is a linear resource
     /// (flow state, capability, or session channel). Used to reject
     /// shared/borrow wrapping of linear types.
+    ///
+    /// H2 (audit-type 2026-08-03): linearity is visible through type
+    /// arguments and structural wrappers — `List<cap>` / `Option<cap>` /
+    /// `Map<K, cap>` / `(cap, i32)` all CONTAIN a linear element. Without
+    /// deep recursion, wrapping a cap in a container let it escape
+    /// exactly-once enforcement (the container could be passed through a
+    /// generic boundary or dropped without consuming the element). Every
+    /// consumer of this predicate (E0432 generic-argument rejection, E0427
+    /// ref/shared wrapping, protocol payload checks) wants the conservative
+    /// deep answer.
     pub(crate) fn is_linear_surface_type(&self, ty: &crate::ast::Type) -> bool {
         match ty.unlocated() {
             crate::ast::Type::Cap(_) | crate::ast::Type::CapAtom(_) => true,
             crate::ast::Type::Name(name, args) => {
                 self.flow_state_type_names.contains(name)
                     || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())
+                    || args.iter().any(|arg| self.is_linear_surface_type(arg))
+            }
+            crate::ast::Type::Option(inner)
+            | crate::ast::Type::CBuffer(inner)
+            | crate::ast::Type::Slice(inner)
+            | crate::ast::Type::Newtype(_, inner) => self.is_linear_surface_type(inner),
+            crate::ast::Type::Array(inner, _) => self.is_linear_surface_type(inner),
+            crate::ast::Type::Result(ok, err) => {
+                self.is_linear_surface_type(ok) || self.is_linear_surface_type(err)
+            }
+            crate::ast::Type::Tuple(items) => {
+                items.iter().any(|item| self.is_linear_surface_type(item))
             }
             crate::ast::Type::Located { ty, .. } => self.is_linear_surface_type(ty),
             _ => false,

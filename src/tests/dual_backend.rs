@@ -3027,9 +3027,17 @@ fn dual_generic_turbofish_explicit() {
 // ─── 0.34.21 — 泛型 × 线性边界（§2.3 裁决）────────────────────
 // Generic parameters are not linearly tracked (GenericParameter
 // is_linear() = false). Linear capabilities (Cap/SessionChan/Flow state)
-// are therefore rejected as generic arguments (E0432); containers such as
-// List<cap>/Option<cap> stay legal — their linearity is tracked by the
-// container's own CFG facts.
+// are therefore rejected as generic arguments (E0432).
+//
+// H2 (audit-type 2026-08-03) correction: linearity is visible THROUGH
+// type arguments — List<cap>/Option<cap>/Map<K, cap> contain a linear
+// element and are rejected at generic boundaries too (the previous
+// "containers stay legal, tracked by container CFG facts" exemption was
+// an exactly-once escape). Concrete (non-generic) container signatures
+// are legal: the CFG tracks the container itself as linear, so it must
+// be consumed whole (drop/move/return); per-element consumption via
+// match/for remains an analysis gap (fail-closed E0256, not a silent
+// leak).
 
 #[test]
 fn dual_generic_linear_cap_rejected() {
@@ -3095,27 +3103,73 @@ fn dual_generic_linear_cap_rejected_turbofish() {
 }
 
 #[test]
-fn dual_generic_linear_container_allowed() {
-    // Containers wrapping linear values are NOT rejected: List<cap> stays
-    // legal (CFG tracks the container facts). The element extracted through
-    // the generic return is consumed afterwards.
-    if !can_link() {
-        return;
-    }
-    dual_assert!(
-        r#"
-        cap FileReadCap;
-        func first<T>(xs: List<T>) -> T { xs[0] }
-        func main() -> i32 {
-            let l = [FileReadCap];
-            let c = first(l);
-            drop(c);
-            println(42);
-            0
-        }
-    "#,
-        "42"
+fn dual_generic_linear_container_rejected() {
+    // H2 (audit-type 2026-08-03): this test used to codify the container
+    // exemption — `first<T>(xs: List<T>)` called with List<cap> was "legal",
+    // claimed to be tracked by container CFG facts. The audit proved that
+    // claim false: inside the generic callee, T is opaque and non-linear, so
+    // elements past xs[0] are silently discarded and the generic boundary
+    // defeats exactly-once. This is the same escape §2.3 rejects for bare
+    // caps, moved one level down: T is instantiated WITH the cap (via
+    // unification List<T> ~ List<cap>), so E0432 now fires on the argument
+    // type List<cap> (linearity visible through type arguments).
+    let diags = check_source(
+        "cap FileReadCap; func first<T>(xs: List<T>) -> T { xs[0] } \
+         func main() -> i32 { let l = [FileReadCap]; let c = first(l); drop(c); 0 }",
+    )
+    .expect_err("cap inside a generic container instantiation must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
     );
+}
+
+#[test]
+fn dual_concrete_linear_container_sink_requires_consumption() {
+    // H2 (audit-type 2026-08-03): the NON-generic half of the hole —
+    // `func sink(v: List<cap>) { }` used to discard every element silently.
+    // List/Map/Set nominals now participate in CFG linearity: an unconsumed
+    // container parameter triggers E0256, and an explicit drop satisfies the
+    // obligation.
+    let diags = check_source(
+        "cap FileReadCap; func sink(v: List<cap FileReadCap>) -> i32 { 1 } \
+         func main() -> i32 { let c = FileReadCap; sink([c]) }",
+    )
+    .expect_err("unconsumed linear container parameter must trigger E0256");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'v'"),
+        "expected E0256 on container parameter 'v', got:\n{rendered}"
+    );
+
+    // Explicit whole-container drop satisfies the obligation (check + run).
+    let ok = "cap FileReadCap; \
+              func sink(v: List<cap FileReadCap>) -> i32 { drop(v); 1 } \
+              func main() -> i32 { let c = FileReadCap; sink([c]) }";
+    assert!(check_source(ok).is_ok(), "drop(container) must consume it");
+    if can_link() {
+        dual_assert!(
+            r#"
+            cap FileReadCap;
+            func sink(v: List<cap FileReadCap>) -> i32 { drop(v); 1 }
+            func main() -> i32 {
+                let c = FileReadCap;
+                println(sink([c]))
+                0
+            }
+        "#,
+            "1"
+        );
+    }
 }
 
 #[test]
