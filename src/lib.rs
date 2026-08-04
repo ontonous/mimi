@@ -95,6 +95,7 @@ pub mod trace;
 
 pub mod diagnostic;
 pub mod error;
+pub mod expr_render;
 pub mod ffi;
 pub mod fmt;
 pub mod interp;

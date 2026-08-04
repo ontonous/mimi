@@ -4460,6 +4460,139 @@ func main() -> i32 {
     );
 }
 
+/// 0.34.34: contract violation messages must be human-readable.
+/// The embedded message renders the contract as source-like text plus a
+/// span coordinate + source line (when resolvable) — never a `{:?}` AST dump
+/// leaking `Located`/`AstNodeMeta`/`SourceId` internals. Phrasing and the
+/// E0808 code align with the bytecode VM's contract report (L1 error parity).
+#[test]
+fn e2e_contract_violation_message_is_human_readable() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let src = r#"
+func safe_div(x: i32, y: i32) -> i32 {
+    requires: y != 0
+    x / y
+}
+func main() -> i32 {
+    safe_div(10, 0);
+    0
+}
+"#;
+    let err =
+        compile_and_verify_contracts(src).expect_err("requires violation should abort the binary");
+    // Error code + phrasing aligned with the bytecode VM (E0808).
+    assert!(
+        err.contains("[E0808]") && err.contains("requires condition failed for"),
+        "message should carry E0808 and interp-aligned phrasing, got: {err}"
+    );
+    // The contract is rendered back to source-like text, not Debug-dumped.
+    assert!(
+        err.contains("y != 0"),
+        "rendered contract text missing, got: {err}"
+    );
+    // Span coordinates survive into the message (in-memory harness sources
+    // resolve to the registry-label fallback, but line:col are always known).
+    assert!(
+        err.contains(":3:") || err.contains("line"),
+        "location coordinates missing, got: {err}"
+    );
+    // Red line: no internal AST/Debug leakage, no stale FFI framing or hint.
+    for banned in [
+        "AstNodeMeta",
+        "Located {",
+        "SourceId(",
+        "NeCmp",
+        "FFI contract violation",
+        "--skip-verify-ffi",
+    ] {
+        assert!(
+            !err.contains(banned),
+            "message must not contain '{banned}', got: {err}"
+        );
+    }
+    // The hint names the real opt-out for baked-in contract checks.
+    assert!(
+        err.contains("--verify-contracts"),
+        "hint should reference --verify-contracts, got: {err}"
+    );
+}
+
+/// 0.34.34: ensures violations use the same human-readable shape, including
+/// `old(...)` and call syntax in the rendered contract.
+#[test]
+fn e2e_ensures_violation_message_is_human_readable() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let src = r#"
+func bad(n: i32) -> i32 {
+    ensures: result > 100
+    n + 1
+}
+func main() -> i32 {
+    bad(5);
+    0
+}
+"#;
+    let err =
+        compile_and_verify_contracts(src).expect_err("ensures violation should abort the binary");
+    assert!(
+        err.contains("[E0808]") && err.contains("ensures condition failed for"),
+        "message should carry E0808 and ensures phrasing, got: {err}"
+    );
+    assert!(
+        err.contains("result > 100"),
+        "rendered ensures contract missing, got: {err}"
+    );
+    assert!(
+        !err.contains("AstNodeMeta"),
+        "message must not leak AST internals, got: {err}"
+    );
+}
+
+/// 0.34.34: extern wrapper contract violations use the same human-readable
+/// shape. The owner is the extern function name (the wrapper's symbol), not
+/// an LLVM-mangled internal.
+#[test]
+fn e2e_extern_ensures_violation_message_is_human_readable() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let src = r#"
+        extern "C" {
+            func test_positive(x: i32) -> i32
+                ensures: result > 0;
+        }
+        func main() -> i32 {
+            println(test_positive(0))
+            0
+        }
+    "#;
+    let err = compile_and_verify_contracts(src)
+        .expect_err("extern ensures violation should abort the binary");
+    assert!(
+        err.contains("[E0808]") && err.contains("ensures condition failed for"),
+        "message should carry E0808 and ensures phrasing, got: {err}"
+    );
+    assert!(
+        err.contains("'test_positive'"),
+        "owner should be the extern name, got: {err}"
+    );
+    assert!(
+        err.contains("result > 0"),
+        "rendered contract missing, got: {err}"
+    );
+    assert!(
+        !err.contains("AstNodeMeta"),
+        "message must not leak AST internals, got: {err}"
+    );
+}
+
 #[test]
 fn e2e_rule_spawn_and_await() {
     if !can_link() {

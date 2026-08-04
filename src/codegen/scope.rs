@@ -6,6 +6,24 @@ use super::CodeGenerator;
 use super::VarEntry;
 use crate::error::{CompileError, MimiResult};
 
+/// Which clause of a function contract a runtime assertion checks.
+/// Rendered into the violation message so both backends use the same phrasing
+/// (bytecode VM: `requires condition failed for '<fn>'` / E0808).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContractPhase {
+    Requires,
+    Ensures,
+}
+
+impl ContractPhase {
+    fn label(self) -> &'static str {
+        match self {
+            ContractPhase::Requires => "requires",
+            ContractPhase::Ensures => "ensures",
+        }
+    }
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn enter_parasteps(&mut self) {
         self.in_parasteps = true;
@@ -115,7 +133,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
-        msg: &str,
+        phase: ContractPhase,
     ) -> MimiResult<()> {
         let cond_val = self.compile_expr(expr, vars)?;
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
@@ -144,8 +162,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_cond_br(cond_bool, pass_bb, fail_bb)?;
 
         self.builder.position_at_end(fail_bb);
-        let contract_text = format!("{:?}", expr);
-        let full_msg = format!("{} | contract: {}", msg, contract_text);
+        // Message is embedded at compile time; render it the way the bytecode
+        // VM reports violations (E0808), with span + source line instead of an
+        // internal AST dump.
+        let full_msg = self.build_contract_violation_message(expr, phase);
         let msg_ptr = self
             .builder
             .build_global_string_ptr(&full_msg, "contract_msg")
@@ -164,6 +184,105 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
         self.builder.position_at_end(pass_bb);
         Ok(())
+    }
+
+    /// Build the embedded violation message for a contract assertion.
+    ///
+    /// Shape (phrasing aligned with the bytecode VM's E0808 report):
+    /// ```text
+    /// [E0808] requires condition failed for 'div': b != 0
+    ///  --> src.mimi:2:15
+    ///   |     requires: b != 0
+    /// Hint: rebuild without --verify-contracts to disable contract checking.
+    /// ```
+    /// The expression is rendered back to source-like text (`expr_render`),
+    /// never Debug-dumped. Location and the source-line snippet are
+    /// best-effort: synthetic/desugared contracts without spans degrade to the
+    /// first line only.
+    fn build_contract_violation_message(&self, expr: &Expr, phase: ContractPhase) -> String {
+        // Owner name comes from the function currently being compiled.
+        // Regular functions use their bare name; actor methods carry a mangled
+        // LLVM name (`Actor__method__method`), which is pretty-printed to the
+        // `Actor::method` form users write. Generic instantiations keep their
+        // mangled name — that is still more actionable than an AST dump.
+        let owner = self
+            .current_function()
+            .map(|f| {
+                let name = f.get_name().to_string_lossy().into_owned();
+                match name.strip_suffix("__method") {
+                    Some(stripped) => stripped.replace("__", "::"),
+                    None => name,
+                }
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let contract_text = crate::expr_render::render_expr(expr);
+        let mut msg = format!(
+            "[E0808] {} condition failed for '{}': {}",
+            phase.label(),
+            owner,
+            contract_text
+        );
+
+        if let Some(meta) = expr.meta() {
+            let span = meta.span;
+            if span.start_line > 0 {
+                let (label, source_line) = self.describe_contract_location(&span);
+                if span.start_col > 0 {
+                    msg.push_str(&format!(
+                        "\n --> {}:{}:{}",
+                        label, span.start_line, span.start_col
+                    ));
+                } else {
+                    msg.push_str(&format!("\n --> {}:{}", label, span.start_line));
+                }
+                if let Some(line_text) = source_line {
+                    msg.push_str(&format!("\n  | {}", line_text));
+                }
+            }
+        }
+
+        msg.push_str("\nHint: rebuild without --verify-contracts to disable contract checking.");
+        msg
+    }
+
+    /// Resolve a span to a display label (`path:line:col` components) and —
+    /// best-effort — the source line the contract sits on.
+    ///
+    /// The [`crate::span::SourceRegistry`] stores identity only (no text), so
+    /// the snippet requires a capped re-read of the file from disk. That is
+    /// safe at compile time (single read per contract site, file just parsed);
+    /// in-memory sources (test harnesses) have no `disk_path` and degrade to
+    /// a key-based label without a snippet.
+    fn describe_contract_location(&self, span: &crate::span::Span) -> (String, Option<String>) {
+        let Some(record) = self
+            .comptime_file
+            .as_ref()
+            .and_then(|f| f.sources.record(span.source_id))
+        else {
+            return ("<unknown source>".to_string(), None);
+        };
+        let label = record
+            .disk_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .or_else(|| record.canonical_uri.clone())
+            .unwrap_or_else(|| record.key.to_string());
+        let line = record.disk_path.as_ref().and_then(|path| {
+            let text = crate::path_safety::read_source_capped(path).ok()?;
+            let line_text = text.lines().nth(span.start_line.saturating_sub(1))?;
+            let trimmed = line_text.trim_end();
+            // Keep embedded strings bounded for pathological lines.
+            if trimmed.len() > 200 {
+                let cut = (0..=200)
+                    .rev()
+                    .find(|&i| trimmed.is_char_boundary(i))
+                    .unwrap_or(0);
+                Some(format!("{} ...", &trimmed[..cut]))
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        (label, line)
     }
 
     /// Push a new capability scope

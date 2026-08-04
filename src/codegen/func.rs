@@ -753,7 +753,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_contract_assert(
                         expr,
                         vars,
-                        &format!("requires violation in '{}'", func.name),
+                        super::scope::ContractPhase::Requires,
                     )?;
                 }
             }
@@ -1170,7 +1170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         ret_ty_ast: Option<&Type>,
         val: Option<BasicValueEnum<'ctx>>,
-        func_name: &str,
+        _func_name: &str,
         vars: &HashMap<String, VarEntry<'ctx>>,
         expr: Option<&Expr>,
     ) -> MimiResult<()> {
@@ -1194,7 +1194,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_contract_assert(
                     ensures_expr,
                     &ensures_vars,
-                    &format!("ensures violation in '{}'", func_name),
+                    super::scope::ContractPhase::Ensures,
                 )?;
             }
         }
@@ -2772,7 +2772,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         ret_ty_ast: Option<&Type>,
         last_val: BasicValueEnum<'ctx>,
-        func_name: &str,
+        _func_name: &str,
         vars: &HashMap<String, VarEntry<'ctx>>,
         expr: Option<&Expr>,
     ) -> MimiResult<()> {
@@ -2845,7 +2845,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_contract_assert(
                         ensures_expr,
                         &ensures_vars,
-                        &format!("ensures violation in '{}'", func_name),
+                        super::scope::ContractPhase::Ensures,
                     )?;
                 }
             }

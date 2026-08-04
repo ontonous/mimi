@@ -900,7 +900,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.compile_contract_assert(
                 req_expr,
                 &contract_vars,
-                &format!("requires violation in extern '{}'", ef.name),
+                super::super::scope::ContractPhase::Requires,
             )?;
         }
         Ok(())
@@ -1614,7 +1614,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.compile_contract_assert(
                 ens_expr,
                 &contract_vars,
-                &format!("ensures violation in extern '{}'", ef.name),
+                super::super::scope::ContractPhase::Ensures,
             )?;
         }
         Ok(())
