@@ -10,15 +10,9 @@ flow Timer {
     state Stopped { remaining: i32 }
     state Running { remaining: i32 }
 
-    transition start(Stopped) -> Running {
-        do { return Running { remaining: self.remaining } }
-    }
-    transition tick(Running) -> Running {
-        do { return Running { remaining: self.remaining - 1 } }
-    }
-    transition stop(Running) -> Stopped {
-        do { return Stopped { remaining: self.remaining } }
-    }
+    transition start(Stopped) -> Running { return Running { remaining: self.remaining } }
+    transition tick(Running) -> Running { return Running { remaining: self.remaining - 1 } }
+    transition stop(Running) -> Stopped { return Stopped { remaining: self.remaining } }
 }
 
 flow TrafficLight {
@@ -26,15 +20,9 @@ flow TrafficLight {
     state Green { elapsed: i32 }
     state Yellow { elapsed: i32 }
 
-    transition to_green(Red) -> Green {
-        do { return Green { elapsed: 0 } }
-    }
-    transition to_yellow(Green) -> Yellow {
-        do { return Yellow { elapsed: 0 } }
-    }
-    transition to_red(Yellow) -> Red {
-        do { return Red { waited: 0 } }
-    }
+    transition to_green(Red) -> Green { return Green { elapsed: 0 } }
+    transition to_yellow(Green) -> Yellow { return Yellow { elapsed: 0 } }
+    transition to_red(Yellow) -> Red { return Red { waited: 0 } }
 }
 
 func main() -> i32 {

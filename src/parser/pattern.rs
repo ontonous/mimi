@@ -194,12 +194,11 @@ impl Parser {
                 }
             }
             // Soft keywords allowed as binding names in pattern context.
-            // Special syntax (do { }, persistent state, etc.) is handled by
+            // Special syntax (persistent state, etc.) is handled by
             // statement parsers before patterns are reached.
             TokenKind::Old
             | TokenKind::View
             | TokenKind::Mutate
-            | TokenKind::Do
             | TokenKind::Persistent
             | TokenKind::And
             | TokenKind::Or

@@ -48,7 +48,7 @@ fn file_has_user_flow(file: &File) -> bool {
     })
 }
 
-/// `flow Main { state Single; transition run(Single) -> Single { do { return Single { } } } }`
+/// `flow Main { state Single; transition run(Single) -> Single { return Single { } } }`
 fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
     let span = parent_meta.span;
     let run_origin = AstOrigin::RuntimeSystem("progressive.run");

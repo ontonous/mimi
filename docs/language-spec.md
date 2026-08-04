@@ -515,7 +515,7 @@ flow Account {
     fault AccountError
 
     transition deposit(Active, amount: i32) -> Active {
-        do { return Active { balance: self.balance + amount } }
+        return Active { balance: self.balance + amount }
     }
 }
 ```
@@ -1116,6 +1116,12 @@ Recursive protocols, dynamic participants, delegation, multiparty Session, and c
 
 Remove the semantically empty `do` wrapper. Transition's `{ ... }` is itself the implementation body:
 
+> v0.34.27: executed — `Stmt::Do` removed from the AST (~28 points / 15 files),
+> `do` dropped from the keyword table (81 → 80), 24 real_world + test corpus
+> migrated (`{ do { X } }` → `{ X }`). A bare `do` identifier followed by `{`
+> now parses as a struct constructor for an undefined type and is rejected by
+> the checker.
+
 ```mimi
 transition ship(Paid) -> Shipped
     fails TrackingError
@@ -1224,7 +1230,7 @@ Quote/AST generation remains experimental until:
 
 #### Removed / Migrated
 
-- Semantic-less `do`;
+- Semantic-less `do`（v0.34.27 已删除）;
 - `delegate view/mutate/consume`（amendment clause 2）;
 - `@transactional` / WAL / metadata_shadow（amendment clause 3）;
 - `pinned(timeout)`（amendment clause 10）;

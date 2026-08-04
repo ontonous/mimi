@@ -198,7 +198,7 @@ flow Choice {
     state Pending
     state Yes
     state No
-    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+    transition decide(Pending) -> Yes | No { return Yes {} }
 }
 func main() -> i32 { 0 }
 "#,

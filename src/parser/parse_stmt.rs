@@ -140,13 +140,6 @@ impl Parser {
                 self.match_semi();
                 Ok(Stmt::Func(func))
             }
-            TokenKind::Do => {
-                self.advance();
-                self.skip_newlines();
-                self.expect(TokenKind::LBrace, "`{`")?;
-                let body = self.parse_block()?;
-                Ok(Stmt::Do(body))
-            }
             TokenKind::Ident(s) if s == "delegate" && self.delegate_followed_by_abolished_kw() => {
                 // v0.34.1 / golden §1.1+§1.4: `delegate` abolished by amendment
                 // clause 2 (no nested Flow delegation) and removed from the

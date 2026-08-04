@@ -5,23 +5,19 @@ flow Buffer {
     state Active { data: i32 }
 
     transition use_pinned(Active) -> Active {
-        do {
-            pinned(self.data) |ptr| {
-                // In real FFI, ptr would be passed to a C function.
-                // Here we just verify ptr binding + scope isolation.
-                let _ = ptr
-            }
-            return Active { data: self.data + 1 }
+        pinned(self.data) |ptr| {
+            // In real FFI, ptr would be passed to a C function.
+            // Here we just verify ptr binding + scope isolation.
+            let _ = ptr
         }
+        return Active { data: self.data + 1 }
     }
 
     transition no_timeout(Active) -> Active {
-        do {
-            pinned(self.data) |p| {
-                let _ = p
-            }
-            return Active { data: self.data + 10 }
+        pinned(self.data) |p| {
+            let _ = p
         }
+        return Active { data: self.data + 10 }
     }
 }
 

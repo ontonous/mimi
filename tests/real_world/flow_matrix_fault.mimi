@@ -10,15 +10,9 @@ flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
 
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: 1 } }
-    }
-    transition inc(Positive) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
-    transition reset(Positive) -> Zero {
-        do { return Zero { count: 0 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: 1 } }
+    transition inc(Positive) -> Positive { return Positive { count: self.count + 1 } }
+    transition reset(Positive) -> Zero { return Zero { count: 0 } }
 }
 
 func main() -> i32 {

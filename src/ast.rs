@@ -503,8 +503,12 @@ pub enum Stmt {
     },
     /// On failure compensation block
     OnFailure(Block),
-    /// Do block — marks the implementation body of a transition
-    Do(Block),
+    /// v0.34.27: `do { }` wrapper removed — language assessment: `do { X }` ≡
+    /// bare block `{ X }` (ir/lower.rs:975 same Lexical Scope path, block is an
+    /// expression while do never was). Parser rejects `do`; no AST variant.
+    /// (was: Do(Block), ~28 points / 15 files; codegen unwrap at compile.rs:1042
+    /// proved the equivalence). This also dropped the keyword count 81 → 80,
+    /// meeting the 0.1.4 ≤80 goal (golden §1.4).
     /// v0.34.11: `become`/`stay` removed — ADR-001 (golden §1.2): unique
     /// transition terminal is `return S{}`. Parser rejects both keywords;
     /// no AST variants. (was: Become(Expr) / Stay, ~14 files ~30 arms)

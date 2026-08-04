@@ -3,20 +3,14 @@
 
 flow Cascade {
     state Live { n: i32 }
-    transition tick(Live) -> Live {
-        do { return Live { n: self.n + 1 } }
-    }
+    transition tick(Live) -> Live { return Live { n: self.n + 1 } }
 }
 
 flow Resilient {
     state Active { n: i32 }
     state Recovering { n: i32 }
-    transition peer_fault(Active) -> Recovering {
-        do { return Recovering { n: self.n } }
-    }
-    transition resume(Recovering) -> Active {
-        do { return Active { n: self.n } }
-    }
+    transition peer_fault(Active) -> Recovering { return Recovering { n: self.n } }
+    transition resume(Recovering) -> Active { return Active { n: self.n } }
 }
 
 func main() -> i32 {

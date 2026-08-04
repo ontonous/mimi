@@ -1379,7 +1379,7 @@ impl Parser {
         } else {
             None
         };
-        // Parse optional body: { do { ... } }
+        // Parse optional body (v0.34.27: `do { }` removed — plain block).
         let body = if self.at(&TokenKind::LBrace) {
             self.expect(TokenKind::LBrace, "`{`")?;
             Some(self.parse_block()?)

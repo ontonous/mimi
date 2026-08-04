@@ -9,15 +9,9 @@ flow Service {
     state Active { requests: i32 }
     state Degraded { requests: i32, errors: i32 }
 
-    transition serve(Active) -> Active {
-        do { return Active { requests: self.requests + 1 } }
-    }
-    transition degrade(Active) -> Degraded {
-        do { return Degraded { requests: self.requests, errors: 1 } }
-    }
-    transition recover(Degraded) -> Active {
-        do { return Active { requests: self.requests } }
-    }
+    transition serve(Active) -> Active { return Active { requests: self.requests + 1 } }
+    transition degrade(Active) -> Degraded { return Degraded { requests: self.requests, errors: 1 } }
+    transition recover(Degraded) -> Active { return Active { requests: self.requests } }
 }
 
 func main() -> i32 {

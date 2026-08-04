@@ -2737,9 +2737,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Block(block) => {
                     self.compile_block(block, vars)?;
                 }
-                Stmt::Do(body) => {
-                    self.compile_block(body, vars)?;
-                }
                 Stmt::Pinned { expr, var, body } => {
                     // v0.34.3: synchronous pinned timeout abolished (clause 10);
                     // only the pin + body remain.

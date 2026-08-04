@@ -10,14 +10,10 @@ flow Counter {
     state Positive { count: i32 }
 
     transition inc(Zero) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
+        return Positive { count: self.count + 1 }
     }
     transition inc(Positive) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
+        return Positive { count: self.count + 1 }
     }
 }
 

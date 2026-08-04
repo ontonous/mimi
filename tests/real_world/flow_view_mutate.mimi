@@ -16,11 +16,9 @@ flow Process {
     state Done { total: i32 }
 
     transition process(Active) -> Done {
-        do {
-            let n = sum_view(self.buffer)
-            let t = bump(self.tag)
-            return Done { total: n + t }
-        }
+        let n = sum_view(self.buffer)
+        let t = bump(self.tag)
+        return Done { total: n + t }
     }
 }
 

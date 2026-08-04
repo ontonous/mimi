@@ -11,21 +11,11 @@ flow BattleUnit {
     state Wounded { hp: i32, attack: i32 }
     state Defeated
 
-    transition buff(Fresh) -> Buffed {
-        do { return Buffed { hp: self.hp, attack: self.attack + 5 } }
-    }
-    transition hit(Buffed, damage: i32) -> Wounded {
-        do { return Wounded { hp: self.hp - damage, attack: self.attack } }
-    }
-    transition hit_fresh(Fresh, damage: i32) -> Wounded {
-        do { return Wounded { hp: self.hp - damage, attack: self.attack } }
-    }
-    transition defeat(Wounded) -> Defeated {
-        do { return Defeated { } }
-    }
-    transition heal(Wounded) -> Fresh {
-        do { return Fresh { hp: self.hp + 10, attack: self.attack } }
-    }
+    transition buff(Fresh) -> Buffed { return Buffed { hp: self.hp, attack: self.attack + 5 } }
+    transition hit(Buffed, damage: i32) -> Wounded { return Wounded { hp: self.hp - damage, attack: self.attack } }
+    transition hit_fresh(Fresh, damage: i32) -> Wounded { return Wounded { hp: self.hp - damage, attack: self.attack } }
+    transition defeat(Wounded) -> Defeated { return Defeated { } }
+    transition heal(Wounded) -> Fresh { return Fresh { hp: self.hp + 10, attack: self.attack } }
 }
 
 func main() -> i32 {

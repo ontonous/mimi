@@ -1071,11 +1071,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;
                 }
-                Stmt::Do(body) => {
-                    // do { ... } is a plain block after transition unwrapping;
-                    // also accept nested do for defensive completeness.
-                    self.compile_block(body, vars)?;
-                }
                 Stmt::Pinned { expr, var, body } => {
                     // v0.34.3: synchronous pinned timeout abolished (clause 10);
                     // only the pin + body remain.

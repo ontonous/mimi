@@ -130,7 +130,7 @@ fn checker_flow_warnings_use_declaration_sources_after_merge() {
             "    state Start\n",
             "    state Idle\n",
             "    transition tick(Start) -> Start {\n",
-            "        do { return Start {} }\n",
+            "        { return Start {} }\n",
             "    }\n",
             "}\n",
         ),

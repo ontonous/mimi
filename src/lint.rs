@@ -366,7 +366,6 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         | Stmt::Rule(..)
         | Stmt::Continue
         | Stmt::Ellipsis => {}
-        Stmt::Do(body) => collect_refs_in_block(body, info),
         Stmt::Pinned { expr, body, .. } => {
             collect_refs_in_expr(expr, info);
             collect_refs_in_block(body, info);
@@ -1843,7 +1842,7 @@ fn walk_stmts(stmts: &[Stmt], visit: &mut impl FnMut(&Stmt)) {
 
 fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
     match stmt.unlocated() {
-        Stmt::Block(stmts) | Stmt::Parasteps(stmts) | Stmt::OnFailure(stmts) | Stmt::Do(stmts) => {
+        Stmt::Block(stmts) | Stmt::Parasteps(stmts) | Stmt::OnFailure(stmts) => {
             walk_stmts(stmts, visit)
         }
         Stmt::If { then_, else_, .. } => {

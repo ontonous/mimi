@@ -543,8 +543,6 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
         Stmt::Block(_) => {
             Err("block statements are not in the trusted subset (v1: flat body only)".into())
         }
-        // Do block (transition body): recurse into the block
-        Stmt::Do(stmts) => check_stmts_trusted(stmts),
         // Anything else is rejected
         _ => Err("statement is not in the trusted subset".into()),
     }
@@ -972,114 +970,6 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                     }
                     // If lowering fails, the expression is not in the trusted
                     // subset but its value is discarded, so we can safely skip it.
-                }
-            }
-            // Skip super-comments and other non-semantic statements
-            crate::ast::Stmt::Do(stmts) => {
-                // Do block (transition body): recurse into the block
-                for inner_stmt in stmts {
-                    match inner_stmt.unlocated() {
-                        crate::ast::Stmt::Expr(expr) => {
-                            if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                                body_stmts.push(VStmt::Return(vexpr));
-                                span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
-                                stmt_index += 1;
-                            } else {
-                                return Err(
-                                    "Do block expression cannot be lowered to VIR".to_string()
-                                );
-                            }
-                        }
-                        crate::ast::Stmt::Return(expr) => {
-                            if let Some(expr) = expr {
-                                if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                                    body_stmts.push(VStmt::Return(vexpr));
-                                    span_table.record_stmt(
-                                        &func_id,
-                                        stmt_index,
-                                        stmt_span(inner_stmt),
-                                    );
-                                    stmt_index += 1;
-                                } else {
-                                    return Err(
-                                        "Do block return expression cannot be lowered to VIR"
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                        }
-                        crate::ast::Stmt::Let { pat, init, .. } => {
-                            if let Some(init) = init {
-                                if let Some(vexpr) = lower_expr_to_vir(init, &mut ctx) {
-                                    let name = match &pat.kind {
-                                        crate::ast::PatternKind::Variable(n) => n.clone(),
-                                        _ => format!("_let{}", stmt_index),
-                                    };
-                                    let var = ctx.resolve(&name);
-                                    body_stmts.push(VStmt::Let(var, vexpr));
-                                    span_table.record_stmt(
-                                        &func_id,
-                                        stmt_index,
-                                        stmt_span(inner_stmt),
-                                    );
-                                    stmt_index += 1;
-                                } else {
-                                    return Err(
-                                        "Do block let binding cannot be lowered to VIR".to_string()
-                                    );
-                                }
-                            }
-                        }
-                        // If statement in tail position: lower as Select.
-                        crate::ast::Stmt::If { cond, then_, else_ } => {
-                            if is_last {
-                                let cond_vir = lower_expr_to_vir(cond, &mut ctx);
-                                let then_tail = crate::verifier::helpers::block_tail_expr(then_);
-                                let else_tail = else_
-                                    .as_ref()
-                                    .and_then(|e| crate::verifier::helpers::block_tail_expr(e));
-                                if let (Some(c), Some(t)) = (cond_vir, then_tail) {
-                                    let then_vir = lower_expr_to_vir(&t, &mut ctx);
-                                    let else_vir =
-                                        else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
-                                    if let (Some(tv), Some(ev)) = (then_vir, else_vir) {
-                                        body_stmts.push(VStmt::Return(VExpr::Select(
-                                            Box::new(c),
-                                            Box::new(tv),
-                                            Box::new(ev),
-                                        )));
-                                        span_table.record_stmt(
-                                            &func_id,
-                                            stmt_index,
-                                            stmt_span(inner_stmt),
-                                        );
-                                        stmt_index += 1;
-                                    } else {
-                                        return Err(
-                                            "Do block if-else branch cannot be lowered to VIR"
-                                                .to_string(),
-                                        );
-                                    }
-                                } else {
-                                    return Err(
-                                        "Do block if condition/then cannot be lowered to VIR"
-                                            .to_string(),
-                                    );
-                                }
-                            } else {
-                                return Err(
-                                    "non-tail if statement in Do block is not in the trusted subset"
-                                        .to_string(),
-                                );
-                            }
-                        }
-                        _ => {
-                            return Err(format!(
-                                "statement {:?} in Do block is not in the trusted subset",
-                                std::mem::discriminant(inner_stmt.unlocated())
-                            ));
-                        }
-                    }
                 }
             }
             // Stmt::If at the top level: handle in tail position, reject otherwise.

@@ -4,9 +4,7 @@
 flow Controller {
     @max_children(2)
     state Ready
-    transition start(Ready) -> Ready {
-        do { return Ready { } }
-    }
+    transition start(Ready) -> Ready { return Ready { } }
 }
 
 actor Worker {

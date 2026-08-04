@@ -10,26 +10,16 @@ flow Buffer {
     state Partial { items: i32, capacity: i32 }
     state Full { items: i32 }
 
-    transition push(Empty) -> Partial {
-        do { return Partial { items: 1, capacity: 4 } }
-    }
+    transition push(Empty) -> Partial { return Partial { items: 1, capacity: 4 } }
     transition push(Partial) -> Partial {
-        do {
-            if self.items + 1 >= self.capacity {
-                return Partial { items: self.capacity, capacity: self.capacity }
-            }
-            return Partial { items: self.items + 1, capacity: self.capacity }
+        if self.items + 1 >= self.capacity {
+            return Partial { items: self.capacity, capacity: self.capacity }
         }
+        return Partial { items: self.items + 1, capacity: self.capacity }
     }
-    transition fill(Partial) -> Full {
-        do { return Full { items: self.items } }
-    }
-    transition drain(Full) -> Empty {
-        do { return Empty { } }
-    }
-    transition drain_partial(Partial) -> Empty {
-        do { return Empty { } }
-    }
+    transition fill(Partial) -> Full { return Full { items: self.items } }
+    transition drain(Full) -> Empty { return Empty { } }
+    transition drain_partial(Partial) -> Empty { return Empty { } }
 }
 
 func main() -> i32 {

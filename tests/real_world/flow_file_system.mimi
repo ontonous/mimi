@@ -10,18 +10,10 @@ flow FileHandle {
     state Reading { name: string, pos: i32, buf: string }
     state Closed { name: string }
 
-    transition read(Open) -> Reading {
-        do { return Reading { name: self.name, pos: self.pos, buf: "data" } }
-    }
-    transition finish_read(Reading) -> Open {
-        do { return Open { name: self.name, pos: self.pos + 4 } }
-    }
-    transition close(Open) -> Closed {
-        do { return Closed { name: self.name } }
-    }
-    transition close_reading(Reading) -> Closed {
-        do { return Closed { name: self.name } }
-    }
+    transition read(Open) -> Reading { return Reading { name: self.name, pos: self.pos, buf: "data" } }
+    transition finish_read(Reading) -> Open { return Open { name: self.name, pos: self.pos + 4 } }
+    transition close(Open) -> Closed { return Closed { name: self.name } }
+    transition close_reading(Reading) -> Closed { return Closed { name: self.name } }
 }
 
 func main() -> i32 {

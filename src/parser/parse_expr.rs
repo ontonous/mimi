@@ -1096,7 +1096,6 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Desc
             | TokenKind::Rule
             | TokenKind::Loop
-            | TokenKind::Do
             | TokenKind::Pinned
             | TokenKind::Shared
             | TokenKind::Const
@@ -1379,7 +1378,6 @@ mod tests {
             TokenKind::Continue,
             TokenKind::Match,
             TokenKind::Loop,
-            TokenKind::Do,
             TokenKind::Pinned,
             TokenKind::Shared,
             TokenKind::Const,

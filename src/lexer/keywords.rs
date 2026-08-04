@@ -83,7 +83,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Persistent
             | TokenKind::View
             | TokenKind::Mutate
-            | TokenKind::Do
             | TokenKind::Session
             | TokenKind::Dual
             | TokenKind::End
@@ -159,7 +158,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "persistent" => TokenKind::Persistent,
         "view" => TokenKind::View,
         "mutate" => TokenKind::Mutate,
-        "do" => TokenKind::Do,
         "session" => TokenKind::Session,
         "dual" => TokenKind::Dual,
         "end" => TokenKind::End,
