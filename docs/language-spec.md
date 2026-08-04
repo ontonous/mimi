@@ -1047,6 +1047,16 @@ func take(x: T)          // by-value consume
 - Runtime/low-level library;
 - Explicitly feature-gated advanced mode.
 
+#### `mutate` argument place grammar `[stable]`
+
+> v0.34.25c (E0434/E0435): `mutate` arguments are restricted to real places
+> with an exclusive-borrow invariant, so silent write-back loss is impossible.
+
+- Legal `mutate` argument: `Ident` or single-level `Ident.field` (including `self.field`) — exactly the write-back targets the checker can coerce back into the payload slot after the call.
+- Rejected (`E0434`): nested places (`o.inner.value`), non-place arguments (literals, computed values, `bump(42)`), index expressions;
+- Rejected (`E0435`): two `mutate` arguments within the same call aliasing the same place (`bump2(self.tag, self.tag)`) — violated exclusive borrow.
+- Nested write-back and cross-call alias tracking are deferred to 1.x (require a backend place-tracking mechanism).
+
 ### 6.3 Ownership: Flow payload and shared/weak `[stable]`
 
 - Flow payload defaults to exclusive, linearly transferred by transition;
