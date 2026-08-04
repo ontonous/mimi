@@ -2,6 +2,7 @@
 
 > **Semantic authority**: `docs/language-spec.md` §4 (Error Model).
 > Error code values remain valid; semantic definitions (Result/Fault/PeerFault/exit layering) defer to the specification.
+> Diagnostic **output format contract** (dense single-line shape, required fields, invariants): `docs/diagnostics.md`.
 > Sourced from `src/diagnostic/codes.rs`.
 
 ## Retirement Policy
