@@ -1945,91 +1945,397 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             return Ok(agg.into());
         }
 
-        // Interpolation path: build format string + snprintf into stack buffer.
-        let mut fmt_str = String::new();
-        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-
-        for part in parts {
-            match part {
-                ResolvedFStringPart::Text(t) => {
-                    // Escape '%' in text parts for printf format.
-                    fmt_str.push_str(&t.replace('%', "%%"));
-                }
-                ResolvedFStringPart::Interpolation(expr) => {
-                    let value = self.emit_expr(expr, frame)?;
-                    let spec = self.fstring_format_spec(&expr.ty)?;
-                    fmt_str.push_str(spec);
-                    args.push(BasicMetadataValueEnum::from(value));
-                }
-            }
-        }
-
-        // Emit format string as global constant.
-        let fmt_global = self
-            .generator
-            .builder
-            .build_global_string_ptr(&fmt_str, "fstr_fmt")
-            .map_err(|e| CompileError::LlvmError(format!("fstring fmt: {e}")))?;
-
-        // Allocate stack buffer (4096 bytes).
-        let buf_size: u64 = 4096;
-        let buf_type = self.generator.context.i8_type().array_type(buf_size as u32);
-        let buf = self.generator.build_alloca(buf_type, "fstr_buf")?;
-
-        // Get or declare snprintf.
-        let snprintf = self.get_or_declare_snprintf();
-
-        // Call snprintf(buf, size, fmt, args...)
-        let buf_ptr = self
-            .generator
-            .builder
-            .build_pointer_cast(
-                buf,
-                self.generator
-                    .context
-                    .ptr_type(inkwell::AddressSpace::default()),
-                "fstr_buf_ptr",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("fstr buf cast: {e}")))?;
-        let size_val = self.generator.context.i64_type().const_int(buf_size, false);
-        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = vec![
-            BasicMetadataValueEnum::from(buf_ptr),
-            BasicMetadataValueEnum::from(size_val),
-            BasicMetadataValueEnum::from(fmt_global.as_pointer_value()),
-        ];
-        call_args.extend(args);
-
-        self.generator
-            .build_call(snprintf, &call_args, "fstr_snprintf")?;
-
-        // Return {ptr, i64} string struct (ptr to buffer, len=0 placeholder;
-        // runtime uses null terminator for actual string operations).
+        // Interpolation path: compile each part tracking (ptr, len), malloc the
+        // exact total, compose with memcpy at tracked offsets.
+        //
+        // AUDIT FIX A2 (full-audit-2026-08-05 §16 / roadmap §4-A2): the old
+        // path assembled a printf format string (%s/%d/%g) and snprintf'd into
+        // a 4096-byte STACK buffer — four defects at once:
+        //   1. %s stops at an embedded NUL → f"a{chr(0)}b" lost the NUL
+        //      (CG len 2, VM len 3; the VM's ConcatStr is length-based,
+        //      interp/bytecode/compiler.rs:2888).
+        //   2. Bool rendered via %d → "1"/"0" instead of the VM's "true"/"false".
+        //   3. Float rendered via %g → diverges from the VM's Rust shortest
+        //      round-trip Display beyond 6 significant digits (1e+06 vs 1000000).
+        //   4. The result struct pointed into the stack frame with len=0
+        //      ("runtime uses null terminator") — dangling past the frame and
+        //      lying about the length channel.
+        // Rewritten to the same length-based discipline as expr/literal.rs's
+        // f-string assembly: authoritative len fields, exact-size heap buffer,
+        // memcpy composition, tracked len end-to-end — NUL bytes survive and
+        // the len field never needs strlen(buf).
+        let i64_ty = self.generator.context.i64_type();
         let ptr_ty = self
             .generator
             .context
             .ptr_type(inkwell::AddressSpace::default());
-        let i64_ty = self.generator.context.i64_type();
-        let struct_ty = self.generator.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(ptr_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self.generator.build_alloca(struct_ty, "fstr_ret")?;
-        let ptr_field = self
-            .generator
-            .builder
-            .build_struct_gep(struct_ty, str_alloca, 0, "fstr_ptr_field")
-            .map_err(|e| CompileError::LlvmError(format!("fstr gep0: {e}")))?;
-        let len_field = self
-            .generator
-            .builder
-            .build_struct_gep(struct_ty, str_alloca, 1, "fstr_len_field")
-            .map_err(|e| CompileError::LlvmError(format!("fstr gep1: {e}")))?;
-        self.generator.build_store(ptr_field, buf_ptr)?;
-        self.generator.build_store(len_field, i64_ty.const_zero())?;
-        self.generator.build_load(struct_ty, str_alloca, "fstr_val")
+
+        // strlen: only used over NUL-free renderings (bool literals, snprintf
+        // temp buffers, mimi_to_string_f64 results) or raw C-string pointers
+        // that carry no length at all. Never over composed data.
+        let strlen_fn = self.generator.module.get_function("strlen").unwrap_or_else(|| {
+            let ty = i64_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr_ty)], false);
+            self.generator
+                .module
+                .add_function("strlen", ty, Some(inkwell::module::Linkage::External))
+        });
+
+        enum CompiledPart<'ctx> {
+            Text(String),
+            Interp {
+                ptr: PointerValue<'ctx>,
+                len: inkwell::values::IntValue<'ctx>,
+            },
+        }
+        let mut compiled_parts: Vec<CompiledPart<'ctx>> = Vec::new();
+        // +1 for the trailing NUL handed to C-string consumers downstream.
+        let mut total_size = i64_ty.const_int(1, false);
+
+        for (i, part) in parts.iter().enumerate() {
+            match part {
+                ResolvedFStringPart::Text(t) => {
+                    total_size = self
+                        .generator
+                        .builder
+                        .build_int_add(
+                            total_size,
+                            i64_ty.const_int(t.len() as u64, false),
+                            &format!("fstr_text_sz_{}", i),
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
+                    compiled_parts.push(CompiledPart::Text(t.clone()));
+                }
+                ResolvedFStringPart::Interpolation(expr) => {
+                    let value = self.emit_expr(expr, frame)?;
+                    let prim = match self.program.resolved_types().get(&expr.ty) {
+                        Some(ResolvedType::Primitive(p)) => Some(p),
+                        _ => None,
+                    };
+                    if matches!(prim, Some(PrimitiveType::Bool)) {
+                        // "true"/"false" globals — VM parity (the old %d path
+                        // printed 1/0).
+                        let iv = match value {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => {
+                                return Err(CompileError::Unsupported(
+                                    "f-string bool interpolation did not lower to an integer"
+                                        .into(),
+                                ))
+                            }
+                        };
+                        let true_g = self
+                            .generator
+                            .builder
+                            .build_global_string_ptr("true", &format!("fstr_true_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("string: {e}")))?
+                            .as_pointer_value();
+                        let false_g = self
+                            .generator
+                            .builder
+                            .build_global_string_ptr("false", &format!("fstr_false_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("string: {e}")))?
+                            .as_pointer_value();
+                        let zero = iv.get_type().const_zero();
+                        let cond = self
+                            .generator
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                iv,
+                                zero,
+                                &format!("fstr_bool_nz_{}", i),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("cmp error: {e}")))?;
+                        let ptr = self
+                            .generator
+                            .builder
+                            .build_select(
+                                cond,
+                                BasicValueEnum::PointerValue(true_g),
+                                BasicValueEnum::PointerValue(false_g),
+                                &format!("fstr_bool_sel_{}", i),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("select error: {e}")))?
+                            .into_pointer_value();
+                        let len = self.call_strlen(strlen_fn, ptr, &format!("fstr_bool_strlen_{}", i))?;
+                        total_size = self
+                            .generator
+                            .builder
+                            .build_int_add(
+                                total_size,
+                                len,
+                                &format!("fstr_bool_sz_{}", i),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
+                        compiled_parts.push(CompiledPart::Interp { ptr, len });
+                    } else if matches!(prim, Some(PrimitiveType::F32 | PrimitiveType::F64)) {
+                        // mimi_to_string_f64 = the same Rust shortest round-trip
+                        // Display the VM uses; returns a NUL-free heap C string,
+                        // so strlen is safe.
+                        let fv = match value {
+                            BasicValueEnum::FloatValue(fv) => fv,
+                            _ => {
+                                return Err(CompileError::Unsupported(
+                                    "f-string float interpolation did not lower to a float"
+                                        .into(),
+                                ))
+                            }
+                        };
+                        let fv64 = if fv.get_type().get_bit_width() == 32 {
+                            self.generator
+                                .builder
+                                .build_float_ext(
+                                    fv,
+                                    self.generator.context.f64_type(),
+                                    &format!("fstr_fext_{}", i),
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("fext: {e}")))?
+                        } else {
+                            fv
+                        };
+                        let to_str_fn = self.generator.get_runtime_fn("mimi_to_string_f64")?;
+                        let ptr = self
+                            .generator
+                            .build_call(
+                                to_str_fn,
+                                &[BasicMetadataValueEnum::FloatValue(fv64)],
+                                &format!("fstr_f64_{}", i),
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError("mimi_to_string_f64 returned void".into())
+                            })?
+                            .into_pointer_value();
+                        // Heap-owned by this f-string evaluation; freed at scope
+                        // exit via the heap-scope registry.
+                        self.generator.register_heap_alloc(ptr);
+                        let len = self.call_strlen(strlen_fn, ptr, &format!("fstr_strlen_{}", i))?;
+                        total_size = self
+                            .generator
+                            .builder
+                            .build_int_add(
+                                total_size,
+                                len,
+                                &format!("fstr_isz_{}", i),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
+                        compiled_parts.push(CompiledPart::Interp { ptr, len });
+                    } else if matches!(prim, Some(PrimitiveType::String)) {
+                        match value {
+                            // String struct {i8*, i64}: the authoritative len
+                            // field, never strlen — embedded NULs survive
+                            // composition exactly like the VM's ConcatStr.
+                            BasicValueEnum::StructValue(sv) => {
+                                let fields = sv.get_type().get_field_types();
+                                let is_string_shape = matches!(
+                                    fields.as_slice(),
+                                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                                        if t.get_bit_width() == 64
+                                );
+                                if !is_string_shape {
+                                    return Err(CompileError::Unsupported(format!(
+                                        "f-string string interpolation lowered to unexpected struct shape in part {}",
+                                        i
+                                    )));
+                                }
+                                let data_ptr = self
+                                    .generator
+                                    .build_extract_value(sv.into(), 0, "fstr_str_data")?
+                                    .into_pointer_value();
+                                let len = self
+                                    .generator
+                                    .build_extract_value(sv.into(), 1, "fstr_str_len")?
+                                    .into_int_value();
+                                total_size = self
+                                    .generator
+                                    .builder
+                                    .build_int_add(
+                                        total_size,
+                                        len,
+                                        &format!("fstr_isz_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("add error: {e}"))
+                                    })?;
+                                compiled_parts.push(CompiledPart::Interp {
+                                    ptr: data_ptr,
+                                    len,
+                                });
+                            }
+                            // Raw C-string pointer: length only recoverable via
+                            // strlen (length-carrying strings travel as structs).
+                            BasicValueEnum::PointerValue(pv) => {
+                                let len = self.call_strlen(strlen_fn, pv, &format!("fstr_strlen_{}", i))?;
+                                total_size = self
+                                    .generator
+                                    .builder
+                                    .build_int_add(
+                                        total_size,
+                                        len,
+                                        &format!("fstr_isz_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("add error: {e}"))
+                                    })?;
+                                compiled_parts.push(CompiledPart::Interp { ptr: pv, len });
+                            }
+                            _ => {
+                                return Err(CompileError::Unsupported(format!(
+                                    "f-string string interpolation did not lower to a string value in part {}",
+                                    i
+                                )))
+                            }
+                        }
+                    } else {
+                        // Integer family (i8..i128, char, usize, ...): snprintf
+                        // %ld into a 32-byte heap temp buffer. The rendering is
+                        // NUL-free, so strlen over the temp buffer is safe.
+                        let iv = match value {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => {
+                                return Err(CompileError::Unsupported(format!(
+                                    "f-string interpolation of type '{}' is not supported",
+                                    expr.ty.as_str()
+                                )))
+                            }
+                        };
+                        let bw = iv.get_type().get_bit_width();
+                        let ext_iv = if bw < 64 {
+                            self.generator
+                                .builder
+                                .build_int_s_extend(
+                                    iv,
+                                    i64_ty,
+                                    &format!("fstr_ext_{}", i),
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("sext: {e}")))?
+                        } else if bw > 64 {
+                            // i128: %ld reads the low 64 bits (pre-existing
+                            // limitation of the printf-based rendering).
+                            self.generator
+                                .builder
+                                .build_int_truncate(
+                                    iv,
+                                    i64_ty,
+                                    &format!("fstr_trunc_{}", i),
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("trunc: {e}")))?
+                        } else {
+                            iv
+                        };
+                        let temp_buf = self
+                            .generator
+                            .malloc_or_abort(i64_ty.const_int(32, false), &format!("fstr_temp_{}", i))?;
+                        self.generator.register_heap_alloc(temp_buf);
+                        let fmt = self
+                            .generator
+                            .builder
+                            .build_global_string_ptr("%ld", &format!("fstr_fmt_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("string: {e}")))?;
+                        let snprintf = self.get_or_declare_snprintf();
+                        self.generator
+                            .build_call(
+                                snprintf,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(temp_buf),
+                                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(32, false)),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::IntValue(ext_iv),
+                                ],
+                                &format!("fstr_snprintf_{}", i),
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError("snprintf returned void".into())
+                            })?;
+                        let len = self.call_strlen(strlen_fn, temp_buf, &format!("fstr_strlen_{}", i))?;
+                        total_size = self
+                            .generator
+                            .builder
+                            .build_int_add(
+                                total_size,
+                                len,
+                                &format!("fstr_isz_{}", i),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
+                        compiled_parts.push(CompiledPart::Interp {
+                            ptr: temp_buf,
+                            len,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Phase 2: exact-size HEAP buffer filled via memcpy at tracked offsets
+        // (no strcpy/strcat/strlen over composed data — embedded NULs survive).
+        let buf = self.generator.malloc_or_abort(total_size, "fstr_buf")?;
+        self.generator.register_heap_alloc(buf);
+        let memcpy_fn = self.generator.get_runtime_fn("memcpy")?;
+        let i8_ty = self.generator.context.i8_type();
+        let mut offset = i64_ty.const_int(0, false);
+        for (i, part) in compiled_parts.iter().enumerate() {
+            let (src_ptr, part_len): (PointerValue<'ctx>, inkwell::values::IntValue<'ctx>) =
+                match part {
+                    CompiledPart::Text(t) => {
+                        if t.is_empty() {
+                            continue;
+                        }
+                        let global = self
+                            .generator
+                            .builder
+                            .build_global_string_ptr(t, &format!("fstr_part_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("string: {e}")))?;
+                        // Exact byte count: the global carries a trailing NUL
+                        // that must NOT be copied into the composition.
+                        (
+                            global.as_pointer_value(),
+                            i64_ty.const_int(t.len() as u64, false),
+                        )
+                    }
+                    CompiledPart::Interp { ptr, len } => (*ptr, *len),
+                };
+            let dst = self.generator.build_in_bounds_gep(
+                BasicTypeEnum::IntType(i8_ty),
+                buf,
+                &[offset],
+                &format!("fstr_dst_{}", i),
+            )?;
+            // SAFETY: `dst` is buf + offset with offset + part_len <= total_size
+            // (total_size accumulated every part's exact length plus the
+            // terminator); `src_ptr` is valid for `part_len` bytes by
+            // construction in phase 1 (globals are t.len() bytes, temp buffers
+            // and runtime strings carry their measured length).
+            self.generator
+                .build_call(
+                    memcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(dst),
+                        BasicMetadataValueEnum::PointerValue(src_ptr),
+                        BasicMetadataValueEnum::IntValue(part_len),
+                    ],
+                    &format!("fstr_memcpy_{}", i),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("memcpy: {e}")))?;
+            offset = self
+                .generator
+                .builder
+                .build_int_add(offset, part_len, &format!("fstr_off_{}", i))
+                .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
+        }
+
+        // Phase 3: trailing NUL for C-string consumers, then the canonical
+        // {i8*, i64} struct whose len field is the TRACKED total — never
+        // strlen(buf) — so interior NUL bytes do not truncate the value.
+        let nul_dst = self.generator.build_in_bounds_gep(
+            BasicTypeEnum::IntType(i8_ty),
+            buf,
+            &[offset],
+            "fstr_nul_gep",
+        )?;
+        self.generator
+            .build_store(nul_dst, i8_ty.const_int(0, false))?;
+        self.generator.build_string_struct(buf, offset)
     }
 
     /// ABI bridge: if the expected result type is String ({ptr, i64}) but the
@@ -2045,7 +2351,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         );
         if is_string {
             if let BasicValueEnum::PointerValue(ptr) = value {
-                // Wrap raw ptr into {ptr, i64} struct.
+                // Wrap raw ptr into {ptr, i64} struct. The raw pointer is a
+                // NUL-terminated C string with no length channel, so strlen is
+                // the ONLY length source — materialize it into the len field
+                // NOW (AUDIT FIX A2 follow-up): consumers like len() read the
+                // authoritative field with a bounded scan; a len=0 placeholder
+                // would make them report 0 for every wrapped builtin string.
                 let ptr_ty = self
                     .generator
                     .context
@@ -2058,6 +2369,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ],
                     false,
                 );
+                let strlen_fn = self
+                    .generator
+                    .module
+                    .get_function("strlen")
+                    .unwrap_or_else(|| {
+                        let ty =
+                            i64_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr_ty)], false);
+                        self.generator.module.add_function(
+                            "strlen",
+                            ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                let len_val = self.call_strlen(strlen_fn, ptr, "builtin_str_wrap_len")?;
                 let alloca = self.generator.build_alloca(struct_ty, "builtin_str_wrap")?;
                 let ptr_field = self
                     .generator
@@ -2070,39 +2395,32 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .build_struct_gep(struct_ty, alloca, 1, "str_len_f")
                     .map_err(|e| CompileError::LlvmError(format!("str wrap gep1: {e}")))?;
                 self.generator.build_store(ptr_field, ptr)?;
-                self.generator.build_store(len_field, i64_ty.const_zero())?;
+                self.generator.build_store(len_field, len_val)?;
                 return self.generator.build_load(struct_ty, alloca, "str_wrapped");
             }
         }
         Ok(value)
     }
 
-    /// Map a canonical type to its printf format specifier.
-    fn fstring_format_spec(&self, ty: &ResolvedTypeId) -> Result<&'static str, CompileError> {
-        use crate::core::PrimitiveType;
-        match self.program.resolved_types().get(ty) {
-            Some(ResolvedType::Primitive(
-                PrimitiveType::I32 | PrimitiveType::U32 | PrimitiveType::Char,
-            )) => Ok("%d"),
-            Some(ResolvedType::Primitive(
-                PrimitiveType::I8 | PrimitiveType::U8 | PrimitiveType::I16 | PrimitiveType::U16,
-            )) => Ok("%d"),
-            Some(ResolvedType::Primitive(
-                PrimitiveType::I64
-                | PrimitiveType::U64
-                | PrimitiveType::Isize
-                | PrimitiveType::Usize
-                | PrimitiveType::I128
-                | PrimitiveType::U128,
-            )) => Ok("%ld"),
-            Some(ResolvedType::Primitive(PrimitiveType::F32 | PrimitiveType::F64)) => Ok("%g"),
-            Some(ResolvedType::Primitive(PrimitiveType::String)) => Ok("%s"),
-            Some(ResolvedType::Primitive(PrimitiveType::Bool)) => Ok("%d"),
-            _ => Err(CompileError::Unsupported(format!(
-                "f-string interpolation type '{}' is not supported",
-                ty.as_str()
-            ))),
-        }
+    /// Call strlen over a pointer whose bytes are NUL-free by construction
+    /// (bool literals, snprintf temp buffers, mimi_to_string_f64 results) or
+    /// over a raw C-string that carries no length channel at all. Never used
+    /// over composed f-string data (that path tracks len through memcpy).
+    fn call_strlen(
+        &self,
+        strlen_fn: inkwell::values::FunctionValue<'ctx>,
+        ptr: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        self.generator
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                name,
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))
+            .map(|v| v.into_int_value())
     }
 
     fn get_or_declare_snprintf(&self) -> inkwell::values::FunctionValue<'ctx> {
@@ -2115,7 +2433,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .context
                     .ptr_type(inkwell::AddressSpace::default());
                 let i64 = self.generator.context.i64_type();
-                let fn_type = i64.fn_type(
+                // snprintf returns int (i32), not i64 — CG-C3 (the legacy
+                // expr/literal.rs declares it with i32 as well; keep the two
+                // declarations signature-consistent within one module).
+                let i32_ty = self.generator.context.i32_type();
+                let fn_type = i32_ty.fn_type(
                     &[
                         BasicMetadataTypeEnum::from(ptr),
                         BasicMetadataTypeEnum::from(i64),
@@ -2125,7 +2447,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 );
                 self.generator
                     .module
-                    .add_function("snprintf", fn_type, None)
+                    .add_function("snprintf", fn_type, Some(inkwell::module::Linkage::External))
             })
     }
 

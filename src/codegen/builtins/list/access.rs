@@ -47,16 +47,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if t.get_bit_width() == 64
                 );
                 if is_string_struct {
-                    // String struct {i8*, i64}: field 1 is the BYTE length —
-                    // wrong for len() semantics on multi-byte UTF-8. Count
-                    // chars over field 0 (data pointer) instead, matching the
-                    // VM's `s.chars().count()`.
+                    // String struct {i8*, i64}: field 1 is the authoritative
+                    // BYTE length. len() semantics = Unicode scalar values
+                    // (VM: `s.chars().count()`), so count UTF-8 leading bytes
+                    // BOUNDED by field 1 — never a NUL-terminated walk, which
+                    // would truncate strings carrying embedded NUL bytes
+                    // (e.g. f"a{chr(0)}b" must count 3). The bounded scan also
+                    // stays correct on multi-byte UTF-8.
                     let data_ptr = self
                         .builder
                         .build_extract_value(sv, 0, "str_data_ptr")
                         .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
                         .into_pointer_value();
-                    let len = self.count_utf8_chars(data_ptr, None)?;
+                    let byte_len = self
+                        .builder
+                        .build_extract_value(sv, 1, "str_byte_len")
+                        .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+                        .into_int_value();
+                    let len = self.count_utf8_chars(data_ptr, Some(byte_len))?;
                     Ok(len.into())
                 } else {
                     // List struct {i64, i8*} passed as StructValue (e.g. from nested indexing).
