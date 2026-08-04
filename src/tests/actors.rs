@@ -344,15 +344,16 @@ actor CounterActor runs Counter {
 
 func main() -> i32 {
     let a = CounterActor.spawn();
-    let s1 = await a.inc();
-    let s2 = await a.bump();
-    let s3 = await a.get();
+    let s1 = a.inc();
+    let s2 = a.bump();
+    let s3 = a.get();
     s3.n
 }
 "#;
-    // TODO(0.31.11): checker does not yet register flow transitions as actor
-    // methods for `runs_flow` actors. Use unchecked run until checker integration
-    // is implemented (E0221 "has no method" false positive).
+    // 0.34.29 analysis: bytecode runs runs_flow dispatch (a.inc() works at
+    // runtime); checker infer does NOT yet register flow transitions as actor
+    // methods (E0221 "has no method" false positive) — full typed check is
+    // registered for 0.1.5 (see golden-document §10 0.34.29).
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(2));
 }

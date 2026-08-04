@@ -400,6 +400,21 @@ Final syntax is determined by formal grammar design, but semantics must satisfy:
 - Dynamic external message failure is typed boundary error;
 - Ordinary Actor helpers can only perform stateless computation.
 
+#### `mut` Field Semantics (SD-5)
+
+An actor field declared `mut` is a **declarative marker** (concurrency-isolation
+hint), not a write-enforced permission:
+
+- The checker does **not** enforce "non-`mut` fields are unwritable" (all three
+  backends agree the field is writable regardless of the marker);
+- 1.0 does **not** introduce write enforcement for actor fields — the Flow
+  state machine (state transition as the only state-change channel) is the
+  replacement for the borrow checker, and actor `mut` is the simple-state
+  escape hatch (SD-5: `mut` = simple state; Flow = complex state machine);
+- `actor Name runs FlowName` actors still reject `mut` business fields
+  (E0402): state is carried by the Flow, and mutable fields break the atomic
+  turn guarantee.
+
 #### Lifecycle
 
 parent/child, detached, PeerFault, SystemKill, and backpressure must share the same state model across all execution backends.

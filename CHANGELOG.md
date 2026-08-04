@@ -2,6 +2,13 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.29 — actor 收敛（裁决重估 + SD-5 文档化，Phase F 之三）
+
+- **await 裁决纠正（重要）**：0.34.23 U6 评估 "await 无意义 / interp no-op / codegen 无路径" 基于**过时证据**。实测：codegen `compile_await_expr`（expr/call/async.rs:327）是**真实 async**（mimi_executor_run + mimi_await_future spin-wait + future+8 结果加载），runtime/future.rs 提供 pthread future，dual_backend.rs "Both interpreter and codegen use real spawn/await with pthread" + `dual_actor_await_get`（1000 call no deadlock）+ real_world concurrency_spawn_await 资产。**await 是完整并发能力，保留**——0.34.23 "删除 await 语法" 裁决基于含错证据，正式撤销。正确语义：actor 场景 `await`（非 Future）由 E0245 `infer_await` 拒绝（helpers.rs:291，即裁决执行）；spawn future 的 await 保留。
+- **runs_flow E0221**：`a.inc()` 误报修复经分析需**三层集成**（① infer method 注册 ② checker 注册 `zonked_function_types` ③ resolved `function:{Actor}::{method}` callable identity + lower_method_call）→ 登记 0.1.5。bytecode 已完整支持 runs_flow dispatch（run_source 42）；测试 `await a.inc()` → `a.inc()`（actor 调用同步，去 await）。
+- **SD-5 mut 字段文档化 ✅**：spec §3.8 新增 `mut` Field Semantics——mut 是声明性标记（并发隔离提示）非写强制；1.0 不引入写强制（Flow 状态机平替 borrow checker，状态转移是唯一状态通道）；`runs Flow` actor 仍拒 mut 业务字段（E0402）。
+- 相关源码未提交（infer/resolved 三层方案登记 0.1.5，不在本次落地半成品）。
+
 ### 0.34.28 — 裁决文档同步战役（Phase F 之二，sprint 规划 `sprint-0.34.28-doc-sync.md`）
 
 - **文档族全链路对齐四组裁决**（do 已删 0.34.27 / math stable / multi-target stable / become-stay 已删 0.34.11）：
