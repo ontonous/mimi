@@ -140,7 +140,7 @@ Different constructs must not compete for the same responsibility. For example, 
 - A Flow instance has exactly one current state at any moment.
 - Transition consumes the old state; the old state cannot be used after transition.
 - Self-loops also produce a new state generation; old aliases cannot be retained.
-- Multi-target transitions must preserve runtime state tag. `[experimental]`
+- Multi-target transitions must preserve runtime state tag. `[stable]`
 - Each transition turn must end with exactly one of: `return Target { ... }`, typed `fault`, or rollback failure.
 - State commit is atomic; failure must not leave a half-updated payload.
 
@@ -348,9 +348,10 @@ type OrderEvent {
 
 A dispatcher does one boundary check at the current state, then calls the resolved transition. Dynamic check is not adding new edges to the business graph.
 
-### 3.7 Multi-target Transition `[experimental]`
+### 3.7 Multi-target Transition `[stable]`
 
-Multi-target transition is only stable when preserving nominal state tag:
+Multi-target transition is **stable** (implemented 0.34.15-16, ADR-002, tagged-union ABI;
+19 门禁测试绿，含 multi_target_codegen_dual_backend_tag_dispatch). Requirements:
 
 ```mimi
 transition decide(Pending) -> Approved | Rejected { ... }
@@ -366,7 +367,9 @@ Requirements:
 
 Implementations not meeting these requirements must not accept multi-target transitions.
 
-Multi-target transition is not part of the minimum 1.0 RC stable core. Stable single-target Flow semantics and typed dynamic boundary errors do not depend on it.
+> v0.34.28: superseded — multi-target shipped stable in 0.34.15-16; the old
+> "not part of the minimum 1.0 RC stable core" clause is rescinded (golden §3.4,
+> ADR-002). Typed dynamic boundary errors remain independent.
 
 ### 3.8 Actor and Flow `[stable]`
 
@@ -587,6 +590,12 @@ func main() {
 ```
 
 The compiler must put its real body into the implicit Flow's startup transition, not just insert a shell Flow and continue the traditional main path.
+
+> v0.34.28: **implemented** — `apply_progressive_typestate` (progressive.rs, v0.29.22)
+> injects an invisible `flow Main { state Single }` whose `run` transition calls
+> the real top-level `main`, so every script lives under the Flow paradigm.
+> `bytecode/compiler.rs` "no main function found" fires only when no main exists
+> at all (pure library), not as evidence of an unimplemented implicit Main.
 
 Rules:
 
@@ -949,9 +958,12 @@ old(immutable_scalar_parameter)
 
 Prohibits field, List, shared, pointer, or alias aggregate `old`.
 
-#### `math` `[removed]`
+#### `math` `[stable]`
 
-General `math { Expr... }` is removed from the RC stable set unless a pure ghost AST and Verified Core rules are established.
+General `math { Expr... }` blocks are a **stable** mathematical-annotation channel: parsed as
+`Stmt::Math` (parse_stmt.rs:896/1006), consumed by the verifier as ghost facts
+(vir.rs:495/878, `ResolvedStmtKind::Math`). No ghost-extension beyond the
+verifier channel is planned.
 
 ### 5.7 Result States `[stable]`
 Stable results must not only use `Verified/Failed/Unknown`:
@@ -1158,9 +1170,10 @@ func withdraw(balance: i64, amount: i64) -> i64
 - Function invariant if no independent meaning: not retained;
 - Runtime and static verifier check timing must be explicit and dual-backend consistent.
 
-#### `math` `[removed]`
+#### `math` `[stable]`
 
-General `math { Expr... }` removed from RC stable set.
+General `math { Expr... }` blocks are a stable verifier channel (see §5.6).
+0.34.28: corrected from an erroneous `[removed]` marking (golden §1.1 verdict).
 
 ### 6.9 MimiSpec Meta-syntax: `desc`, `rule`, `mms` `[removed]`
 
@@ -1219,7 +1232,6 @@ Quote/AST generation remains experimental until:
 
 #### Experimental
 
-- Multi-target (until tagged union lowering);
 - Dynamic Protocol/VTable/broadcast;
 - Quote/AST generation;
 - In-process FFI signal recovery and forced thread termination;
@@ -1558,7 +1570,7 @@ Any business fact has only one commit authority. Mimi business state authority i
 - Actor mutable business field bypassing Flow: **blocks RC**;
 - Undeclared business combination default-injected as transition: **blocks RC**;
 - Dynamic event without typed boundary error: **blocks RC**;
-- A build that accepts experimental multi-target while losing the state tag or silently selecting the first target violates the specification and **blocks RC**; the minimum RC may instead disable and reject the experimental syntax;
+- A build that lowers multi-target transitions while losing the state tag or silently selecting the first target violates the specification and **blocks RC**; tagged-union lowering (0.34.15-16) is the only accepted lowering;
 - Interpreter/native Actor lifecycle semantics differ: **blocks RC**;
 - Async Actor API claims static knowledge of arrival state, or no stale generation/revision typed result: **blocks RC**;
 - Transition rollback failure without declared error type, or source generation ownership uncertain after failure: **blocks RC**.
