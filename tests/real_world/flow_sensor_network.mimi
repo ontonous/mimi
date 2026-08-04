@@ -11,30 +11,18 @@ flow TempSensor {
     state TempActive { interval: i32 }
     state TempReading { value: i32, interval: i32 }
 
-    transition start(TempIdle) -> TempActive {
-        do { return TempActive { interval: 5 } }
-    }
-    transition read(TempActive) -> TempReading {
-        do { return TempReading { value: 22, interval: self.interval } }
-    }
-    transition finish(TempReading) -> TempActive {
-        do { return TempActive { interval: self.interval } }
-    }
-    transition stop(TempActive) -> TempIdle {
-        do { return TempIdle { } }
-    }
+    transition start(TempIdle) -> TempActive { return TempActive { interval: 5 } }
+    transition read(TempActive) -> TempReading { return TempReading { value: 22, interval: self.interval } }
+    transition finish(TempReading) -> TempActive { return TempActive { interval: self.interval } }
+    transition stop(TempActive) -> TempIdle { return TempIdle { } }
 }
 
 flow HumiditySensor {
     state HumIdle
     state HumActive { interval: i32 }
 
-    transition start(HumIdle) -> HumActive {
-        do { return HumActive { interval: 10 } }
-    }
-    transition stop(HumActive) -> HumIdle {
-        do { return HumIdle { } }
-    }
+    transition start(HumIdle) -> HumActive { return HumActive { interval: 10 } }
+    transition stop(HumActive) -> HumIdle { return HumIdle { } }
 }
 
 func main() -> i32 {

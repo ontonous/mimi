@@ -986,7 +986,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Return type: the single declared target state's nominal LLVM layout.
     /// Multi-target transitions are rejected by `compile_flow` until codegen
     /// has a closed tagged-state-union ABI.
-    /// Body: the transition body with outer `do { }` unwrapped (if present).
+    /// Body: the transition body (v0.34.27: `do { }` removed — plain block).
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
         let origin = AstOrigin::RuntimeSystem("codegen.transition_lowering");
         let meta = AstNodeMeta::inherited(t.meta.span, origin);
@@ -1035,29 +1035,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Name(ret_name, vec![]).deep_reorigin(meta)
         };
 
-        // Unwrap a single outer `do { ... }` so compile_block sees normal stmts.
-        let body: Block = match &t.body {
-            Some(block) => {
-                if block.len() == 1 {
-                    if let Stmt::Do(inner) = block[0].unlocated() {
-                        inner.clone()
-                    } else {
-                        block.clone()
-                    }
-                } else {
-                    // Multiple top-level stmts: unwrap each Do, keep rest.
-                    let mut out = Vec::new();
-                    for stmt in block {
-                        match stmt.unlocated() {
-                            Stmt::Do(inner) => out.extend(inner.iter().cloned()),
-                            _ => out.push(stmt.clone()),
-                        }
-                    }
-                    out
-                }
-            }
-            None => Vec::new(),
-        };
+        // v0.34.27: `do { ... }` removed — transition body is the plain block.
+        // (was: unwrap single outer `do { }` so compile_block sees normal stmts;
+        // the unwrap itself proved `{ do { X } }` ≡ `{ X }`).
+        let body: Block = t.body.clone().unwrap_or_default();
 
         FuncDef {
             meta,

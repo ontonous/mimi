@@ -6,9 +6,7 @@ flow FFI {
     state Active { buffer: i32 }
     state FFI_Pinned { buffer: i32 }
 
-    transition process(Active) -> Active {
-        do { return Active { buffer: self.buffer + 1 } }
-    }
+    transition process(Active) -> Active { return Active { buffer: self.buffer + 1 } }
 }
 
 func main() -> i32 {

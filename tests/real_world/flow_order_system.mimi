@@ -30,17 +30,11 @@ flow Order {
     state Delivered { item: string }
 
     transition pay(Pending, txn_id: string) -> Paid fails string {
-        do {
-            let valid_price = validate_price(self.price)?
-            return Paid { item: self.item, price: valid_price, txn: txn_id }
-        }
+        let valid_price = validate_price(self.price)?
+        return Paid { item: self.item, price: valid_price, txn: txn_id }
     }
-    transition ship(Paid) -> Shipped {
-        do { return Shipped { item: self.item, tracking: "TRK-001" } }
-    }
-    transition deliver(Shipped) -> Delivered {
-        do { return Delivered { item: self.item } }
-    }
+    transition ship(Paid) -> Shipped { return Shipped { item: self.item, tracking: "TRK-001" } }
+    transition deliver(Shipped) -> Delivered { return Delivered { item: self.item } }
 }
 
 func main() -> i32 {

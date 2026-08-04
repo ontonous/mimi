@@ -80,7 +80,7 @@ actor Counter { count: i32 func inc() -> i32 { 1 } }
 flow Door {
     state Closed
     state Open
-    transition toggle(Closed) -> Open { do { return Open {} } }
+    transition toggle(Closed) -> Open { return Open {} }
 }
 func outer() -> i32 {
     func nested() -> i32 { 1 }

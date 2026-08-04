@@ -10,15 +10,9 @@ flow CoinSlot {
     state Empty
     state HasCoin { value: i32 }
 
-    transition insert(Empty) -> HasCoin {
-        do { return HasCoin { value: 1 } }
-    }
-    transition insert(HasCoin) -> HasCoin {
-        do { return HasCoin { value: self.value + 1 } }
-    }
-    transition eject(HasCoin) -> Empty {
-        do { return Empty { } }
-    }
+    transition insert(Empty) -> HasCoin { return HasCoin { value: 1 } }
+    transition insert(HasCoin) -> HasCoin { return HasCoin { value: self.value + 1 } }
+    transition eject(HasCoin) -> Empty { return Empty { } }
 }
 
 flow VendingMachine {
@@ -27,28 +21,18 @@ flow VendingMachine {
     state Dispensing { item: string, coins: i32 }
     state OutOfStock { coins: i32 }
 
-    transition coin(Idle) -> CoinInserted {
-        do { return CoinInserted { coins: 1, total: 1 } }
-    }
-    transition coin(CoinInserted) -> CoinInserted {
-        do { return CoinInserted { coins: self.coins + 1, total: self.total + 1 } }
-    }
+    transition coin(Idle) -> CoinInserted { return CoinInserted { coins: 1, total: 1 } }
+    transition coin(CoinInserted) -> CoinInserted { return CoinInserted { coins: self.coins + 1, total: self.total + 1 } }
     transition buy(CoinInserted) -> Dispensing {
-        do {
-            // Check if enough coins (need at least 2)
-            if self.coins < 2 {
-                // Not enough coins — trigger Fault via undefined path
-                return Dispensing { item: "error", coins: self.coins }
-            }
-            return Dispensing { item: "cola", coins: self.coins - 2 }
+        // Check if enough coins (need at least 2)
+        if self.coins < 2 {
+            // Not enough coins — trigger Fault via undefined path
+            return Dispensing { item: "error", coins: self.coins }
         }
+        return Dispensing { item: "cola", coins: self.coins - 2 }
     }
-    transition collect(Dispensing) -> Idle {
-        do { return Idle { } }
-    }
-    transition restock(OutOfStock) -> Idle {
-        do { return Idle { } }
-    }
+    transition collect(Dispensing) -> Idle { return Idle { } }
+    transition restock(OutOfStock) -> Idle { return Idle { } }
 }
 
 func main() -> i32 {

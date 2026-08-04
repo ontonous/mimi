@@ -16,19 +16,13 @@ flow LidarDriver {
     state Active { data: i32, internal: i32 }
 
     transition start(Idle) -> Active {
-        do {
-            return Active { data: 0, internal: 42 }
-        }
+        return Active { data: 0, internal: 42 }
     }
     transition read(Active) -> Active {
-        do {
-            return Active { data: self.data + 1, internal: self.internal }
-        }
+        return Active { data: self.data + 1, internal: self.internal }
     }
     transition stop(Active) -> Idle {
-        do {
-            return Idle { }
-        }
+        return Idle { }
     }
 }
 

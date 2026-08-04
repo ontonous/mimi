@@ -5,12 +5,8 @@ flow Engine {
     @mailbox(depth = 128)
     state Idle
     state Running { ticks: i32 }
-    transition start(Idle) -> Running {
-        do { return Running { ticks: 0 } }
-    }
-    transition tick(Running) -> Running {
-        do { return Running { ticks: self.ticks + 1 } }
-    }
+    transition start(Idle) -> Running { return Running { ticks: 0 } }
+    transition tick(Running) -> Running { return Running { ticks: self.ticks + 1 } }
 }
 
 actor Counter {

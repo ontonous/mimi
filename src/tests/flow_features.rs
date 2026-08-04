@@ -12,9 +12,7 @@ fn transition_rejects_wrong_target_payload_field_type() {
 flow Counter {
     state Idle
     state Active { count: i32, ready: bool }
-    transition start(Idle) -> Active {
-        do { return Active { count: true, ready: 1 } }
-    }
+    transition start(Idle) -> Active { return Active { count: true, ready: 1 } }
 }
 "#;
     let err = check_source(src).expect_err("transition payload field types must be checked");
@@ -139,9 +137,7 @@ flow F {
     state A { value: i32 }
     state B { value: i32 }
     transition go(A, flag: bool) -> B {
-        do {
-            if flag { return B { value: self.value } }
-        }
+        if flag { return B { value: self.value } }
     }
 }
 func main() -> i32 { 0 }
@@ -159,12 +155,10 @@ flow F {
     state A { value: i32 }
     state B { value: i32 }
     transition go(A, flag: bool) -> B {
-        do {
-            if flag {
-                return B { value: self.value }
-            } else {
-                return B { value: 0 }
-            }
+        if flag {
+            return B { value: self.value }
+        } else {
+            return B { value: 0 }
         }
     }
 }
@@ -178,11 +172,11 @@ fn flow_check_cross_flow_same_state_name_rejected_on_pollution() {
     let src = r#"
 flow A {
     state Ready { x: i32 }
-    transition go(Ready) -> Ready { do { return Ready { x: 0 } } }
+    transition go(Ready) -> Ready { { return Ready { x: 0 } } }
 }
 flow B {
     state Ready { y: string }
-    transition go(Ready) -> Ready { do { return Ready { y: "bad" } } }
+    transition go(Ready) -> Ready { { return Ready { y: "bad" } } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -197,11 +191,11 @@ fn flow_check_cross_flow_same_state_name_same_payload_accepted() {
     let src = r#"
 flow A {
     state Ready { v: i32 }
-    transition go(Ready) -> Ready { do { return Ready { v: 0 } } }
+    transition go(Ready) -> Ready { { return Ready { v: 0 } } }
 }
 flow B {
     state Ready { v: i32 }
-    transition go(Ready) -> Ready { do { return Ready { v: 1 } } }
+    transition go(Ready) -> Ready { { return Ready { v: 1 } } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -214,8 +208,8 @@ fn flow_check_overloaded_event_inconsistent_params_rejected() {
 flow F {
     state A { v: i32 }
     state B { v: i32 }
-    transition go(A, x: i32) -> B { do { return B { v: x } } }
-    transition go(B, flag: bool) -> A { do { return A { v: 0 } } }
+    transition go(A, x: i32) -> B { { return B { v: x } } }
+    transition go(B, flag: bool) -> A { { return A { v: 0 } } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -231,8 +225,8 @@ fn flow_check_overloaded_event_consistent_params_accepted() {
 flow F {
     state A { v: i32 }
     state B { v: i32 }
-    transition go(A, x: i32) -> B { do { return B { v: x } } }
-    transition go(B, x: i32) -> A { do { return A { v: x } } }
+    transition go(A, x: i32) -> B { { return B { v: x } } }
+    transition go(B, x: i32) -> A { { return A { v: x } } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -251,12 +245,10 @@ flow Processor {
     state OverloadWarning { data: f32 }
 
     transition process(Idle, data: f32) -> Active | OverloadWarning {
-        do {
-            if data > 1.0 {
-                return OverloadWarning { data: data }
-            } else {
-                return Active { data: data }
-            }
+        if data > 1.0 {
+            return OverloadWarning { data: data }
+        } else {
+            return Active { data: data }
         }
     }
 }
@@ -291,9 +283,7 @@ flow DataPipeline {
     state Ready
     state Processing
 
-    transition run(Ready) -> Processing {
-        do { return Processing { } }
-    }
+    transition run(Ready) -> Processing { return Processing { } }
 }
 "#;
     let file = parse(src);
@@ -356,10 +346,8 @@ flow Parent {
     state Active
 
     transition run(Active) -> Active {
-        do {
-            delegate view(self.buffer) to sub_flow;
-            return Active { }
-        }
+        delegate view(self.buffer) to sub_flow;
+        return Active { }
     }
 }
 "#,
@@ -375,11 +363,9 @@ flow Parent {
     state Active
 
     transition run(Active) -> Active {
-        do {
-            delegate mutate(self.buffer) to sub;
-            delegate consume(self.owned) to sub;
-            return Active { }
-        }
+        delegate mutate(self.buffer) to sub;
+        delegate consume(self.owned) to sub;
+        return Active { }
     }
 }
 "#,
@@ -393,12 +379,10 @@ flow SafeFFI {
     state Active { buffer: List<u8> }
 
     transition process(Active) -> Active {
-        do {
-            pinned(self.buffer) |ptr| {
-                let _ = ptr;
-            }
-            return Active { buffer: self.buffer }
+        pinned(self.buffer) |ptr| {
+            let _ = ptr;
         }
+        return Active { buffer: self.buffer }
     }
 }
 "#;
@@ -406,10 +390,8 @@ flow SafeFFI {
     match &file.items[0] {
         Item::Flow(f) => {
             let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match body[0].unlocated() {
-                Stmt::Do(b) => b,
-                _ => body,
-            };
+            // v0.34.27: `do` removed — transition body is the plain block.
+            let do_body = body;
             assert!(matches!(do_body[0].unlocated(), Stmt::Pinned { .. }));
             if let Stmt::Pinned { expr, var, .. } = do_body[0].unlocated() {
                 let _ = expr;
@@ -466,9 +448,9 @@ flow LidarDriver {
     state Idle
     state Active { data: f32 }
 
-    transition start(Idle) -> Active { do { return Active { data: 0.0 } } }
-    transition read(Active) -> Active { do { return Active { data: 1.0 } } }
-    transition stop(Active) -> Idle { do { return Idle { } } }
+    transition start(Idle) -> Active { { return Active { data: 0.0 } } }
+    transition read(Active) -> Active { { return Active { data: 1.0 } } }
+    transition stop(Active) -> Idle { { return Idle { } } }
 }
 "#;
     let file = parse(src);
@@ -487,7 +469,7 @@ flow ResilientService {
     persistent state Config { max_retries: i32, timeout_ms: i64 }
     state Active { request_id: i32 }
 
-    transition run(Active) -> Active { do { return Active { request_id: 1 } } }
+    transition run(Active) -> Active { { return Active { request_id: 1 } } }
 }
 "#;
     let file = parse(src);
@@ -521,7 +503,8 @@ fn flow_lexer_keywords() {
         ("view", TokenKind::View),
         ("mutate", TokenKind::Mutate),
         ("consume", TokenKind::Ident("consume".into())),
-        ("do", TokenKind::Do),
+        // v0.34.27: `do` removed — tokenizes as a plain identifier
+        ("do", TokenKind::Ident("do".into())),
         ("subflow", TokenKind::Ident("subflow".into())),
         ("session", TokenKind::Session),
         ("dual", TokenKind::Dual),
@@ -572,9 +555,7 @@ flow FaultTolerant {
     state Fault { trace: string }
 
     transition recover_state(Fault) -> Active {
-        do {
-            return Active { data: 0 }
-        }
+        return Active { data: 0 }
     }
 }
 "#;
@@ -590,40 +571,78 @@ flow FaultTolerant {
 }
 
 #[test]
-fn flow_do_block_statement() {
+fn flow_block_statement_in_transition() {
+    // v0.34.27: `do { }` wrapper removed — nested bare blocks still parse.
     let src = r#"
 flow TestFlow {
     state Ready
     state Done
 
     transition run(Ready) -> Done {
-        do {
-            let x = 42
-            do {
-                let y = x + 1
-            }
-            return Done { }
+        let x = 42
+        {
+            let y = x + 1
         }
+        return Done { }
     }
 }
 "#;
-    // Verify that `do { }` blocks are parsed correctly (both outer transition do and inner do)
+    // Verify that `{ }` blocks are parsed correctly (both outer transition do and inner do)
     let file = parse(src);
     match &file.items[0] {
         Item::Flow(f) => {
             let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match body[0].unlocated() {
-                Stmt::Do(b) => b,
-                _ => body,
-            };
+            let do_body = body;
             // First stmt is let x = 42
             assert!(matches!(do_body[0].unlocated(), Stmt::Let { .. }));
-            // Second stmt is the inner do block
-            assert!(matches!(do_body[1].unlocated(), Stmt::Do(_)));
+            // Second stmt is the nested bare block (was inner do)
+            assert!(matches!(do_body[1].unlocated(), Stmt::Block(_)));
             // Third is return
             assert!(matches!(do_body[2].unlocated(), Stmt::Return(_)));
         }
         _ => panic!("expected Item::Flow"),
+    }
+}
+
+#[test]
+fn flow_do_keyword_rejected() {
+    // v0.34.27: `do` removed from the keyword table (language assessment —
+    // `do { X }` ≡ `{ X }`, keeping it would burn a keyword slot for no
+    // expressiveness). It now lexes as a plain identifier, so `do { }` fails
+    // to parse as a statement.
+    // transition contexts wrapped in a flow; func context standalone.
+    let cases: Vec<String> = vec![
+        format!(
+            "flow Counter {{\n    state Ready\n    state Done\n    {}\n}}\n",
+            r#"transition t(Ready) -> Done { do { return Done { } } }"#
+        ),
+        format!(
+            "flow Counter {{\n    state Ready\n    state Done\n    {}\n}}\n",
+            r#"transition t(Ready) -> Done {
+                do { return Done { } }
+            }"#
+        ),
+        "func f() -> i32 {\n    do { return 1 }\n}".to_string(),
+    ];
+    for src in cases {
+        // `do` now lexes as a plain identifier: `do { ... }` parses as a
+        // struct-constructor expression for an undefined type `do`, so the
+        // rejection surfaces in type checking (not parsing).
+        let result = check_source(&src);
+        assert!(
+            result.is_err(),
+            "`do` should be rejected after v0.34.27 removal, got Ok for: {src}"
+        );
+        let err = result
+            .unwrap_err()
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            err.contains("do") || err.contains("unknown") || err.contains("undefined"),
+            "expected a diagnostic mentioning `do`, got: {err}"
+        );
     }
 }
 
@@ -636,14 +655,10 @@ flow SimpleFlow {
     state Done
 
     transition run(Ready, input: i32) -> Active {
-        do {
-            return Active { value: input }
-        }
+        return Active { value: input }
     }
     transition finish(Active) -> Done {
-        do {
-            return Done { }
-        }
+        return Done { }
     }
 }
 "#;
@@ -662,9 +677,7 @@ fn flow_check_undefined_state() {
 flow BadFlow {
     state Ready
     transition run(Ready) -> NonExistent {
-        do {
-            return NonExistent { }
-        }
+        return NonExistent { }
     }
 }
 "#;
@@ -679,9 +692,7 @@ fn flow_check_undefined_from_state() {
 flow BadFlow {
     state Ready
     transition run(NonExistent) -> Ready {
-        do {
-            return Ready { }
-        }
+        return Ready { }
     }
 }
 "#;
@@ -711,14 +722,10 @@ fn flow_check_duplicate_transition() {
 flow BadFlow {
     state Ready
     transition run(Ready) -> Ready {
-        do {
-            return Ready { }
-        }
+        return Ready { }
     }
     transition run(Ready) -> Ready {
-        do {
-            return Ready { }
-        }
+        return Ready { }
     }
 }
 "#;
@@ -766,9 +773,7 @@ flow Calc {
     state Value { v: i32 }
 
     transition add(Zero, amount: i32) -> Value {
-        do {
-            return Value { v: self.v + amount }
-        }
+        return Value { v: self.v + amount }
     }
 }
 
@@ -788,9 +793,7 @@ fn flow_check_transition_call_rejects_wrong_arity() {
 flow Calc {
     state Zero { v: i32 }
     state Value { v: i32 }
-    transition add(Zero, amount: i32) -> Value {
-        do { return Value { v: self.v + amount } }
-    }
+    transition add(Zero, amount: i32) -> Value { return Value { v: self.v + amount } }
 }
 func main() -> i32 {
     let s = Zero { v: 10 }
@@ -810,9 +813,7 @@ fn flow_check_transition_call_rejects_wrong_event_type() {
 flow Calc {
     state Zero { v: i32 }
     state Value { v: i32 }
-    transition add(Zero, amount: i32) -> Value {
-        do { return Value { v: self.v + amount } }
-    }
+    transition add(Zero, amount: i32) -> Value { return Value { v: self.v + amount } }
 }
 func main() -> i32 {
     let s = Zero { v: 10 }
@@ -833,12 +834,8 @@ flow Calc {
     state Zero { v: i32 }
     state Other { v: i32 }
     state Value { v: i32 }
-    transition add(Zero, amount: i32) -> Value {
-        do { return Value { v: self.v + amount } }
-    }
-    transition add(Other, amount: string) -> Value {
-        do { return Value { v: self.v } }
-    }
+    transition add(Zero, amount: i32) -> Value { return Value { v: self.v + amount } }
+    transition add(Other, amount: string) -> Value { return Value { v: self.v } }
 }
 func main() -> i32 {
     let r = Calc::add(99, 1)
@@ -859,12 +856,10 @@ flow Checker {
     state Large { v: i32 }
 
     transition classify(Small, amount: i32) -> Small | Large {
-        do {
-            if self.v + amount > 50 {
-                return Large { v: self.v + amount }
-            } else {
-                return Small { v: self.v + amount }
-            }
+        if self.v + amount > 50 {
+            return Large { v: self.v + amount }
+        } else {
+            return Small { v: self.v + amount }
         }
     }
 }
@@ -971,9 +966,7 @@ protocol Sensor {
 flow BadFlow {
     impl Sensor
     state Idle
-    transition start(Idle) -> Idle {
-        do { return Idle { } }
-    }
+    transition start(Idle) -> Idle { return Idle { } }
 }
 "#;
     let result = check_source(src);
@@ -997,9 +990,7 @@ flow BadFlow {
     impl Sensor
     state Idle
     state Active { data: i32 }
-    transition start(Idle) -> Active {
-        do { return Active { data: 0 } }
-    }
+    transition start(Idle) -> Active { return Active { data: 0 } }
 }
 "#;
     let result = check_source(src);
@@ -1017,9 +1008,7 @@ fn flow_check_wrong_return_target() {
 flow BadFlow {
     state Ready
     state Active { v: i32 }
-    transition go(Ready) -> Active {
-        do { return Ready { } }
-    }
+    transition go(Ready) -> Active { return Ready { } }
 }
 "#;
     let result = check_source(src);
@@ -1035,9 +1024,7 @@ fn flow_check_missing_field_in_return() {
 flow BadFlow {
     state Ready { v: i32 }
     state Active { v: i32 }
-    transition go(Ready) -> Active {
-        do { return Active { } }
-    }
+    transition go(Ready) -> Active { return Active { } }
 }
 "#;
     let result = check_source(src);
@@ -1053,9 +1040,7 @@ fn flow_check_extra_field_in_return() {
 flow BadFlow {
     state Ready { v: i32 }
     state Active { v: i32 }
-    transition go(Ready) -> Active {
-        do { return Active { v: 0, x: 1 } }
-    }
+    transition go(Ready) -> Active { return Active { v: 0, x: 1 } }
 }
 "#;
     let result = check_source(src);
@@ -1068,9 +1053,7 @@ fn flow_check_wrong_field_type_in_return() {
 flow BadFlow {
     state Ready { v: i32 }
     state Active { v: i32 }
-    transition go(Ready) -> Active {
-        do { return Active { v: "hello" } }
-    }
+    transition go(Ready) -> Active { return Active { v: "hello" } }
 }
 "#;
     let result = check_source(src);
@@ -1086,9 +1069,7 @@ fn flow_check_self_in_no_payload_state() {
 flow BadFlow {
     state Ready
     state Active { v: i32 }
-    transition go(Ready) -> Active {
-        do { return Active { v: self.v } }
-    }
+    transition go(Ready) -> Active { return Active { v: self.v } }
 }
 "#;
     let result = check_source(src);
@@ -1101,9 +1082,7 @@ fn flow_check_undefined_param_type() {
 flow BadFlow {
     state Ready
     state Active { v: i32 }
-    transition go(Ready, x: NonExistentType) -> Active {
-        do { return Active { v: 0 } }
-    }
+    transition go(Ready, x: NonExistentType) -> Active { return Active { v: 0 } }
 }
 "#;
     let result = check_source(src);
@@ -1116,9 +1095,7 @@ fn flow_check_return_self_wrong_state() {
 flow BadFlow {
     state Ready { v: i32 }
     state Active { v: i32 }
-    transition go(Ready) -> Active {
-        do { return Active { v: self.v } }
-    }
+    transition go(Ready) -> Active { return Active { v: self.v } }
 }
 "#;
     // go(Ready) -> Active, self.v is accessible (Ready has payload), return Active is valid
@@ -1137,10 +1114,8 @@ flow BadFlow {
     state Active { v: i32 }
     state Done { v: i32 }
     transition go(Ready) -> Active | Done {
-        do {
-            let x = self.v
-            return Active { v: x }
-        }
+        let x = self.v
+        return Active { v: x }
     }
 }
 "#;
@@ -1163,9 +1138,7 @@ flow Decision {
     state Approved { value: i32 }
     state Rejected { value: i32 }
 
-    transition decide(Pending) -> Approved | Rejected {
-        do { return Approved { value: self.value } }
-    }
+    transition decide(Pending) -> Approved | Rejected { return Approved { value: self.value } }
 }
 
 func main() -> i32 { 0 }
@@ -1206,9 +1179,7 @@ fn flow_check_no_payload_state_return_no_braces() {
 flow GoodFlow {
     state Ready
     state Done
-    transition finish(Ready) -> Done {
-        do { return Done { } }
-    }
+    transition finish(Ready) -> Done { return Done { } }
 }
 "#;
     let result = check_source(src);
@@ -1233,12 +1204,8 @@ flow GoodFlow {
     state Idle
     state Active { data: i32 }
 
-    transition start(Idle) -> Active {
-        do { return Active { data: 0 } }
-    }
-    transition stop(Active) -> Idle {
-        do { return Idle { } }
-    }
+    transition start(Idle) -> Active { return Active { data: 0 } }
+    transition stop(Active) -> Idle { return Idle { } }
 }
 "#;
     let result = check_source(src);
@@ -1266,9 +1233,7 @@ flow MySensor {
     impl Sensor
     state Idle
     state Active { data: i32 }
-    transition start(Idle) -> Active {
-        do { return Active { data: 42 } }
-    }
+    transition start(Idle) -> Active { return Active { data: 42 } }
 }
 func main() -> i32 {
     let s = Idle { }
@@ -1306,9 +1271,7 @@ flow MySensor {
     impl Sensor
     state Idle
     state Active { data: i32 }
-    transition start(Idle) -> Active {
-        do { return Active { data: 42 } }
-    }
+    transition start(Idle) -> Active { return Active { data: 42 } }
 }
 func main() -> i32 {
     let s = Idle { }
@@ -1340,9 +1303,7 @@ flow BadWriter {
     impl Writer
     state Open { handle: i32 }
     state Closed
-    transition close(Open) -> Closed {
-        do { return Closed { } }
-    }
+    transition close(Open) -> Closed { return Closed { } }
 }
 "#;
     let result = check_source(src);
@@ -1369,9 +1330,7 @@ fn flow_state_closure_capture_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -1405,9 +1364,7 @@ fn flow_state_lambda_param_accepted() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let f = fn(x: Zero) {
@@ -1431,9 +1388,7 @@ fn flow_state_in_list_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -1464,12 +1419,10 @@ flow TestFlow {
     state Active { result: i32 }
 
     transition process(Ready) -> Active {
-        do {
-            pinned(self.buf) |ptr| {
-                let _x = ptr
-            }
-            return Active { result: self.buf + 1 }
+        pinned(self.buf) |ptr| {
+            let _x = ptr
         }
+        return Active { result: self.buf + 1 }
     }
 }
 "#;
@@ -1491,10 +1444,8 @@ flow TestFlow {
     state Active
 
     transition go(Ready) -> Active {
-        do {
-            pinned(self, timeout = 5) |_ptr| {
-                return Active { }
-            }
+        pinned(self, timeout = 5) |_ptr| {
+            return Active { }
         }
     }
 }
@@ -1518,12 +1469,10 @@ flow TestFlow {
     state Active { result: i32 }
 
     transition process(Ready) -> Active {
-        do {
-            pinned(self.val) |ptr| {
-                let _ = ptr
-            }
-            return Active { result: self.val + 1 }
+        pinned(self.val) |ptr| {
+            let _ = ptr
         }
+        return Active { result: self.val + 1 }
     }
 }
 
@@ -1545,9 +1494,7 @@ fn flow_warn_unreachable_state() {
 flow BadFlow {
     state Ready
     state Lost
-    transition go(Ready) -> Ready {
-        do { return Ready { } }
-    }
+    transition go(Ready) -> Ready { return Ready { } }
 }
 "#;
     let warnings = check_source_warnings(src);
@@ -1565,9 +1512,7 @@ fn flow_no_warn_first_state_unreachable() {
 flow GoodFlow {
     state Ready
     state Active
-    transition go(Ready) -> Active {
-        do { return Active { } }
-    }
+    transition go(Ready) -> Active { return Active { } }
 }
 "#;
     let warnings = check_source_warnings(src);
@@ -1584,9 +1529,7 @@ fn flow_warn_terminal_state() {
 flow GoodFlow {
     state Ready
     state Done
-    transition go(Ready) -> Done {
-        do { return Done { } }
-    }
+    transition go(Ready) -> Done { return Done { } }
 }
 "#;
     let warnings = check_source_warnings(src);
@@ -1603,9 +1546,7 @@ fn flow_no_warn_cycling_state() {
 flow GoodFlow {
     state Ready
     state Active
-    transition tick(Active) -> Active {
-        do { return Active { } }
-    }
+    transition tick(Active) -> Active { return Active { } }
 }
 "#;
     let warnings = check_source_warnings(src);
@@ -1632,9 +1573,7 @@ fn flow_warn_terminal_not_first() {
 flow GoodFlow {
     state Active
     state Ready
-    transition go(Active) -> Ready {
-        do { return Ready { } }
-    }
+    transition go(Active) -> Ready { return Ready { } }
 }
 "#;
     let warnings = check_source_warnings(src);
@@ -1656,11 +1595,9 @@ flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
-        do {
-            let sub = 42
-            delegate view(self.val) to sub;
-            return Active { val: self.val }
-        }
+        let sub = 42
+        delegate view(self.val) to sub;
+        return Active { val: self.val }
     }
 }
 
@@ -1683,11 +1620,9 @@ flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
-        do {
-            let sub = 99
-            delegate consume(self.val) to sub;
-            return Active { val: self.val + 1 }
-        }
+        let sub = 99
+        delegate consume(self.val) to sub;
+        return Active { val: self.val + 1 }
     }
 }
 
@@ -1710,11 +1645,9 @@ flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
-        do {
-            let sub = 99
-            delegate view(self.val) to sub;
-            return Active { val: self.val }
-        }
+        let sub = 99
+        delegate view(self.val) to sub;
+        return Active { val: self.val }
     }
 }
 
@@ -1737,11 +1670,9 @@ flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
-        do {
-            let sub = 99
-            delegate mutate(self.val) to sub;
-            return Active { val: self.val + 1 }
-        }
+        let sub = 99
+        delegate mutate(self.val) to sub;
+        return Active { val: self.val + 1 }
     }
 }
 
@@ -1765,10 +1696,8 @@ flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
-        do {
-            delegate view(self.val) to nonexistent;
-            return Active { val: self.val }
-        }
+        delegate view(self.val) to nonexistent;
+        return Active { val: self.val }
     }
 }
 
@@ -1791,12 +1720,10 @@ flow Buffer {
     state Active { data: i32 }
 
     transition use_pinned(Active) -> Active {
-        do {
-            pinned(self.data) |ptr| {
-                let _ = ptr
-            }
-            return Active { data: self.data + 1 }
+        pinned(self.data) |ptr| {
+            let _ = ptr
         }
+        return Active { data: self.data + 1 }
     }
 }
 
@@ -1825,12 +1752,10 @@ flow Buffer {
     state Active { data: i32 }
 
     transition process(Active) -> Active {
-        do {
-            pinned(self.data) |p| {
-                let _ = p
-            }
-            return Active { data: self.data + 10 }
+        pinned(self.data) |p| {
+            let _ = p
         }
+        return Active { data: self.data + 10 }
     }
 }
 
@@ -1859,12 +1784,10 @@ flow Buffer {
     state Active { data: i32 }
 
     transition process(Active) -> Active {
-        do {
-            pinned(self.data) {
-                let _ = 42
-            }
-            return Active { data: self.data * 2 }
+        pinned(self.data) {
+            let _ = 42
         }
+        return Active { data: self.data * 2 }
     }
 }
 
@@ -1894,14 +1817,10 @@ flow Counter {
     state Done
 
     transition inc(Zero, amount: i32) -> Active {
-        do {
-            return Active { count: self.count + amount }
-        }
+        return Active { count: self.count + amount }
     }
     transition finish(Active) -> Done {
-        do {
-            return Done { }
-        }
+        return Done { }
     }
 }
 
@@ -1929,9 +1848,7 @@ flow Calc {
     state Value { v: i32 }
 
     transition add(Zero, amount: i32) -> Value {
-        do {
-            return Value { v: self.v + amount }
-        }
+        return Value { v: self.v + amount }
     }
 }
 
@@ -1961,14 +1878,10 @@ flow Counter {
     state Done
 
     transition inc(Zero, amount: i32) -> Active {
-        do {
-            return Active { count: self.count + amount }
-        }
+        return Active { count: self.count + amount }
     }
     transition finish(Active) -> Done {
-        do {
-            return Done { }
-        }
+        return Done { }
     }
 }
 
@@ -1998,12 +1911,10 @@ flow Checker {
     state Large { v: i32 }
 
     transition classify(Small, amount: i32) -> Small | Large {
-        do {
-            if self.v + amount > 50 {
-                return Large { v: self.v + amount }
-            } else {
-                return Small { v: self.v + amount }
-            }
+        if self.v + amount > 50 {
+            return Large { v: self.v + amount }
+        } else {
+            return Small { v: self.v + amount }
         }
     }
 }
@@ -2036,9 +1947,7 @@ flow F {
     state B
 
     transition go(A) -> B {
-        do {
-            return B { }
-        }
+        return B { }
     }
 }
 
@@ -2069,11 +1978,9 @@ flow Parent {
     state Active { val: i32 }
 
     transition run(Active) -> Active {
-        do {
-            let sub = 42
-            delegate view(self.val) to sub;
-            return Active { val: self.val + 1 }
-        }
+        let sub = 42
+        delegate view(self.val) to sub;
+        return Active { val: self.val + 1 }
     }
 }
 
@@ -2105,12 +2012,8 @@ flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
 
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
-    transition inc(Positive) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
+    transition inc(Positive) -> Positive { return Positive { count: self.count + 1 } }
 }
 
 func main() -> i32 {
@@ -2146,10 +2049,8 @@ flow Holder {
     state Dead { tag: string }
 
     transition kill(Live, d: i32) -> Dead | Fault {
-        do {
-            let x = self.n / d
-            return Dead { tag: self.tag }
-        }
+        let x = self.n / d
+        return Dead { tag: self.tag }
     }
 }
 
@@ -2187,18 +2088,16 @@ fn flow_fault_mailbox_short_circuit_actor() {
 flow S {
     state Active { n: i32 }
     transition fail(Active) -> Fault {
-        do {
-            return Fault {
-                last_state: "Active",
+        return Fault {
+            last_state: "Active",
+            unexpected_event: "fail",
+            snapshot: "user fail",
+            trace: SystemTrace {
+                last_state_name: "Active",
                 unexpected_event: "fail",
                 snapshot: "user fail",
-                trace: SystemTrace {
-                    last_state_name: "Active",
-                    unexpected_event: "fail",
-                    snapshot: "user fail",
-                    memory_dump: MemoryDump { fields: "", count: 0 },
-                    panic_payload: PanicPayload { error_type: "fail", file: "", line: 0, stack: "user fail" }
-                }
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "fail", file: "", line: 0, stack: "user fail" }
             }
         }
     }
@@ -2233,9 +2132,7 @@ flow F {
     state A { v: i32 }
     state B { v: i32 }
 
-    transition go(A, d: i32) -> B | Fault {
-        do { return B { v: self.v / d } }
-    }
+    transition go(A, d: i32) -> B | Fault { return B { v: self.v / d } }
 }
 
 func main() -> i32 {
@@ -2281,9 +2178,7 @@ flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
-    transition inc(Zero, d: i32) -> Pos | Fault {
-        do { return Pos { n: self.n / d } }
-    }
+    transition inc(Zero, d: i32) -> Pos | Fault { return Pos { n: self.n / d } }
 }
 
 func main() -> i32 {
@@ -2327,9 +2222,7 @@ flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
-    transition inc(Zero, d: i32) -> Pos | Fault {
-        do { return Pos { n: self.n / d } }
-    }
+    transition inc(Zero, d: i32) -> Pos | Fault { return Pos { n: self.n / d } }
 }
 
 func main() -> i32 {
@@ -2371,10 +2264,8 @@ flow Calc {
     state Ready { v: i32 }
 
     transition boom(Ready, denom: i32) -> Ready {
-        do {
-            let q = self.v / denom
-            return Ready { v: q }
-        }
+        let q = self.v / denom
+        return Ready { v: q }
     }
 }
 
@@ -2397,10 +2288,8 @@ flow Calc {
     state Ready { v: i32 }
 
     transition boom(Ready, denom: i32) -> Ready {
-        do {
-            let q = self.v / denom
-            return Ready { v: q }
-        }
+        let q = self.v / denom
+        return Ready { v: q }
     }
 }
 
@@ -2439,35 +2328,31 @@ flow F {
     state A
 
     transition go(A) -> Fault {
-        do {
-            return Fault {
-                last_state: "A",
+        return Fault {
+            last_state: "A",
+            unexpected_event: "go",
+            snapshot: "manual",
+            trace: SystemTrace {
+                last_state_name: "A",
                 unexpected_event: "go",
                 snapshot: "manual",
-                trace: SystemTrace {
-                    last_state_name: "A",
-                    unexpected_event: "go",
-                    snapshot: "manual",
-                    memory_dump: MemoryDump { fields: "", count: 0 },
-                    panic_payload: PanicPayload { error_type: "go", file: "", line: 0, stack: "manual" }
-                }
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "go", file: "", line: 0, stack: "manual" }
             }
         }
     }
     transition boom(Fault, denom: i32) -> Fault {
-        do {
-            let x = 1 / denom
-            return Fault {
-                last_state: "Fault",
+        let x = 1 / denom
+        return Fault {
+            last_state: "Fault",
+            unexpected_event: "boom",
+            snapshot: "unreachable",
+            trace: SystemTrace {
+                last_state_name: "Fault",
                 unexpected_event: "boom",
                 snapshot: "unreachable",
-                trace: SystemTrace {
-                    last_state_name: "Fault",
-                    unexpected_event: "boom",
-                    snapshot: "unreachable",
-                    memory_dump: MemoryDump { fields: "", count: 0 },
-                    panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "unreachable" }
-                }
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "unreachable" }
             }
         }
     }
@@ -2503,9 +2388,7 @@ fn flow_reset_recover_injected() {
 flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
-    transition inc(Zero) -> Pos {
-        do { return Pos { n: self.n + 1 } }
-    }
+    transition inc(Zero) -> Pos { return Pos { n: self.n + 1 } }
 }
 "#;
     let file = parse(src);
@@ -2550,14 +2433,10 @@ flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
-    transition inc(Zero) -> Pos {
-        do { return Pos { n: self.n + 1 } }
-    }
+    transition inc(Zero) -> Pos { return Pos { n: self.n + 1 } }
     transition crash(Pos) -> Pos {
-        do {
-            let x = 1 / 0
-            return Pos { n: self.n }
-        }
+        let x = 1 / 0
+        return Pos { n: self.n }
     }
 }
 
@@ -2589,14 +2468,10 @@ flow Svc {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32, req: i32 }
 
-    transition start(Config) -> Active {
-        do { return Active { max_retries: self.max_retries, req: 0 } }
-    }
+    transition start(Config) -> Active { return Active { max_retries: self.max_retries, req: 0 } }
     transition crash(Active) -> Active {
-        do {
-            let x = 1 / 0
-            return Active { max_retries: self.max_retries, req: self.req }
-        }
+        let x = 1 / 0
+        return Active { max_retries: self.max_retries, req: self.req }
     }
 }
 
@@ -2627,14 +2502,10 @@ flow Svc {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32 }
 
-    transition start(Config) -> Active {
-        do { return Active { max_retries: self.max_retries } }
-    }
+    transition start(Config) -> Active { return Active { max_retries: self.max_retries } }
     transition crash(Active) -> Active {
-        do {
-            let x = 1 / 0
-            return Active { max_retries: self.max_retries }
-        }
+        let x = 1 / 0
+        return Active { max_retries: self.max_retries }
     }
 }
 
@@ -2657,11 +2528,9 @@ flow Svc {
     persistent state Active { value: i32 }
 
     transition crash(Active) -> Active {
-        do {
-            self.value = 99
-            let x = 1 / 0
-            return Active { value: self.value }
-        }
+        self.value = 99
+        let x = 1 / 0
+        return Active { value: self.value }
     }
 }
 
@@ -2685,11 +2554,9 @@ flow Svc {
     @transactional persistent state Active { value: i32 }
 
     transition crash(Active) -> Active {
-        do {
-            self.value = 99
-            let x = 1 / 0
-            return Active { value: self.value }
-        }
+        self.value = 99
+        let x = 1 / 0
+        return Active { value: self.value }
     }
 }
 
@@ -2721,18 +2588,12 @@ flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
-    transition inc(Zero) -> Pos {
-        do { return Pos { n: self.n + 1 } }
-    }
+    transition inc(Zero) -> Pos { return Pos { n: self.n + 1 } }
     transition crash(Pos) -> Pos {
-        do {
-            let x = 1 / 0
-            return Pos { n: self.n }
-        }
+        let x = 1 / 0
+        return Pos { n: self.n }
     }
-    transition reset(Fault) -> Zero {
-        do { return Zero { n: 42 } }
-    }
+    transition reset(Fault) -> Zero { return Zero { n: 42 } }
 }
 
 func main() -> i32 {
@@ -2756,18 +2617,14 @@ fn flow_exec_subflow_nested_transition() {
 flow Child {
     state CIdle { n: i32 }
     state CDone { n: i32 }
-    transition step(CIdle) -> CDone {
-        do { return CDone { n: self.n + 1 } }
-    }
+    transition step(CIdle) -> CDone { return CDone { n: self.n + 1 } }
 }
 flow Parent {
     state Working { child: CIdle }
     state Finished { result: i32 }
     transition run(Working) -> Finished {
-        do {
-            let c2 = Child::step(self.child)
-            return Finished { result: c2.n }
-        }
+        let c2 = Child::step(self.child)
+        return Finished { result: c2.n }
     }
 }
 func main() -> i32 {
@@ -2826,18 +2683,16 @@ flow Child {
 flow Parent {
     state Working { child: CIdle }
     transition boom(Working) -> Fault {
-        do {
-            return Fault {
-                last_state: "Working",
+        return Fault {
+            last_state: "Working",
+            unexpected_event: "boom",
+            snapshot: "user",
+            trace: SystemTrace {
+                last_state_name: "Working",
                 unexpected_event: "boom",
                 snapshot: "user",
-                trace: SystemTrace {
-                    last_state_name: "Working",
-                    unexpected_event: "boom",
-                    snapshot: "user",
-                    memory_dump: MemoryDump { fields: "", count: 0 },
-                    panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "user" }
-                }
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "user" }
             }
         }
     }
@@ -2954,15 +2809,9 @@ flow LidarDriver {
     impl Sensor
     state Idle
     state Active { data: i32, internal: i32 }
-    transition start(Idle) -> Active {
-        do { return Active { data: 0, internal: 42 } }
-    }
-    transition read(Active) -> Active {
-        do { return Active { data: self.data + 1, internal: self.internal } }
-    }
-    transition stop(Active) -> Idle {
-        do { return Idle { } }
-    }
+    transition start(Idle) -> Active { return Active { data: 0, internal: 42 } }
+    transition read(Active) -> Active { return Active { data: self.data + 1, internal: self.internal } }
+    transition stop(Active) -> Idle { return Idle { } }
 }
 func main() -> i32 {
     let s0 = Idle { }
@@ -3000,12 +2849,8 @@ flow Switch {
     impl Toggle
     state Off
     state On
-    transition flip(Off) -> On {
-        do { return On { } }
-    }
-    transition flip(On) -> Off {
-        do { return Off { } }
-    }
+    transition flip(Off) -> On { return On { } }
+    transition flip(On) -> Off { return Off { } }
 }
 func main() -> i32 {
     let s0 = Off { }
@@ -3066,9 +2911,7 @@ flow Bad {
     impl Sensor
     state Idle
     state Active { data: i32 }
-    transition start(Idle) -> Idle {
-        do { return Idle { } }
-    }
+    transition start(Idle) -> Idle { return Idle { } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -3089,9 +2932,7 @@ protocol Sensor {
 flow Rich {
     impl Sensor
     state Active { data: i32, extra: i32, more: i32 }
-    transition tick(Active) -> Active {
-        do { return Active { data: self.data + 1, extra: self.extra, more: self.more } }
-    }
+    transition tick(Active) -> Active { return Active { data: self.data + 1, extra: self.extra, more: self.more } }
 }
 func main() -> i32 {
     let s = Active { data: 1, extra: 2, more: 3 }
@@ -3142,9 +2983,7 @@ flow F {
     state Idle
     state Active { data: i32 }
     state Extra { data: i32 }
-    transition start(Idle) -> Active | Extra {
-        do { return Active { data: 7 } }
-    }
+    transition start(Idle) -> Active | Extra { return Active { data: 7 } }
 }
 func main() -> i32 {
     let s = Idle { }
@@ -3507,9 +3346,7 @@ fn flow_peer_fault_injected_default_cascade() {
     let src = r#"
 flow Node {
     state Live { n: i32 }
-    transition work(Live) -> Live {
-        do { return Live { n: self.n + 1 } }
-    }
+    transition work(Live) -> Live { return Live { n: self.n + 1 } }
 }
 func main() -> i32 {
     let s = Live { n: 1 }
@@ -3535,9 +3372,7 @@ fn flow_peer_fault_user_self_loop_not_overridden() {
     let src = r#"
 flow Node {
     state Active { n: i32 }
-    transition peer_fault(Active) -> Active {
-        do { return Active { n: self.n + 10 } }
-    }
+    transition peer_fault(Active) -> Active { return Active { n: self.n + 10 } }
 }
 func main() -> i32 {
     let s = Active { n: 5 }
@@ -3563,9 +3398,7 @@ fn flow_peer_fault_user_recovering_target() {
 flow Node {
     state Active { n: i32 }
     state Recovering { n: i32 }
-    transition peer_fault(Active) -> Recovering {
-        do { return Recovering { n: self.n } }
-    }
+    transition peer_fault(Active) -> Recovering { return Recovering { n: self.n } }
 }
 func main() -> i32 {
     let s = Active { n: 3 }
@@ -3611,7 +3444,7 @@ fn flow_parse_peer_fault_injection() {
 flow N {
     state A
     state B
-    transition go(A) -> B { do { return B { } } }
+    transition go(A) -> B { { return B { } } }
 }
 "#;
     let file = parse(src);
@@ -3655,7 +3488,7 @@ fn flow_parse_mailbox_depth_annotation() {
 flow Audio {
     @mailbox(depth = 64)
     state Ready
-    transition go(Ready) -> Ready { do { return Ready { } } }
+    transition go(Ready) -> Ready { { return Ready { } } }
 }
 "#;
     let file = parse(src);
@@ -3844,9 +3677,7 @@ fn progressive_explicit_flow_no_injection() {
     let src = r#"
 flow Counter {
     state Zero { n: i32 }
-    transition inc(Zero) -> Zero {
-        do { return Zero { n: self.n + 1 } }
-    }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
 }
 func main() -> i32 {
     let s = Zero { n: 0 }
@@ -3878,9 +3709,7 @@ fn progressive_migration_warning_on_flow_plus_main() {
     let src = r#"
 flow Counter {
     state Zero { n: i32 }
-    transition inc(Zero) -> Zero {
-        do { return Zero { n: self.n + 1 } }
-    }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
 }
 func main() -> i32 {
     let x = 1
@@ -4001,9 +3830,7 @@ fn view_param_transition_rejected() {
     let src = r#"
 flow F {
     state A { n: i32 }
-    transition go(A) -> A {
-        do { return A { n: self.n + 1 } }
-    }
+    transition go(A) -> A { return A { n: self.n + 1 } }
 }
 func bad(data: view i32) -> i32 {
     let s = A { n: data }
@@ -4070,7 +3897,7 @@ fn spawn_quota_within_limit_dual_backend() {
 flow Parent {
     @max_children(2)
     state Idle
-    transition go(Idle) -> Idle { do { return Idle { } } }
+    transition go(Idle) -> Idle { { return Idle { } } }
 }
 actor Worker {
     n: i32
@@ -4096,7 +3923,7 @@ fn spawn_quota_exceeded_runtime_error() {
 flow Parent {
     @max_children(1)
     state Idle
-    transition go(Idle) -> Idle { do { return Idle { } } }
+    transition go(Idle) -> Idle { { return Idle { } } }
 }
 actor Worker {
     n: i32
@@ -4219,17 +4046,13 @@ fn pinned_reject_transition_under_pin() {
     let src = r#"
 flow Buf {
     state Active { data: i32 }
-    transition step(Active) -> Active {
-        do { return Active { data: self.data + 1 } }
-    }
+    transition step(Active) -> Active { return Active { data: self.data + 1 } }
     transition bad(Active) -> Active {
-        do {
-            pinned(self.data) |p| {
-                let _ = p
-                let _ = Buf::step(Active { data: 0 })
-            }
-            return Active { data: self.data }
+        pinned(self.data) |p| {
+            let _ = p
+            let _ = Buf::step(Active { data: 0 })
         }
+        return Active { data: self.data }
     }
 }
 "#;
@@ -4385,11 +4208,9 @@ flow Process {
     state Active { buffer: List<i32>, tag: i32 }
     state Done { total: i32 }
     transition process(Active) -> Done {
-        do {
-            let n = sum_view(self.buffer)
-            let t = bump(self.tag)
-            return Done { total: n + t }
-        }
+        let n = sum_view(self.buffer)
+        let t = bump(self.tag)
+        return Done { total: n + t }
     }
 }
 func main() -> i32 {
@@ -4424,11 +4245,9 @@ flow Process {
     state Active { buffer: List<i32> }
     state Done { first: i32 }
     transition process(Active) -> Done {
-        do {
-            let n = apply_filter(mutate self.buffer)
-            let f = self.buffer[0]
-            return Done { first: f + n }
-        }
+        let n = apply_filter(mutate self.buffer)
+        let f = self.buffer[0]
+        return Done { first: f + n }
     }
 }
 func main() -> i32 {
@@ -4517,10 +4336,8 @@ flow P {
     state Active { tag: i32 }
     state Done { v: i32 }
     transition go(Active) -> Done {
-        do {
-            let a = bump2(self.tag, self.tag)
-            return Done { v: a }
-        }
+        let a = bump2(self.tag, self.tag)
+        return Done { v: a }
     }
 }
 func main() -> i32 {
@@ -4579,7 +4396,7 @@ fn assert_state_correct_state() {
 flow C {
     state A { v: i32 }
     state B { v: i32 }
-    transition go(A) -> B { do { return B { v: self.v + 1 } } }
+    transition go(A) -> B { { return B { v: self.v + 1 } } }
 }
 func main() -> i32 {
     let s0 = A { v: 0 }
@@ -4603,7 +4420,7 @@ fn assert_state_wrong_state() {
 flow C {
     state A { v: i32 }
     state B { v: i32 }
-    transition go(A) -> B { do { return B { v: self.v + 1 } } }
+    transition go(A) -> B { { return B { v: self.v + 1 } } }
 }
 func main() -> i32 {
     let s0 = A { v: 0 }
@@ -4699,8 +4516,8 @@ flow F {
     impl P
     state Idle
     state Active { data: i32, extra: i32 }
-    transition start(Idle) -> Active { do { return Active { data: 0, extra: 99 } } }
-    transition stop(Active) -> Idle { do { return Idle { } } }
+    transition start(Idle) -> Active { { return Active { data: 0, extra: 99 } } }
+    transition stop(Active) -> Idle { { return Idle { } } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -4725,7 +4542,7 @@ flow F {
     impl P
     state Idle
     state Active { data: i32, inner: Active }
-    transition start(Idle) -> Active { do { return Active { data: 0, inner: Active { data: 0 } } } }
+    transition start(Idle) -> Active { { return Active { data: 0, inner: Active { data: 0 } } } }
 }
 func main() -> i32 { 0 }
 "#;
@@ -4840,12 +4657,10 @@ flow C {
     state A { v: i32 }
     state B { v: i32 }
     transition go(A) -> B | A {
-        do {
-            if self.v > 0 {
-                return B { v: self.v }
-            }
-            return A { v: 0 }
+        if self.v > 0 {
+            return B { v: self.v }
         }
+        return A { v: 0 }
     }
 }
 func main() -> i32 {
@@ -4866,17 +4681,13 @@ fn transition_return_with_subflow_payload() {
     let src = r#"
 flow Inner {
     state IActive { n: i32 }
-    transition bump(IActive) -> IActive {
-        do { return IActive { n: self.n + 1 } }
-    }
+    transition bump(IActive) -> IActive { return IActive { n: self.n + 1 } }
 }
 flow Outer {
     state Working { child: IActive }
     transition step(Working) -> Working {
-        do {
-            let c = Inner::bump(self.child)
-            return Working { child: c }
-        }
+        let c = Inner::bump(self.child)
+        return Working { child: c }
     }
 }
 func main() -> i32 {
@@ -4904,9 +4715,7 @@ flow FFI {
     state Active { buffer: i32 }
     state FFI_Pinned { buffer: i32 }
 
-    transition process(Active) -> Active {
-        do { return Active { buffer: self.buffer + 1 } }
-    }
+    transition process(Active) -> Active { return Active { buffer: self.buffer + 1 } }
 }
 func main() -> i32 {
     let s = Active { buffer: 42 }
@@ -4926,9 +4735,7 @@ flow FFI {
     state Active { buffer: i32 }
     state FFI_Pinned { buffer: i32 }
 
-    transition process(Active) -> Active {
-        do { return Active { buffer: self.buffer + 1 } }
-    }
+    transition process(Active) -> Active { return Active { buffer: self.buffer + 1 } }
 }
 func main() -> i32 {
     let s = Active { buffer: 99 }
@@ -4952,9 +4759,7 @@ flow FFI {
     state Active { buffer: i32 }
     state FFI_Pinned { buffer: i32 }
 
-    transition process(Active) -> Active {
-        do { return Active { buffer: self.buffer + 1 } }
-    }
+    transition process(Active) -> Active { return Active { buffer: self.buffer + 1 } }
 }
 func main() -> i32 {
     let s = Active { buffer: 7 }
@@ -4981,9 +4786,7 @@ fn ffi_pinned_transitions_injected() {
 flow FFI {
     state Active { buffer: i32 }
     state FFI_Pinned { buffer: i32 }
-    transition process(Active) -> Active {
-        do { return Active { buffer: self.buffer } }
-    }
+    transition process(Active) -> Active { return Active { buffer: self.buffer } }
 }
 "#;
     let tokens = Lexer::new(src).tokenize().expect("lex");
@@ -5125,10 +4928,8 @@ flow C {
     state A { v: i32 }
     state B { v: i32 }
     transition go(A) -> B | A {
-        do {
-            if self.v > 0 { return B { v: self.v } }
-            return A { v: 0 }
-        }
+        if self.v > 0 { return B { v: self.v } }
+        return A { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5165,10 +4966,8 @@ flow C {
     state A { v: i32 }
     state B { message: string }
     transition go(A) -> B | A {
-        do {
-            if self.v > 0 { return B { message: "positive" } }
-            return A { v: 0 }
-        }
+        if self.v > 0 { return B { message: "positive" } }
+        return A { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5209,12 +5008,10 @@ flow Checker {
     state Small { v: i32 }
     state Large { v: i32 }
     transition classify(Small, amount: i32) -> Small | Large {
-        do {
-            if self.v + amount > 50 {
-                return Large { v: self.v + amount }
-            } else {
-                return Small { v: self.v + amount }
-            }
+        if self.v + amount > 50 {
+            return Large { v: self.v + amount }
+        } else {
+            return Small { v: self.v + amount }
         }
     }
 }
@@ -5222,10 +5019,8 @@ flow C {
     state A { v: i32 }
     state B { message: string }
     transition go(A) -> B | A {
-        do {
-            if self.v > 0 { return B { message: "positive" } }
-            return A { v: 0 }
-        }
+        if self.v > 0 { return B { message: "positive" } }
+        return A { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5276,12 +5071,10 @@ flow Checker {
     state Small { v: i32 }
     state Large { v: i32 }
     transition classify(Small, amount: i32) -> Small | Large {
-        do {
-            if self.v + amount > 50 {
-                return Large { v: self.v + amount }
-            } else {
-                return Small { v: self.v + amount }
-            }
+        if self.v + amount > 50 {
+            return Large { v: self.v + amount }
+        } else {
+            return Small { v: self.v + amount }
         }
     }
 }
@@ -5289,10 +5082,8 @@ flow C {
     state A { v: i32 }
     state B { message: string }
     transition go(A) -> B | A {
-        do {
-            if self.v > 0 { return B { message: "positive" } }
-            return A { v: 0 }
-        }
+        if self.v > 0 { return B { message: "positive" } }
+        return A { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5350,15 +5141,9 @@ flow Calc {
     state A { v: i32 }
     state B { v: i32 }
     state C { v: i32 }
-    transition t1(A, d: i32) -> A | B {
-        do { if d == 0 { return A { v: 1 } } return B { v: 2 } }
-    }
-    transition t2(B, d: i32) -> A | C {
-        do { if d == 0 { return C { v: 3 } } return A { v: 4 } }
-    }
-    transition go(A) -> B {
-        do { return B { v: 9 } }
-    }
+    transition t1(A, d: i32) -> A | B { if d == 0 { return A { v: 1 } } return B { v: 2 } }
+    transition t2(B, d: i32) -> A | C { if d == 0 { return C { v: 3 } } return A { v: 4 } }
+    transition go(A) -> B { return B { v: 9 } }
 }
 func main() -> i32 {
     let r1 = Calc::t1(A { v: 0 }, 0)
@@ -5394,15 +5179,9 @@ fn multi_target_disjoint_sets_fault_tag_dual_backend() {
 flow Calc {
     state A { v: i32 }
     state B { v: i32 }
-    transition t1(A, d: i32) -> A | B {
-        do { if d == 0 { return A { v: 1 } } return B { v: 2 } }
-    }
-    transition t2(B, d: i32) -> B | Fault {
-        do { return B { v: self.v / d } }
-    }
-    transition go(A) -> B {
-        do { return B { v: 9 } }
-    }
+    transition t1(A, d: i32) -> A | B { if d == 0 { return A { v: 1 } } return B { v: 2 } }
+    transition t2(B, d: i32) -> B | Fault { return B { v: self.v / d } }
+    transition go(A) -> B { return B { v: 9 } }
 }
 func main() -> i32 {
     let r1 = Calc::t1(A { v: 0 }, 0)
@@ -5443,12 +5222,10 @@ flow F {
     state Done { inner: Inner }
     state Skip { v: i32 }
     transition go(Start) -> Done | Skip {
-        do {
-            if self.v > 0 {
-                return Done { inner: Inner { a: 1, b: 2, c: 3 } }
-            }
-            return Skip { v: 0 }
+        if self.v > 0 {
+            return Done { inner: Inner { a: 1, b: 2, c: 3 } }
         }
+        return Skip { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5481,12 +5258,10 @@ flow F {
     state Done { inner: Inner }
     state Skip { v: i32 }
     transition go(Start) -> Done | Skip {
-        do {
-            if self.v > 0 {
-                return Done { inner: Inner { a: 1, b: 2, c: 3 } }
-            }
-            return Skip { v: 0 }
+        if self.v > 0 {
+            return Done { inner: Inner { a: 1, b: 2, c: 3 } }
         }
+        return Skip { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5522,10 +5297,8 @@ flow F {
     state Done { v: i32 }
     state Skip { v: i32 }
     transition go(Start) -> Done | Skip {
-        do {
-            if self.v > 0 { return Done { v: self.v } }
-            return Skip { v: 0 }
-        }
+        if self.v > 0 { return Done { v: self.v } }
+        return Skip { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5696,10 +5469,8 @@ flow C {
     state A { v: i32 }
     state B { v: i32 }
     transition go(A) -> B | A {
-        do {
-            if self.v > 0 { return B { v: self.v } }
-            return A { v: 0 }
-        }
+        if self.v > 0 { return B { v: self.v } }
+        return A { v: 0 }
     }
 }
 func main() -> i32 {
@@ -5728,9 +5499,7 @@ fn flow_state_forgery_non_root_outside_transition_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let forged = Positive { count: 999 }
@@ -5759,9 +5528,7 @@ fn flow_state_root_construction_outside_transition_allowed() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5785,12 +5552,8 @@ fn flow_state_non_root_inside_transition_allowed() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
-    transition reset(Positive) -> Zero {
-        do { return Zero { count: 0 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
+    transition reset(Positive) -> Zero { return Zero { count: 0 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5817,12 +5580,8 @@ flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
     state Done
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
-    transition finish(Positive) -> Done {
-        do { return Done { } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
+    transition finish(Positive) -> Done { return Done { } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5854,15 +5613,9 @@ flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
     state Done
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
-    transition inc2(Positive) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
-    transition finish(Positive) -> Done {
-        do { return Done { } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
+    transition inc2(Positive) -> Positive { return Positive { count: self.count + 1 } }
+    transition finish(Positive) -> Done { return Done { } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5890,9 +5643,7 @@ fn flow_state_alias_then_use_original_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5921,9 +5672,7 @@ fn flow_state_alias_target_usable() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5947,9 +5696,7 @@ fn flow_state_shared_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -5977,9 +5724,7 @@ fn flow_state_ref_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -6008,9 +5753,7 @@ fn flow_state_shadowing_does_not_reset_consumption() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -6045,11 +5788,9 @@ fn flow_turn_try_without_fails_rejected() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active {
-        do {
-            let result = safe_div(self.balance, amount)
-            let new_balance = result?
-            return Active { balance: new_balance }
-        }
+        let result = safe_div(self.balance, amount)
+        let new_balance = result?
+        return Active { balance: new_balance }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6075,11 +5816,9 @@ fn flow_turn_try_with_fails_accepted() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        do {
-            let result = safe_div(self.balance, amount)
-            let new_balance = result?
-            return Active { balance: new_balance }
-        }
+        let result = safe_div(self.balance, amount)
+        let new_balance = result?
+        return Active { balance: new_balance }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6111,11 +5850,9 @@ fn flow_turn_rejected_returns_source() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        do {
-            let result = safe_div(self.balance, amount)
-            let new_balance = result?
-            return Active { balance: new_balance }
-        }
+        let result = safe_div(self.balance, amount)
+        let new_balance = result?
+        return Active { balance: new_balance }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6140,11 +5877,9 @@ fn flow_turn_success_path_unaffected() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        do {
-            let result = safe_div(self.balance, amount)
-            let new_balance = result?
-            return Active { balance: new_balance }
-        }
+        let result = safe_div(self.balance, amount)
+        let new_balance = result?
+        return Active { balance: new_balance }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6172,9 +5907,7 @@ fn flow_turn_become_explicit_terminal() {
 flow Counter {
     state Idle { count: i32 }
     state Active { count: i32 }
-    transition start(Idle) -> Active {
-        do { return Active { count: self.count + 1 } }
-    }
+    transition start(Idle) -> Active { return Active { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Idle { count: 10 }
@@ -6194,9 +5927,7 @@ fn flow_turn_become_dual_backend() {
 flow Counter {
     state Idle { count: i32 }
     state Active { count: i32 }
-    transition start(Idle) -> Active {
-        do { return Active { count: self.count + 1 } }
-    }
+    transition start(Idle) -> Active { return Active { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Idle { count: 10 }
@@ -6218,9 +5949,7 @@ fn flow_turn_stay_self_loop() {
     let src = r#"
 flow Counter {
     state Active { count: i32 }
-    transition noop(Active) -> Active {
-        do { return Active { count: self.count } }
-    }
+    transition noop(Active) -> Active { return Active { count: self.count } }
 }
 func main() -> i32 {
     let s0 = Active { count: 42 }
@@ -6239,9 +5968,7 @@ fn flow_turn_stay_dual_backend() {
     let src = r#"
 flow Counter {
     state Active { count: i32 }
-    transition noop(Active) -> Active {
-        do { return Active { count: self.count } }
-    }
+    transition noop(Active) -> Active { return Active { count: self.count } }
 }
 func main() -> i32 {
     let s0 = Active { count: 42 }
@@ -6269,12 +5996,10 @@ flow Gate {
     state Open { v: i32 }
     state Closed { v: i32 }
     transition decide(Idle, threshold: i32) -> Open | Closed {
-        do {
-            if self.v > threshold {
-                return Open { v: self.v }
-            } else {
-                return Closed { v: self.v }
-            }
+        if self.v > threshold {
+            return Open { v: self.v }
+        } else {
+            return Closed { v: self.v }
         }
     }
 }
@@ -6299,9 +6024,7 @@ fn flow_turn_become_stay_rejected_as_removed_keywords() {
 flow Counter {{
     state Idle {{ count: i32 }}
     state Active {{ count: i32 }}
-    transition start(Idle) -> Active {{
-        do {{ {kw} Active {{ count: self.count + 1 }} }}
-    }}
+    transition start(Idle) -> Active {{ {kw} Active {{ count: self.count + 1 }} }}
 }}
 func main() -> i32 {{
     let s0 = Idle {{ count: 10 }}
@@ -6326,11 +6049,9 @@ fn flow_turn_rejected_dual_backend() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        do {
-            let result = safe_div(self.balance, amount)
-            let new_balance = result?
-            return Active { balance: new_balance }
-        }
+        let result = safe_div(self.balance, amount)
+        let new_balance = result?
+        return Active { balance: new_balance }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6364,11 +6085,9 @@ fn flow_turn_success_dual_backend() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        do {
-            let result = safe_div(self.balance, amount)
-            let new_balance = result?
-            return Active { balance: new_balance }
-        }
+        let result = safe_div(self.balance, amount)
+        let new_balance = result?
+        return Active { balance: new_balance }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6405,9 +6124,7 @@ type AccountError {
 flow Account {
     state Active { balance: i32 }
     fault AccountError
-    transition deposit(Active, amount: i32) -> Active {
-        do { return Active { balance: self.balance + amount } }
-    }
+    transition deposit(Active, amount: i32) -> Active { return Active { balance: self.balance + amount } }
 }
 func main() -> i32 {
     let s0 = Active { balance: 100 }
@@ -6445,9 +6162,7 @@ flow Svc {
     state Idle { n: i32 }
     state Running { n: i32 }
     fault MyError
-    transition start(Idle, d: i32) -> Running | Fault {
-        do { return Running { n: self.n / d } }
-    }
+    transition start(Idle, d: i32) -> Running | Fault { return Running { n: self.n / d } }
 }
 func main() -> i32 {
     let u = Svc::start(Idle { n: 5 }, 0)
@@ -6481,9 +6196,7 @@ fn flow_sparse_skips_fallback_injection() {
 flow Gate @sparse {
     state Idle { v: i32 }
     state Open { v: i32 }
-    transition open(Idle) -> Open {
-        do { return Open { v: self.v } }
-    }
+    transition open(Idle) -> Open { return Open { v: self.v } }
 }
 func main() -> i32 {
     let s0 = Idle { v: 1 }
@@ -6510,9 +6223,7 @@ fn flow_panic_absorption_div_zero_dual_backend() {
     let src = r#"
 flow Calc {
     state Ready { v: i32 }
-    transition div(Ready, d: i32) -> Ready | Fault {
-        do { return Ready { v: self.v / d } }
-    }
+    transition div(Ready, d: i32) -> Ready | Fault { return Ready { v: self.v / d } }
 }
 func main() -> i32 {
     let r = Calc::div(Ready { v: 10 }, 0)
@@ -6550,7 +6261,7 @@ fn flow_panic_absorption_persistent_shadow_dual_backend() {
     let src = r#"
 flow Calc {
     persistent state S { v: i32 }
-    transition go(S, d: i32) -> S | Fault { do { return S { v: self.v / d } } }
+    transition go(S, d: i32) -> S | Fault { { return S { v: self.v / d } } }
 }
 func main() -> i32 {
     let r = Calc::go(S { v: 10 }, 0)
@@ -6587,9 +6298,7 @@ fn flow_panic_absorption_normal_path_returns_state_dual_backend() {
     let src = r#"
 flow Calc {
     state Ready { v: i32 }
-    transition div(Ready, d: i32) -> Ready | Fault {
-        do { return Ready { v: self.v / d } }
-    }
+    transition div(Ready, d: i32) -> Ready | Fault { return Ready { v: self.v / d } }
 }
 func main() -> i32 {
     let r = Calc::div(Ready { v: 10 }, 2)
@@ -6617,11 +6326,11 @@ fn flow_panic_absorption_multi_flow_match_dispatch_dual_backend() {
     let src = r#"
 flow A {
     state S { v: i32 }
-    transition go(S, d: i32) -> S | Fault { do { return S { v: self.v / d } } }
+    transition go(S, d: i32) -> S | Fault { { return S { v: self.v / d } } }
 }
 flow B {
     state T { v: i32 }
-    transition go(T, d: i32) -> T | Fault { do { return T { v: self.v / d } } }
+    transition go(T, d: i32) -> T | Fault { { return T { v: self.v / d } } }
 }
 func main() -> i32 {
     let ra = A::go(S { v: 1 }, 0)
@@ -6652,9 +6361,7 @@ fn flow_sparse_undefined_event_rejected() {
 flow Gate @sparse {
     state Idle { v: i32 }
     state Open { v: i32 }
-    transition open(Idle) -> Open {
-        do { return Open { v: self.v } }
-    }
+    transition open(Idle) -> Open { return Open { v: self.v } }
 }
 func main() -> i32 {
     let s0 = Open { v: 1 }
@@ -6678,9 +6385,7 @@ fn flow_dense_annotation_rejected_by_amendment_clause_1() {
 flow Counter @dense {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     0
@@ -6726,18 +6431,12 @@ fn flow_explicit_reset_overrides_system_verb() {
 flow Counter {
     state Zero { n: i32 }
     state Positive { n: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { n: 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { n: 1 } }
     transition crash(Positive) -> Positive {
-        do {
-            let x = 1 / 0
-            return Positive { n: self.n }
-        }
+        let x = 1 / 0
+        return Positive { n: self.n }
     }
-    transition reset(Fault) -> Zero {
-        do { return Zero { n: 42 } }
-    }
+    transition reset(Fault) -> Zero { return Zero { n: 42 } }
 }
 func main() -> i32 {
     let s1 = Counter::inc(Zero { n: 0 })
@@ -6761,18 +6460,12 @@ fn flow_explicit_recover_overrides_system_verb() {
 flow Svc {
     persistent state Config { retries: i32 }
     state Running { n: i32 }
-    transition start(Config) -> Running {
-        do { return Running { n: self.retries } }
-    }
+    transition start(Config) -> Running { return Running { n: self.retries } }
     transition crash(Running) -> Running {
-        do {
-            let x = 1 / 0
-            return Running { n: self.n }
-        }
+        let x = 1 / 0
+        return Running { n: self.n }
     }
-    transition recover(Fault) -> Config {
-        do { return Config { retries: 99 } }
-    }
+    transition recover(Fault) -> Config { return Config { retries: 99 } }
 }
 func main() -> i32 {
     let s1 = Svc::start(Config { retries: 0 })
@@ -6802,14 +6495,12 @@ flow Parser {
     state Pending { data: i32 }
     state Ready { data: i32 }
     transition parse(Pending, token: i32) -> Ready fails string {
-        do {
-            // Consume the linear resource (flow state alias)
-            let consumed = self
-            // Then try a fallible operation — should be rejected
-            let result = safe_div(10, token)
-            let value = result?
-            return Ready { data: value }
-        }
+        // Consume the linear resource (flow state alias)
+        let consumed = self
+        // Then try a fallible operation — should be rejected
+        let result = safe_div(10, token)
+        let value = result?
+        return Ready { data: value }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6839,13 +6530,11 @@ flow Parser {
     state Pending { data: i32 }
     state Ready { data: i32 }
     transition parse(Pending, token: i32) -> Ready fails string {
-        do {
-            // Fallible operation first — no linear resource consumed yet
-            let result = safe_div(10, token)
-            let value = result?
-            // Now consume the linear resource
-            return Ready { data: value + self.data }
-        }
+        // Fallible operation first — no linear resource consumed yet
+        let result = safe_div(10, token)
+        let value = result?
+        // Now consume the linear resource
+        return Ready { data: value + self.data }
     }
 }
 func safe_div(a: i32, b: i32) -> Result<i32, string> {
@@ -6880,9 +6569,7 @@ fn flow_state_tuple_rejected() {
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
-    transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }
@@ -6910,9 +6597,7 @@ fn flow_state_map_value_rejected() {
     let src = r#"
 flow Counter {
     state Zero { count: i32 }
-    transition inc(Zero) -> Zero {
-        do { return Zero { count: self.count + 1 } }
-    }
+    transition inc(Zero) -> Zero { return Zero { count: self.count + 1 } }
 }
 func main() -> i32 {
     let s0 = Zero { count: 0 }

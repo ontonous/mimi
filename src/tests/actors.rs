@@ -281,7 +281,7 @@ flow Order {
     state Pending { item: string }
     state Shipped { item: string }
     transition ship(Pending) -> Shipped {
-        do { return Shipped { item: self.item } }
+        { return Shipped { item: self.item } }
     }
 }
 
@@ -329,13 +329,13 @@ flow Counter {
     state Zero { n: i32 }
     state Positive { n: i32 }
     transition inc(Zero) -> Positive {
-        do { return Positive { n: self.n + 1 } }
+        { return Positive { n: self.n + 1 } }
     }
     transition bump(Positive) -> Positive {
-        do { return Positive { n: self.n + 1 } }
+        { return Positive { n: self.n + 1 } }
     }
     transition get(Positive) -> Positive {
-        do { return Positive { n: self.n } }
+        { return Positive { n: self.n } }
     }
 }
 
@@ -364,7 +364,7 @@ fn actor_runs_flow_rejects_mut_field() {
 flow Counter {
     state Zero { n: i32 }
     transition inc(Zero) -> Zero {
-        do { return Zero { n: self.n + 1 } }
+        { return Zero { n: self.n + 1 } }
     }
 }
 

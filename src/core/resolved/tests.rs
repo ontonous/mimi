@@ -265,8 +265,8 @@ fn resolved_transition_ids_include_source_state() {
 flow Door {
     state Closed
     state Open
-    transition toggle(Closed) -> Open { do { return Open {} } }
-    transition toggle(Open) -> Closed { do { return Closed {} } }
+    transition toggle(Closed) -> Open { return Open {} }
+    transition toggle(Open) -> Closed { return Closed {} }
 }
 "#,
     );
@@ -282,8 +282,8 @@ fn resolved_ids_do_not_depend_on_declaration_order() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed) -> Open { do { return Open {} } }
-    transition close(Open) -> Closed { do { return Closed {} } }
+    transition open(Closed) -> Open { return Open {} }
+    transition close(Open) -> Closed { return Closed {} }
 }
 "#,
     );
@@ -292,8 +292,8 @@ flow Door {
 flow Door {
     state Open
     state Closed
-    transition close(Open) -> Closed { do { return Closed {} } }
-    transition open(Closed) -> Open { do { return Open {} } }
+    transition close(Open) -> Closed { return Closed {} }
+    transition open(Closed) -> Open { return Open {} }
 }
 "#,
     );
@@ -323,7 +323,7 @@ flow Decision {
     state Pending
     state Yes
     state No
-    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+    transition decide(Pending) -> Yes | No { return Yes {} }
 }
 "#,
     );
@@ -346,7 +346,7 @@ flow Decision {
     state Pending
     state Yes
     state No
-    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+    transition decide(Pending) -> Yes | No { return Yes {} }
 }
 func abs(x: i32) -> i32 {
     requires: x >= 0
@@ -371,8 +371,8 @@ fn resolved_transition_table_is_exact_source_keyed() {
 flow Counter {
     state Zero
     state Pos
-    transition inc(Zero) -> Pos { do { return Pos {} } }
-    transition inc(Pos) -> Pos { do { return Pos {} } }
+    transition inc(Zero) -> Pos { return Pos {} }
+    transition inc(Pos) -> Pos { return Pos {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -957,7 +957,7 @@ flow Worker {
     @max_children(3)
     @mailbox(depth = 8)
     state Idle
-    transition tick(Idle) -> Idle { do { return Idle {} } }
+    transition tick(Idle) -> Idle { return Idle {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -975,7 +975,7 @@ fn interpreter_from_checked_prefers_resolved_max_children() {
 flow Worker {
     @max_children(4)
     state Idle
-    transition tick(Idle) -> Idle { do { return Idle {} } }
+    transition tick(Idle) -> Idle { return Idle {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -995,7 +995,7 @@ fn interpreter_from_checked_installs_mailbox_depths() {
 flow Worker {
     @mailbox(depth = 64)
     state Idle
-    transition tick(Idle) -> Idle { do { return Idle {} } }
+    transition tick(Idle) -> Idle { return Idle {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1014,7 +1014,7 @@ module net {
     flow Conn {
         @mailbox(depth = 32)
         state Idle
-        transition tick(Idle) -> Idle { do { return Idle {} } }
+        transition tick(Idle) -> Idle { return Idle {} }
     }
 }
 func main() -> i32 { 0 }
@@ -1035,7 +1035,7 @@ flow Worker {
     @max_children(5)
     @mailbox(depth = 16)
     state Idle
-    transition tick(Idle) -> Idle { do { return Idle {} } }
+    transition tick(Idle) -> Idle { return Idle {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1054,7 +1054,7 @@ fn resolved_flow_records_persistent_field_sets() {
 flow ResilientService {
     persistent state Config { max_retries: i32, timeout_ms: i64 }
     state Active { request_id: i32 }
-    transition run(Active) -> Active { do { return Active { request_id: 1 } } }
+    transition run(Active) -> Active { return Active { request_id: 1 } }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1078,7 +1078,7 @@ fn consumers_install_persistent_field_directories() {
 flow ResilientService {
     persistent state Config { max_retries: i32, timeout_ms: i64 }
     state Active { request_id: i32 }
-    transition run(Active) -> Active { do { return Active { request_id: 1 } } }
+    transition run(Active) -> Active { return Active { request_id: 1 } }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1105,7 +1105,7 @@ flow Decision {
     state Pending
     state Yes
     state No
-    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+    transition decide(Pending) -> Yes | No { return Yes {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1149,7 +1149,7 @@ protocol Sensor {
 flow Lidar {
     impl Sensor
     state Idle
-    transition tick(Idle) -> Idle { do { return Idle {} } }
+    transition tick(Idle) -> Idle { return Idle {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1170,7 +1170,7 @@ protocol Sensor {
 flow Lidar {
     impl Sensor
     state Idle
-    transition tick(Idle) -> Idle { do { return Idle {} } }
+    transition tick(Idle) -> Idle { return Idle {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1195,7 +1195,7 @@ fn resolved_transition_records_fallback_and_pinned_flags() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed) -> Open { do { return Open {} } }
+    transition open(Closed) -> Open { return Open {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1228,7 +1228,7 @@ fn interpreter_exposes_resolved_transition_targets() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed) -> Open { do { return Open {} } }
+    transition open(Closed) -> Open { return Open {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1251,7 +1251,7 @@ fn codegen_exposes_resolved_transition_targets() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed) -> Open { do { return Open {} } }
+    transition open(Closed) -> Open { return Open {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1274,7 +1274,7 @@ fn resolved_transition_records_event_parameters() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed, code: i32) -> Open { do { return Open {} } }
+    transition open(Closed, code: i32) -> Open { return Open {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1293,7 +1293,7 @@ fn consumers_use_resolved_transition_param_arity() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed, code: i32) -> Open { do { return Open {} } }
+    transition open(Closed, code: i32) -> Open { return Open {} }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1993,7 +1993,7 @@ flow Counter {
     state Zero
     state Positive { count: i32 }
     transition inc(Zero) -> Positive {
-        do { return Positive { count: 1 } }
+        { return Positive { count: 1 } }
     }
 }
 func main() -> i32 { 0 }
@@ -2146,7 +2146,7 @@ fn verifier_verify_checked_records_function_names() {
 flow Door {
     state Closed
     state Open
-    transition open(Closed) -> Open { do { return Open {} } }
+    transition open(Closed) -> Open { return Open {} }
 }
 protocol Sensor {
     state Idle
@@ -2185,14 +2185,14 @@ module alpha {
     flow Worker {
         state Idle
         state Busy
-        transition start(Idle) -> Busy { do { return Busy {} } }
+        transition start(Idle) -> Busy { return Busy {} }
     }
 }
 module beta {
     flow Worker {
         state Idle
         state Busy
-        transition start(Idle) -> Busy { do { return Busy {} } }
+        transition start(Idle) -> Busy { return Busy {} }
     }
 }
 "#,
@@ -2811,7 +2811,7 @@ extern "C" {
 flow Machine {
     state Ready
     transition tick(Ready, left: i32, right: i32) -> Ready {
-        do { return Ready {} }
+        { return Ready {} }
     }
 }
 func top(left: i32 = leaf(), right: i32 = leaf()) -> i32 {
@@ -3030,8 +3030,8 @@ flow Worker<T> {
     @mailbox(depth = 8)
     state Idle { value: T, count: i32 }
     state Busy { value: T, count: i32 }
-    transition start(Idle, left: i32, right: i32) -> Busy { do { return Busy {} } }
-    transition stop(Busy, left: i32, right: i32) -> Idle { do { return Idle {} } }
+    transition start(Idle, left: i32, right: i32) -> Busy { return Busy {} }
+    transition stop(Busy, left: i32, right: i32) -> Idle { return Idle {} }
 }
 func catalog<T: Clone, U: Eq>(first: Pair<T, U>, second: Pair<T, U>) -> i32 where T: Clone, U: Eq {
     let pair = Pair { left: first.left, right: second.right }
@@ -4091,7 +4091,7 @@ cap File
 flow Door {
     state Closed
     state Open
-    transition open(Closed, f: cap File) -> Open { do { return Open {} } }
+    transition open(Closed, f: cap File) -> Open { return Open {} }
 }
 func main() -> i32 { 0 }
 "#,

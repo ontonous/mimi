@@ -373,7 +373,7 @@ fn ck_c5_user_fault_state_rejected() {
             state Idle
             state Fault { msg: string }
             transition boom(Idle) -> Fault {
-                do { return Fault { msg: "x" } }
+                { return Fault { msg: "x" } }
             }
         }
         func main() -> i32 { 0 }
@@ -438,10 +438,8 @@ fn ck_c4_pinned_timeout_rejected_by_amendment_clause_10() {
         flow F {
             state S { data: i32 }
             transition t(S) -> S {
-                do {
-                    pinned(self.data, timeout = 5) |p| { let _ = p }
-                    return S { data: self.data }
-                }
+                pinned(self.data, timeout = 5) |p| { let _ = p }
+                return S { data: self.data }
             }
         }
         func main() -> i32 { 0 }

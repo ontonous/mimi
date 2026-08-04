@@ -12,18 +12,10 @@ flow TCPConnection {
     state Established { seq: i32, ack: i32 }
     state CloseWait { seq: i32 }
 
-    transition syn(Closed) -> SynSent {
-        do { return SynSent { seq: 100 } }
-    }
-    transition syn_ack(SynSent) -> Established {
-        do { return Established { seq: self.seq, ack: self.seq + 1 } }
-    }
-    transition fin(Established) -> CloseWait {
-        do { return CloseWait { seq: self.seq } }
-    }
-    transition ack(CloseWait) -> Closed {
-        do { return Closed { } }
-    }
+    transition syn(Closed) -> SynSent { return SynSent { seq: 100 } }
+    transition syn_ack(SynSent) -> Established { return Established { seq: self.seq, ack: self.seq + 1 } }
+    transition fin(Established) -> CloseWait { return CloseWait { seq: self.seq } }
+    transition ack(CloseWait) -> Closed { return Closed { } }
 }
 
 func main() -> i32 {

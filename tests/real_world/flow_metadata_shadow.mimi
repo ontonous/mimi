@@ -4,9 +4,7 @@
 flow Buf {
     persistent state Active { buffer: List<i32> }
 
-    transition safe(Active) -> Active {
-        do { return Active { buffer: self.buffer } }
-    }
+    transition safe(Active) -> Active { return Active { buffer: self.buffer } }
 }
 func main() -> i32 {
     let s = Active { buffer: [1, 2, 3] }

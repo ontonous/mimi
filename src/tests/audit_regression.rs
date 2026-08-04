@@ -1011,7 +1011,7 @@ flow F {
     state S { v: i32 }
     @metadata_shadow(persistent)
     transition t(S) -> S {
-        do { return S { v: 1 } }
+        { return S { v: 1 } }
     }
 }
 func main() -> i32 { 0 }
@@ -1033,7 +1033,7 @@ flow Counter {
     state Zero
     state One
     transition inc(Zero) -> Zero |> One {
-        do { return One { } }
+        { return One { } }
     }
 }
 func main() -> i32 { 0 }
@@ -1101,7 +1101,7 @@ func main() -> i32 {
 
     for kw in ["view", "mutate", "consume"] {
         let abolished = format!(
-            "flow Parent {{\n    state Active\n\n    transition run(Active) -> Active {{\n        do {{\n            delegate {kw}(self.buffer) to sub_flow;\n            return Active {{ }}\n        }}\n    }}\n}}\nfunc main() -> i32 {{ 0 }}\n"
+            "flow Parent {{\n    state Active\n\n    transition run(Active) -> Active {{\n        delegate {kw}(self.buffer) to sub_flow;\n        return Active {{ }}\n    }}\n}}\nfunc main() -> i32 {{ 0 }}\n"
         );
         let diagnostics = parse_error_messages(&abolished);
         let rendered = diagnostics.join("\n");
@@ -1357,7 +1357,7 @@ flow Decision {
     state Approved { value: i32 }
     state Rejected { value: i32 }
     transition decide(Pending) -> Approved | Rejected fails string {
-        do { return Approved { value: self.value } }
+        { return Approved { value: self.value } }
     }
 }
 func main() -> i32 { 0 }
@@ -1386,7 +1386,7 @@ fn single_target_fails_still_accepted() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        do { return Active { balance: self.balance - amount } }
+        { return Active { balance: self.balance - amount } }
     }
 }
 func main() -> i32 { 0 }

@@ -56,7 +56,7 @@ if else for fault fails in while return reset recover break continue
 match use pub drop defer await async unsafe spawn parasteps
 quote comptime failure requires ensures invariant math desc rule old mms
 flow state transition protocol pinned persistent view mutate
-do session dual end with loop as
+session dual end with loop as
 true false unit i32 nothing
 ```
 
@@ -69,7 +69,7 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
-`old view mutate do persistent and or not session dual end`
+`old view mutate persistent and or not session dual end`
 
 ---
 
@@ -139,7 +139,7 @@ Pattern := Ident                              (* Variable *)
          | Int | String | true | false        (* Literal，:120-152 *)
          | '(' { Pattern ',' } ')'            (* Tuple，:153-167 *)
          | '[' { Pattern ',' } [ '..' [ Ident ] ] ']'   (* Array/Slice+rest，:168-195 *)
-         | 软关键字 → Variable（old/view/mutate/consume/do/persistent/subflow/session/dual/end）
+         | 软关键字 → Variable（old/view/mutate/persistent/session/dual/end）
 ```
 
 ---
@@ -169,7 +169,7 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
       | 'defer' '{' Block '}' ';'                                            (* :100-107 *)
       | 'parasteps' '{' Block '}' ';'                                        (* :108-115 *)
       | 'func' FuncDef ';'                                                   (* :116-120 *)
-      | 'do' '{' Block '}'                                                   (* :121-127 *)
+      | 'do' '{' Block '}'  — **v0.34.27 已删除**（语言评估）
       | 'delegate' ... — **v0.34.1 已拒绝**（条款 2 诊断，parse_stmt.rs:139-160）
       | 'pinned' '(' Expr ')' [ '|' Ident '|' ] '{' Block '}'   (* :180-216；v0.34.3 timeout 字段删除 *)
       | 'if' 'let' Pattern '=' Expr '{' Block '}' [ 'else' ( 'if' ... | '{' Block '}' ) ]  (* v0.34.3 Stmt::IfLet *)
@@ -307,7 +307,7 @@ Flow := 'flow' Ident generics
         | 'transition' Ident '(' FromIdent [ ',' { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type } ] ')'
           '->' Ident { '|' Ident }            (* v0.34.1：仅 `|` 多目标分隔符；`|>` 已拒绝 *)
           [ 'fails' Type ]                    (* :1358-1364 *)
-          [ '{' Block '}' | ';' ]             (* body 为裸 block（do 包装可选）:1366-1375 *)
+          [ '{' Block '}' | ';' ]             (* body 为裸 block :1381-1385；v0.34.27 do 已删 *)
         | 'fault' Type ';'                    (* per-Flow 单一 typed error，:1216-1222 *)
         '}'
 ```
@@ -361,7 +361,7 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 | `pinned(timeout)` | :946 状态反转 | parser 已拒绝（条款 10） |
 | `actor runs Flow` | :849 [not-yet-implemented] | 已实现（top_level.rs:616-621） |
 | `fails E` | :803 [not-yet-implemented] | 已实现且有语料（top_level.rs:1358-1364） |
-| `do {}` | :797 [removed] | 仍在解析且是语料主流（parse_stmt.rs:121-127） |
+| `do {}` | :797 [removed] | **v0.34.27 已删除**（语言评估；AST/关键字/语料全清） |
 | `stay` | :924 [not-yet-implemented] | **v0.34.11 已删除**（ADR-001，唯一终止符 `return S{}`） |
 | state-level `invariant` | :776 | 未实现（仅块内 invariant 子句 §4.2） |
 

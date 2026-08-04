@@ -10,12 +10,8 @@ flow Door {
     state Closed
     state Open
 
-    transition open(Closed) -> Open {
-        do { return Open { } }
-    }
-    transition close(Open) -> Closed {
-        do { return Closed { } }
-    }
+    transition open(Closed) -> Open { return Open { } }
+    transition close(Open) -> Closed { return Closed { } }
 }
 
 flow Elevator {
@@ -23,18 +19,10 @@ flow Elevator {
     state Moving { from_floor: i32, to_floor: i32 }
     state DoorOpen { floor: i32 }
 
-    transition request(Idle, target: i32) -> Moving {
-        do { return Moving { from_floor: self.floor, to_floor: target } }
-    }
-    transition arrive(Moving) -> Idle {
-        do { return Idle { floor: self.to_floor } }
-    }
-    transition open_door(Idle) -> DoorOpen {
-        do { return DoorOpen { floor: self.floor } }
-    }
-    transition close_door(DoorOpen) -> Idle {
-        do { return Idle { floor: self.floor } }
-    }
+    transition request(Idle, target: i32) -> Moving { return Moving { from_floor: self.floor, to_floor: target } }
+    transition arrive(Moving) -> Idle { return Idle { floor: self.to_floor } }
+    transition open_door(Idle) -> DoorOpen { return DoorOpen { floor: self.floor } }
+    transition close_door(DoorOpen) -> Idle { return Idle { floor: self.floor } }
 }
 
 func main() -> i32 {

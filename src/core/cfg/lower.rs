@@ -442,7 +442,6 @@ impl<'a> Lowerer<'a> {
             | Stmt::Unsafe(block)
             | Stmt::IeeeFloat(block)
             | Stmt::OnFailure(block)
-            | Stmt::Do(block)
             | Stmt::Parasteps(block)
             | Stmt::Defer(block) => {
                 self.lower_block(block, Some(current), &format!("{role}.block"))
@@ -908,7 +907,6 @@ fn collect_nested(
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
             | Stmt::OnFailure(body)
-            | Stmt::Do(body)
             | Stmt::Parasteps(body)
             | Stmt::Defer(body)
             | Stmt::Loop(body) => collect_nested(body, owner, sources, out, errors),

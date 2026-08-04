@@ -175,7 +175,6 @@ impl Parser {
             TokenKind::Old => "old".to_string(),
             TokenKind::View => "view".to_string(),
             TokenKind::Mutate => "mutate".to_string(),
-            TokenKind::Do => "do".to_string(),
             TokenKind::Persistent => "persistent".to_string(),
             TokenKind::Session => "session".to_string(),
             TokenKind::Dual => "dual".to_string(),
@@ -261,7 +260,6 @@ pub(crate) fn is_ident_like_kind(kind: &TokenKind) -> bool {
             | TokenKind::Old
             | TokenKind::View
             | TokenKind::Mutate
-            | TokenKind::Do
             | TokenKind::Persistent
             | TokenKind::Session
             | TokenKind::Dual

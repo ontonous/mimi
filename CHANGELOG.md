@@ -2,6 +2,17 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.27 — `do` wrapper 删除（语言自洽性，sprint 规划 `sprint-0.34.27-do-removal.md`）
+
+- **AST**：删除 `Stmt::Do(Block)`（ast.rs）——`do { X }` ≡ 裸 block `{ X }`（ir/lower.rs 同路径 Lexical Scope + 裸 block 是表达式），无表达力损失。
+- **关键字**：`do` 移出关键字表（keywords.rs `"do" => TokenKind::Do` 删除）→ 映射 **81→80，达成 0.1.4 ≤80 硬关键字目标**（golden §1.4）。`do` 现 tokenize 为普通 Ident。
+- **解析/**：parse_stmt.rs `do { }` 语句分支删除；token.rs `TokenKind::Do` variant 删除；parser/helpers、pattern、parse_expr 的 TokenKind::Do 分类 arm 清理。
+- **消费点清扫**（~28 点/15 文件）：cfg/ir lowering、resolved（kind_name stmt.do→block）、checker（borrow/func/check_stmt）、lint、loader/flow、codegen（block/func + **compile.rs transition do-unwrap 逻辑简化为 `t.body` 直接取块**——该 unwrap 代码本身印证了 `{ do { X } }` ≡ `{ X }`）、bytecode（Do arm 与 Block arm 逐字节一致，删除零风险）、verifier（Do arm 删除，顶层 Return/Expr/Let/If arm 天然接管）。
+- **语料迁移**：24 real_world（84 处）+ flow_features（203 处）+ resolved/cfg/ir/audit/actors/codegen_e2e/diagnostic 测试全部展开。`{ do { X } }` → `{ X }`（transition body 扁平化）；普通函数内 do 块 → 裸块语句 `{ X }`。codegen 的 transition 返回值依赖实现体扁平，嵌套 block 会 SIGSEGV——已全部消除。
+- **负测试**：`flow_do_keyword_rejected`（单行/多行 transition + func 三场景）——`do { }` 现被 checker 以「未定义类型 do 的结构体构造」拒绝（do 是普通 Ident）。
+- **文档同步**：spec §6.7 实施注记 + :518 示例改裸 return；syntax-reference.golden + syntax-reference.md（EBNF 删 do 行、关键字表删 do、差异表 81→80）；golden-document §1.4 达成 ≤80 标记 + §1.3/§10 Phase F。
+- **测试**：4597 lib / 13 real_world / 28 cli / 8 ignored（不变）；clippy + fmt 干净。
+
 ### 0.34.24 审计战役（四份 audit-{codegen,flow,type,syntax} 报告驱动，原始报告存 /tmp 已被系统清理，以下条目为唯一留存记录）
 
 **CRITICAL 全部闭环**：

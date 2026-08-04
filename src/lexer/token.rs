@@ -84,7 +84,6 @@ pub enum TokenKind {
     Persistent,
     View,
     Mutate,
-    Do,
     /// Session type declaration: `session Name = !T . ?U . end`
     Session,
     /// Session dual: `dual(S)` — dual of a session type
@@ -234,7 +233,6 @@ impl fmt::Display for TokenKind {
             TokenKind::Persistent => "persistent",
             TokenKind::View => "view",
             TokenKind::Mutate => "mutate",
-            TokenKind::Do => "do",
             TokenKind::Session => "session",
             TokenKind::Dual => "dual",
             TokenKind::End => "end",
@@ -384,7 +382,6 @@ impl TokenKind {
             TokenKind::Persistent => "persistent",
             TokenKind::View => "view",
             TokenKind::Mutate => "mutate",
-            TokenKind::Do => "do",
             TokenKind::Session => "session",
             TokenKind::Dual => "dual",
             TokenKind::End => "end",

@@ -10,18 +10,10 @@ flow Service {
     state Active { name: string, uptime: i32 }
     state Recovering { name: string, uptime: i32 }
 
-    transition launch(Config) -> Active {
-        do { return Active { name: self.name, uptime: 0 } }
-    }
-    transition tick(Active) -> Active {
-        do { return Active { name: self.name, uptime: self.uptime + 1 } }
-    }
-    transition crash(Active) -> Recovering {
-        do { return Recovering { name: self.name, uptime: self.uptime } }
-    }
-    transition restart(Recovering) -> Active {
-        do { return Active { name: self.name, uptime: 0 } }
-    }
+    transition launch(Config) -> Active { return Active { name: self.name, uptime: 0 } }
+    transition tick(Active) -> Active { return Active { name: self.name, uptime: self.uptime + 1 } }
+    transition crash(Active) -> Recovering { return Recovering { name: self.name, uptime: self.uptime } }
+    transition restart(Recovering) -> Active { return Active { name: self.name, uptime: 0 } }
 }
 
 func main() -> i32 {

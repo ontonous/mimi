@@ -2130,12 +2130,10 @@ fn e2e_valgrind_fault_return_heap_cleanup() {
 flow Calc {
     state S { v: i32 }
     transition go(S, d: i32) -> S | Fault {
-        do {
-            let s = "hello" + " " + "world"
-            let mut lst = [1, 2, 3]
-            push(lst, 4)
-            return S { v: self.v / d }
-        }
+        let s = "hello" + " " + "world"
+        let mut lst = [1, 2, 3]
+        push(lst, 4)
+        return S { v: self.v / d }
     }
 }
 func main() -> i32 {

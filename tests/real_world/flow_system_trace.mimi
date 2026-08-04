@@ -9,24 +9,16 @@ flow Worker {
     state Idle { id: string }
     state Busy { id: string, task: string }
 
-    transition assign(Idle, task_name: string) -> Busy {
-        do { return Busy { id: self.id, task: task_name } }
-    }
-    transition complete(Busy) -> Idle {
-        do { return Idle { id: self.id } }
-    }
+    transition assign(Idle, task_name: string) -> Busy { return Busy { id: self.id, task: task_name } }
+    transition complete(Busy) -> Idle { return Idle { id: self.id } }
 }
 
 flow Scheduler {
     state Waiting { queue: i32 }
     state Dispatching { queue: i32 }
 
-    transition dispatch(Waiting) -> Dispatching {
-        do { return Dispatching { queue: self.queue } }
-    }
-    transition done(Dispatching) -> Waiting {
-        do { return Waiting { queue: self.queue } }
-    }
+    transition dispatch(Waiting) -> Dispatching { return Dispatching { queue: self.queue } }
+    transition done(Dispatching) -> Waiting { return Waiting { queue: self.queue } }
 }
 
 func main() -> i32 {

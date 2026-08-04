@@ -472,7 +472,6 @@ fn collect_nested_function_syntax<'a>(
             | Stmt::Unsafe(body)
             | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
-            | Stmt::Do(body)
             | Stmt::Parasteps(body)
             | Stmt::Alloc { body, .. }
             | Stmt::Pinned { body, .. } => collect_nested_function_syntax(body, owner, out),
@@ -972,7 +971,7 @@ impl BodyLowerer<'_> {
                     body: lowered_body?,
                 }
             }
-            Stmt::Block(body) | Stmt::Do(body) => ResolvedStmtKind::Scope {
+            Stmt::Block(body) => ResolvedStmtKind::Scope {
                 kind: super::ResolvedScopeKind::Lexical,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
@@ -6501,7 +6500,7 @@ mod tests {
     #[test]
     fn transition_call_closes_source_overload_and_parameter_identities() {
         let file = parse(
-            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { do { return Value { v: self.v + amount } } } }\nfunc advance(current: Zero) -> Value { Calc::add(current, amount = 5) }",
+            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { { return Value { v: self.v + amount } } } }\nfunc advance(current: Zero) -> Value { Calc::add(current, amount = 5) }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let transition_owner = NodeId("transition:Calc::add::Zero".into());
@@ -6538,7 +6537,7 @@ mod tests {
     #[test]
     fn flow_state_records_share_canonical_payload_field_facts() {
         let file = parse(
-            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { do { return Value { v: self.v + amount } } } }\nfunc main() -> i32 { let current = Zero { v: 10 }; let next = Calc::add(current, 5); next.v }",
+            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { { return Value { v: self.v + amount } } } }\nfunc main() -> i32 { let current = Zero { v: 10 }; let next = Calc::add(current, 5); next.v }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let state = &program.flow("Calc").expect("flow").states["Zero"];
@@ -6585,7 +6584,7 @@ mod tests {
     #[test]
     fn implemented_transition_body_retains_typed_self_and_payload_construction() {
         let file = parse(
-            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { do { return Value { v: self.v + amount } } } }\nfunc main() -> i32 { 0 }",
+            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { { return Value { v: self.v + amount } } } }\nfunc main() -> i32 { 0 }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let bodies = lower_checked_transition_bodies(&file, &program).expect("lower transition");
@@ -6967,7 +6966,7 @@ mod tests {
     fn checked_program_owns_complete_callable_bodies_after_surface_drop() {
         let program = {
             let file = parse(
-                "flow Calc { state Zero transition stop(Zero) -> Zero { do { return Zero } } }\nactor Counter { func value() -> i32 { 1 } }\nfunc main() -> i32 { 0 }",
+                "flow Calc { state Zero transition stop(Zero) -> Zero { { return Zero } } }\nactor Counter { func value() -> i32 { 1 } }\nfunc main() -> i32 { 0 }",
             );
             crate::core::check_program(&file).expect("check")
         };

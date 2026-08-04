@@ -2992,7 +2992,6 @@ fn collect_nested_function_records(
             | Stmt::Unsafe(body)
             | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
-            | Stmt::Do(body)
             | Stmt::Parasteps(body)
             | Stmt::Defer(body)
             | Stmt::Alloc { body, .. }
@@ -4559,7 +4558,6 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::Defer(_) => "defer".into(),
         Stmt::SharedLet { name, .. } => format!("shared-let:{name}"),
         Stmt::OnFailure(_) => "on-failure".into(),
-        Stmt::Do(_) => "do".into(),
         Stmt::Pinned { var, .. } => format!("pinned:{}", var.as_deref().unwrap_or("_")),
         Stmt::Parasteps(_) => "parasteps".into(),
         Stmt::MmsBlock { content, .. } => format!("mms:{:016x}", stable_text_hash(content)),
@@ -4598,7 +4596,6 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::Defer(_) => "stmt.defer",
         Stmt::SharedLet { .. } => "stmt.shared_let",
         Stmt::OnFailure(_) => "stmt.on_failure",
-        Stmt::Do(_) => "stmt.do",
         Stmt::Pinned { .. } => "stmt.pinned",
         Stmt::Parasteps(_) => "stmt.parasteps",
         Stmt::MmsBlock { .. } => "stmt.mms",
@@ -4908,7 +4905,6 @@ fn collect_stmt_meta(
         | Stmt::Unsafe(body)
         | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
-        | Stmt::Do(body)
         | Stmt::Parasteps(body)
         | Stmt::Defer(body) => collect_block_meta(
             body,
@@ -6664,7 +6660,6 @@ fn collect_stmt_call_sites(
         | Stmt::Unsafe(body)
         | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
-        | Stmt::Do(body)
         | Stmt::Parasteps(body)
         | Stmt::Defer(body) => {
             collect_block_call_sites(

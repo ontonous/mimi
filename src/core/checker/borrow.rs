@@ -225,11 +225,6 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_stmt(s, uses);
                 }
             }
-            Stmt::Do(body) => {
-                for s in body {
-                    Self::collect_uses_in_stmt(s, uses);
-                }
-            }
             Stmt::Pinned { expr, body, .. } => {
                 Self::collect_uses_in_expr(expr, uses);
                 for s in body {

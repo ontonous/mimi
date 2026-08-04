@@ -1387,16 +1387,6 @@ impl BytecodeCompiler {
                     fc.on_failure_scopes_mut().push(block.clone());
                 }
 
-                Stmt::Do(block) => {
-                    // Do block — transition implementation body.
-                    fc.push_scope();
-                    let result = self.compile_block(fc, block)?;
-                    fc.pop_scope();
-                    if is_last {
-                        last_reg = result;
-                    }
-                }
-
                 Stmt::Parasteps(block) => {
                     // Parallel steps — compile the block.
                     // Parallel execution semantics handled at runtime.

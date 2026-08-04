@@ -166,11 +166,6 @@ impl<'a> Checker<'a> {
             | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis
             | Stmt::Pinned { .. } => {}
-            Stmt::Do(body) => {
-                for s in body {
-                    self.check_stmt_parasteps_safe(s, scopes);
-                }
-            }
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
     }
@@ -301,11 +296,6 @@ impl<'a> Checker<'a> {
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis => {}
-            Stmt::Do(body) => {
-                for s in body {
-                    self.collect_shared_writes_in_stmt(s, scopes, writes);
-                }
-            }
             Stmt::Pinned { expr, body, .. } => {
                 self.collect_shared_writes_in_expr(expr, scopes, writes);
                 for s in body {
@@ -1752,9 +1742,6 @@ impl<'a> Checker<'a> {
                 self.mutate_params = outer_mutate;
                 self.end_callable(previous_owner);
                 self.generic_scope.truncate(generic_scope_len);
-            }
-            Stmt::Do(body) => {
-                self.check_block(body, ret, scopes);
             }
             Stmt::Pinned {
                 expr, var, body, ..
