@@ -1221,6 +1221,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             if is_custom_enum {
                                 return self.emit_custom_enum_ctor(name, call, expression, frame);
                             }
+                            // 0.34.30 (dx-backlog #11): build Option/Result values
+                            // in the *resolved* layout ({bool, ok_llvm, i64_err})
+                            // instead of the legacy compile_constructor. Legacy
+                            // compile_err_constructor hard-codes the ok-pad as
+                            // i64 outside list-packing, so Err(..) yields
+                            // {bool, i64, i64} while Ok(1.5) yields {bool, double,
+                            // i64} — if/else branch merging then fails on the
+                            // numeric conversion and the whole trait-impl
+                            // function falls back to legacy.
                             let ctor_args: Vec<BasicValueEnum<'ctx>> = call
                                 .arguments
                                 .iter()
@@ -1229,7 +1238,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     self.apply_conversion(value, &arg.conversion)
                                 })
                                 .collect::<Result<_, _>>()?;
-                            return self.generator.compile_constructor(name, ctor_args);
+                            return self.emit_resolved_optional_ctor(
+                                name,
+                                ctor_args,
+                                &expression.ty,
+                            );
                         }
                         // 0.32.17: Option/Result predicate and accessor methods.
                         if matches!(
@@ -2692,6 +2705,190 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         target: BasicTypeEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         self.numeric_convert(value, target)
+    }
+
+    /// 0.34.30 (dx-backlog #11): construct `Some`/`None`/`Ok`/`Err` in the
+    /// resolved layout ({bool, ok_llvm, i64_err}) derived from the target
+    /// `expression.ty`. This keeps Ok(1.5) ({bool, double, i64}) and Err(..)
+    /// ({bool, double, i64}) layout-consistent inside if/else merges, which the
+    /// legacy compile_constructor (non-list path, ok-pad hard-coded to i64)
+    /// breaks for non-i64 ok payloads such as `Result<f64, string>`.
+    fn emit_resolved_optional_ctor(
+        &mut self,
+        name: &str,
+        args: Vec<BasicValueEnum<'ctx>>,
+        ty: &ResolvedTypeId,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let BasicTypeEnum::StructType(sty) = self.lower_type(ty)? else {
+            return Err(CompileError::Unsupported(format!(
+                "Option/Result constructor for '{name}' did not lower to an LLVM struct"
+            )));
+        };
+        let bool_ty = self.generator.context.bool_type();
+        let alloca = self.generator.build_alloca(sty, "opt_result_ctor")?;
+        self.generator
+            .build_store(alloca, BasicValueEnum::StructValue(sty.const_zero()))?;
+        let disc_gep = self
+            .generator
+            .builder
+            .build_struct_gep(sty, alloca, 0, "ctor_disc")
+            .map_err(|e| CompileError::LlvmError(format!("ctor disc gep: {e}")))?;
+        let slot1_ty = sty.get_field_type_at_index(1).ok_or_else(|| {
+            CompileError::LlvmError("Option/Result struct has no payload slot".into())
+        })?;
+        match name {
+            "None" => {
+                self.generator
+                    .build_store(disc_gep, bool_ty.const_int(0, false))?;
+            }
+            "Ok" | "Some" => {
+                let payload = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| CompileError::LlvmError(format!("{name} expects 1 argument")))?;
+                self.generator
+                    .build_store(disc_gep, bool_ty.const_int(1, false))?;
+                let slot = self.numeric_convert(payload, slot1_ty)?;
+                let slot_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(sty, alloca, 1, "ctor_payload")
+                    .map_err(|e| CompileError::LlvmError(format!("ctor payload gep: {e}")))?;
+                self.generator.build_store(slot_gep, slot)?;
+            }
+            "Err" => {
+                let payload = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| CompileError::LlvmError("Err expects 1 argument".into()))?;
+                self.generator
+                    .build_store(disc_gep, bool_ty.const_int(0, false))?;
+                // err value → i64 handle, mirroring the legacy
+                // compile_err_constructor non-list path: ints widen/truncate,
+                // pointers ptrtoint, strings heap-pack as {ptr,len} then
+                // ptrtoint (the `?` operator reconstructs via inttoptr+GEP),
+                // enums store their i32 tag. Self-contained so the resolved
+                // ctor never depends on legacy struct slot extraction.
+                let err_handle = self.resolved_err_to_handle(payload)?;
+                let err_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(sty, alloca, 2, "ctor_err")
+                    .map_err(|e| CompileError::LlvmError(format!("ctor err gep: {e}")))?;
+                self.generator.build_store(err_gep, err_handle)?;
+            }
+            _ => {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved optional ctor '{name}'"
+                )))
+            }
+        }
+        self.generator
+            .build_load(BasicTypeEnum::StructType(sty), alloca, "ctor_val")
+    }
+
+    /// 0.34.30: err payload → i64 handle, mirroring the legacy
+    /// `compile_err_constructor` non-list path so the `?` operator's
+    /// inttoptr+GEP reconstruction stays ABI-compatible.
+    fn resolved_err_to_handle(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        match value {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                let widened = if bw == 1 {
+                    self.generator
+                        .builder
+                        .build_int_z_extend(iv, i64_ty, "err_bool_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("err bool zext: {e}")))?
+                } else if bw < 64 {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(iv, i64_ty, "err_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("err sext: {e}")))?
+                } else if bw > 64 {
+                    self.generator
+                        .builder
+                        .build_int_truncate(iv, i64_ty, "err_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("err trunc: {e}")))?
+                } else {
+                    iv
+                };
+                Ok(BasicValueEnum::IntValue(widened))
+            }
+            BasicValueEnum::PointerValue(pv) => self
+                .generator
+                .build_ptr_to_int(pv, i64_ty, "err_to_i64")
+                .map(BasicValueEnum::IntValue),
+            BasicValueEnum::StructValue(sv) => {
+                let fields = sv.get_type().get_field_types();
+                let is_mimi_string = fields.len() == 2
+                    && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if is_mimi_string {
+                    // Heap-pack {ptr, len} so `?` (inttoptr + GEP 0/1) can
+                    // reconstruct the full string.
+                    let i8_ptr = self
+                        .generator
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default());
+                    let string_ty = self.generator.context.struct_type(
+                        &[
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    );
+                    let alloc_size = i64_ty.const_int(16, false);
+                    let heap_ptr = self
+                        .generator
+                        .malloc_or_abort(alloc_size, "err_str_malloc")?;
+                    let str_ptr_gep = self
+                        .generator
+                        .builder
+                        .build_struct_gep(string_ty, heap_ptr, 0, "err_str_ptr_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("err str ptr gep: {e}")))?;
+                    self.generator.build_store(
+                        str_ptr_gep,
+                        self.generator
+                            .build_extract_value(sv.into(), 0, "err_str_ptr")?,
+                    )?;
+                    let str_len_gep = self
+                        .generator
+                        .builder
+                        .build_struct_gep(string_ty, heap_ptr, 1, "err_str_len_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("err str len gep: {e}")))?;
+                    self.generator.build_store(
+                        str_len_gep,
+                        self.generator
+                            .build_extract_value(sv.into(), 1, "err_str_len")?,
+                    )?;
+                    Ok(BasicValueEnum::IntValue(self.generator.build_ptr_to_int(
+                        heap_ptr,
+                        i64_ty,
+                        "err_str_heap_i64",
+                    )?))
+                } else {
+                    // Custom enum: store the i32 tag in the error slot.
+                    let tag = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "enum_tag")?
+                        .into_int_value();
+                    Ok(BasicValueEnum::IntValue(
+                        self.generator
+                            .builder
+                            .build_int_cast(tag, i64_ty, "err_tag_ext")
+                            .map_err(|e| CompileError::LlvmError(format!("err tag ext: {e}")))?,
+                    ))
+                }
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "resolved Err payload type {:?} cannot become an i64 handle",
+                value.get_type()
+            ))),
+        }
     }
 
     /// Coerce a value to i64 for list element storage. Handles int
