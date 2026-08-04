@@ -50,6 +50,14 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
             ensures: None,
             variadic: false,
             no_panic: false,
+            // Audit fix 2026-08-05 (full audit §12): exported functions are
+            // Mimi-implemented callees; the SD-3 `#[errno]` attribute is
+            // import-only — the parser rejects it on `extern "C" func`
+            // definitions ("attribute `errno` is only supported on extern
+            // blocks (SD-3)", parser/top_level.rs), so there is no source
+            // flag to propagate here. Export adapters therefore carry
+            // `false` by construction; the real errno propagation happens in
+            // `crate::emit::resolved_extern_funcs` for imported symbols.
             returns_errno: false,
         };
         extern_funcs.push(extern_func);

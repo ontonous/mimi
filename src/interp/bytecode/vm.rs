@@ -35,13 +35,25 @@ struct Frame {
     /// Used by wrap_ok to distinguish `?` Err (rejection) from a
     /// final-expression Err (success producing an Err value).
     early_return: bool,
-    /// When set, a fault handler's instruction index. If a builtin call
-    /// fails or `?` triggers RetEarly, execution jumps here instead of
-    /// propagating the error. Set by Op::SetFaultPc, cleared by ClearFaultPc.
-    fault_pc: Option<usize>,
-    /// When fault_pc intercepts RetEarly, saves the error-value register
+    /// Stack of active fault-handler instruction indices (audit fix 2026-08-05:
+    /// was a single `fault_pc` slot — nested `on failure` scopes clobbered each
+    /// other and the inner scope's ClearFaultPc wiped the outer handler).
+    /// Op::SetFaultPc pushes (at the `on failure` statement's execution point),
+    /// Op::ClearFaultPc pops (matching pair on normal scope exit). When a
+    /// builtin/extern fails or `?` triggers RetEarly, the TOP handler is popped
+    /// and execution jumps there; after its compensation, FaultRetEarly cascades
+    /// to the next handler on the stack, so all enclosing compensations run in
+    /// LIFO order (codegen `compile_compensations` parity).
+    fault_handlers: Vec<usize>,
+    /// When fault_handlers intercepts RetEarly, saves the error-value register
     /// so the fault handler can re-emit RetEarly after compensations.
     fault_reg: Option<Reg>,
+    /// Stashed InterpError when a builtin/extern call failure is intercepted by
+    /// a fault handler (audit fix 2026-08-05: the old code jumped to the handler
+    /// without saving the error, so FaultRetEarly died with "no fault_reg set"
+    /// and the original E08xx was lost). FaultRetEarly re-raises it after the
+    /// compensation cascade completes.
+    pending_fault: Option<InterpError>,
     /// Caller registers to write back `mut` parameter values to after the
     /// callee returns. One entry per callee mut_param_indices entry, in the
     /// same order (set by Op::MutateSetup).
@@ -396,7 +408,6 @@ impl<'a> BytecodeVM<'a> {
                 "recursion limit exceeded (possible infinite recursion)",
             ));
         }
-        self.depth += 1;
 
         let proto = &self.program.functions[func_idx as usize];
         let reg_count = proto.register_count as usize;
@@ -414,6 +425,13 @@ impl<'a> BytecodeVM<'a> {
         if self.verify_contracts && proto.has_requires {
             self.check_requires(func_idx, &args)?;
         }
+
+        // Audit fix 2026-08-05 (#7): increment the recursion depth only after
+        // every early-return path above (arity mismatch, requires violation).
+        // Previously `depth += 1` ran before these checks and each failed push
+        // leaked one depth unit, so ~768 recoverable contract/arity failures
+        // produced a spurious "recursion limit exceeded".
+        self.depth += 1;
 
         // Snapshot params for old(x) in ensures (before args is consumed).
         let old_snapshots = if self.verify_contracts && proto.has_ensures {
@@ -446,8 +464,9 @@ impl<'a> BytecodeVM<'a> {
             wrap_ok: false,
             flow_source_state: None,
             early_return: false,
-            fault_pc: None,
+            fault_handlers: Vec::new(),
             fault_reg: None,
+            pending_fault: None,
             mutate_writebacks: None,
             mutate_field_writebacks: None,
             flow_tx: None,
@@ -568,131 +587,152 @@ impl<'a> BytecodeVM<'a> {
                 // Single frame borrow per op: reads + write happen inside one
                 // last_mut region to cut per-op boundary checks.
                 Op::AddInt { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
-                        (Value::Int(a), Value::Int(b)) => {
-                            Value::Int(a.checked_add(*b).ok_or_else(|| {
+                    // Read operands immutably so the float fallback can route
+                    // through the ieee-aware `check_float` (audit fix #11: the
+                    // old hardcoded NaN/Inf trap ignored frame.ieee_depth).
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            frame.regs[ra as usize].clone(),
+                            frame.regs[rb as usize].clone(),
+                        )
+                    };
+                    let result = match (&a, &b) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            Value::Int(x.checked_add(*y).ok_or_else(|| {
                                 InterpError::integer_overflow("integer addition overflow")
                             })?)
                         }
-                        (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
+                        (Value::String(x), Value::String(y)) => Value::String(format!("{x}{y}")),
                         _ => {
-                            let af = value_to_f64(&frame.regs[ra as usize])?;
-                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            let af = value_to_f64(&a)?;
+                            let bf = value_to_f64(&b)?;
                             let r = af + bf;
-                            if r.is_nan() || r.is_infinite() {
-                                return Err(InterpError::float_error(
-                                    "invalid floating-point result from +",
-                                ));
-                            }
+                            self.check_float(r, "+")?;
                             Value::Float(r)
                         }
                     };
-                    frame.regs[rd as usize] = result;
+                    self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::SubInt { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
-                        (Value::Int(a), Value::Int(b)) => {
-                            Value::Int(a.checked_sub(*b).ok_or_else(|| {
+                    // Audit fix #11: ieee-aware float fallback (see AddInt).
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            frame.regs[ra as usize].clone(),
+                            frame.regs[rb as usize].clone(),
+                        )
+                    };
+                    let result = match (&a, &b) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            Value::Int(x.checked_sub(*y).ok_or_else(|| {
                                 InterpError::integer_overflow("integer subtraction overflow")
                             })?)
                         }
                         _ => {
-                            let af = value_to_f64(&frame.regs[ra as usize])?;
-                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            let af = value_to_f64(&a)?;
+                            let bf = value_to_f64(&b)?;
                             let r = af - bf;
-                            if r.is_nan() || r.is_infinite() {
-                                return Err(InterpError::float_error(
-                                    "invalid floating-point result from -",
-                                ));
-                            }
+                            self.check_float(r, "-")?;
                             Value::Float(r)
                         }
                     };
-                    frame.regs[rd as usize] = result;
+                    self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::MulInt { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
-                        (Value::Int(a), Value::Int(b)) => {
-                            Value::Int(a.checked_mul(*b).ok_or_else(|| {
+                    // Audit fix #11: ieee-aware float fallback (see AddInt).
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            frame.regs[ra as usize].clone(),
+                            frame.regs[rb as usize].clone(),
+                        )
+                    };
+                    let result = match (&a, &b) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            Value::Int(x.checked_mul(*y).ok_or_else(|| {
                                 InterpError::integer_overflow("integer multiplication overflow")
                             })?)
                         }
                         _ => {
-                            let af = value_to_f64(&frame.regs[ra as usize])?;
-                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            let af = value_to_f64(&a)?;
+                            let bf = value_to_f64(&b)?;
                             let r = af * bf;
-                            if r.is_nan() || r.is_infinite() {
-                                return Err(InterpError::float_error(
-                                    "invalid floating-point result from *",
-                                ));
-                            }
+                            self.check_float(r, "*")?;
                             Value::Float(r)
                         }
                     };
-                    frame.regs[rd as usize] = result;
+                    self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::DivInt { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
-                        (Value::Int(a), Value::Int(b)) => {
-                            if *b == 0 {
+                    // Audit fix #11: ieee-aware float fallback (see AddInt). The
+                    // float zero-divisor trap is suspended inside `ieee_float { }`
+                    // (IEEE 754 x/0.0 = ±Inf), mirroring Op::DivFloat.
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            frame.regs[ra as usize].clone(),
+                            frame.regs[rb as usize].clone(),
+                        )
+                    };
+                    let result = match (&a, &b) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            if *y == 0 {
                                 return Err(InterpError::div_by_zero());
                             }
-                            Value::Int(a.checked_div(*b).ok_or_else(|| {
+                            Value::Int(x.checked_div(*y).ok_or_else(|| {
                                 InterpError::integer_overflow(
                                     "integer division overflow (MIN / -1)",
                                 )
                             })?)
                         }
                         _ => {
-                            let af = value_to_f64(&frame.regs[ra as usize])?;
-                            let bf = value_to_f64(&frame.regs[rb as usize])?;
-                            if bf == 0.0 {
+                            let af = value_to_f64(&a)?;
+                            let bf = value_to_f64(&b)?;
+                            if bf == 0.0 && self.cur_frame().ieee_depth == 0 {
                                 return Err(InterpError::div_by_zero());
                             }
                             let r = af / bf;
-                            if r.is_nan() || r.is_infinite() {
-                                return Err(InterpError::float_error(
-                                    "invalid floating-point result from /",
-                                ));
-                            }
+                            self.check_float(r, "/")?;
                             Value::Float(r)
                         }
                     };
-                    frame.regs[rd as usize] = result;
+                    self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::ModInt { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
-                        (Value::Int(a), Value::Int(b)) => {
-                            if *b == 0 {
+                    // Audit fix #11: ieee-aware float fallback (see AddInt). The
+                    // float zero-divisor trap is suspended inside `ieee_float { }`
+                    // (IEEE 754 x % 0.0 = NaN), mirroring the DivFloat ruling.
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            frame.regs[ra as usize].clone(),
+                            frame.regs[rb as usize].clone(),
+                        )
+                    };
+                    let result = match (&a, &b) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            if *y == 0 {
                                 return Err(InterpError::div_by_zero());
                             }
-                            Value::Int(a.checked_rem(*b).ok_or_else(|| {
+                            Value::Int(x.checked_rem(*y).ok_or_else(|| {
                                 InterpError::integer_overflow(
                                     "integer division overflow (MIN / -1)",
                                 )
                             })?)
                         }
                         _ => {
-                            let a = value_to_f64(&frame.regs[ra as usize])?;
-                            let b = value_to_f64(&frame.regs[rb as usize])?;
-                            if b == 0.0 {
+                            let af = value_to_f64(&a)?;
+                            let bf = value_to_f64(&b)?;
+                            if bf == 0.0 && self.cur_frame().ieee_depth == 0 {
                                 return Err(InterpError::div_by_zero());
                             }
-                            let r = a % b;
-                            if r.is_nan() || r.is_infinite() {
-                                return Err(InterpError::float_error(
-                                    "invalid floating-point result from %",
-                                ));
-                            }
+                            let r = af % bf;
+                            self.check_float(r, "%")?;
                             Value::Float(r)
                         }
                     };
-                    frame.regs[rd as usize] = result;
+                    self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::NegInt { rd, ra } => {
                     let frame = self.cur_frame_mut();
@@ -1334,10 +1374,17 @@ impl<'a> BytecodeVM<'a> {
                     match self.call_builtin(builtin, &args) {
                         Ok(v) => self.set_reg(rd, v),
                         Err(e) => {
+                            // Audit fix #1: stash the error BEFORE jumping to the
+                            // handler — the old code jumped without saving it, so
+                            // FaultRetEarly died with "no fault_reg set" and the
+                            // original E08xx was lost. Audit fix #2: pop the TOP
+                            // handler from the per-frame stack (nested scopes).
                             if let Some(handler_pc) =
-                                self.stack.last_mut().and_then(|f| f.fault_pc.take())
+                                self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
                             {
-                                self.cur_frame_mut().pc = handler_pc;
+                                let frame = self.cur_frame_mut();
+                                frame.pending_fault = Some(e);
+                                frame.pc = handler_pc;
                             } else {
                                 return Err(e);
                             }
@@ -1357,10 +1404,14 @@ impl<'a> BytecodeVM<'a> {
                     match result {
                         Ok(v) => self.set_reg(rd, v),
                         Err(e) => {
+                            // Audit fixes #1/#2: stash the error and pop the top
+                            // handler (see CallBuiltin Err branch).
                             if let Some(handler_pc) =
-                                self.stack.last_mut().and_then(|f| f.fault_pc.take())
+                                self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
                             {
-                                self.cur_frame_mut().pc = handler_pc;
+                                let frame = self.cur_frame_mut();
+                                frame.pending_fault = Some(e);
+                                frame.pc = handler_pc;
                             } else {
                                 return Err(e);
                             }
@@ -1671,8 +1722,12 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::QuoteAst(Box::new(node)));
                 }
                 Op::RetEarly { ra } => {
-                    // Check fault handler before returning.
-                    if let Some(handler_pc) = self.stack.last_mut().and_then(|f| f.fault_pc.take())
+                    // Check fault handler before returning. Audit fix #2: pop the
+                    // TOP handler from the per-frame stack; after its compensation
+                    // runs, FaultRetEarly cascades to the remaining handlers so
+                    // every enclosing `on failure` executes in LIFO order.
+                    if let Some(handler_pc) =
+                        self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
                     {
                         if let Some(frame) = self.stack.last_mut() {
                             frame.fault_reg = Some(ra);
@@ -1730,6 +1785,26 @@ impl<'a> BytecodeVM<'a> {
                             )))
                         }
                     }
+                }
+                Op::ListPop { rd, ra } => {
+                    // Ruling (a), audit fix #14: pop is IN-PLACE with write-back.
+                    // Mutate the caller's list register directly (the register
+                    // holds the bound list value), remove + return the last
+                    // element, and trap on empty. The builtin `pop` clones and
+                    // cannot write back; the compiler emits this op for
+                    // `pop(var)` on a known local variable.
+                    let popped = match self.get_reg_mut(ra) {
+                        Value::List(l) => l
+                            .pop()
+                            .ok_or_else(|| InterpError::new("pop from empty list"))?,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "pop: expected List, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, popped);
                 }
                 Op::ListGet { rd, ra, rb } => {
                     let idx_raw = self.get_int(rb)?;
@@ -2947,25 +3022,61 @@ impl<'a> BytecodeVM<'a> {
                 }
 
                 // ── Fault handling ──────────────────────────────
+                // Audit fix #2: per-frame STACK of handler PCs (was a single slot —
+                // nested `on failure` clobbered each other and the inner scope's
+                // ClearFaultPc wiped the outer handler). The compiler emits
+                // SetFaultPc at the `on failure` statement's execution point and a
+                // matching ClearFaultPc per handler on normal scope exit, so a
+                // handler never compensates faults from code ABOVE its declaration.
                 Op::SetFaultPc { handler_pc } => {
                     if let Some(frame) = self.stack.last_mut() {
-                        frame.fault_pc = Some(handler_pc as usize);
+                        frame.fault_handlers.push(handler_pc as usize);
                     }
                 }
                 Op::ClearFaultPc => {
                     if let Some(frame) = self.stack.last_mut() {
-                        frame.fault_pc = None;
+                        frame.fault_handlers.pop();
                     }
                 }
                 Op::FaultRetEarly => {
+                    // End of a compensation block. Two propagation modes:
+                    // - fault_reg set: the fault was a `?` RetEarly carrying an
+                    //   error VALUE in a register — cascade through any remaining
+                    //   enclosing handlers, then re-emit the early return.
+                    // - pending_fault set (audit fix #1): the fault was a
+                    //   builtin/extern InterpError — cascade through remaining
+                    //   handlers, then re-raise the stashed error (the old code
+                    //   died here with "no fault_reg set", losing the E08xx).
                     let ra = self.stack.last().and_then(|f| f.fault_reg);
                     if let Some(ra) = ra {
-                        if let Some(frame) = self.stack.last_mut() {
-                            frame.early_return = true;
+                        // Cascade: run the next enclosing handler first.
+                        if let Some(next_pc) =
+                            self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
+                        {
+                            self.cur_frame_mut().pc = next_pc;
+                        } else {
+                            if let Some(frame) = self.stack.last_mut() {
+                                frame.early_return = true;
+                            }
+                            let v = self.do_return(ra, true, stop)?;
+                            if let Some(v) = v {
+                                return Ok(v);
+                            }
                         }
-                        let v = self.do_return(ra, true, stop)?;
-                        if let Some(v) = v {
-                            return Ok(v);
+                    } else if self.stack.last().is_some_and(|f| f.pending_fault.is_some()) {
+                        // Cascade: run the next enclosing handler first.
+                        if let Some(next_pc) =
+                            self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
+                        {
+                            self.cur_frame_mut().pc = next_pc;
+                        } else {
+                            // All compensations ran — re-raise the original error.
+                            let e = self
+                                .stack
+                                .last_mut()
+                                .and_then(|f| f.pending_fault.take())
+                                .expect("checked pending_fault.is_some() above");
+                            return Err(e);
                         }
                     } else {
                         return Err(InterpError::new("FaultRetEarly: no fault_reg set"));
@@ -3219,7 +3330,7 @@ impl<'a> BytecodeVM<'a> {
     fn check_ensures(
         &mut self,
         func_idx: FuncIdx,
-        _args: &[Value],
+        args: &[Value],
         old_snapshots: &[Value],
         result: &Value,
     ) -> Result<(), InterpError> {
@@ -3229,12 +3340,17 @@ impl<'a> BytecodeVM<'a> {
         }
         let name = proto.name.clone();
         let contract_funcs = proto.ensures_funcs.clone();
-        // Ensures mini-functions take pre-call param snapshots + result.
-        // old(x) compiles to just evaluating x, so we pass old_snapshots
-        // (pre-call values) as the parameter arguments. This ensures old(x)
-        // resolves to the pre-call value even for mut parameters.
-        let mut ensures_args = old_snapshots.to_vec();
+        // Audit fix #12: ensures mini-functions take POST-call param values,
+        // then `result`, then PRE-call snapshots. Plain parameter names bind to
+        // the post-call values (a `mut`/`mutate` param that was incremented in
+        // the body must satisfy `ensures x == old(x) + 1`); `old(x)` compiles to
+        // the dedicated snapshot registers appended after `result` (see
+        // compiler.rs compile_contract_expr). The old code passed the snapshots
+        // as the plain names, so mut-param contracts saw pre-call values and
+        // raised spurious E0808. (For non-mut params post == pre.)
+        let mut ensures_args = args.to_vec();
         ensures_args.push(result.clone());
+        ensures_args.extend(old_snapshots.iter().cloned());
         for cidx in contract_funcs {
             let cond = self.call_function(cidx, &ensures_args)?;
             if !crate::interp::value::is_truthy(&cond) {

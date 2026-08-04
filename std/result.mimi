@@ -19,7 +19,13 @@ impl<T, E> ResultExt<T, E> for Result<T, E> {
     func unwrap_or(default: T) -> T { if self.is_ok() { self.unwrap() } else { default } }
     func expect(msg: string) -> T { self.expect(msg) }
     func map<U>(f: func(T) -> U) -> Result<U, E> {
-        if self.is_ok() { Ok(f(self.unwrap())) } else { self }
+        // Rebuild the Err variant at the target type Result<U, E>: returning
+        // `self` here would produce a Result<T, E> where Result<U, E> is
+        // declared (typing hole).
+        match self {
+            Ok(v) => Ok(f(v))
+            Err(e) => Err(e)
+        }
     }
     func map_err<F>(f: func(E) -> F) -> Result<T, F> { self.map_err(f) }
 }
@@ -51,10 +57,11 @@ pub func expect_result<T, E>(result: Result<T, E>, msg: string) -> T {
 
 // map_result: Applies f to the Ok value, preserving Err.
 pub func map_result<T, E, U>(result: Result<T, E>, f: func(T) -> U) -> Result<U, E> {
-    if result.is_ok() {
-        Ok(f(result.unwrap()))
-    } else {
-        result
+    // Rebuild the Err variant at the target type Result<U, E>: returning
+    // `result` in the Err branch would be a Result<T, E>, not Result<U, E>.
+    match result {
+        Ok(v) => Ok(f(v))
+        Err(e) => Err(e)
     }
 }
 

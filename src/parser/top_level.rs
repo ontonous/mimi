@@ -692,6 +692,17 @@ impl Parser {
     }
 
     fn parse_module(&mut self) -> Result<ModuleDef, ParseError> {
+        // Full-audit 2026-08-05: module nesting recurses via
+        // parse_item_block → parse_item → parse_module with no depth guard
+        // (stack overflow DoS on crafted input). Mirror the parse_expr guard.
+        self.check_depth()?;
+        self.inc_depth();
+        let result = self.parse_module_inner();
+        self.dec_depth();
+        result
+    }
+
+    fn parse_module_inner(&mut self) -> Result<ModuleDef, ParseError> {
         let start_pos = self.pos;
         self.expect_keyword(TokenKind::Module)?;
         let name = self.expect_ident()?;
@@ -1220,7 +1231,23 @@ impl Parser {
                 }
                 TokenKind::Fault => {
                     // v0.31.10: `fault ErrorType` declares a per-Flow typed Fault.
+                    let fault_tok = self.peek().clone();
                     self.advance();
+                    // Full-audit 2026-08-05: a second `fault T` declaration used
+                    // to silently overwrite the first (last-wins). A flow has
+                    // exactly one fault type — surface the duplicate definition
+                    // (E0402) instead of discarding the first declaration.
+                    if fault_type.is_some() {
+                        return Err(ParseError::new(
+                            format!(
+                                "[E0402] duplicate `fault` declaration in flow '{}': a flow has \
+                                 exactly one fault type",
+                                name
+                            ),
+                            fault_tok.line,
+                            fault_tok.col,
+                        ));
+                    }
                     let ty = self.parse_type()?;
                     self.match_semi();
                     fault_type = Some(ty);
@@ -1508,6 +1535,17 @@ impl Parser {
 
     /// Parse a session type expression starting at the current token.
     pub(crate) fn parse_session_type(&mut self) -> Result<SessionType, ParseError> {
+        // Full-audit 2026-08-05: `!T . !T . ... end` chains recurse once per
+        // `.` segment and had no depth guard (stack overflow on crafted
+        // input). Mirror the parse_expr guard.
+        self.check_depth()?;
+        self.inc_depth();
+        let result = self.parse_session_type_inner();
+        self.dec_depth();
+        result
+    }
+
+    fn parse_session_type_inner(&mut self) -> Result<SessionType, ParseError> {
         let start_pos = self.pos;
         // `!T . cont`  or  `?T . cont`  or  `dual(...)`  or  `end`  or  `Name`
         if self.at(&TokenKind::Bang) || self.at(&TokenKind::NotOp) {

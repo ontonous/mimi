@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::diagnostic::Severity;
 use mimi::{lexer, lint, loader};
 
@@ -17,8 +18,28 @@ pub(crate) fn lint_files(files: &[PathBuf], fail_on_warnings: bool) -> Result<()
         let tokens = lexer::Lexer::new(&source)
             .tokenize()
             .map_err(|e| format!("lexer error in {}: {}", path.display(), e))?;
-        let (file, _parse_errors) =
+        let (file, parse_errors) =
             loader::parser_for_path(tokens, path)?.parse_file_with_recovery();
+        // Full audit 2026-08-05 §13: parse errors used to be dropped here,
+        // so lint reported "no issues found" and exited 0 on unparseable
+        // input. Fail closed like `mimi check` (src/main/check.rs): surface
+        // every parse error and exit non-zero. The recovered AST is partial;
+        // linting it as healthy would be a false clean bill.
+        if !parse_errors.is_empty() {
+            let use_color = colors_enabled();
+            let src_ref = Some(source.as_str());
+            let filename = &path.display().to_string();
+            for e in &parse_errors {
+                let formatted = format_diagnostic(&e.to_diagnostic(), src_ref, filename);
+                if use_color {
+                    eprint!("{}", formatted);
+                } else {
+                    eprint!("{}", strip_ansi(&formatted));
+                }
+            }
+            has_errors = true;
+            continue;
+        }
         let result = linter.lint(&file, &source);
 
         for diag in &result.diagnostics {

@@ -242,8 +242,10 @@ pub func sign_float(x: f64) -> f64 {
     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
 }
 
-// factorial: Iterative factorial of n (n >= 0).
+// factorial: Iterative factorial of n; returns -1 for n < 0 or n > 12 (13! exceeds i32::MAX).
 pub func factorial(n: i32) -> i32 {
+    // Mirror the IntMath method guard: 13! = 6,227,020,800 overflows i32.
+    if n < 0 || n > 12 { return -1 }
     let mut fac_acc = 1
     let mut fac_k = 2
     while fac_k <= n {
@@ -415,16 +417,27 @@ pub func round_val(x: f64) -> f64 {
 
 // ---- Number theory ----
 
-// gcd: Greatest common divisor of a and b (Euclidean algorithm).
+// gcd: Greatest common divisor of a and b (Euclidean algorithm); always non-negative.
 pub func gcd(a: i32, b: i32) -> i32 {
-    let mut g_x = a; let mut g_y = b
+    // Abs-normalize so gcd(4, -2) == 2 (not -2): gcd is defined up to sign,
+    // the stdlib convention is the non-negative representative.
+    let mut g_x = abs(a); let mut g_y = abs(b)
     while g_y != 0 { let g_tmp = g_y; g_y = g_x % g_y; g_x = g_tmp }
     g_x
 }
 
-// lcm: Least common multiple of a and b.
+// lcm: Least common multiple of a and b; always non-negative (0 if either is 0).
 pub func lcm(a: i32, b: i32) -> i32 {
-    if a == 0 || b == 0 { 0 } else { a * b / gcd(a, b) }
+    // Overflow-safe identity lcm(a,b) = |a| / gcd(|a|,|b|) * |b|: dividing
+    // before multiplying keeps the intermediate in range (lcm(65536, 65536)
+    // fits in i32 while 65536 * 65536 does not).
+    if a == 0 || b == 0 {
+        0
+    } else {
+        let lcm_a = abs(a)
+        let lcm_b = abs(b)
+        lcm_a / gcd(lcm_a, lcm_b) * lcm_b
+    }
 }
 
 // is_divisible_by: Returns true if n is divisible by d (d != 0).
@@ -542,7 +555,10 @@ pub func random_uniform(lo: f64, hi: f64) -> f64 {
 
 // random_exponential: Sample from Exp(λ) (rate parameter λ > 0).
 // Returns -ln(1 - u) / λ, with u uniform in [0, 1).
+// Returns -1.0 (sentinel, never a valid sample) for λ <= 0.
 pub func random_exponential(lambda: f64) -> f64 {
+    // Guard: λ <= 0 is not a valid rate; dividing by it would trap.
+    if lambda <= 0.0 { return -1.0 }
     let u = random()
     let safe_u = if u < 0.000000000001 { 0.000000000001 } else { u }
     -ln(1.0 - safe_u) / lambda
@@ -638,16 +654,40 @@ pub func try_pow_int(base: i32, exp: i32) -> Result<i32, string> {
         Ok(1)
     } else if base == 0 {
         Ok(0)
+    } else if base == 1 {
+        Ok(1)
+    } else if base == -1 {
+        // +/-1 alternation never overflows; also avoids MIN / -1 below.
+        if exp % 2 == 0 { Ok(1) } else { Ok(-1) }
     } else {
         let mut result = 1
         let mut i = 0
         while i < exp {
-            // Check for overflow before multiplication (base != 0 guaranteed here)
-            if base > 0 && result > 2147483647 / base {
-                return Err("integer overflow")
-            }
-            if base < 0 && result < -2147483648 / base {
-                return Err("integer overflow")
+            // Bounds for result * base in both directions. base is not
+            // 0 or +/-1 here, so MIN / base can never be MIN / -1.
+            if base > 0 {
+                // result stays positive in this branch, but check both
+                // sides of the [MIN, MAX] window anyway.
+                if result > 2147483647 / base {
+                    return Err("integer overflow")
+                }
+                if result < -2147483648 / base {
+                    return Err("integer overflow")
+                }
+            } else if result >= 0 {
+                // Product is non-positive: only the MIN bound can break.
+                // result * base >= MIN  <=>  result <= MIN / base (floor;
+                // truncation of a positive quotient is the floor).
+                if result > -2147483648 / base {
+                    return Err("integer overflow")
+                }
+            } else {
+                // Product is positive: only the MAX bound can break.
+                // result * base <= MAX  <=>  result >= MAX / base (ceil;
+                // truncation of a negative quotient is the ceiling).
+                if result < 2147483647 / base {
+                    return Err("integer overflow")
+                }
             }
             result *= base
             i += 1

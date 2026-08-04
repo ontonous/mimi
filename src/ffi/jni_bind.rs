@@ -36,6 +36,7 @@ impl JniBindGenerator {
         writeln!(out, "#include <stdlib.h>")?;
         writeln!(out, "#include <string.h>")?;
         writeln!(out, "#include <stdint.h>")?;
+        writeln!(out, "#include <stdbool.h>")?;
         writeln!(out)?;
         writeln!(out, "// Mimi runtime")?;
         writeln!(out, "extern void mimi_string_free(char* s);")?;
@@ -155,6 +156,36 @@ impl JniBindGenerator {
         }
         writeln!(out, ") {{")?;
 
+        // Fail closed on unsupported argument types: the checker rejects them,
+        // but runtime-only paths can bypass it. Passing NULL silently (the old
+        // behavior) would report success with garbage data — map to an error.
+        for (i, p) in func.params.iter().enumerate() {
+            if let FfiArgContract::Unsupported(ty) = &contract.args[i] {
+                let jname = sanitize_java_name(&p.name);
+                writeln!(out, "    {{")?;
+                writeln!(
+                    out,
+                    "        jclass mimi_exc = (*env)->FindClass(env, \"java/lang/UnsupportedOperationException\");"
+                )?;
+                writeln!(
+                    out,
+                    "        if (mimi_exc) (*env)->ThrowNew(env, mimi_exc, \"mimi FFI: unsupported argument type '{}' for parameter '{}'\");",
+                    escape_c_string(ty),
+                    escape_c_string(&jname)
+                )?;
+                if matches!(contract.ret, crate::ffi::contract::FfiRetContract::Unit) {
+                    writeln!(out, "        return;")?;
+                } else {
+                    writeln!(
+                        out,
+                        "        return 0; /* pending exception is delivered */"
+                    )?;
+                }
+                writeln!(out, "    }}")?;
+                writeln!(out)?;
+            }
+        }
+
         // Extract struct-by-value arguments first.
         for (i, p) in func.params.iter().enumerate() {
             if let FfiArgContract::StructByValue(name) = &contract.args[i] {
@@ -166,15 +197,45 @@ impl JniBindGenerator {
         // Convert Java string arguments to C strings before the call.
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow
-                | FfiArgContract::StringTransfer
-                | FfiArgContract::Json => {
+                // Borrowed for the duration of the call only; released afterwards.
+                FfiArgContract::StringBorrow | FfiArgContract::Json => {
                     let jname = sanitize_java_name(&p.name);
                     writeln!(
                         out,
                         "    const char* {}_str = (*env)->GetStringUTFChars(env, {}, NULL);",
                         jname, jname
                     )?;
+                }
+                // Ownership transfers to C: the JVM buffer from
+                // GetStringUTFChars must NOT be handed over (releasing it later
+                // would leave C with a dangling pointer; never releasing it
+                // leaks the pinned JVM string). Copy into a malloc'd buffer and
+                // give that to C — C owns it and must free(3) it. Mirrors
+                // interp/ffi_runtime.rs StringTransfer marshalling.
+                FfiArgContract::StringTransfer => {
+                    let jname = sanitize_java_name(&p.name);
+                    writeln!(
+                        out,
+                        "    const char* {0}_utf = (*env)->GetStringUTFChars(env, {0}, NULL);",
+                        jname
+                    )?;
+                    writeln!(out, "    char* {0}_str = NULL;", jname)?;
+                    writeln!(out, "    if ({0}_utf) {{", jname)?;
+                    writeln!(
+                        out,
+                        "        {0}_str = (char*)malloc(strlen({0}_utf) + 1);",
+                        jname
+                    )?;
+                    writeln!(out, "        if ({0}_str) strcpy({0}_str, {0}_utf);", jname)?;
+                    // The JVM buffer is released here — ownership of `{j}_str`
+                    // (the malloc'd copy) moves to C, so there is deliberately
+                    // NO post-call ReleaseStringUTFChars for it.
+                    writeln!(
+                        out,
+                        "        (*env)->ReleaseStringUTFChars(env, {0}, {0}_utf);",
+                        jname
+                    )?;
+                    writeln!(out, "    }}")?;
                 }
                 _ => {}
             }
@@ -209,11 +270,22 @@ impl JniBindGenerator {
                     | FfiArgContract::CBorrow(_)
                     | FfiArgContract::CBorrowMut(_) => jname,
                     FfiArgContract::Float => jname,
+                    // Raw pointers cross the JNI boundary as a jlong address
+                    // (see mimi_type_to_jni / mimi_type_to_java). Marshal the
+                    // Java-supplied pointer value — discarding it as NULL (the
+                    // old behavior) silently breaks every *T / *mut T extern.
+                    // Mirrors interp/ffi_runtime.rs (Value::Int(n) passes the
+                    // address through unchanged).
+                    FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => {
+                        format!("(void*)(intptr_t){}", jname)
+                    }
                     FfiArgContract::StructByValue(_) => format!("{}_struct", jname),
                     FfiArgContract::Callback { .. } => {
                         self.callback_trampoline_name(&func.name, &p.name)
                     }
-                    _ => format!("(intptr_t)NULL /* {} */", jname),
+                    // Supported variants are exhausted above; Unsupported args
+                    // already threw before the call. Keep a defensive fallback.
+                    _ => format!("(intptr_t)NULL /* unsupported: {} */", jname),
                 }
             })
             .collect();
@@ -245,8 +317,31 @@ impl JniBindGenerator {
                     c_args.join(", ")
                 )?;
             }
-            crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned => {
+            crate::ffi::contract::FfiRetContract::String => {
+                // FfiRetContract::String is BORROWED from C — Mimi must NOT
+                // free it (contract.rs). NewStringUTF copies the bytes into a
+                // JVM-owned jstring; the C pointer stays with C. Freeing it
+                // (the old behavior) corrupts the heap. Mirrors
+                // interp/ffi_runtime.rs FfiRetContract::String (copy, no free).
+                writeln!(
+                    out,
+                    "    char* raw_ret = {}({});",
+                    func.name,
+                    c_args.join(", ")
+                )?;
+                writeln!(out, "    jstring mimi_ret = NULL;")?;
+                writeln!(out, "    if (raw_ret) {{")?;
+                writeln!(
+                    out,
+                    "        mimi_ret = (*env)->NewStringUTF(env, raw_ret);"
+                )?;
+                writeln!(out, "        /* borrowed from C — do NOT free */")?;
+                writeln!(out, "    }}")?;
+            }
+            crate::ffi::contract::FfiRetContract::StringOwned
+            | crate::ffi::contract::FfiRetContract::Json => {
+                // StringOwned / Json returns transfer ownership to the Mimi
+                // side: copy into the jstring, then free the C buffer.
                 writeln!(
                     out,
                     "    char* raw_ret = {}({});",
@@ -262,6 +357,28 @@ impl JniBindGenerator {
                 writeln!(out, "        mimi_string_free(raw_ret);")?;
                 writeln!(out, "    }}")?;
             }
+            crate::ffi::contract::FfiRetContract::RawPtr(_)
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => {
+                // Pointer returns cross back to Java as a jlong address —
+                // marshal the actual value instead of a hard-coded 0.
+                writeln!(
+                    out,
+                    "    jlong mimi_ret = (jlong)(intptr_t)({}({}));",
+                    func.name,
+                    c_args.join(", ")
+                )?;
+            }
+            crate::ffi::contract::FfiRetContract::CShared(_)
+            | crate::ffi::contract::FfiRetContract::CBorrow(_)
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => {
+                // MimiHandle is int64_t (c_header.rs); pass the handle value.
+                writeln!(
+                    out,
+                    "    jlong mimi_ret = (jlong)({}({}));",
+                    func.name,
+                    c_args.join(", ")
+                )?;
+            }
             crate::ffi::contract::FfiRetContract::StructByValue(name) => {
                 writeln!(
                     out,
@@ -271,20 +388,47 @@ impl JniBindGenerator {
                     c_args.join(", ")
                 )?;
                 writeln!(out, "    jobject mimi_ret = NULL;")?;
-                self.write_struct_return_build(out, java_class, name, "mimi_ret")?;
+                self.write_struct_return_build(
+                    out,
+                    java_class,
+                    name,
+                    "mimi_ret",
+                    "mimi_struct_ret",
+                )?;
             }
-            _ => {
-                writeln!(out, "    // Unsupported return type")?;
+            crate::ffi::contract::FfiRetContract::Unsupported(ty) => {
+                // Fail closed: the checker rejects unsupported return types, so
+                // if one reaches the binding, raise an error instead of
+                // reporting success with a fabricated 0.
+                writeln!(
+                    out,
+                    "    /* Unsupported return type '{}' — fail closed. */",
+                    escape_c_string(ty)
+                )?;
+                writeln!(out, "    {{")?;
+                writeln!(
+                    out,
+                    "        jclass mimi_exc = (*env)->FindClass(env, \"java/lang/UnsupportedOperationException\");"
+                )?;
+                writeln!(
+                    out,
+                    "        if (mimi_exc) (*env)->ThrowNew(env, mimi_exc, \"mimi FFI: unsupported return type '{}'\");",
+                    escape_c_string(ty)
+                )?;
+                writeln!(out, "    }}")?;
                 writeln!(out, "    jlong mimi_ret = 0;")?;
-            }
+            } // Unit / Int / Float are handled by the arms above; this match is
+              // exhaustive over FfiRetContract, so no wildcard (which would silently
+              // swallow future variants) is needed.
         }
 
-        // Release string arguments and tear down callback slots
+        // Release string arguments and tear down callback slots.
+        // NOTE: StringTransfer is deliberately absent — ownership of the
+        // malloc'd buffer moved to C (which must free(3) it). Releasing it
+        // here would free memory C still owns → double-free/UAF on the C side.
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow
-                | FfiArgContract::StringTransfer
-                | FfiArgContract::Json => {
+                FfiArgContract::StringBorrow | FfiArgContract::Json => {
                     let jname = sanitize_java_name(&p.name);
                     writeln!(
                         out,
@@ -536,6 +680,7 @@ impl JniBindGenerator {
         java_class: &str,
         type_name: &str,
         result_var: &str,
+        struct_var: &str,
     ) -> Result<(), std::fmt::Error> {
         writeln!(
             out,
@@ -559,11 +704,15 @@ impl JniBindGenerator {
                         "    jfieldID ret_{}_fid = (*env)->GetFieldID(env, ret_cls, \"{}\", \"{}\");",
                         field.name, field.name, sig
                     )?;
-                    let jtype = self.jni_field_access(&field.ty).0;
+                    // Field values are read from the struct variable declared
+                    // by the caller (`mimi_struct_ret`), NOT a nonexistent
+                    // `ret` — the old output referenced an undeclared variable
+                    // and did not compile for ANY struct-by-value return.
+                    let (jtype, cast) = self.jni_field_access(&field.ty);
                     writeln!(
                         out,
-                        "    (*env)->Set{}Field(env, ret_obj, ret_{}_fid, ret.{});",
-                        jtype, field.name, field.name
+                        "    (*env)->Set{}Field(env, ret_obj, ret_{}_fid, ({}){}.{});",
+                        jtype, field.name, cast, struct_var, field.name
                     )?;
                 }
             }
@@ -700,8 +849,17 @@ impl JniBindGenerator {
     }
 
     fn callback_c_type(&self, ty: &Type) -> String {
+        // Mirror the declared scalar widths (same table as py_bind.rs
+        // callback_c_type and cpp_bind.rs mimi_type_to_c_type): the trampoline
+        // is passed to the extern function as its declared function-pointer
+        // type, so e.g. an i32 parameter must be `int32_t`, not `int64_t`
+        // (the old blanket int64_t mapping was an ABI width mismatch — the
+        // callee would read garbage upper halves on little-endian ABIs).
         match ty.unlocated() {
+            Type::Name(name, _) if name == "i32" => "int32_t".to_string(),
+            Type::Name(name, _) if name == "i64" => "int64_t".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "bool" => "bool".to_string(),
             Type::Name(name, _) if name == "unit" => "void".to_string(),
             _ => "int64_t".to_string(),
         }
@@ -797,7 +955,8 @@ impl JniBindGenerator {
             },
             crate::ffi::contract::FfiRetContract::Float => "jdouble".to_string(),
             crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned => "jstring".to_string(),
+            | crate::ffi::contract::FfiRetContract::StringOwned
+            | crate::ffi::contract::FfiRetContract::Json => "jstring".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(_) => "jobject".to_string(),
             _ => "jlong".to_string(),
         }
@@ -837,11 +996,29 @@ impl JniBindGenerator {
             },
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
             crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned => "String".to_string(),
+            | crate::ffi::contract::FfiRetContract::StringOwned
+            | crate::ffi::contract::FfiRetContract::Json => "String".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             _ => "long".to_string(),
         }
     }
+}
+
+/// Escape a string for embedding in an emitted C string literal.
+fn escape_c_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn sanitize_java_class(name: &str) -> String {

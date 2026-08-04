@@ -38,7 +38,6 @@ impl RustBindGenerator {
             out,
             "use std::ffi::{{c_char, c_double, c_int, c_longlong, c_void}};"
         )?;
-        writeln!(out, "use std::ptr;")?;
         writeln!(out)?;
 
         // Generate type definitions
@@ -190,12 +189,13 @@ impl RustBindGenerator {
             .collect();
         let ret = self.ret_type_to_rust_safe(contract);
 
-        // For string parameters, convert &str to *const c_char
+        // For string parameters, convert &str to *const c_char (borrow) or
+        // hand over a heap pointer to C (transfer).
         let mut conversions = String::new();
         let mut call_args = Vec::new();
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
+                FfiArgContract::StringBorrow => {
                     writeln!(
                         conversions,
                         "        let {}_cstr = std::ffi::CString::new({}).unwrap();",
@@ -205,6 +205,41 @@ impl RustBindGenerator {
                         conversions,
                         "        let {}_ptr = {}_cstr.as_ptr();",
                         p.name, p.name
+                    )?;
+                    call_args.push(format!("{}_ptr", p.name));
+                }
+                FfiArgContract::StringTransfer => {
+                    // Ownership transfers TO C (FfiArgContract::StringTransfer):
+                    // hand over the heap pointer via CString::into_raw and do NOT
+                    // free it after the call — C is now the owner and must free
+                    // it with mimi_string_free_raw. The old code passed a local
+                    // CString's as_ptr() and dropped it after the call while C
+                    // believed it owned the pointer -> double-free/UAF.
+                    // Interior NUL bytes are filtered first, mirroring the
+                    // interpreter reference behavior (interp/ffi_runtime.rs
+                    // StringTransfer arm).
+                    writeln!(
+                        conversions,
+                        "        let {n}_bytes: Vec<u8> = {n}.bytes().filter(|&b| b != 0).collect();",
+                        n = p.name
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        // Cannot fail: interior NUL bytes were filtered above."
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        let {n}_cstr = std::ffi::CString::new({n}_bytes).expect(\"interior NUL bytes were filtered\");",
+                        n = p.name
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        // Ownership transferred to C (StringTransfer contract); must NOT be freed here."
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        let {n}_ptr = {n}_cstr.into_raw();",
+                        n = p.name
                     )?;
                     call_args.push(format!("{}_ptr", p.name));
                 }
@@ -223,9 +258,29 @@ impl RustBindGenerator {
         )?;
         write!(out, "{}", conversions)?;
         match &contract.ret {
-            crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned
+            crate::ffi::contract::FfiRetContract::String => {
+                // BORROWED from C (FfiRetContract::String): copy into an owned
+                // String but do NOT free the C pointer — C retains ownership.
+                // Freeing it here corrupted the C heap (the interpreter
+                // reference behavior warns instead of freeing:
+                // interp/ffi_runtime.rs ffi_ret_to_value).
+                writeln!(
+                    out,
+                    "        let raw = unsafe {{ super::ffi_raw::{}({}) }};",
+                    func.name,
+                    call_args.join(", ")
+                )?;
+                writeln!(out, "        if raw.is_null() {{ return String::new(); }}")?;
+                writeln!(
+                    out,
+                    "        // Borrowed from C: copy, do NOT free (FfiRetContract::String)."
+                )?;
+                writeln!(out, "        unsafe {{ std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned() }}")?;
+            }
+            crate::ffi::contract::FfiRetContract::StringOwned
             | crate::ffi::contract::FfiRetContract::Json => {
+                // OWNED: copy, then free the C pointer with the documented
+                // runtime deallocator (mimi_string_free == libc::free).
                 writeln!(
                     out,
                     "        let raw = unsafe {{ super::ffi_raw::{}({}) }};",
@@ -234,6 +289,7 @@ impl RustBindGenerator {
                 )?;
                 writeln!(out, "        if raw.is_null() {{ return String::new(); }}")?;
                 writeln!(out, "        let s = unsafe {{ std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned() }};")?;
+                writeln!(out, "        // Owned by Mimi (StringOwned/Json contract): free with the runtime deallocator.")?;
                 writeln!(
                     out,
                     "        unsafe {{ super::ffi_raw::mimi_string_free(raw) }};"
@@ -264,9 +320,10 @@ impl RustBindGenerator {
                 crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
             },
             FfiArgContract::Float => "c_double".to_string(),
-            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
-                "*const c_char".to_string()
-            }
+            FfiArgContract::StringBorrow => "*const c_char".to_string(),
+            // Ownership transfers to C, which must free it — declare the owned
+            // pointer as mutable to match the C header (`char*`).
+            FfiArgContract::StringTransfer => "*mut c_char".to_string(),
             FfiArgContract::Cap(_) => "c_longlong".to_string(),
             FfiArgContract::RawPtr(inner) => {
                 format!("*const {}", self.mimi_type_to_rust_field(inner))

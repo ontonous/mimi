@@ -620,11 +620,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(BasicTypeEnum::IntType(i64_ty));
                 let val = self.build_load(field_ty, gep, &field.name)?;
                 let val_i64 = match val {
-                    BasicValueEnum::IntValue(iv) => iv,
+                    BasicValueEnum::IntValue(iv) => {
+                        // List slots are i64 — sign-extend narrow integers
+                        // (i32 fields) before storing, matching the list
+                        // storage convention (coerce_to_list_storage). A bare
+                        // i32 store into the i64 slot is type-mismatched IR.
+                        if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, "values_elem_sext")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("s_ext error: {}", e))
+                                })?
+                        } else {
+                            iv
+                        }
+                    }
+                    // full-audit 2026-08-05 §7 (HIGH): fptoui is poison for
+                    // negative and non-finite floats. List slots carry floats
+                    // by BITCAST convention — coerce_to_list_storage packs the
+                    // f64 bit pattern into the i64 slot and index reads
+                    // bitcast it back to f64 — so encode the bits, never a
+                    // value conversion. (Native codegen lists are raw
+                    // {len, data} i64-slot structs with no per-element kind
+                    // metadata; the runtime ListElementKind::F64 belongs to
+                    // the MimiList ABI, which this path does not produce.)
                     BasicValueEnum::FloatValue(fv) => self
-                        .builder
-                        .build_float_to_unsigned_int(fv, i64_ty, "float_to_i64")
-                        .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?,
+                        .build_bit_cast(
+                            BasicValueEnum::FloatValue(fv),
+                            BasicTypeEnum::IntType(i64_ty),
+                            "float_bits_to_i64",
+                        )?
+                        .into_int_value(),
                     BasicValueEnum::PointerValue(pv) => {
                         self.build_ptr_to_int(pv, i64_ty, "ptr_to_i64")?
                     }

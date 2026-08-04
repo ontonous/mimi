@@ -46,9 +46,13 @@ impl FsOps for string {
         }
     }
     func file_size() -> Result<i32, string> {
-        match read_file(self) {
-            Ok(content) => Ok(len(content))
-            Err(e) => Err("file_size(" + self + "): " + e)
+        // Byte size via stat (len() counts characters, not bytes).
+        let fs_st = file_stat(self)
+        if fs_st.size < 0 {
+            Err("file_size(" + self + "): cannot stat file")
+        } else {
+            let fs_sz = fs_st.size
+            Ok(fs_sz as i32)
         }
     }
     func write_lines(xs: List<string>) -> Result<(), string> {
@@ -84,15 +88,17 @@ pub func read_lines(path: string) -> Result<List<string>, string> {
     }
 }
 
-// Note: file_size reads the entire file to measure length.
-// A dedicated stat() call is not yet available in the C runtime.
-//
-// file_size: Returns the size of the file at path in bytes.
-// Returns Err with original I/O error message if the file cannot be read.
+// Note: file_size uses file_stat (a real stat() call), so the result is the
+// on-disk byte size — len(content) would count characters, not bytes.
+
+// file_size: Returns the size of the file at path in bytes, or Err if it cannot be stat'ed.
 pub func file_size(path: string) -> Result<i32, string> {
-    match read_file(path) {
-        Ok(content) => Ok(len(content))
-        Err(e) => Err("file_size(" + path + "): " + e)
+    let fs_st = file_stat(path)
+    if fs_st.size < 0 {
+        Err("file_size(" + path + "): cannot stat file")
+    } else {
+        let fs_sz = fs_st.size
+        Ok(fs_sz as i32)
     }
 }
 

@@ -328,12 +328,15 @@ fn validate_return_resources(
             .last()
             .map_or(&block.source, |point| &point.source);
         for (resource, fact) in &state.resources {
-            if fact.availability != Availability::Available {
-                continue;
-            }
             // 0.31.16: flow state resources are auto-droppable at scope exit.
             // Unlike Cap/SessionChan, flow states represent data that can be
-            // safely discarded when the function returns.
+            // safely discarded when the function returns. Audit 2026-08-05
+            // (wave-1 fix 3): this droppable exemption ALSO covers the old
+            // `_`-prefix exemption — `let _s = flow_state` stays legal, but
+            // the blanket `_`-prefix skip was removed: for non-droppable
+            // linears (caps, SessionChan) an underscore binding is a leak,
+            // not an intentional discard, and Move retargeting made the old
+            // exemption silently drop obligations.
             if droppable.contains(resource) {
                 continue;
             }
@@ -342,22 +345,42 @@ fn validate_return_resources(
                 .as_ref()
                 .map(Place::display)
                 .unwrap_or_else(|| resource.0 .0.clone());
-            // 0.31.16: variables with `_` prefix are intentionally unused —
-            // auto-drop instead of reporting E0256.
-            if name.starts_with('_') {
-                continue;
+            match fact.availability {
+                Availability::Available => {
+                    errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0256,
+                            format!(
+                                "linear resource '{}' must be consumed before this return path",
+                                name
+                            ),
+                            source.span,
+                        )
+                        .with_help("move, return, transfer, or drop the resource before returning"),
+                    );
+                }
+                // Audit 2026-08-05 (wave-1 fix 2): MaybeConsumed at a return
+                // terminator is an obligation — the resource is not provably
+                // consumed on every reachable path. Previously the gate
+                // skipped every non-Available fact, letting conditionally
+                // moved caps leak. (Droppable resources returned above.)
+                Availability::MaybeConsumed => {
+                    errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0256,
+                            format!(
+                                "linear resource '{}' is possibly unconsumed on some paths",
+                                name
+                            ),
+                            source.span,
+                        )
+                        .with_help(
+                            "move, return, transfer, or drop the resource on every reachable path",
+                        ),
+                    );
+                }
+                Availability::Consumed => {}
             }
-            errors.push(
-                Diagnostic::error_code(
-                    crate::diagnostic::codes::E0256,
-                    format!(
-                        "linear resource '{}' must be consumed before this return path",
-                        name
-                    ),
-                    source.span,
-                )
-                .with_help("move, return, transfer, or drop the resource before returning"),
-            );
         }
     }
 }
@@ -623,18 +646,41 @@ fn join_predecessors(
                     }
                 }
                 (Some(fact), None) | (None, Some(fact)) => {
-                    // Resource exists on only one predecessor path.
-                    // This is NOT an error when the resource was introduced
-                    // inside a branch (e.g., a match arm binding). The branch
-                    // arms are mutually exclusive — introduction on one arm
-                    // does not obligate consumption on all arms.
-                    // Resources introduced before the branch are present in
-                    // BOTH predecessors and correctly compared above.
-                    // See flow_order_system.mimi for the false positive this
-                    // prevents (E0304 on match-arm-scoped Flow state variables).
-                    ResourceFact {
-                        availability: Availability::MaybeConsumed,
-                        owner: fact.owner,
+                    // Resource exists on only one predecessor path. The
+                    // predecessor that carries the fact FELL THROUGH to this
+                    // join, so its availability is a live observation on that
+                    // path — the merge must not erase it.
+                    //
+                    // Audit 2026-08-05 (wave-1 fix 2): previously every
+                    // one-side-only fact merged to MaybeConsumed and the
+                    // return gate skipped all non-Available facts — a cap
+                    // introduced (or moved) on one branch and never consumed
+                    // leaked silently. Fail-closed now:
+                    // * Available stays Available — the live obligation
+                    //   survives the merge; the return terminator reports
+                    //   E0256 for non-droppable resources.
+                    // * Consumed stays Consumed — the only path that owned
+                    //   the resource already discharged it (introduce then
+                    //   consume inside one arm); flagging it would be a
+                    //   false positive.
+                    // * MaybeConsumed propagates its ambiguity unchanged.
+                    // No error is emitted AT THE JOIN: branch arms remain
+                    // mutually exclusive (no E0304 on arm-scoped resources).
+                    // Droppable linears (flow states) stay exempt at the
+                    // return gate — see flow_order_system.mimi.
+                    match fact.availability {
+                        Availability::Available => ResourceFact {
+                            availability: Availability::Available,
+                            owner: fact.owner,
+                        },
+                        Availability::Consumed => ResourceFact {
+                            availability: Availability::Consumed,
+                            owner: None,
+                        },
+                        Availability::MaybeConsumed => ResourceFact {
+                            availability: Availability::MaybeConsumed,
+                            owner: fact.owner,
+                        },
                     }
                 }
                 (None, None) => continue,

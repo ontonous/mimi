@@ -5,7 +5,7 @@ use crate::error::CompileError;
 
 use inkwell::basic_block::BasicBlock;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, PointerValue};
 use std::collections::HashMap;
 
 /// Immutable context shared between match dispatch and body compilation.
@@ -602,8 +602,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             PatternKind::Tuple(inner_pats) => {
                 // For tuple patterns, bind inner variables by loading from struct.
-                // Prefer the actual struct type from the scrutinee value when available,
-                // falling back to tuple_type_stack only for PointerValue scrutinees.
+                // Prefer the actual struct type from the scrutinee value when available;
+                // for PointerValue scrutinees resolve_pointer_tuple_type prefers the
+                // scrutinee's AST tuple type, then tuple_type_stack (possibly empty).
                 let (struct_ty, scrutinee_ptr) = match scrutinee_val {
                     BasicValueEnum::StructValue(sv) => {
                         let actual_ty = sv.get_type();
@@ -612,11 +613,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         (actual_ty, alloca)
                     }
                     BasicValueEnum::PointerValue(pv) => {
-                        let stack_ty = *self.tuple_type_stack.last().ok_or_else(|| {
-                            CompileError::LlvmError(
-                                "tuple_type_stack empty for tuple pattern bind".to_string(),
-                            )
-                        })?;
+                        let stack_ty = self.resolve_pointer_tuple_type(scrutinee_type)?;
                         (stack_ty, pv)
                     }
                     _ => return Ok(local_vars),
@@ -642,33 +639,126 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             PatternKind::Array(inner_pats) => {
-                // For array patterns, bind inner variables by loading from list data
-                let scrutinee_ptr = match scrutinee_val {
-                    BasicValueEnum::PointerValue(pv) => pv,
-                    _ => return Ok(local_vars),
+                // For array patterns, bind inner variables by loading from list data.
+                // Dispatch only reaches this body for list subjects, so a None
+                // coercion (non-list) is unreachable — skip binding fail-closed.
+                let scrutinee_ptr = match self.coerce_list_scrutinee_ptr(scrutinee_val, false)? {
+                    Some(ptr) => ptr,
+                    None => return Ok(local_vars),
                 };
                 let data_ptr = self.load_list_data_ptr(scrutinee_ptr)?;
                 self.bind_list_prefix(data_ptr, inner_pats, &mut local_vars)?;
             }
             PatternKind::Slice(inner_pats, rest) => {
                 // For slice patterns, bind prefix variables and rest as list
-                let scrutinee_ptr = match scrutinee_val {
-                    BasicValueEnum::PointerValue(pv) => pv,
-                    _ => return Ok(local_vars),
+                // (dispatch guarantees the subject is a list — see the Array arm).
+                let scrutinee_ptr = match self.coerce_list_scrutinee_ptr(scrutinee_val, false)? {
+                    Some(ptr) => ptr,
+                    None => return Ok(local_vars),
                 };
                 let data_ptr = self.load_list_data_ptr(scrutinee_ptr)?;
                 self.bind_list_prefix(data_ptr, inner_pats, &mut local_vars)?;
 
-                // Bind rest as remaining list (simplified: bind as empty list)
+                // AUDIT FIX (full-audit-2026-08-05 §7, match.rs:653-674): bind
+                // `rest` to the ACTUAL remainder list subject[pats.len()..].
+                // The old code bound a hardcoded empty i64 0 ("simplified"),
+                // so `len(rest)` and element access diverged from the VM —
+                // which binds `__slice(subject, pats.len(), len(subject))`
+                // (interp/bytecode/compiler.rs:4021-4056). Mirrors the memcpy
+                // remainder construction of the irrefutable `let [..rest]`
+                // path (codegen/func/pattern.rs). Dispatch guarantees
+                // len >= pats.len() here, so the subtraction cannot wrap.
                 if let Some(rest_pat) = rest.as_ref() {
                     if let PatternKind::Variable(name) = &rest_pat.kind {
                         let i64_ty = self.context.i64_type();
-                        let empty_list: BasicValueEnum = i64_ty.const_int(0, false).into();
+                        let total_len = self.load_list_len(scrutinee_ptr)?;
+                        let prefix = i64_ty.const_int(inner_pats.len() as u64, false);
+                        let rest_len = self
+                            .builder
+                            .build_int_sub(total_len, prefix, "rest_len")
+                            .map_err(|e| CompileError::LlvmError(format!("sub: {}", e)))?;
+                        let src = self
+                            .gep()
+                            .build_in_bounds_gep(
+                                BasicTypeEnum::IntType(i64_ty),
+                                data_ptr,
+                                &[prefix],
+                                "rest_src",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                        let bytes = self
+                            .builder
+                            .build_int_mul(rest_len, i64_ty.const_int(8, false), "rest_bytes")
+                            .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+                        // Empty remainder: skip malloc(0) and bind a null-data
+                        // empty list (same shape as func/pattern.rs).
+                        let zero = i64_ty.const_int(0, false);
+                        let is_empty = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                rest_len,
+                                zero,
+                                "rest_empty",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+                        let function = self.current_function().ok_or_else(|| {
+                            CompileError::LlvmError("no function for slice rest".to_string())
+                        })?;
+                        let empty_bb = self.context.append_basic_block(function, "rest_empty_bb");
+                        let copy_bb = self.context.append_basic_block(function, "rest_copy_bb");
+                        let rest_merge_bb =
+                            self.context.append_basic_block(function, "rest_merge_bb");
+                        self.build_cond_br(is_empty, empty_bb, copy_bb)?;
+
+                        self.builder.position_at_end(empty_bb);
+                        let null_data = self
+                            .context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null();
+                        let empty_list = self.build_list_struct(zero, null_data)?;
+                        self.build_br(rest_merge_bb)?;
+                        let empty_end = self.builder.get_insert_block().unwrap_or(empty_bb);
+
+                        self.builder.position_at_end(copy_bb);
+                        let dest = self.malloc_or_abort(bytes, "rest_data")?;
+                        // SAFETY: `src` covers elements [prefix, total_len) of a
+                        // valid list data allocation (dispatch established
+                        // total_len >= prefix), `dest` is a fresh `bytes`-sized
+                        // allocation from malloc_or_abort, and the regions are
+                        // disjoint.
+                        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+                        self.builder
+                            .build_call(
+                                memcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(dest),
+                                    BasicMetadataValueEnum::PointerValue(src),
+                                    BasicMetadataValueEnum::IntValue(bytes),
+                                ],
+                                "rest_memcpy",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("memcpy: {}", e)))?;
+                        // build_list_struct registers the data slot for
+                        // scope-exit free; do not also register_heap_alloc
+                        // (double free).
+                        let copy_list = self.build_list_struct(rest_len, dest)?;
+                        self.build_br(rest_merge_bb)?;
+                        let copy_end = self.builder.get_insert_block().unwrap_or(copy_bb);
+
+                        self.builder.position_at_end(rest_merge_bb);
+                        let phi_ty = empty_list.get_type();
+                        let phi = self
+                            .builder
+                            .build_phi(phi_ty, "rest_list_phi")
+                            .map_err(|e| CompileError::LlvmError(format!("phi: {}", e)))?;
+                        phi.add_incoming(&[(&empty_list, empty_end), (&copy_list, copy_end)]);
+                        let rest_val = phi.as_basic_value();
                         self.bind_pattern_var(
                             &mut local_vars,
                             name,
-                            empty_list,
-                            BasicTypeEnum::IntType(i64_ty),
+                            rest_val,
+                            rest_val.get_type(),
                         )?;
                     }
                 }
@@ -692,6 +782,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(alloca, val)?;
         local_vars.insert(name.to_string(), (alloca, ty));
         Ok(())
+    }
+
+    /// Coerce a list-pattern scrutinee to a `{i64 len, i8* data}` struct
+    /// pointer, or `None` if the value is not a list.
+    ///
+    /// Lists are normally PointerValue; a by-value list StructValue occurs for
+    /// nested subjects (e.g. `match xs[0] { .. }` on List<List<T>>) and is
+    /// materialized into a fresh alloca. Only a genuine list shape
+    /// `{i64, ptr}` is coerced — every other shape (enum `{i32,i64}`, tuple,
+    /// string `{ptr,i64}`) must NOT match a list pattern: the VM tests
+    /// `TypeOf == "list"` first (interp/bytecode/compiler.rs:3832-3848), and
+    /// GEP-ing any other shape as a list struct would be UB.
+    fn coerce_list_scrutinee_ptr(
+        &self,
+        scrutinee: BasicValueEnum<'ctx>,
+        is_string_scrutinee: bool,
+    ) -> Result<Option<PointerValue<'ctx>>, CompileError> {
+        Ok(match scrutinee {
+            BasicValueEnum::PointerValue(pv) if !is_string_scrutinee => Some(pv),
+            BasicValueEnum::StructValue(sv) if !is_string_scrutinee => {
+                let fields = sv.get_type().get_field_types();
+                let is_list_shape = matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::IntType(t), BasicTypeEnum::PointerType(_)]
+                        if t.get_bit_width() == 64
+                );
+                if !is_list_shape {
+                    return Ok(None);
+                }
+                let alloca =
+                    self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "list_scrutinee")?;
+                self.build_store(alloca, sv)?;
+                Some(alloca)
+            }
+            _ => None,
+        })
     }
 
     /// Load the i64 data pointer from a list struct pointer.
@@ -755,20 +881,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Resolve the struct layout for a pointer-form tuple scrutinee.
+    ///
+    /// AUDIT FIX (full-audit-2026-08-05 §7, record.rs:284 + match.rs:615/769):
+    /// `tuple_type_stack` is now pushed/popped symmetrically in
+    /// `compile_tuple_expr`, so it may legitimately be EMPTY here — and even
+    /// when non-empty its top may be unrelated to this scrutinee (the old
+    /// never-popped pushes were exactly the "stale layout" hazard). Prefer
+    /// the scrutinee's AST tuple type when known (authoritative: the checker
+    /// assigned it), fall back to the stack, and fail closed with a clear
+    /// error instead of guessing a layout.
+    fn resolve_pointer_tuple_type(
+        &self,
+        scrutinee_type: Option<&crate::ast::Type>,
+    ) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
+        if let Some(ty) = scrutinee_type {
+            if let crate::ast::Type::Tuple(elems) = ty.unlocated() {
+                let i64_default = BasicTypeEnum::IntType(self.context.i64_type());
+                let field_tys: Vec<BasicTypeEnum<'ctx>> = elems
+                    .iter()
+                    .map(|t| {
+                        crate::codegen::types::mimi_type_to_llvm(self.context, t)
+                            .unwrap_or(i64_default)
+                    })
+                    .collect();
+                return Ok(self.context.struct_type(&field_tys, false));
+            }
+        }
+        self.tuple_type_stack.last().copied().ok_or_else(|| {
+            CompileError::LlvmError(
+                "tuple pattern on pointer scrutinee: no tuple type known and \
+                 tuple_type_stack is empty"
+                    .to_string(),
+            )
+        })
+    }
+
     /// Generate element-wise comparison for a tuple pattern.
     /// Returns `Some(i1)` if any element requires comparison, `None` for wildcard-only patterns.
     fn compile_tuple_pattern(
         &self,
         scrutinee: BasicValueEnum<'ctx>,
         inner_pats: &[Pattern],
+        scrutinee_type: Option<&crate::ast::Type>,
     ) -> Result<Option<inkwell::values::IntValue<'ctx>>, CompileError> {
         let i64_ty = self.context.i64_type();
         // Normalize to a struct value so we can use the real struct type for GEPs.
         let (tuple_ptr, struct_ty) = match scrutinee {
             BasicValueEnum::PointerValue(pv) => {
-                let struct_ty = *self.tuple_type_stack.last().ok_or_else(|| {
-                    CompileError::LlvmError("tuple_type_stack empty for tuple pattern".to_string())
-                })?;
+                let struct_ty = self.resolve_pointer_tuple_type(scrutinee_type)?;
                 let loaded = self.build_load(struct_ty, pv, "tuple_pat_loaded")?;
                 let sv = match loaded {
                     BasicValueEnum::StructValue(sv) => sv,
@@ -831,44 +992,106 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Generate element-wise comparison for an array pattern.
-    /// Returns `Some(i1)` if any element requires comparison, `None` for wildcard-only patterns.
+    ///
+    /// AUDIT FIX (full-audit-2026-08-05 §7, match.rs:835-917/1396-1411):
+    /// exact-length list pattern — delegates to `compile_list_pattern_test`
+    /// with `exact_len = true` (VM reference: bytecode `EqInt len == pats.len()`,
+    /// interp/bytecode/compiler.rs:3830-3879).
     fn compile_array_pattern(
         &self,
         scrutinee: BasicValueEnum<'ctx>,
         inner_pats: &[Pattern],
+        is_string_scrutinee: bool,
+    ) -> Result<Option<inkwell::values::IntValue<'ctx>>, CompileError> {
+        self.compile_list_pattern_test(scrutinee, inner_pats, true, is_string_scrutinee)
+    }
+
+    /// Generate the dispatch test for list patterns (array + slice).
+    ///
+    /// AUDIT FIX (full-audit-2026-08-05 §7, match.rs:835-917/1396-1411):
+    /// the previous implementation compared only prefix elements with NO
+    /// length check and NO subject-kind test: `match [1, 2, 3] { [1, 2] => .. }`
+    /// over-matched, an empty `[]` pattern returned `None` and the dispatcher
+    /// took an unconditional br (matching EVERYTHING, including non-lists),
+    /// and element loads read out of bounds when the subject was shorter than
+    /// the pattern. The bytecode VM is the reference semantics:
+    /// array patterns require `TypeOf == "list"` AND `len == pats.len()`
+    /// (compiler.rs:3830-3879), slice patterns `len >= pats.len()`
+    /// (compiler.rs:3928-3977), and element tests run only after the
+    /// length check passes (VM `JmpIfNot` skip around element access).
+    ///
+    /// Emitted shape: `len_test` (EQ for array / SGE for slice), then — if
+    /// any element carries a literal — a guarded diamond:
+    ///
+    /// ```text
+    ///          len_test?
+    ///          /      \
+    ///   elems_bb    nomatch_bb
+    ///   (loads+cmp)     |
+    ///          \      /
+    ///          phi(i1)
+    /// ```
+    ///
+    /// Element loads live only in `elems_bb`, which is entered with
+    /// `len >= pats.len()` established, so no OOB read is possible.
+    /// Non-list subjects never match: a non-pointer value is not a list, and
+    /// a statically-known string scrutinee is a pointer but not a list struct
+    /// (VM: `TypeOf != "list"` → fallthrough; also avoids GEP-ing a string
+    /// pointer as `{i64 len, i8* data}`). In both cases a constant-false
+    /// test is returned so the arm falls through instead of matching.
+    fn compile_list_pattern_test(
+        &self,
+        scrutinee: BasicValueEnum<'ctx>,
+        inner_pats: &[Pattern],
+        exact_len: bool,
+        is_string_scrutinee: bool,
     ) -> Result<Option<inkwell::values::IntValue<'ctx>>, CompileError> {
         let i64_ty = self.context.i64_type();
-        let scrutinee_ptr = match scrutinee {
-            BasicValueEnum::PointerValue(pv) => pv,
-            _ => return Ok(None),
+        let bool_ty = self.context.bool_type();
+        // Not a list (or statically known string) → arm never matches.
+        let scrutinee_ptr = match self.coerce_list_scrutinee_ptr(scrutinee, is_string_scrutinee)? {
+            Some(ptr) => ptr,
+            None => return Ok(Some(bool_ty.const_int(0, false))),
         };
-        let list_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(i64_ty),
-                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
-            ],
-            false,
-        );
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        let data_i8 = self
-            .build_load(
-                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
-                data_gep,
-                "data",
-            )?
-            .into_pointer_value();
-        let data_ptr = self
+        let len = self.load_list_len(scrutinee_ptr)?;
+        let expected_len = i64_ty.const_int(inner_pats.len() as u64, false);
+        let len_predicate = if exact_len {
+            inkwell::IntPredicate::EQ
+        } else {
+            inkwell::IntPredicate::SGE
+        };
+        let len_ok = self
             .builder
-            .build_bit_cast(
-                data_i8,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "data_i64",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
-            .into_pointer_value();
+            .build_int_compare(len_predicate, len, expected_len, "list_len_test")
+            .map_err(|e| CompileError::LlvmError(format!("list len cmp: {}", e)))?;
+
+        // If no element carries a literal, the length test IS the complete
+        // pattern test (variables/wildcards add no comparisons — VM emits no
+        // element tests for them either).
+        let needs_element_test = inner_pats
+            .iter()
+            .any(|p| matches!(&p.kind, PatternKind::Literal(_)));
+        if !needs_element_test {
+            return Ok(Some(len_ok));
+        }
+
+        // Guarded element comparisons (see doc comment).
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                CompileError::LlvmError("list pattern test has no function".to_string())
+            })?;
+        let elems_bb = self.context.append_basic_block(function, "list_elems");
+        let nomatch_bb = self.context.append_basic_block(function, "list_nomatch");
+        let merge_bb = self.context.append_basic_block(function, "list_merge");
+        self.build_cond_br(len_ok, elems_bb, nomatch_bb)?;
+
+        self.builder.position_at_end(elems_bb);
+        // SAFETY: element loads below execute only when `len_ok` held at
+        // runtime (len >= inner_pats.len()), so every index is in bounds.
+        let data_ptr = self.load_list_data_ptr(scrutinee_ptr)?;
         let mut agg: Option<inkwell::values::IntValue<'ctx>> = None;
         for (j, pat) in inner_pats.iter().enumerate() {
             let lit_val = match &pat.kind {
@@ -882,12 +1105,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             if let Some(expected) = lit_val {
                 let idx = i64_ty.const_int(j as u64, false);
-                // SAFETY: pointer derived from valid list data allocation
-                let elem_ptr = {
-                    self.gep()
-                        .build_gep(i64_ty, data_ptr, &[idx], &format!("arr_el{}", j))
-                }
-                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                let elem_ptr = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], &format!("arr_el{}", j))
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                 let elem_val = self
                     .build_load(
                         BasicTypeEnum::IntType(i64_ty),
@@ -913,7 +1134,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 });
             }
         }
-        Ok(agg)
+        let elems_match = agg.unwrap_or_else(|| bool_ty.const_int(1, false));
+        self.build_br(merge_bb)?;
+        let elems_end = self.builder.get_insert_block().unwrap_or(elems_bb);
+
+        self.builder.position_at_end(nomatch_bb);
+        self.build_br(merge_bb)?;
+
+        self.builder.position_at_end(merge_bb);
+        let nomatch_val = bool_ty.const_int(0, false);
+        let phi = self
+            .builder
+            .build_phi(bool_ty, "list_pat_test")
+            .map_err(|e| CompileError::LlvmError(format!("list pattern phi: {}", e)))?;
+        phi.add_incoming(&[
+            (&elems_match as &dyn inkwell::values::BasicValue, elems_end),
+            (&nomatch_val, nomatch_bb),
+        ]);
+        Ok(Some(phi.as_basic_value().into_int_value()))
     }
 
     /// Check if a variant's payload i64 was ptrtoint-encoded from a struct type,
@@ -1047,9 +1285,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         scrutinee: BasicValueEnum<'ctx>,
         inner_pats: &[Pattern],
         _rest: &Option<Box<Pattern>>,
+        is_string_scrutinee: bool,
     ) -> Result<Option<inkwell::values::IntValue<'ctx>>, CompileError> {
-        // Same data access as array patterns, only comparing prefix elements
-        self.compile_array_pattern(scrutinee, inner_pats)
+        // AUDIT FIX (full-audit-2026-08-05 §7, match.rs:1045-1053): a slice
+        // pattern `[p1, .., ..rest]` requires `len >= pats.len()` (VM `GeInt`,
+        // interp/bytecode/compiler.rs:3951-3977), not the array pattern's
+        // exact length — the old delegation to `compile_array_pattern`
+        // (which had no length test at all) both rejected valid matches and
+        // over-matched shorter ones. `rest` affects bindings only (see
+        // bind_pattern_variables), not the dispatch test.
+        self.compile_list_pattern_test(scrutinee, inner_pats, false, is_string_scrutinee)
     }
 
     pub(in crate::codegen) fn compile_match_expr(
@@ -1146,6 +1391,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 scrutinee_iv,
                 else_bb,
                 scrutinee_type.as_ref(),
+                is_string_scrutinee,
             )?;
             // Guard failure must continue to the next arm's dispatch block, so
             // update else_bb before compiling the arm body.
@@ -1205,6 +1451,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         scrutinee_iv: Option<IntValue<'ctx>>,
         else_bb: BasicBlock<'ctx>,
         scrutinee_type: Option<&crate::ast::Type>,
+        is_string_scrutinee: bool,
     ) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>), CompileError> {
         let function = else_bb.get_parent().ok_or_else(|| {
             CompileError::LlvmError("match arm dispatch has no parent function".to_string())
@@ -1389,7 +1636,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((arm_bb, next_bb))
             }
             PatternKind::Tuple(inner_pats) => {
-                let match_cmp = self.compile_tuple_pattern(scrutinee_val, inner_pats)?;
+                let match_cmp =
+                    self.compile_tuple_pattern(scrutinee_val, inner_pats, scrutinee_type)?;
                 let next_bb = self
                     .context
                     .append_basic_block(function, &format!("next{}", arm_idx));
@@ -1400,24 +1648,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((arm_bb, next_bb))
             }
             PatternKind::Array(inner_pats) => {
-                let match_cmp = self.compile_array_pattern(scrutinee_val, inner_pats)?;
+                let match_cmp =
+                    self.compile_array_pattern(scrutinee_val, inner_pats, is_string_scrutinee)?;
                 let next_bb = self
                     .context
                     .append_basic_block(function, &format!("next{}", arm_idx));
+                // AUDIT FIX (full-audit-2026-08-05 §7): compile_list_pattern_test
+                // ALWAYS returns Some(test) — the old `None => build_br(arm_bb)`
+                // unconditional arm (empty/wildcard-only patterns) matched every
+                // subject including non-lists. Kept defensively: a `None` here
+                // would reintroduce the over-match, so fail closed instead.
                 match match_cmp {
                     Some(cmp) => self.build_cond_br(cmp, arm_bb, next_bb)?,
-                    None => self.build_br(arm_bb)?,
+                    None => {
+                        return Err(CompileError::LlvmError(
+                            "array pattern dispatch: missing pattern test".to_string(),
+                        ))
+                    }
                 }
                 Ok((arm_bb, next_bb))
             }
             PatternKind::Slice(inner_pats, rest) => {
-                let match_cmp = self.compile_slice_pattern(scrutinee_val, inner_pats, rest)?;
+                let match_cmp = self.compile_slice_pattern(
+                    scrutinee_val,
+                    inner_pats,
+                    rest,
+                    is_string_scrutinee,
+                )?;
                 let next_bb = self
                     .context
                     .append_basic_block(function, &format!("next{}", arm_idx));
+                // Same fail-closed guard as Array above.
                 match match_cmp {
                     Some(cmp) => self.build_cond_br(cmp, arm_bb, next_bb)?,
-                    None => self.build_br(arm_bb)?,
+                    None => {
+                        return Err(CompileError::LlvmError(
+                            "slice pattern dispatch: missing pattern test".to_string(),
+                        ))
+                    }
                 }
                 Ok((arm_bb, next_bb))
             }

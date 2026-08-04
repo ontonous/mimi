@@ -6,6 +6,16 @@ use std::collections::HashSet;
 
 use super::unification::UnificationTable;
 
+/// Audit 2026-08-05: a deferred restore of the three global directories
+/// (`funcs`, `func_generics`, `nested_func_params`) captured when a nested
+/// function is registered, applied when the enclosing callable exits.
+pub(crate) struct PendingNestedRestore {
+    pub(crate) name: String,
+    pub(crate) funcs_entry: Option<(Vec<Type>, Type)>,
+    pub(crate) generics_entry: Option<Vec<GenericParam>>,
+    pub(crate) nested_params_entry: Option<Vec<crate::ast::Param>>,
+}
+
 pub(crate) struct Checker<'a> {
     pub(crate) file: &'a File,
     /// Registry backing `file.sources` — lets the type checker tell stdlib
@@ -55,6 +65,13 @@ pub(crate) struct Checker<'a> {
     /// Track generic parameters per function: func_name -> generic params
     pub(crate) func_generics: HashMap<String, Vec<GenericParam>>,
     pub(crate) nested_func_params: HashMap<String, Vec<Param>>,
+    /// Audit 2026-08-05 (wave-1 central fix): nested-func registrations stay
+    /// live in `funcs`/`func_generics`/`nested_func_params` for the whole
+    /// enclosing callable body (default-value / named-arg / generic
+    /// instantiation resolution needs the directory path, not a scopes
+    /// closure binding). Restores are deferred to the enclosing callable's
+    /// exit and flushed there — nothing leaks to subsequently checked items.
+    pub(crate) pending_nested_restores: Vec<PendingNestedRestore>,
     /// Track generic parameters per type def: type_name -> generic params
     pub(crate) type_generics: HashMap<String, Vec<GenericParam>>,
     /// Track methods available on types via traits: type_name -> list of (trait_name, method_name)
@@ -254,6 +271,7 @@ impl<'a> Checker<'a> {
             mut_vars: vec![HashMap::new()],
             func_generics: HashMap::new(),
             nested_func_params: HashMap::new(),
+            pending_nested_restores: Vec::new(),
             type_generics: HashMap::new(),
             type_methods: HashMap::new(),
             trait_method_sigs: HashMap::new(),
@@ -414,6 +432,39 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn end_callable(&mut self, previous: Option<super::NodeId>) {
         self.current_callable_owner = previous;
+    }
+
+    /// Audit 2026-08-05: apply deferred nested-function directory restores.
+    /// Called at every callable-body exit (check_func / actor method / impl
+    /// method). Entries are applied last-registered-first so nested-inside-
+    /// nested shadowing unwinds correctly.
+    pub(crate) fn flush_pending_nested_restores(&mut self) {
+        while let Some(restore) = self.pending_nested_restores.pop() {
+            match restore.funcs_entry {
+                Some(entry) => {
+                    self.funcs.insert(restore.name.clone(), entry);
+                }
+                None => {
+                    self.funcs.remove(&restore.name);
+                }
+            }
+            match restore.generics_entry {
+                Some(entry) => {
+                    self.func_generics.insert(restore.name.clone(), entry);
+                }
+                None => {
+                    self.func_generics.remove(&restore.name);
+                }
+            }
+            match restore.nested_params_entry {
+                Some(entry) => {
+                    self.nested_func_params.insert(restore.name.clone(), entry);
+                }
+                None => {
+                    self.nested_func_params.remove(&restore.name);
+                }
+            }
+        }
     }
 
     /// 0.31.13 追加 A: check whether a surface `Type` refers to a flow state.

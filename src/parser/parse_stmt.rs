@@ -208,9 +208,19 @@ impl Parser {
                             tok.col,
                         ));
                     }
-                    if self.at(&TokenKind::BitOr) {
-                        self.advance();
+                    // Full-audit 2026-08-05: the closing `|` is mandatory
+                    // (ADR-002 binder form `| name |`); `pinned(x) |v { }`
+                    // silently accepted a half-open binder before.
+                    if !self.at(&TokenKind::BitOr) {
+                        let tok = self.peek();
+                        return Err(ParseError::new(
+                            "expected `|` to close the pinned binder (ADR-002): syntax is \
+                             `pinned(expr) | name | { ... }`",
+                            tok.line,
+                            tok.col,
+                        ));
                     }
+                    self.advance();
                     Some(v)
                 } else {
                     None
@@ -801,21 +811,139 @@ impl Parser {
                 chars.next();
                 if let Some(&esc) = chars.peek() {
                     match esc {
-                        'n' => current_text.push('\n'),
-                        't' => current_text.push('\t'),
-                        'r' => current_text.push('\r'),
-                        '0' => current_text.push('\0'),
-                        '\\' => current_text.push('\\'),
-                        '"' => current_text.push('"'),
-                        '{' => current_text.push('{'),
-                        '}' => current_text.push('}'),
+                        'n' => {
+                            current_text.push('\n');
+                            chars.next();
+                        }
+                        't' => {
+                            current_text.push('\t');
+                            chars.next();
+                        }
+                        'r' => {
+                            current_text.push('\r');
+                            chars.next();
+                        }
+                        '0' => {
+                            current_text.push('\0');
+                            chars.next();
+                        }
+                        '\\' => {
+                            current_text.push('\\');
+                            chars.next();
+                        }
+                        '"' => {
+                            current_text.push('"');
+                            chars.next();
+                        }
+                        '{' => {
+                            current_text.push('{');
+                            chars.next();
+                        }
+                        '}' => {
+                            current_text.push('}');
+                            chars.next();
+                        }
+                        // Full-audit 2026-08-05: \xNN / \uXXXX / \u{...} are
+                        // validated by scan_fstring but were never decoded here
+                        // (f"\x41" stayed the literal 4 chars while "\x41" = "A").
+                        // Decode exactly like the normal-string path
+                        // (LexerPos::scan_string in lexer/flow.rs).
+                        'x' => {
+                            chars.next(); // consume 'x'
+                            let mut hex = String::with_capacity(2);
+                            for _ in 0..2 {
+                                match chars.peek() {
+                                    Some(&h) if h.is_ascii_hexdigit() => {
+                                        hex.push(h);
+                                        chars.next();
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if hex.len() != 2 {
+                                return Err(ParseError::new(
+                                    "invalid \\x escape in f-string (expected 2 hex digits)",
+                                    base_line,
+                                    base_col,
+                                ));
+                            }
+                            // Infallible: exactly 2 ASCII hex digits validated above.
+                            let value = u8::from_str_radix(&hex, 16).map_err(|_| {
+                                ParseError::new(
+                                    "invalid \\x escape in f-string (expected 2 hex digits)",
+                                    base_line,
+                                    base_col,
+                                )
+                            })?;
+                            current_text.push(value as char);
+                        }
+                        'u' => {
+                            chars.next(); // consume 'u'
+                            let mut code = String::new();
+                            if chars.peek() == Some(&'{') {
+                                chars.next();
+                                while let Some(&ch) = chars.peek() {
+                                    if ch.is_ascii_hexdigit() || ch == '_' {
+                                        code.push(ch);
+                                        chars.next();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if chars.peek() != Some(&'}') {
+                                    return Err(ParseError::new(
+                                        "invalid \\u{ escape in f-string (expected `}`)",
+                                        base_line,
+                                        base_col,
+                                    ));
+                                }
+                                chars.next(); // consume '}'
+                            } else {
+                                for _ in 0..4 {
+                                    match chars.peek() {
+                                        Some(&ch) if ch.is_ascii_hexdigit() => {
+                                            code.push(ch);
+                                            chars.next();
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                if code.len() != 4 {
+                                    return Err(ParseError::new(
+                                        "invalid \\u escape in f-string (expected 4 hex digits)",
+                                        base_line,
+                                        base_col,
+                                    ));
+                                }
+                            }
+                            let cleaned: String = code.chars().filter(|ch| *ch != '_').collect();
+                            let value = u32::from_str_radix(&cleaned, 16).map_err(|_| {
+                                ParseError::new(
+                                    "invalid \\u escape in f-string (expected hex digits)",
+                                    base_line,
+                                    base_col,
+                                )
+                            })?;
+                            match char::from_u32(value) {
+                                Some(ch) => current_text.push(ch),
+                                // Lexer validation cannot exclude surrogates
+                                // (\uD800) or out-of-range braces (\u{110000}).
+                                None => {
+                                    return Err(ParseError::new(
+                                        "invalid \\u escape in f-string (not a valid Unicode scalar value)",
+                                        base_line,
+                                        base_col,
+                                    ))
+                                }
+                            }
+                        }
                         other => {
                             // Unknown escape: keep both chars so diagnostics remain visible.
                             current_text.push('\\');
                             current_text.push(other);
+                            chars.next();
                         }
                     }
-                    chars.next();
                 }
             } else {
                 current_text.push(c);
@@ -1012,6 +1140,12 @@ impl Parser {
                     let mut exprs = Vec::new();
                     self.skip_newlines();
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        // Full-audit 2026-08-05: a failed parse can stop with
+                        // the cursor ON the math block's own `}` (or EOF). The
+                        // old blind advance() then ate that terminator, pulling
+                        // every following statement into the math node (silent
+                        // AST corruption on the LSP/recovery path).
+                        let pos_before = self.pos;
                         match self.parse_expr(0) {
                             Ok(expr) => {
                                 exprs.push(expr);
@@ -1019,7 +1153,15 @@ impl Parser {
                                 self.skip_newlines();
                             }
                             Err(_) => {
-                                self.advance();
+                                if self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof) {
+                                    break;
+                                }
+                                // Only force progress when the failed parse made
+                                // none; otherwise the failure already advanced
+                                // and skipping again would drop a token.
+                                if self.pos == pos_before {
+                                    self.advance();
+                                }
                             }
                         }
                     }

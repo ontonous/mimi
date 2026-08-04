@@ -2,8 +2,8 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, PointerValue};
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -64,17 +64,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.build_string_struct(ptr, len);
         }
 
-        // For f-strings with interpolation: dynamically compute buffer size, then fill
+        // For f-strings with interpolation: dynamically compute buffer size, then fill.
+        //
+        // AUDIT FIX (full-audit-2026-08-05 §7, literal.rs:373-424): the legacy
+        // assembly was strlen/strcpy/strcat-based — C-string semantics on
+        // length-based data. A string part carrying an embedded NUL terminated
+        // the composition at the NUL (VM concatenation is length-based,
+        // interp/bytecode/compiler.rs:2568-2612 ConcatStr), and the final
+        // length came from strlen(buf) instead of the tracked total. This
+        // rewrite tracks (ptr, len) per part, allocates the exact total, and
+        // copies with memcpy at tracked offsets so NUL bytes survive.
+        // Float interpolation switched from snprintf "%f" (fixed 6 decimals,
+        // diverges: 1.5 → "1.500000") to mimi_to_string_f64 — the same Rust
+        // shortest round-trip Display the VM uses (Value::Float → `{}`).
+        //
         // B3: Use snprintf instead of sprintf for buffer safety.
         // B4: allocations go through malloc_or_abort (no bare malloc).
-        let strcpy_fn = self
-            .module
-            .get_function("strcpy")
-            .ok_or_else(|| "strcpy not declared".to_string())?;
-        let strcat_fn = self
-            .module
-            .get_function("strcat")
-            .ok_or_else(|| "strcat not declared".to_string())?;
         let strlen_fn = self
             .module
             .get_function("strlen")
@@ -95,12 +100,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
 
-        // Phase 1: Compile each part and compute total buffer size at runtime
+        // Phase 1: Compile each part, tracking (ptr, runtime len) so phase 2
+        // can copy length-based (no strcat/strlen over composed data).
         enum CompiledPart<'ctx> {
             Text(String),
-            InterpStr(BasicValueEnum<'ctx>),
+            Interp {
+                ptr: PointerValue<'ctx>,
+                len: IntValue<'ctx>,
+            },
         }
         let mut compiled_parts: Vec<CompiledPart<'ctx>> = Vec::new();
+        // +1 for the trailing NUL handed to C-string consumers downstream.
         let mut total_size = i64_ty.const_int(1, false);
         for (i, part) in parts.iter().enumerate() {
             match part {
@@ -109,7 +119,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_int_add(
                             total_size,
-                            i64_ty.const_int(t.len() as u64 + 1, false),
+                            i64_ty.const_int(t.len() as u64, false),
                             &format!("fstr_text_sz_{}", i),
                         )
                         .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
@@ -140,7 +150,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_int_add(total_size, len, &format!("fstr_bool_sz_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                        compiled_parts.push(CompiledPart::InterpStr(ptr.into()));
+                        compiled_parts.push(CompiledPart::Interp { ptr, len });
                         continue;
                     }
                     match val {
@@ -202,7 +212,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .map_err(|e| {
                                         CompileError::LlvmError(format!("add error: {}", e))
                                     })?;
-                                compiled_parts.push(CompiledPart::InterpStr(ptr.into()));
+                                compiled_parts.push(CompiledPart::Interp { ptr, len });
                                 continue;
                             }
                             let ext_iv = if bw < 64 {
@@ -254,36 +264,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("add error: {}", e))
                                 })?;
-                            compiled_parts.push(CompiledPart::InterpStr(temp_buf.into()));
+                            compiled_parts.push(CompiledPart::Interp { ptr: temp_buf, len });
                         }
                         BasicValueEnum::FloatValue(fv) => {
-                            // MEM-C1 (deep audit): %f can produce up to 317 chars for extreme
-                            // float values (e.g. DBL_MAX). Use 512-byte buffer to be safe.
-                            let temp_buf = self.malloc_or_abort(
-                                i64_ty.const_int(512, false),
-                                &format!("fstr_temp_{}", i),
-                            )?;
-                            self.register_heap_alloc(temp_buf);
-                            let fmt = self
-                                .builder
-                                .build_global_string_ptr("%f", &format!("fstr_fmt_{}", i))
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("string error: {}", e))
-                                })?;
-                            self.build_call(
-                                snprintf_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(temp_buf),
-                                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(512, false)),
-                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                    BasicMetadataValueEnum::FloatValue(fv),
-                                ],
-                                &format!("fstr_snprintf_{}", i),
-                            )?;
+                            // MEM-C1 note superseded: see AUDIT FIX below (float path now
+                            // uses mimi_to_string_f64; no fixed-size %f buffer needed).
+                            // AUDIT FIX (full-audit-2026-08-05 §7): snprintf "%f"
+                            // diverges from the VM, which stringifies floats via
+                            // Rust shortest round-trip Display (Value::Float →
+                            // write!("{}", v); 1.5 → "1.5", not "1.500000").
+                            // mimi_to_string_f64 is the same runtime Display the
+                            // println emitter uses (builtins/io.rs); it returns a
+                            // NUL-free heap C string, so strlen is safe here.
+                            let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                            let float_ptr = self
+                                .build_call(
+                                    to_f64_fn,
+                                    &[BasicMetadataValueEnum::FloatValue(fv)],
+                                    &format!("fstr_f64_{}", i),
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("mimi_to_string_f64 returned void")?
+                                .into_pointer_value();
+                            // Heap-owned by this f-string evaluation; freed at
+                            // scope exit (allocator-compatible: mimi_alloc is
+                            // libc::malloc in release builds).
+                            self.register_heap_alloc(float_ptr);
                             let len = self
                                 .build_call(
                                     strlen_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(temp_buf)],
+                                    &[BasicMetadataValueEnum::PointerValue(float_ptr)],
                                     &format!("fstr_strlen_{}", i),
                                 )?
                                 .try_as_basic_value_opt()
@@ -295,9 +305,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("add error: {}", e))
                                 })?;
-                            compiled_parts.push(CompiledPart::InterpStr(temp_buf.into()));
+                            compiled_parts.push(CompiledPart::Interp {
+                                ptr: float_ptr,
+                                len,
+                            });
                         }
                         BasicValueEnum::PointerValue(pv) => {
+                            // Raw C-string value: length only recoverable via
+                            // strlen (length-carrying strings travel as
+                            // StructValue below, where embedded NULs survive).
                             let len = self
                                 .build_call(
                                     strlen_fn,
@@ -313,10 +329,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("add error: {}", e))
                                 })?;
-                            compiled_parts.push(CompiledPart::InterpStr(val));
+                            compiled_parts.push(CompiledPart::Interp { ptr: pv, len });
                         }
                         BasicValueEnum::StructValue(sv) => {
-                            // String struct {i8*, i64} — extract data pointer for strcat
+                            // String struct {i8*, i64} — use the authoritative len
+                            // field (NOT strlen), so embedded NUL bytes survive
+                            // the composition exactly like the VM's ConcatStr.
+                            let sv_fields = sv.get_type().get_field_types();
+                            let is_string_shape = matches!(
+                                sv_fields.as_slice(),
+                                [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                                    if t.get_bit_width() == 64
+                            );
+                            if !is_string_shape {
+                                // Non-string struct (e.g. a list) — its fields are
+                                // not {ptr, len}; fall through to the placeholder
+                                // instead of misreading them.
+                                let unknown = self
+                                    .builder
+                                    .build_global_string_ptr(
+                                        "<unsupported>",
+                                        &format!("fstr_unsup_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("string error: {}", e))
+                                    })?;
+                                let unknown_len = self
+                                    .build_call(
+                                        strlen_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(
+                                            unknown.as_pointer_value(),
+                                        )],
+                                        &format!("fstr_strlen_{}", i),
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("strlen returned void")?
+                                    .into_int_value();
+                                total_size = self
+                                    .builder
+                                    .build_int_add(
+                                        total_size,
+                                        unknown_len,
+                                        &format!("fstr_isz_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("add error: {}", e))
+                                    })?;
+                                compiled_parts.push(CompiledPart::Interp {
+                                    ptr: unknown.as_pointer_value(),
+                                    len: unknown_len,
+                                });
+                                continue;
+                            }
                             let data_ptr = self
                                 .build_extract_value(sv.into(), 0, "fstr_str_data")?
                                 .into_pointer_value();
@@ -329,7 +393,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("add error: {}", e))
                                 })?;
-                            compiled_parts.push(CompiledPart::InterpStr(data_ptr.into()));
+                            compiled_parts.push(CompiledPart::Interp { ptr: data_ptr, len });
                         }
                         _ => {
                             let unknown = self
@@ -358,33 +422,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("add error: {}", e))
                                 })?;
-                            compiled_parts
-                                .push(CompiledPart::InterpStr(unknown.as_pointer_value().into()));
+                            compiled_parts.push(CompiledPart::Interp {
+                                ptr: unknown.as_pointer_value(),
+                                len,
+                            });
                         }
                     }
                 }
             }
         }
 
-        // Phase 2: Allocate correctly-sized buffer and fill
+        // Phase 2: allocate the exact-size buffer and fill via memcpy at
+        // tracked offsets (AUDIT FIX — no strcpy/strcat/strlen over composed
+        // data, so embedded NUL bytes survive; VM parity).
         let buf = self.malloc_or_abort(total_size, "fstr_buf")?;
         self.register_heap_alloc(buf);
-
-        let empty = self
-            .builder
-            .build_global_string_ptr("", "fstr_empty_init")
-            .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(empty.as_pointer_value()),
-            ],
-            "fstr_init",
-        )?;
-
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let i8_ty = self.context.i8_type();
+        let mut offset = i64_ty.const_int(0, false);
         for (i, part) in compiled_parts.iter().enumerate() {
-            match part {
+            let (src_ptr, part_len): (PointerValue<'ctx>, IntValue<'ctx>) = match part {
                 CompiledPart::Text(t) => {
                     if t.is_empty() {
                         continue;
@@ -393,46 +450,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_global_string_ptr(t, &format!("fstr_part_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                    self.build_call(
-                        strcat_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(buf),
-                            BasicMetadataValueEnum::PointerValue(global.as_pointer_value()),
-                        ],
-                        &format!("fstr_cat_{}", i),
-                    )?;
+                    // Exact byte count: the global carries a trailing NUL that
+                    // must NOT be copied into the composition.
+                    (
+                        global.as_pointer_value(),
+                        i64_ty.const_int(t.len() as u64, false),
+                    )
                 }
-                CompiledPart::InterpStr(pv) => {
-                    let ptr = match pv {
-                        BasicValueEnum::PointerValue(p) => *p,
-                        _ => {
-                            return Err(CompileError::LlvmError(
-                                "f-string interp: expected pointer".to_string(),
-                            ))
-                        }
-                    };
-                    self.build_call(
-                        strcat_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(buf),
-                            BasicMetadataValueEnum::PointerValue(ptr),
-                        ],
-                        &format!("fstr_cat_{}", i),
-                    )?;
-                }
-            }
+                CompiledPart::Interp { ptr, len } => (*ptr, *len),
+            };
+            let dst = self.build_in_bounds_gep(
+                BasicTypeEnum::IntType(i8_ty),
+                buf,
+                &[offset],
+                &format!("fstr_dst_{}", i),
+            )?;
+            // SAFETY: `dst` is buf + offset with offset + part_len <= total_size
+            // (total_size accumulated every part's exact length plus the
+            // terminator byte); `src_ptr` is valid for `part_len` bytes by
+            // construction in phase 1 (globals are t.len() bytes long, temp
+            // buffers and runtime strings carry their measured length).
+            self.builder
+                .build_call(
+                    memcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(dst),
+                        BasicMetadataValueEnum::PointerValue(src_ptr),
+                        BasicMetadataValueEnum::IntValue(part_len),
+                    ],
+                    &format!("fstr_memcpy_{}", i),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("memcpy: {}", e)))?;
+            offset = self
+                .builder
+                .build_int_add(offset, part_len, &format!("fstr_off_{}", i))
+                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
         }
 
-        // Phase 3: Wrap heap-allocated buffer into canonical {i8*, i64} struct
-        let len = self
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(buf)],
-                "fstr_len",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
-            .into_int_value();
-        self.build_string_struct(buf, len)
+        // Phase 3: trailing NUL for C-string consumers downstream (puts, %s),
+        // then wrap into the canonical {i8*, i64} struct. The len field is the
+        // TRACKED total — never strlen(buf) — so NUL bytes inside the string
+        // do not truncate the value.
+        let nul_gep = self.build_in_bounds_gep(
+            BasicTypeEnum::IntType(i8_ty),
+            buf,
+            &[offset],
+            "fstr_nul_gep",
+        )?;
+        self.build_store(nul_gep, i8_ty.const_int(0, false))?;
+        self.build_string_struct(buf, offset)
     }
 }

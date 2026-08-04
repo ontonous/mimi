@@ -289,194 +289,139 @@ fn mimi_type_to_abi_depth(name: &str, depth: usize) -> AbiTypeRef {
     }
 }
 
-/// 0.31.31: Convenience: fat pointer type reference (String-like with capacity).
-pub fn fat_string() -> AbiTypeRef {
-    AbiTypeRef::FatPointer {
-        element: Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)),
-        has_capacity: true,
-    }
-}
-
-/// 0.31.31: Convenience: fat pointer slice type reference (no capacity).
-pub fn fat_slice(element: AbiTypeRef) -> AbiTypeRef {
-    AbiTypeRef::FatPointer {
-        element: Box::new(element),
-        has_capacity: false,
-    }
-}
-
-/// Register standard fat pointer type definitions.
-///
-/// 0.31.31: These replace the opaque handle types for String/List/Map/Set.
-/// Fat pointers carry { data, len, capacity } directly, eliminating the
-/// global handle registry lookup.
-pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
-    use super::types::{AbiField, AbiStruct};
-    use AbiPrimitive::*;
-
-    // MimiString: { data: *mut u8, len: usize, capacity: usize }
-    gen.type_def(super::types::AbiTypeDef::Struct(AbiStruct {
-        name: "MimiString".to_string(),
-        fields: vec![
-            AbiField {
-                name: "data".to_string(),
-                ty: ptr(prim(U8)),
-                offset: Some(0),
-            },
-            AbiField {
-                name: "len".to_string(),
-                ty: prim(UIntPtr),
-                offset: Some(8),
-            },
-            AbiField {
-                name: "capacity".to_string(),
-                ty: prim(UIntPtr),
-                offset: Some(16),
-            },
-        ],
-        is_repr_c: true,
-        size: Some(24),
-        align: Some(8),
-    }));
-
-    // MimiSlice: { data: *mut T, len: usize }
-    gen.type_def(super::types::AbiTypeDef::Struct(AbiStruct {
-        name: "MimiSlice".to_string(),
-        fields: vec![
-            AbiField {
-                name: "data".to_string(),
-                ty: ptr(prim(U8)),
-                offset: Some(0),
-            },
-            AbiField {
-                name: "len".to_string(),
-                ty: prim(UIntPtr),
-                offset: Some(8),
-            },
-        ],
-        is_repr_c: true,
-        size: Some(16),
-        align: Some(8),
-    }));
-}
-
 /// Register the core runtime ABI surface.
 ///
-/// This is the v3 manual registry. It covers ~180 of 388 runtime functions:
-/// RC, list, map, set, string, I/O, concurrency, file I/O, time, JSON,
-/// crypto, regex, net, actor, future, env, exec, sort, capability, misc,
-/// list/set serialization, tuple, option/result JSON, executor, actor extras.
+/// This is the v4 manual registry, corrected against the real runtime on
+/// 2026-08-05 (full audit §12): every signature below was re-verified
+/// against the `#[no_mangle] pub extern "C"` definitions in `src/runtime/`
+/// (mod.rs, capability.rs, net.rs, crypto.rs, actor.rs, fs.rs,
+/// concurrency.rs, env.rs, binary_io.rs, future.rs, regex.rs).
+///
+/// Audit fix: phantom symbols were removed entirely —
+/// `mimi_list_new`/`mimi_list_len` (lists are codegen-allocated, no runtime
+/// constructor), `mimi_print_line`/`mimi_print_err` (codegen emits libc
+/// puts/printf directly), `mimi_sleep_ms` (real: `mimi_sleep`),
+/// `mimi_timestamp`/`mimi_timestamp_ms` (real: `mimi_now`/`mimi_now_ms`),
+/// and the 0.31.31 `MimiString`/`MimiSlice` fat-pointer surface
+/// (`mimi_string_new`/`mimi_string_len`/`mimi_string_as_slice`) which never
+/// existed in the runtime and collided with the real `mimi_string_len`
+/// (ffi/runtime.rs, `(*const Value) -> i64`). The `FatPointer` type
+/// vocabulary stays in `types.rs`; the core registry only registers it when
+/// a component actually uses it.
+///
+/// Runtime-internal alias types used below: `ValueHandle = usize`
+/// (runtime/mod.rs:252), `MapHandle = usize` (mod.rs:253),
+/// `SetHandle = i64` / `SetValueHandle = i64` (mod.rs:16471-16472).
+///
 /// JSON combinatorial serialization variants (mimi_map_from_json_* etc.)
 /// are intentionally excluded — they are internal codegen artifacts.
 pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     use AbiPrimitive::*;
 
-    // 0.31.31: register the fat-pointer struct layouts (MimiString/MimiSlice)
-    // so String/buffer surfaces carry { data, len, capacity } directly instead
-    // of an opaque C-string pointer + separate length.
-    register_fat_pointer_types(gen);
-
-    // Register opaque handle types (referenced by list/map/set/actor/future).
+    // Register opaque handle types (referenced by list/map/actor/future).
+    //
+    // Audit 2026-08-05: SetHandle removed — the real runtime `SetHandle`
+    // is `type SetHandle = i64` (runtime/mod.rs:16471), not an opaque
+    // pointer type; set functions below carry plain `i64`. Opaque renders
+    // as `MimiHandle/* Name */` in C; the header preamble emits
+    // `typedef uintptr_t MimiHandle;` (c_header.rs).
     use super::types::{AbiOpaque, AbiTypeDef};
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "ListHandle".to_string(),
-        description: "Opaque handle to a Mimi list (generational, kind-tagged)".to_string(),
+        description: "Opaque handle to a Mimi list (*mut MimiList)".to_string(),
     }));
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "MapHandle".to_string(),
-        description: "Opaque handle to a Mimi map (generational, kind-tagged)".to_string(),
-    }));
-    gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
-        name: "SetHandle".to_string(),
-        description: "Opaque handle to a Mimi set (generational, kind-tagged)".to_string(),
+        description: "Opaque handle to a Mimi map (MapHandle = usize)".to_string(),
     }));
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "ActorHandle".to_string(),
-        description: "Opaque handle to a Mimi actor".to_string(),
+        description: "Opaque handle to a Mimi actor (*mut MimiActorRepr)".to_string(),
     }));
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "FutureHandle".to_string(),
-        description: "Opaque handle to a Mimi future/task".to_string(),
+        description: "Opaque handle to a Mimi future/task (*mut FutureRepr)".to_string(),
     }));
 
-    // ── RC / Allocation ──
+    // ── RC / Allocation (runtime/mod.rs:1201-1360) ──
     gen.export("mimi_rc_alloc", |f| {
-        f.param("size", prim(UIntPtr))
-            .returns(prim(IntPtr))
+        f.param("size", prim(I64))
+            .returns(ptr(prim(U8)))
             .effect("alloc")
     });
-    gen.export("mimi_rc_retain", |f| f.param("ptr", prim(IntPtr)));
+    gen.export("mimi_rc_retain", |f| f.param("ptr", ptr(prim(U8))));
     gen.export("mimi_rc_release", |f| {
-        f.param("ptr", prim(IntPtr)).effect("dealloc")
+        f.param("ptr", ptr(prim(U8))).effect("dealloc")
     });
     gen.export("mimi_rc_upgrade", |f| {
-        f.param("weak_ptr", prim(IntPtr)).returns(prim(IntPtr))
+        f.param("ptr", ptr(prim(U8))).returns(ptr(prim(U8)))
     });
-    gen.export("mimi_rc_weak_retain", |f| f.param("ptr", prim(IntPtr)));
+    gen.export("mimi_rc_weak_retain", |f| f.param("ptr", ptr(prim(U8))));
     gen.export("mimi_rc_weak_release", |f| {
-        f.param("ptr", prim(IntPtr)).effect("dealloc")
+        f.param("ptr", ptr(prim(U8))).effect("dealloc")
     });
 
-    // ── List ──
-    gen.export("mimi_list_new", |f| {
-        f.returns(handle("ListHandle")).effect("alloc")
-    });
+    // ── List (runtime/mod.rs:594-1020) ──
+    // Audit 2026-08-05: mimi_list_new / mimi_list_len removed — no such
+    // runtime symbols exist. Lists are codegen-allocated MimiList structs;
+    // length lives in the struct field, not a runtime function.
     gen.export("mimi_list_push_i64", |f| {
         f.param("list", handle("ListHandle"))
-            .param("value", prim(I64))
+            .param("element", prim(I64))
     });
     gen.export("mimi_list_push_f64", |f| {
         f.param("list", handle("ListHandle"))
-            .param("value", prim(F64))
+            .param("element", prim(F64))
     });
     gen.export("mimi_list_push_string", |f| {
         f.param("list", handle("ListHandle"))
-            .param("value", ptr(prim(U8)))
+            .param("element", ptr(prim(U8)))
     });
     gen.export("mimi_list_get_i64", |f| {
         f.param("list", handle("ListHandle"))
-            .param("index", prim(UIntPtr))
+            .param("index", prim(I64))
             .returns(prim(I64))
     });
     gen.export("mimi_list_get_f64", |f| {
         f.param("list", handle("ListHandle"))
-            .param("index", prim(UIntPtr))
+            .param("index", prim(I64))
             .returns(prim(F64))
     });
     gen.export("mimi_list_get_string", |f| {
         f.param("list", handle("ListHandle"))
-            .param("index", prim(UIntPtr))
+            .param("index", prim(I64))
             .returns(ptr(prim(U8)))
     });
-    gen.export("mimi_list_len", |f| {
-        f.param("list", handle("ListHandle")).returns(prim(UIntPtr))
-    });
     gen.export("mimi_list_free", |f| {
-        f.param("list", handle("ListHandle")).effect("dealloc")
+        f.param("list", handle("ListHandle"))
+            .param("free_elements", prim(Bool))
+            .effect("dealloc")
     });
     gen.export("mimi_list_push_grow", |f| {
         f.param("list", handle("ListHandle"))
-            .param("value", prim(I64))
-            .param("capacity", prim(UIntPtr))
+            .param("additional", prim(I64))
+            .returns(ptr(ptr(prim(U8))))
+            .effect("alloc")
     });
 
-    // ── Map ──
+    // ── Map (runtime/mod.rs:1419-1805; MapHandle = usize, ValueHandle = usize) ──
     gen.export("mimi_map_new", |f| {
         f.returns(handle("MapHandle")).effect("alloc")
     });
     gen.export("mimi_map_set", |f| {
         f.param("map", handle("MapHandle"))
             .param("key", ptr(prim(U8)))
-            .param("value", prim(I64))
+            .param("value", prim(UIntPtr))
     });
     gen.export("mimi_map_get", |f| {
         f.param("map", handle("MapHandle"))
             .param("key", ptr(prim(U8)))
-            .returns(prim(I64))
+            .returns(prim(UIntPtr))
     });
     gen.export("mimi_map_remove", |f| {
         f.param("map", handle("MapHandle"))
             .param("key", ptr(prim(U8)))
+            .returns(prim(I32))
     });
     gen.export("mimi_map_has_key", |f| {
         f.param("map", handle("MapHandle"))
@@ -492,50 +437,57 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(handle("ListHandle"))
     });
     gen.export("mimi_map_size", |f| {
-        f.param("map", handle("MapHandle")).returns(prim(UIntPtr))
+        f.param("map", handle("MapHandle")).returns(prim(I64))
     });
     gen.export("mimi_map_destroy", |f| {
         f.param("map", handle("MapHandle")).effect("dealloc")
     });
     gen.export("mimi_map_from_list", |f| {
-        f.param("keys", handle("ListHandle"))
-            .param("values", handle("ListHandle"))
+        f.param("keys", ptr(prim(UIntPtr)))
+            .param("values", ptr(prim(UIntPtr)))
+            .param("n", prim(I64))
             .returns(handle("MapHandle"))
             .effect("alloc")
     });
 
-    // ── Set ──
-    gen.export("mimi_set_new", |f| {
-        f.returns(handle("SetHandle")).effect("alloc")
-    });
+    // ── Set (runtime/mod.rs:16495-18393; SetHandle = i64, SetValueHandle = i64) ──
+    // Audit 2026-08-05: handles are plain i64 in the real runtime
+    // (`type SetHandle = i64`, mod.rs:16471), not opaque pointer handles.
+    gen.export("mimi_set_new", |f| f.returns(prim(I64)).effect("alloc"));
     gen.export("mimi_set_insert", |f| {
-        f.param("set", handle("SetHandle"))
+        f.param("set", prim(I64))
             .param("value", prim(I64))
+            .returns(prim(I64))
     });
     gen.export("mimi_set_contains", |f| {
-        f.param("set", handle("SetHandle"))
+        f.param("set", prim(I64))
             .param("value", prim(I64))
-            .returns(prim(I32))
+            .returns(prim(I64))
     });
     gen.export("mimi_set_remove", |f| {
-        f.param("set", handle("SetHandle"))
+        f.param("set", prim(I64))
             .param("value", prim(I64))
+            .returns(prim(I64))
     });
     gen.export("mimi_set_size", |f| {
-        f.param("set", handle("SetHandle")).returns(prim(UIntPtr))
+        f.param("set", prim(I64)).returns(prim(I64))
     });
     gen.export("mimi_set_destroy", |f| {
-        f.param("set", handle("SetHandle")).effect("dealloc")
+        f.param("set", prim(I64)).effect("dealloc")
     });
     gen.export("mimi_set_to_list", |f| {
-        f.param("set", handle("SetHandle"))
-            .returns(handle("ListHandle"))
+        f.param("set", prim(I64))
+            .param("out_len", ptr(prim(I64)))
+            .returns(ptr(prim(I64)))
+            .effect("alloc")
     });
 
-    // ── String ──
+    // ── String (runtime/mod.rs:1833-2963, crypto.rs:244-288) ──
     gen.export("mimi_str_clone", |f| {
-        f.param("s", ptr(prim(U8)))
-            .returns(ptr(prim(U8)))
+        // real: (ptr: *const c_char, len: i64) -> ValueHandle (mod.rs:1833)
+        f.param("ptr", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(UIntPtr))
             .effect("alloc")
     });
     gen.export("mimi_str_concat", |f| {
@@ -576,14 +528,20 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_string_free", |f| {
-        f.param("s", ptr(prim(U8))).effect("dealloc")
+        f.param("ptr", ptr(prim(U8))).effect("dealloc")
     });
     gen.export("mimi_str_format", |f| {
+        // real: 10 params (num_args, template, arg0..arg7) — crypto.rs:256
         f.param("num_args", prim(I64))
             .param("template", ptr(prim(U8)))
             .param("arg0", ptr(prim(U8)))
             .param("arg1", ptr(prim(U8)))
             .param("arg2", ptr(prim(U8)))
+            .param("arg3", ptr(prim(U8)))
+            .param("arg4", ptr(prim(U8)))
+            .param("arg5", ptr(prim(U8)))
+            .param("arg6", ptr(prim(U8)))
+            .param("arg7", ptr(prim(U8)))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
@@ -598,54 +556,51 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_any_to_string", |f| {
-        f.param("value", prim(I64))
-            .param("type_tag", prim(I32))
+        // real: (value: ValueHandle = usize) -> *mut c_char (mod.rs:1508)
+        f.param("value", prim(UIntPtr))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
-    // 0.31.31: fat-pointer string surface (zero-copy, replaces C-string marshalling)
-    gen.export("mimi_string_new", |f| {
-        f.param("bytes", fat_slice(prim(U8)))
-            .returns(fat_string())
-            .effect("alloc")
-    });
-    gen.export("mimi_string_len", |f| {
-        f.param("s", fat_string()).returns(prim(UIntPtr))
-    });
-    gen.export("mimi_string_as_slice", |f| {
-        f.param("s", fat_string()).returns(fat_slice(prim(U8)))
-    });
+    // Audit 2026-08-05: mimi_string_new / mimi_string_len / mimi_string_as_slice
+    // removed — phantom symbols with no runtime implementation. The real
+    // `mimi_string_len` lives in ffi/runtime.rs with an unrelated signature
+    // `(*const Value) -> i64` and is not part of the core runtime ABI.
 
     // ── I/O ──
-    gen.export("mimi_print_line", |f| {
-        f.param("data", ptr(prim(U8)))
-            .param("len", prim(UIntPtr))
-            .effect("io")
-    });
-    gen.export("mimi_print_err", |f| {
-        f.param("data", ptr(prim(U8)))
-            .param("len", prim(UIntPtr))
-            .effect("io")
-    });
+    // Audit 2026-08-05: mimi_print_line / mimi_print_err removed — no such
+    // runtime symbols exist. Codegen prints via libc puts/printf directly
+    // (codegen/builtins/io.rs), so there is no runtime print ABI to export.
 
-    // ── Runtime control ──
+    // ── Runtime control (runtime/mod.rs) ──
     gen.export("mimi_runtime_abort", |f| {
-        f.param("msg", ptr(prim(U8)))
-            .param("len", prim(UIntPtr))
-            .unsafe_fn()
+        // real: (msg: *const c_char) -> ! — noreturn (mod.rs:19089)
+        f.param("msg", ptr(prim(U8))).unsafe_fn().effect("noreturn")
     });
     gen.export("mimi_runtime_set_error_handler", |f| {
+        // real: (handler: Option<ErrorHandler>) — fn-pointer-sized (mod.rs:19080)
         f.param("handler", prim(IntPtr))
     });
     gen.export("mimi_install_no_panic_handlers", |f| f.effect("io"));
     gen.export("mimi_restore_no_panic_handlers", |f| f.effect("io"));
-    gen.export("mimi_try_exit", |f| f.param("code", prim(I32)));
-    gen.export("mimi_try_exit_str", |f| f.param("msg", ptr(prim(U8))));
+    gen.export("mimi_try_exit", |f| {
+        // real: (payload: i64) -> ! (mod.rs:2992)
+        f.param("payload", prim(I64)).effect("noreturn")
+    });
+    gen.export("mimi_try_exit_str", |f| {
+        // real: (str: *const c_char, len: i64) -> ! (mod.rs:2999)
+        f.param("msg", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .effect("noreturn")
+    });
     gen.export("mimi_assert_state", |f| {
-        f.param("cond", prim(I32)).param("msg", ptr(prim(U8)))
+        // real: (actual_state, expected_state: *const c_char) -> i64 (mod.rs:19266)
+        f.param("actual_state", ptr(prim(U8)))
+            .param("expected_state", ptr(prim(U8)))
+            .returns(prim(I64))
     });
     gen.export("mimi_value_type_name", |f| {
-        f.param("type_tag", prim(I32)).returns(ptr(prim(U8)))
+        // real: (_handle: ValueHandle = usize) -> *const c_char (mod.rs:1810)
+        f.param("handle", prim(UIntPtr)).returns(ptr(prim(U8)))
     });
 
     // ── Concurrency: Atomic ──
@@ -760,7 +715,7 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("pair", prim(I64)).returns(prim(I64))
     });
 
-    // ── File I/O ──
+    // ── File I/O (runtime/fs.rs, runtime/binary_io.rs) ──
     gen.export("mimi_is_dir", |f| {
         f.param("path", ptr(prim(U8)))
             .returns(prim(I64))
@@ -782,22 +737,22 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("io")
     });
     gen.export("mimi_read_file_bytes", |f| {
+        // real: (path: *const c_char) -> *mut c_char (binary_io.rs:53)
         f.param("path", ptr(prim(U8)))
-            .param("out_len", ptr(prim(UIntPtr)))
             .returns(ptr(prim(U8)))
             .effect("io")
             .effect("alloc")
     });
     gen.export("mimi_write_file_bytes", |f| {
+        // real: (path, data: *const c_char) -> i32 (binary_io.rs:73)
         f.param("path", ptr(prim(U8)))
             .param("data", ptr(prim(U8)))
-            .param("len", prim(I64))
-            .returns(prim(I64))
+            .returns(prim(I32))
             .effect("io")
     });
     gen.export("mimi_append_file", |f| {
         f.param("path", ptr(prim(U8)))
-            .param("data", ptr(prim(U8)))
+            .param("content", ptr(prim(U8)))
             .returns(prim(I64))
             .effect("io")
     });
@@ -828,41 +783,56 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
 
-    // ── Time ──
-    gen.export("mimi_sleep_ms", |f| {
+    // ── Time (runtime/mod.rs:3056-3072) ──
+    // Audit 2026-08-05: mimi_sleep_ms / mimi_timestamp / mimi_timestamp_ms
+    // removed — phantoms. Real symbols: mimi_sleep, mimi_now, mimi_now_ms.
+    gen.export("mimi_sleep", |f| {
         f.param("ms", prim(I64)).effect("io").effect("blocking")
     });
-    gen.export("mimi_timestamp", |f| f.returns(prim(I64)).effect("io"));
-    gen.export("mimi_timestamp_ms", |f| f.returns(prim(I64)).effect("io"));
     gen.export("mimi_now", |f| f.returns(prim(I64)).effect("io"));
     gen.export("mimi_now_ms", |f| f.returns(prim(I64)).effect("io"));
 
-    // ── JSON ──
+    // ── JSON (runtime/mod.rs) ──
     gen.export("mimi_json_serialize", |f| {
-        f.param("value", prim(I64))
-            .param("type_tag", prim(I32))
+        // real: (data: *mut c_void, len: i64, elem_type: i64) -> *mut c_char (mod.rs:18460)
+        f.param("data", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .param("elem_type", prim(I64))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_json_deserialize", |f| {
+        // real: (json, out_len: *mut i64, elem_type: i64) -> *mut c_void (mod.rs:18534).
+        // The old registry entry dropped out_len — SDK calls built from it
+        // would let the runtime write through a garbage pointer.
         f.param("json", ptr(prim(U8)))
-            .returns(prim(I64))
+            .param("out_len", ptr(prim(I64)))
+            .param("elem_type", prim(I64))
+            .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_json_deserialize_free", |f| {
-        f.param("ptr", prim(I64)).effect("dealloc")
+        // real: (buf: *mut c_void, len: i64, elem_type: i64) (mod.rs:18772)
+        f.param("buf", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .param("elem_type", prim(I64))
+            .effect("dealloc")
     });
     gen.export("mimi_json_as_i64", |f| {
-        f.param("json_ptr", prim(I64)).returns(prim(I64))
+        // real: (json: *const c_char) -> i64 (mod.rs:16405)
+        f.param("json", ptr(prim(U8))).returns(prim(I64))
     });
     gen.export("mimi_json_as_f64", |f| {
-        f.param("json_ptr", prim(I64)).returns(prim(F64))
+        // real: (json: *const c_char) -> f64 (mod.rs:16430)
+        f.param("json", ptr(prim(U8))).returns(prim(F64))
     });
     gen.export("mimi_json_as_bool", |f| {
-        f.param("json_ptr", prim(I64)).returns(prim(I32))
+        // real: (json: *const c_char) -> i64 (mod.rs:16444)
+        f.param("json", ptr(prim(U8))).returns(prim(I64))
     });
     gen.export("mimi_is_valid_json", |f| {
-        f.param("json", ptr(prim(U8))).returns(prim(I32))
+        // real: (json_str: *const c_char) -> i64 (mod.rs:3398)
+        f.param("json", ptr(prim(U8))).returns(prim(I64))
     });
     gen.export("mimi_json_escape_string", |f| {
         f.param("s", ptr(prim(U8)))
@@ -870,9 +840,8 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_from_json", |f| {
-        f.param("json", ptr(prim(U8)))
-            .param("type_tag", prim(I32))
-            .returns(prim(I64))
+        // real: (json_str: *const c_char) -> *mut c_void (mod.rs:3384)
+        f.param("json", ptr(prim(U8))).returns(ptr(prim(U8)))
     });
 
     // ── Crypto ──
@@ -930,7 +899,7 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
 
-    // ── Net ──
+    // ── Net (runtime/net.rs) ──
     gen.export("mimi_socket", |f| {
         f.param("domain", prim(I64))
             .param("type_", prim(I64))
@@ -940,15 +909,15 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_connect", |f| {
         f.param("fd", prim(I64))
-            .param("addr", ptr(prim(U8)))
+            .param("host", ptr(prim(U8)))
             .param("port", prim(I64))
             .returns(prim(I64))
             .effect("io")
             .effect("blocking")
     });
     gen.export("mimi_bind", |f| {
+        // real: (fd: i64, port: i64) -> i64 — binds INADDR_ANY (net.rs:112)
         f.param("fd", prim(I64))
-            .param("addr", ptr(prim(U8)))
             .param("port", prim(I64))
             .returns(prim(I64))
             .effect("io")
@@ -973,14 +942,22 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("io")
     });
     gen.export("mimi_recv", |f| {
+        // real: (fd: i64, buf_size: i64, out_len: *mut i64) -> *mut c_char (net.rs:192).
+        // The runtime allocates the receive buffer itself and reports the
+        // byte count through out_len; the old registry modeled a
+        // caller-provided buffer + i64 return — wrong on both counts.
         f.param("fd", prim(I64))
-            .param("buf", ptr(prim(U8)))
-            .param("buf_len", prim(I64))
-            .returns(prim(I64))
+            .param("buf_size", prim(I64))
+            .param("out_len", ptr(prim(I64)))
+            .returns(ptr(prim(U8)))
             .effect("io")
             .effect("blocking")
+            .effect("alloc")
     });
-    gen.export("mimi_close", |f| f.param("fd", prim(I64)).effect("io"));
+    gen.export("mimi_close", |f| {
+        // real: (fd: i64) -> i64 (net.rs:226)
+        f.param("fd", prim(I64)).returns(prim(I64)).effect("io")
+    });
     gen.export("mimi_http_get", |f| {
         f.param("url", ptr(prim(U8)))
             .returns(ptr(prim(U8)))
@@ -997,26 +974,33 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
 
-    // ── Actor ──
+    // ── Actor (runtime/actor.rs) ──
     gen.export("mimi_actor_spawn", |f| {
-        f.param("fields_ptr", prim(IntPtr))
+        // real: (fields_ptr: *const c_void, fields_size: i64,
+        //        dispatch_fn: Option<ActorDispatchFn>) -> *mut c_void (actor.rs:161)
+        f.param("fields_ptr", ptr(prim(U8)))
             .param("fields_size", prim(I64))
             .param("dispatch_fn", prim(IntPtr))
             .returns(handle("ActorHandle"))
             .effect("alloc")
     });
     gen.export("mimi_actor_spawn_detached", |f| {
-        f.param("fields_ptr", prim(IntPtr))
+        // real: (fields_ptr: *const c_void, fields_size: i64,
+        //        dispatch_fn: Option<ActorDispatchFn>) -> *mut c_void (actor.rs:171)
+        f.param("fields_ptr", ptr(prim(U8)))
             .param("fields_size", prim(I64))
             .param("dispatch_fn", prim(IntPtr))
             .returns(handle("ActorHandle"))
             .effect("alloc")
     });
     gen.export("mimi_actor_call", |f| {
+        // real: (handle, method_id: i32, args_ptr: *const c_void,
+        //        args_size: i64, result_ptr: *mut c_void) -> i64 (actor.rs:399)
         f.param("handle", handle("ActorHandle"))
             .param("method_id", prim(I32))
-            .param("args_ptr", prim(IntPtr))
+            .param("args_ptr", ptr(prim(U8)))
             .param("args_size", prim(I64))
+            .param("result_ptr", ptr(prim(U8)))
             .returns(prim(I64))
             .effect("blocking")
     });
@@ -1042,13 +1026,17 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("handle", handle("ActorHandle"))
     });
     gen.export("mimi_broadcast", |f| {
-        f.param("handles", prim(IntPtr))
+        // real: (handles: *const *mut c_void, count: i64,
+        //        method_name: *const c_char, out_len: *mut i64) -> *mut i64
+        // (actor.rs:720). The old registry carried phantom args_ptr/args_size
+        // parameters that do not exist.
+        f.param("handles", ptr(ptr(prim(U8))))
             .param("count", prim(I64))
             .param("method_name", ptr(prim(U8)))
-            .param("args_ptr", prim(IntPtr))
-            .param("args_size", prim(I64))
+            .param("out_len", ptr(prim(I64)))
             .returns(ptr(prim(I64)))
             .effect("blocking")
+            .effect("alloc")
     });
     gen.export("mimi_broadcast_free", |f| {
         f.param("ptr", ptr(prim(I64)))
@@ -1075,13 +1063,15 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("future", handle("FutureHandle")).effect("blocking")
     });
     gen.export("mimi_spawn_future", |f| {
+        // real: (future: *mut FutureRepr, poll_fn: extern fn) -> *mut c_void (future.rs:159)
         f.param("future", handle("FutureHandle"))
             .param("poll_fn", prim(IntPtr))
+            .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_executor_run", |f| f.effect("blocking"));
 
-    // ── Env ──
+    // ── Env (runtime/env.rs, runtime/fs.rs) ──
     gen.export("mimi_getenv", |f| {
         f.param("name", ptr(prim(U8)))
             .returns(ptr(prim(U8)))
@@ -1089,8 +1079,10 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_set_env", |f| {
-        f.param("name", ptr(prim(U8)))
+        // real: (key, value: *const c_char) -> i64 (fs.rs:717)
+        f.param("key", ptr(prim(U8)))
             .param("value", ptr(prim(U8)))
+            .returns(prim(I64))
             .effect("io")
     });
     gen.export("mimi_args_count", |f| f.returns(prim(I64)));
@@ -1100,14 +1092,19 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_args_init", |f| {
-        f.param("argc", prim(I32)).param("argv", prim(IntPtr))
+        // real: (argc: i32, argv: *mut *mut c_char) (env.rs:36)
+        f.param("argc", prim(I32)).param("argv", ptr(ptr(prim(U8))))
     });
     gen.export("mimi_args_list", |f| {
         f.returns(handle("ListHandle")).effect("alloc")
     });
 
-    // ── Exec ──
+    // ── Exec (runtime/fs.rs) ──
+    // Real return type is *mut MimiExecResult (layout internal to the
+    // runtime); modeled as an opaque byte pointer here. Free with
+    // mimi_exec_free.
     gen.export("mimi_exec", |f| {
+        // real: (cmd: *const c_char) -> *mut MimiExecResult (fs.rs:268)
         f.param("cmd", ptr(prim(U8)))
             .returns(ptr(prim(U8)))
             .effect("io")
@@ -1115,60 +1112,80 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_exec_safe", |f| {
-        f.param("cmd", ptr(prim(U8)))
+        // real: (prog: *const c_char, args: *mut MimiList) -> *mut MimiExecResult (fs.rs:433)
+        f.param("prog", ptr(prim(U8)))
+            .param("args", handle("ListHandle"))
             .returns(ptr(prim(U8)))
             .effect("io")
             .effect("blocking")
             .effect("alloc")
     });
     gen.export("mimi_exec_pipe", |f| {
+        // real: (cmd: *const c_char) -> *mut c_char (fs.rs:396)
         f.param("cmd", ptr(prim(U8)))
-            .param("input", ptr(prim(U8)))
             .returns(ptr(prim(U8)))
             .effect("io")
             .effect("blocking")
             .effect("alloc")
     });
     gen.export("mimi_exec_free", |f| {
-        f.param("ptr", ptr(prim(U8))).effect("dealloc")
+        // real: (res: *mut MimiExecResult) (fs.rs:360)
+        f.param("res", ptr(prim(U8))).effect("dealloc")
     });
 
-    // ── Sort ──
+    // ── Sort (runtime/mod.rs:18415-18429) ──
+    // Real sort primitives operate on raw buffers, not list handles.
     gen.export("mimi_sort_f64_inplace", |f| {
-        f.param("list", handle("ListHandle"))
+        // real: (data: *mut u8, count: i64) — count*8 writable bytes
+        f.param("data", ptr(prim(U8))).param("count", prim(I64))
     });
     gen.export("mimi_sort_str_inplace", |f| {
-        f.param("list", handle("ListHandle"))
+        // real: (data: *mut *mut c_char, count: i64) — array of C-string slots
+        f.param("data", ptr(ptr(prim(U8))))
+            .param("count", prim(I64))
     });
 
-    // ── Capability ──
+    // ── Capability (runtime/capability.rs) ──
     gen.export("mimi_cap_register", |f| {
-        f.param("name", ptr(prim(U8))).param("level", prim(I32))
+        // real: (name: *const c_char) -> i64 (capability.rs:34)
+        f.param("name", ptr(prim(U8))).returns(prim(I64))
     });
     gen.export("mimi_cap_check", |f| {
-        f.param("name", ptr(prim(U8)))
-            .param("required", prim(I32))
-            .returns(prim(I32))
+        // real: (cap: i64, name: *const c_char) -> bool (capability.rs:69)
+        f.param("cap", prim(I64))
+            .param("name", ptr(prim(U8)))
+            .returns(prim(Bool))
     });
     gen.export("mimi_cap_consume", |f| {
-        f.param("name", ptr(prim(U8))).returns(prim(I32))
+        // real: (cap: i64, name: *const c_char) -> bool (capability.rs:86)
+        f.param("cap", prim(I64))
+            .param("name", ptr(prim(U8)))
+            .returns(prim(Bool))
+    });
+    gen.export("mimi_cap_drop", |f| {
+        // real: (cap: i64) (capability.rs:61) — releases the table entry
+        f.param("cap", prim(I64)).effect("dealloc")
     });
 
     // ── Fault injection ──
     gen.export("mimi_inject_fault", |f| {
-        f.param("name", ptr(prim(U8)))
-            .param("probability", prim(F64))
+        // real: (state_name: *const c_char) -> i64 (mod.rs:19243)
+        f.param("state_name", ptr(prim(U8))).returns(prim(I64))
     });
 
-    // ── List serialization / display ──
+    // ── List serialization / display (runtime/mod.rs) ──
     gen.export("mimi_list_serialize", |f| {
-        f.param("list", handle("ListHandle"))
+        // real: (data: *mut c_void, len: i64) -> *mut c_char (mod.rs:18526)
+        f.param("data", ptr(prim(U8)))
+            .param("len", prim(I64))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_list_deserialize", |f| {
-        f.param("data", ptr(prim(U8)))
-            .returns(handle("ListHandle"))
+        // real: (json: *const c_char, out_len: *mut i64) -> *mut c_void (mod.rs:18798)
+        f.param("json", ptr(prim(U8)))
+            .param("out_len", ptr(prim(I64)))
+            .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_list_to_string", |f| {
@@ -1182,9 +1199,8 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_list_element_kind", |f| {
-        f.param("list", handle("ListHandle"))
-            .param("index", prim(UIntPtr))
-            .returns(prim(I32))
+        // real: (list: *const MimiList) -> i8 (mod.rs:911)
+        f.param("list", handle("ListHandle")).returns(prim(I8))
     });
     gen.export("mimi_list_free_elements", |f| {
         f.param("list", handle("ListHandle")).effect("dealloc")
@@ -1192,55 +1208,69 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
 
     // ── Set display / serialization ──
     gen.export("mimi_set_to_display", |f| {
-        f.param("set", handle("SetHandle"))
+        // real: (handle: SetHandle = i64) -> *mut c_char (mod.rs:16527)
+        f.param("set", prim(I64))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_set_list_free", |f| {
-        f.param("list", handle("ListHandle")).effect("dealloc")
+        // real: (ptr: *mut SetValueHandle, len: i64) (mod.rs:18393)
+        f.param("ptr", ptr(prim(I64)))
+            .param("len", prim(I64))
+            .effect("dealloc")
     });
 
     // ── Tuple serialization ──
     gen.export("mimi_tuple_serialize", |f| {
-        f.param("ptr", prim(IntPtr))
-            .param("type_tag", prim(I32))
+        // real: (values: *mut i64, count: i64, elem_types: *mut i64) -> *mut c_char (mod.rs:18806)
+        f.param("values", ptr(prim(I64)))
+            .param("count", prim(I64))
+            .param("elem_types", ptr(prim(I64)))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_tuple_deserialize", |f| {
-        f.param("data", ptr(prim(U8)))
-            .param("type_tag", prim(I32))
-            .returns(prim(IntPtr))
-            .effect("alloc")
+        // real: (json: *const c_char, count: i64, elem_types: *mut i64,
+        //        out_values: *mut i64) -> i64 (mod.rs:18870)
+        f.param("json", ptr(prim(U8)))
+            .param("count", prim(I64))
+            .param("elem_types", ptr(prim(I64)))
+            .param("out_values", ptr(prim(I64)))
+            .returns(prim(I64))
     });
 
     // ── Option / Result JSON ──
     gen.export("mimi_option_i64_to_json", |f| {
-        f.param("has_value", prim(I32))
-            .param("value", prim(I64))
+        // real: (disc: i64, payload: i64) -> *mut c_char (mod.rs:16507)
+        f.param("disc", prim(I64))
+            .param("payload", prim(I64))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_result_i64_to_json", |f| {
-        f.param("is_ok", prim(I32))
-            .param("value", prim(I64))
+        // real: (disc: i64, ok: i64, err: i64) -> *mut c_char (mod.rs:16517)
+        f.param("disc", prim(I64))
+            .param("ok", prim(I64))
+            .param("err", prim(I64))
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
 
-    // ── File I/O extras ──
+    // ── File I/O extras (runtime/binary_io.rs, runtime/fs.rs) ──
     gen.export("mimi_read_file_partial", |f| {
+        // real: (path: *const c_char, max_bytes: i64) -> *mut c_char (binary_io.rs:19)
         f.param("path", ptr(prim(U8)))
-            .param("offset", prim(I64))
-            .param("len", prim(I64))
-            .param("out_len", ptr(prim(UIntPtr)))
+            .param("max_bytes", prim(I64))
             .returns(ptr(prim(U8)))
             .effect("io")
             .effect("alloc")
     });
     gen.export("mimi_read_lines_each", |f| {
+        // real: (path: *const c_char, callback_fn: extern "C" fn(*const c_char)) -> i64
+        // (binary_io.rs:102)
         f.param("path", ptr(prim(U8)))
-            .returns(handle("ListHandle"))
+            .param("callback_fn", prim(IntPtr))
+            .returns(prim(I64))
             .effect("io")
     });
     gen.export("mimi_read_lines_json", |f| {
@@ -1250,13 +1280,17 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("alloc")
     });
     gen.export("mimi_file_stat", |f| {
+        // real: (path: *const c_char, err_out: *mut *mut c_char) -> *mut MimiStatResult
+        // (fs.rs:551); result layout is runtime-internal, exposed as opaque bytes
         f.param("path", ptr(prim(U8)))
-            .returns(prim(IntPtr))
+            .param("err_out", ptr(ptr(prim(U8))))
+            .returns(ptr(prim(U8)))
             .effect("io")
             .effect("alloc")
     });
     gen.export("mimi_file_stat_free", |f| {
-        f.param("stat", prim(IntPtr)).effect("dealloc")
+        // real: (res: *mut MimiStatResult) (fs.rs:538)
+        f.param("res", ptr(prim(U8))).effect("dealloc")
     });
     gen.export("mimi_walk_dir", |f| {
         f.param("path", ptr(prim(U8)))
@@ -1278,8 +1312,11 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_actor_set_max_children", |f| f.param("max", prim(I64)));
     gen.export("mimi_actor_set_method_names", |f| {
+        // real: (handle, names: *const *const c_char, count: i64) (actor.rs:662) —
+        // a raw array of C strings plus its length, not a list handle.
         f.param("handle", handle("ActorHandle"))
-            .param("names", handle("ListHandle"))
+            .param("names", ptr(ptr(prim(U8))))
+            .param("count", prim(I64))
     });
     gen.export("mimi_actor_method_id", |f| {
         f.param("handle", handle("ActorHandle"))
@@ -1291,7 +1328,10 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
 
     // ── Misc ──
-    gen.export("mimi_match_panic", |f| f.param("msg", ptr(prim(U8))));
+    gen.export("mimi_match_panic", |f| {
+        // real: () -> ! (mod.rs:3046) — non-exhaustive match trap
+        f.effect("noreturn")
+    });
 }
 
 #[cfg(test)]
@@ -1322,14 +1362,14 @@ mod tests {
         let mut gen = AbiGenerator::new();
         gen.export("mimi_list_push_i64", |f| {
             f.param("list", handle("ListHandle"))
-                .param("value", prim(AbiPrimitive::I64))
+                .param("element", prim(AbiPrimitive::I64))
                 .returns(void())
         });
         let ir = gen.build();
         let sym = ir.export("mimi_list_push_i64").expect("should exist");
         assert_eq!(
             sym.c_decl(),
-            "void mimi_list_push_i64(MimiHandle/* ListHandle */ list, int64_t value)"
+            "void mimi_list_push_i64(MimiHandle/* ListHandle */ list, int64_t element)"
         );
     }
 
@@ -1339,14 +1379,18 @@ mod tests {
         register_core_runtime_abi(&mut gen);
         let ir = gen.build();
 
-        // v2 registry: ~180 functions across 22 categories
+        // v4 registry (audit 2026-08-05): 186 exports after phantom removal.
         assert!(
-            ir.exports.len() >= 170,
-            "expected >=170 exports, got {}",
+            ir.exports.len() >= 180,
+            "expected >=180 exports, got {}",
             ir.exports.len()
         );
 
-        // Verify critical functions from each category
+        // Verify critical functions from each category.
+        // Audit 2026-08-05: phantom symbols (mimi_list_new, mimi_list_len,
+        // mimi_print_line, mimi_print_err, mimi_sleep_ms, mimi_timestamp,
+        // mimi_timestamp_ms, mimi_string_new/len/as_slice) are no longer
+        // asserted — they never existed in the runtime.
         let critical = [
             // RC
             "mimi_rc_alloc",
@@ -1356,15 +1400,14 @@ mod tests {
             "mimi_rc_weak_retain",
             "mimi_rc_weak_release",
             // List
-            "mimi_list_new",
             "mimi_list_push_i64",
             "mimi_list_push_f64",
             "mimi_list_push_string",
             "mimi_list_get_i64",
             "mimi_list_get_f64",
             "mimi_list_get_string",
-            "mimi_list_len",
             "mimi_list_free",
+            "mimi_list_push_grow",
             // Map
             "mimi_map_new",
             "mimi_map_set",
@@ -1397,11 +1440,10 @@ mod tests {
             "mimi_to_string_i64",
             "mimi_to_string_f64",
             "mimi_any_to_string",
-            // I/O + Runtime
-            "mimi_print_line",
-            "mimi_print_err",
+            // Runtime control
             "mimi_runtime_abort",
             "mimi_try_exit",
+            "mimi_try_exit_str",
             "mimi_assert_state",
             // Concurrency
             "mimi_atomic_i32_new",
@@ -1425,14 +1467,13 @@ mod tests {
             "mimi_path_join",
             "mimi_path_basename",
             // Time
-            "mimi_sleep_ms",
-            "mimi_timestamp",
-            "mimi_timestamp_ms",
+            "mimi_sleep",
             "mimi_now",
             "mimi_now_ms",
             // JSON
             "mimi_json_serialize",
             "mimi_json_deserialize",
+            "mimi_json_deserialize_free",
             "mimi_json_as_i64",
             "mimi_json_as_f64",
             "mimi_json_as_bool",
@@ -1499,6 +1540,7 @@ mod tests {
             "mimi_cap_register",
             "mimi_cap_check",
             "mimi_cap_consume",
+            "mimi_cap_drop",
             // Fault
             "mimi_inject_fault",
             // List serialization
@@ -1541,51 +1583,46 @@ mod tests {
                 name
             );
         }
+
+        // Phantom symbols must NOT be in the registry (audit fix 2026-08-05).
+        // mimi_string_len deliberately excluded: the real symbol lives in
+        // ffi/runtime.rs with a different signature ((*const Value) -> i64).
+        let phantoms = [
+            "mimi_list_new",
+            "mimi_list_len",
+            "mimi_print_line",
+            "mimi_print_err",
+            "mimi_sleep_ms",
+            "mimi_timestamp",
+            "mimi_timestamp_ms",
+            "mimi_string_new",
+            "mimi_string_len",
+            "mimi_string_as_slice",
+        ];
+        for name in &phantoms {
+            assert!(
+                ir.export(name).is_none(),
+                "phantom symbol still registered: {}",
+                name
+            );
+        }
     }
 
     #[test]
     fn unsafe_flag() {
         let mut gen = AbiGenerator::new();
         gen.export("mimi_runtime_abort", |f| {
-            f.param("msg", ptr(prim(AbiPrimitive::U8))).unsafe_fn()
+            f.param("msg", ptr(prim(AbiPrimitive::U8)))
+                .unsafe_fn()
+                .effect("noreturn")
         });
         let ir = gen.build();
         let sym = ir.export("mimi_runtime_abort").expect("should exist");
         assert!(sym.is_unsafe);
     }
 
-    #[test]
-    fn fat_pointer_types() {
-        let mut gen = AbiGenerator::new();
-        register_fat_pointer_types(&mut gen);
-        let ir = gen.build();
-
-        // MimiString: { data, len, capacity } = 24 bytes
-        let string_ty = ir.type_def("MimiString").expect("MimiString should exist");
-        if let super::super::types::AbiTypeDef::Struct(s) = string_ty {
-            assert_eq!(s.fields.len(), 3);
-            assert_eq!(s.size, Some(24));
-            assert!(s.is_repr_c);
-        } else {
-            panic!("MimiString should be a struct");
-        }
-
-        // MimiSlice: { data, len } = 16 bytes
-        let slice_ty = ir.type_def("MimiSlice").expect("MimiSlice should exist");
-        if let super::super::types::AbiTypeDef::Struct(s) = slice_ty {
-            assert_eq!(s.fields.len(), 2);
-            assert_eq!(s.size, Some(16));
-        } else {
-            panic!("MimiSlice should be a struct");
-        }
-    }
-
-    #[test]
-    fn fat_pointer_type_refs() {
-        let s = fat_string();
-        assert_eq!(s.c_type_name(), "MimiString/* uint8_t */");
-
-        let sl = fat_slice(prim(AbiPrimitive::I64));
-        assert_eq!(sl.c_type_name(), "MimiSlice/* int64_t */");
-    }
+    // Audit 2026-08-05: fat_pointer_types / fat_pointer_type_refs tests
+    // removed together with the phantom MimiString/MimiSlice registry
+    // surface. The FatPointer vocabulary remains in types.rs for components
+    // that define their own fat-pointer types.
 }

@@ -1,6 +1,49 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Atomic text-file write: stage the content in a unique temp file in the
+/// same directory, then `rename` it over the target.
+///
+/// Full audit 2026-08-05 §13: fixed temp names (`mimi.toml.tmp` /
+/// `mimi.lock.tmp`) race between concurrent installs, and direct
+/// `fs::write` can leave a user file truncated/corrupted on a crash or
+/// concurrent access mid-write. A rename within the same directory is
+/// atomic on POSIX, so readers observe either the old or the new content,
+/// never a partial write.
+///
+/// Temp-name pattern follows `pkg_resolve::install_dir_atomic` (per-pid),
+/// extended with a per-process atomic counter so same-process writers
+/// cannot collide either.
+pub fn write_text_atomic(path: &Path, content: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    std::fs::write(&tmp_path, content)
+        .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        // Best-effort cleanup of the staged temp file; the rename error is propagated.
+        let _ = std::fs::remove_file(&tmp_path);
+        format!(
+            "failed to rename {} to {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })
+}
+
 /// mimi.toml package configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Manifest {
@@ -131,17 +174,12 @@ impl Manifest {
     /// Save mimi.toml to a directory (atomic write via temp+rename)
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let toml_path = dir.join("mimi.toml");
-        let tmp_path = dir.join("mimi.toml.tmp");
         let content = toml::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize manifest: {}", e))?;
-        // M42 (deep audit): atomic write to prevent corruption.
-        std::fs::write(&tmp_path, &content)
-            .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
-        std::fs::rename(&tmp_path, &toml_path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!("failed to rename manifest: {}", e)
-        })?;
-        Ok(())
+        // M42 (deep audit) + full audit 2026-08-05 §13: atomic write with a
+        // per-pid unique temp name (the fixed `mimi.toml.tmp` raced between
+        // concurrent installs).
+        write_text_atomic(&toml_path, &content)
     }
 
     /// Create a new empty manifest

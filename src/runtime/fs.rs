@@ -15,6 +15,55 @@ use super::{alloc_c_string, cstr_to_string, ListElementKind, MimiList};
 
 // ─── Directory & path operations ───────────────────────────────
 
+/// Free element pointers previously produced by `alloc_c_string`.
+fn free_c_string_ptrs(items: &[*mut std::ffi::c_char]) {
+    for &p in items {
+        if !p.is_null() {
+            // SAFETY: each non-null pointer was allocated by `alloc_c_string`
+            // via libc::malloc and is freed exactly once here.
+            unsafe { libc::free(p as *mut std::ffi::c_void) };
+        }
+    }
+}
+
+/// H1-pattern fix (matches `mimi_str_split` in mod.rs): move
+/// `alloc_c_string` element pointers out of a `Vec` into a fresh
+/// `libc::malloc` array so `mimi_list_free` can free the data buffer with
+/// `libc::free` (same allocator) and `list_cap`'s read of `data[-8]` never
+/// goes OOB on a Rust Vec buffer. The Vec's own backing storage is dropped
+/// normally (allocator-consistent). Returns null when the input is empty or
+/// on allocation failure (elements are freed in the failure case so they do
+/// not leak).
+fn malloc_c_string_array(items: Vec<*mut std::ffi::c_char>) -> *mut *mut std::ffi::c_char {
+    if items.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let data_size = match items
+        .len()
+        .checked_mul(std::mem::size_of::<*mut std::ffi::c_char>())
+    {
+        Some(s) => s,
+        None => {
+            free_c_string_ptrs(&items);
+            return std::ptr::null_mut();
+        }
+    };
+    // SAFETY: data_size > 0 (items non-empty); result is checked for null.
+    let ptr = unsafe { libc::malloc(data_size) as *mut *mut std::ffi::c_char };
+    if ptr.is_null() {
+        free_c_string_ptrs(&items);
+        return std::ptr::null_mut();
+    }
+    for (i, p) in items.iter().enumerate() {
+        // SAFETY: i < items.len() and `ptr` is a fresh allocation of
+        // items.len() pointer slots; each slot is written exactly once.
+        unsafe {
+            *ptr.add(i) = *p;
+        }
+    }
+    ptr
+}
+
 /// Returns a Mimi List of entry names in the given directory.
 /// Returns an empty list on error (not a directory, permission denied, etc.).
 #[no_mangle]
@@ -38,10 +87,20 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
         Err(_) => return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String))),
     };
     let len = entries.len() as i64;
-    let mut items = entries;
-    let data_ptr = items.as_mut_ptr();
-    std::mem::forget(items);
-    // 0.31.23: directory entries are strings.
+    // Audit fix (H1 pattern): copy the element pointers out of the Vec into a
+    // libc::malloc'd array. The old code handed the Vec buffer to MimiList
+    // with owns_data=true → list_cap read data[-8] OOB and mimi_list_free
+    // freed a Vec buffer via libc::free (allocator mismatch).
+    let data_ptr = malloc_c_string_array(entries);
+    if data_ptr.is_null() && len > 0 {
+        // Allocation failure (elements already freed by the helper): degrade
+        // to an empty list, never a null list pointer (callers do not
+        // null-check MimiList*).
+        return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
+    }
+    // 0.31.23: directory entries are strings. The MimiList STRUCT is
+    // Box-allocated, matching mimi_list_free which frees it via
+    // Box::from_raw (mod.rs). No hidden capacity header.
     Box::into_raw(Box::new(MimiList::with_data(
         data_ptr,
         len,
@@ -181,11 +240,19 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
     let mut results = Vec::new();
     walk_dir_recursive(path_str, &mut results);
     let len = results.len() as i64;
-    let mut items: Vec<*mut std::ffi::c_char> =
+    let items: Vec<*mut std::ffi::c_char> =
         results.into_iter().map(|s| alloc_c_string(&s)).collect();
-    let data_ptr = items.as_mut_ptr();
-    std::mem::forget(items);
-    // 0.31.23: file paths are strings.
+    // Audit fix (H1 pattern): same as mimi_listdir — copy the element
+    // pointers out of the Vec into a libc::malloc'd array so mimi_list_free
+    // frees with the matching allocator and list_cap doesn't read OOB.
+    let data_ptr = malloc_c_string_array(items);
+    if data_ptr.is_null() && len > 0 {
+        // Allocation failure (elements already freed by the helper): degrade
+        // to an empty list, never a null list pointer.
+        return empty();
+    }
+    // 0.31.23: file paths are strings. The MimiList STRUCT is Box-allocated,
+    // matching mimi_list_free which frees it via Box::from_raw (mod.rs).
     Box::into_raw(Box::new(MimiList::with_data(
         data_ptr,
         len,
@@ -636,9 +703,15 @@ pub extern "C" fn mimi_append_file(
     }
 }
 
-/// H14 fix: Global mutex for env var operations to prevent data races
-/// when Mimi actor/spawn threads call set_var concurrently.
-static SETENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// H14 fix: Global mutex serializing ALL runtime access to the process
+/// environment — writers (mimi_set_env) AND readers (env.rs `mimi_getenv`).
+/// POSIX setenv may reallocate the `environ` array; a concurrent getenv
+/// then reads through the old array (use-after-free). The old code locked
+/// writers only, which prevented writer/writer races but NOT the
+/// writer/reader realloc race (2026-08-05 full audit, HIGH) — the previous
+/// comment claiming this prevented data races was false for readers.
+/// `pub(super)` so the sibling `env` module takes the same lock.
+pub(super) static SETENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Sets an environment variable. Returns 1 on success, 0 on failure.
 /// Thread-safe: uses a global mutex to serialize env var modifications,
@@ -659,15 +732,104 @@ pub extern "C" fn mimi_set_env(
         Ok(s) => s,
         Err(_) => return 0,
     };
-    // Serialize env var writes under a global lock.
+    // Serialize env var writes under the global lock. Readers must take the
+    // same lock (see SETENV_LOCK and env.rs mimi_getenv): POSIX setenv may
+    // realloc the environ array, so any concurrent environment read races.
     let _lock = match SETENV_LOCK.lock() {
         Ok(guard) => guard,
         Err(_) => return 0,
     };
-    // SAFETY: key_str and value_str are non-null C strings (checked above).
-    // std::env::set_var takes &str which requires UTF-8; this is a
-    // best-effort call and may panic on non-UTF-8 input, which matches
-    // the documented behavior of this runtime function.
+    // SAFETY: key_str and value_str are valid UTF-8 &strs (checked above).
+    // std::env::set_var may reallocate the process-wide `environ` array;
+    // that is exactly why SETENV_LOCK is held, and why every runtime
+    // environment reader (mimi_getenv) takes the same lock. No other runtime
+    // path reads the environment without the lock.
     unsafe { std::env::set_var(key_str, value_str) };
     1
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the 2026-08-05 audit fix (HIGH): mimi_listdir /
+    //! mimi_walk_dir must hand mimi_list_free a libc::malloc'd element array
+    //! (H1 pattern), not a Rust Vec buffer (allocator mismatch + list_cap
+    //! data[-8] OOB).
+
+    use super::*;
+
+    /// Create `dir` with two files and one nested file; returns the dir path.
+    fn make_tree(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("mimi_audit_fs_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("b.txt"), b"b").unwrap();
+        std::fs::write(dir.join("sub").join("c.txt"), b"c").unwrap();
+        dir
+    }
+
+    fn list_to_strings(list: *mut MimiList) -> Vec<String> {
+        // SAFETY: caller passes a list just returned by mimi_listdir /
+        // mimi_walk_dir; `data` holds `len` NUL-terminated C strings.
+        unsafe {
+            let lst = &*list;
+            let mut out = Vec::new();
+            for i in 0..lst.len as isize {
+                let p = *lst.data.offset(i);
+                if !p.is_null() {
+                    out.push(
+                        CStr::from_ptr(p as *const std::ffi::c_char)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn listdir_survives_mimi_list_free() {
+        let dir = make_tree("listdir");
+        let c_path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let list = mimi_listdir(c_path.as_ptr());
+        assert!(!list.is_null());
+        let mut names = list_to_strings(list);
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);
+        // The old Vec-buffer ABI failed exactly here: list_cap read data[-8]
+        // OOB and mimi_list_free freed a Vec buffer via libc::free.
+        crate::runtime::mimi_list_free(list, true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_dir_survives_mimi_list_free() {
+        let dir = make_tree("walk");
+        let c_path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let list = mimi_walk_dir(c_path.as_ptr());
+        assert!(!list.is_null());
+        let mut paths = list_to_strings(list);
+        paths.sort();
+        assert_eq!(paths.len(), 3, "walk_dir must see a.txt, b.txt, sub/c.txt");
+        assert!(paths.iter().any(|p| p.ends_with("a.txt")));
+        assert!(paths.iter().any(|p| p.ends_with("b.txt")));
+        let c_suffix = std::path::MAIN_SEPARATOR.to_string() + "c.txt";
+        assert!(paths.iter().any(|p| p.ends_with(&c_suffix)));
+        crate::runtime::mimi_list_free(list, true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listdir_missing_dir_is_empty_not_null() {
+        let c_path = std::ffi::CString::new("/nonexistent/mimi/audit/path").unwrap();
+        let list = mimi_listdir(c_path.as_ptr());
+        assert!(!list.is_null());
+        // SAFETY: list just allocated by mimi_listdir.
+        unsafe {
+            assert_eq!((*list).len, 0);
+        }
+        crate::runtime::mimi_list_free(list, true);
+    }
 }

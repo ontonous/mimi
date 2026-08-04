@@ -154,8 +154,10 @@ BOOTSTRAP_DIR="$PROJECT_DIR/bootstrap"
 if [ -d "$BOOTSTRAP_DIR" ] && ls "$BOOTSTRAP_DIR"/*.mimi 2>/dev/null | head -1 > /dev/null; then
     log_info "Found bootstrap compiler sources in $BOOTSTRAP_DIR"
 
-    local tmp_dir=$(mktemp -d /tmp/mimi_bootstrap.XXXXXX)
-    local stage1_bin="$tmp_dir/stage1"
+    # 注意：本块在脚本顶层（非函数内），不能用 local
+    # （顶层 local 会报错并在 set -e 下终止脚本）。
+    tmp_dir=$(mktemp -d /tmp/mimi_bootstrap.XXXXXX)
+    stage1_bin="$tmp_dir/stage1"
 
     # Stage 1: 用 Rust 编译器编译 Mimi 编译器
     if "$MIMI_BIN" build "$BOOTSTRAP_DIR/main.mimi" -o "$stage1_bin" 2>/dev/null; then
@@ -163,7 +165,7 @@ if [ -d "$BOOTSTRAP_DIR" ] && ls "$BOOTSTRAP_DIR"/*.mimi 2>/dev/null | head -1 >
 
         # Stage 2: 用 Stage 1 编译器再次编译自身
         if [ -x "$stage1_bin" ]; then
-            local stage2_bin="$tmp_dir/stage2"
+            stage2_bin="$tmp_dir/stage2"
             if "$stage1_bin" build "$BOOTSTRAP_DIR/main.mimi" -o "$stage2_bin" 2>/dev/null; then
                 # 对比 stage1 和 stage2 二进制
                 if cmp -s "$stage1_bin" "$stage2_bin"; then

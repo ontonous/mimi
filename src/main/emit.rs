@@ -68,7 +68,15 @@ pub(crate) fn resolved_extern_funcs(
                 ensures: signature.ensures.clone(),
                 variadic: signature.variadic,
                 no_panic: signature.no_panic || block.no_panic,
-                returns_errno: false,
+                // Audit fix 2026-08-05 (full audit §12): propagate the real
+                // SD-3 errno flag from the checked catalog instead of
+                // hard-coding false. `#[errno]` on the block is the default
+                // for every signature in it (parser pre-merges it into each
+                // function, but the catalog keeps both levels — OR-combine
+                // them exactly like no_panic above so neither source is
+                // dropped). Previously `#[abi(errno)]` was silently lost
+                // before reaching every binding generator.
+                returns_errno: signature.returns_errno || block.returns_errno,
             });
         }
     }
@@ -242,6 +250,53 @@ module b { extern "C" { func collide(x: i32) -> i32 } }
         assert!(error.contains("collide"));
     }
 
+    /// Audit fix 2026-08-05 (full audit §12): the checked catalog carries
+    /// the SD-3 errno flag (`ResolvedExternFunc.returns_errno` +
+    /// `ResolvedExternBlock.returns_errno`); `resolved_extern_funcs` must
+    /// propagate it instead of hard-coding false, or `#[errno]` never
+    /// reaches the binding generators.
+    #[test]
+    fn resolved_extern_catalog_propagates_function_level_errno() {
+        let file = parse(
+            r#"
+extern "C" {
+    #[errno]
+    func readm(x: i32) -> i32
+    func writem(x: i32) -> i32
+}
+"#,
+        );
+        let checked = checked_component_input(&file).expect("checked component");
+        let funcs = resolved_extern_funcs(&checked).expect("resolved extern catalog");
+        assert_eq!(funcs.len(), 2);
+        let readm = funcs.iter().find(|f| f.name == "readm").expect("readm");
+        let writem = funcs.iter().find(|f| f.name == "writem").expect("writem");
+        assert!(
+            readm.returns_errno,
+            "#[errno] on readm must survive into the extern catalog"
+        );
+        assert!(!writem.returns_errno);
+    }
+
+    #[test]
+    fn resolved_extern_catalog_propagates_block_level_errno() {
+        let file = parse(
+            r#"
+#[errno]
+extern "C" {
+    func fsyncm(x: i32) -> i32
+}
+"#,
+        );
+        let checked = checked_component_input(&file).expect("checked component");
+        let funcs = resolved_extern_funcs(&checked).expect("resolved extern catalog");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].returns_errno,
+            "block-level #[errno] must apply to every signature in the block"
+        );
+    }
+
     #[test]
     fn resolved_export_catalog_preserves_checked_signature() {
         let file = parse(
@@ -354,6 +409,10 @@ pub(crate) fn emit_py_bindings(
             ensures: None,
             variadic: false,
             no_panic: false,
+            // Audit fix 2026-08-05 (full audit §12): export adapters carry
+            // no errno flag — SD-3 `#[errno]` is import-only (rejected by
+            // the parser on `extern "C" func` definitions). Real errno
+            // propagation for imports is in `resolved_extern_funcs` above.
             returns_errno: false,
         };
         extern_funcs.push(extern_func);

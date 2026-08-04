@@ -1774,6 +1774,21 @@ impl Verifier {
     ///
     /// Does NOT handle extern block contracts (those still use the AST path
     /// through `verify_ffi_checked` / `flow_verify_ffi_call_sites_with_externs`).
+    ///
+    /// AU-V1 (full-audit-2026-08-05 §11, VERIFIED CRITICAL): the solver scope
+    /// is reset before EACH callable. `verify_contracts_from_resolved` asserts
+    /// its base constraints — requires, `result == body`, i32 range bounds,
+    /// `old(param) == param`, proven `math:` lemmas — directly into the
+    /// session (only the individual ensures checks are push/pop scoped).
+    /// Every callable also reuses the same Z3 const names (`result` and the
+    /// parameter display names). Without a reset, function B was proved under
+    /// function A's assumptions → spurious Proven. This also clears state
+    /// left over from earlier requests on a long-lived session (LSP keeps one
+    /// `Verifier` across requests, lsp/state.rs), so no separate per-request
+    /// reset hook is needed: the first contract-bearing callable of every
+    /// request starts from a clean solver. Mirrors the per-function
+    /// `session.reset()` already used by the AST engines (func.rs
+    /// `verify_items_collect`, flow.rs `FlowEvent::Step`).
     pub(crate) fn verify_checked_contracts(
         &mut self,
         program: &crate::core::CheckedProgram,
@@ -1791,6 +1806,12 @@ impl Verifier {
                 .find(|f| f.node_id == *node_id)
                 .map(|f| f.qualified_name.clone())
                 .unwrap_or_else(|| format!("{:?}", node_id));
+
+            // AU-V1: per-callable isolation — see doc comment above.
+            // `reset()` clears all assertions, returns the solver to Z3 depth
+            // 0, and clears poisoned/replaced flags; safe on any session
+            // state (same primitive the other engines use per function).
+            self.session.reset();
 
             let start = std::time::Instant::now();
             let status = crate::verifier::resolved_expr::verify_contracts_from_resolved(

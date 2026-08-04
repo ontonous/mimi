@@ -739,10 +739,29 @@ impl CheckedProgram {
         // Override declaration snapshots only with mandatory-finalized checker
         // artifacts. Raw checker types are not a backend input.
         for func in program.functions.values_mut() {
-            if let Some((resolved_params, resolved_ret)) = zonked_nested_func_types
-                .get(&func.node_id)
-                .or_else(|| zonked_func_types.get(&func.qualified_name))
-            {
+            // Full audit 2026-08-05 (#9): the checker registers actor methods
+            // in its function table WITHOUT the module path
+            // (checker/items.rs: `{actor}::{method}`), while the resolved
+            // catalog is module-qualified. For a module-wrapped actor the
+            // exact-key lookup misses and the function later aborts with "no
+            // checker-finalized signature". Try the exact qualified key
+            // first, then progressively shorter suffixes — longest first,
+            // i.e. `actor::method`, then the plain method key — before
+            // giving up. Nested functions are keyed by NodeId and are
+            // unaffected. The parameter-count cross-check below still guards
+            // against a wrong-shape fallback hit.
+            let mut candidate_keys = vec![func.qualified_name.clone()];
+            let mut cursor = func.qualified_name.as_str();
+            while let Some((_, rest)) = cursor.split_once("::") {
+                candidate_keys.push(rest.to_string());
+                cursor = rest;
+            }
+            let zonked = zonked_nested_func_types.get(&func.node_id).or_else(|| {
+                candidate_keys
+                    .iter()
+                    .find_map(|key| zonked_func_types.get(key))
+            });
+            if let Some((resolved_params, resolved_ret)) = zonked {
                 if resolved_params.len() != func.params.len() {
                     errors.push(Diagnostic::error(
                         format!(
@@ -1404,9 +1423,14 @@ impl CheckedProgram {
     }
 
     pub fn extern_func_signature(&self, name: &str) -> Option<&ResolvedExternFunc> {
-        self.extern_blocks
-            .values()
-            .flat_map(|block| block.signatures.iter())
+        // Full audit 2026-08-05 (#13): same-named externs across blocks
+        // previously resolved by raw HashMap iteration order (nondeterministic
+        // `.find`). Blocks are visited in sorted node-id order instead.
+        let mut block_ids = self.extern_blocks.keys().collect::<Vec<_>>();
+        block_ids.sort();
+        block_ids
+            .into_iter()
+            .flat_map(|id| self.extern_blocks[id].signatures.iter())
             .find(|sig| sig.name == name)
     }
 
@@ -1933,6 +1957,35 @@ fn collect_items(
                     backend_requirements,
                     errors,
                 );
+                // Full audit 2026-08-05 (#10): nested callables declared in
+                // user-implemented transition bodies were recorded by the
+                // meta/call-site walks but never collected into the function
+                // catalog, leaving dangling NestedCallable statements (no
+                // signature, no body). The User-origin slice mirrors
+                // collect_transition_syntax (ir/lower.rs), which is the slice
+                // body lowering processes; synthetic matrix transitions must
+                // not contribute catalog records their bodies never lower.
+                for transition in &flow.transitions {
+                    if !matches!(transition.meta.origin, AstOrigin::User) {
+                        continue;
+                    }
+                    let Some(body) = &transition.body else {
+                        continue;
+                    };
+                    let transition_owner = NodeId(format!(
+                        "transition:{qualified}::{}::{}",
+                        transition.name, transition.from_state
+                    ));
+                    collect_nested_function_records(
+                        body,
+                        &transition_owner,
+                        &format!("{qualified}::{}", transition.name),
+                        (&ids, &[]),
+                        node_meta,
+                        functions,
+                        errors,
+                    );
+                }
             }
             Item::Func(function) => {
                 let qualified = qualify(module, &function.name);
@@ -2961,7 +3014,16 @@ fn collect_nested_function_records(
                     errors,
                 );
             }
-            Stmt::IfLet { then_, else_, .. } | Stmt::If { then_, else_, .. } => {
+            Stmt::If { cond, then_, else_ } => {
+                collect_nested_function_records_in_expr(
+                    cond,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
                 collect_nested_function_records(
                     then_,
                     owner,
@@ -2983,10 +3045,100 @@ fn collect_nested_function_records(
                     );
                 }
             }
-            Stmt::While { body, .. }
-            | Stmt::WhileLet { body, .. }
-            | Stmt::Loop(body)
-            | Stmt::For { body, .. }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                collect_nested_function_records_in_expr(
+                    init,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records(
+                    then_,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                if let Some(else_) = else_ {
+                    collect_nested_function_records(
+                        else_,
+                        owner,
+                        parent_qualified,
+                        (ids, inherited_generic_binders),
+                        node_meta,
+                        functions,
+                        errors,
+                    );
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_nested_function_records_in_expr(
+                    cond,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records(
+                    body,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                collect_nested_function_records_in_expr(
+                    init,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records(
+                    body,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::For { iterable, body, .. } => {
+                collect_nested_function_records_in_expr(
+                    iterable,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records(
+                    body,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::Loop(body)
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
@@ -2994,8 +3146,7 @@ fn collect_nested_function_records(
             | Stmt::OnFailure(body)
             | Stmt::Parasteps(body)
             | Stmt::Defer(body)
-            | Stmt::Alloc { body, .. }
-            | Stmt::Pinned { body, .. } => collect_nested_function_records(
+            | Stmt::Alloc { body, .. } => collect_nested_function_records(
                 body,
                 owner,
                 parent_qualified,
@@ -3004,8 +3155,431 @@ fn collect_nested_function_records(
                 functions,
                 errors,
             ),
+            Stmt::Pinned { expr, body, .. } => {
+                collect_nested_function_records_in_expr(
+                    expr,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records(
+                    body,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            // Full audit 2026-08-05 (#10): expression positions can carry
+            // blocks/lambdas containing nested function declarations. The
+            // meta walk records those nodes; the catalog must too, or the
+            // bodies dangle. Mirrors collect_nested_function_syntax
+            // (ir/lower.rs), which keeps the syntax map in the same shape.
+            Stmt::Let {
+                init: Some(init), ..
+            }
+            | Stmt::SharedLet { init, .. } => {
+                collect_nested_function_records_in_expr(
+                    init,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::Expr(expr)
+            | Stmt::Return(Some(expr))
+            | Stmt::Break(Some(expr))
+            | Stmt::Drop(expr) => collect_nested_function_records_in_expr(
+                expr,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            ),
+            Stmt::Assign { target, value } => {
+                collect_nested_function_records_in_expr(
+                    target,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records_in_expr(
+                    value,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) | Stmt::Invariant(expr, _) => {
+                collect_nested_function_records_in_expr(
+                    expr,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::Math(expressions) => {
+                for expression in expressions {
+                    collect_nested_function_records_in_expr(
+                        expression,
+                        owner,
+                        parent_qualified,
+                        (ids, inherited_generic_binders),
+                        node_meta,
+                        functions,
+                        errors,
+                    );
+                }
+            }
             _ => {}
         }
+    }
+}
+
+/// Full audit 2026-08-05 (#10): expression-tree walker pairing with
+/// `collect_nested_function_records`. Descends every sub-expression and
+/// collects statement-level function declarations from embedded blocks
+/// (block expressions, lambda bodies, `if`/`arena` block expressions).
+/// Quote and Comptime interiors are deliberately skipped: the checker never
+/// finalizes nested function declarations there (`infer_expr` types a quote
+/// as an opaque AST value; `infer_comptime` ignores `Stmt::Func`), so a
+/// catalog record would have no checker-finalized signature (fail-closed
+/// contract — records and finalized signatures must pair).
+fn collect_nested_function_records_in_expr(
+    expr: &Expr,
+    owner: &NodeId,
+    parent_qualified: &str,
+    generic_context: (&NodeIdBuilder<'_>, &[(String, NodeId)]),
+    node_meta: &HashMap<NodeId, NodeMeta>,
+    functions: &mut HashMap<NodeId, ResolvedFunction>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let (ids, inherited_generic_binders) = generic_context;
+    match expr.unlocated() {
+        Expr::Block(body) | Expr::Arena(body) => collect_nested_function_records(
+            body,
+            owner,
+            parent_qualified,
+            (ids, inherited_generic_binders),
+            node_meta,
+            functions,
+            errors,
+        ),
+        Expr::If { cond, then_, else_ } => {
+            collect_nested_function_records_in_expr(
+                cond,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            collect_nested_function_records(
+                then_,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            if let Some(else_) = else_ {
+                collect_nested_function_records(
+                    else_,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::Lambda { body, .. } => collect_nested_function_records(
+            body,
+            owner,
+            parent_qualified,
+            (ids, inherited_generic_binders),
+            node_meta,
+            functions,
+            errors,
+        ),
+        Expr::Binary(_, left, right) => {
+            collect_nested_function_records_in_expr(
+                left,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            collect_nested_function_records_in_expr(
+                right,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+        }
+        Expr::Unary(_, operand)
+        | Expr::Try(operand)
+        | Expr::OptionalChain(operand, _)
+        | Expr::Spawn(operand)
+        | Expr::Await(operand)
+        | Expr::TypeOf(operand)
+        | Expr::Old(operand)
+        | Expr::QuoteInterpolate(operand)
+        | Expr::NamedArg(_, operand)
+        | Expr::Cast(operand, _) => collect_nested_function_records_in_expr(
+            operand,
+            owner,
+            parent_qualified,
+            (ids, inherited_generic_binders),
+            node_meta,
+            functions,
+            errors,
+        ),
+        Expr::Call(callee, arguments) => {
+            collect_nested_function_records_in_expr(
+                callee,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            for argument in arguments {
+                collect_nested_function_records_in_expr(
+                    argument,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::Field(base, _) | Expr::TupleIndex(base, _) => {
+            collect_nested_function_records_in_expr(
+                base,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+        }
+        Expr::Index(base, index) => {
+            collect_nested_function_records_in_expr(
+                base,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            collect_nested_function_records_in_expr(
+                index,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+        }
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            for item in items {
+                collect_nested_function_records_in_expr(
+                    item,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_nested_function_records_in_expr(
+                expr,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            collect_nested_function_records_in_expr(
+                iter,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            if let Some(guard) = guard {
+                collect_nested_function_records_in_expr(
+                    guard,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_nested_function_records_in_expr(
+                scrutinee,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_nested_function_records_in_expr(
+                        guard,
+                        owner,
+                        parent_qualified,
+                        (ids, inherited_generic_binders),
+                        node_meta,
+                        functions,
+                        errors,
+                    );
+                }
+                collect_nested_function_records_in_expr(
+                    &arm.body,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for field in fields {
+                collect_nested_function_records_in_expr(
+                    &field.value,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_nested_function_records_in_expr(
+                target,
+                owner,
+                parent_qualified,
+                (ids, inherited_generic_binders),
+                node_meta,
+                functions,
+                errors,
+            );
+            if let Some(start) = start {
+                collect_nested_function_records_in_expr(
+                    start,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            if let Some(end) = end {
+                collect_nested_function_records_in_expr(
+                    end,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::Turbofish(_, _, arguments) => {
+            for argument in arguments {
+                collect_nested_function_records_in_expr(
+                    argument,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                collect_nested_function_records_in_expr(
+                    key,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                collect_nested_function_records_in_expr(
+                    value,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+        }
+        // See the doc comment: checker never finalizes nested declarations
+        // inside these interiors.
+        Expr::Quote(_) | Expr::Comptime(_) => {}
+        Expr::Literal(_) | Expr::Ident(_) | Expr::TypeInfo(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
     }
 }
 
@@ -3945,15 +4519,33 @@ pub(crate) fn impl_method_owner(impl_qualified_name: &str, method: &crate::ast::
 }
 
 pub(crate) fn nested_function_owner(owner: &NodeId, function: &crate::ast::FuncDef) -> NodeId {
+    // Full audit 2026-08-05 (#11): same-named, same-signature nested
+    // callables in DISJOINT branches (if/else, match arms) are accepted by
+    // the checker, but the structural key alone (name+params+ret) collided
+    // into one NodeId and aborted compilation with a duplicate-identity
+    // diagnostic. Fold the declaration's source anchor into the hashed
+    // signature fragment. Every consumer (checker signature recording,
+    // meta walk, call-site walk, IR body lowering, CFG lowering) calls this
+    // helper on the same AST node, so the anchor stays consistent across
+    // catalogs. The span is a per-compilation anchor — the same discipline
+    // NodeIdBuilder::anonymous uses for user-node source ranges — and
+    // synthetic declarations on Span::Unknown keep the legacy key value.
+    let span = function.meta.span;
+    let mut signature_key =
+        method_signature_key(&function.name, &function.params, function.ret.as_ref());
+    {
+        use std::fmt::Write as _;
+        let _ = write!(
+            signature_key,
+            "@{}:{}:{}:{}",
+            span.start_line, span.start_col, span.end_line, span.end_col
+        );
+    }
     NodeId(format!(
         "{}/function:{}:{:016x}",
         owner.0,
         stable_id_fragment(&function.name),
-        stable_text_hash(&method_signature_key(
-            &function.name,
-            &function.params,
-            function.ret.as_ref()
-        ))
+        stable_text_hash(&signature_key)
     ))
 }
 
@@ -5773,10 +6365,15 @@ fn collect_flow(
     let flow_id = FlowId(qualified_name.to_string());
     let flow_node_id = NodeId(format!("flow:{}", qualified_name));
     let flow_span = declaration_span(flow.meta, flow.meta.span);
-    let states = flow
-        .states
-        .iter()
-        .map(|state| {
+    // Full audit 2026-08-05 (#12): duplicate state names were silently
+    // last-wins through `HashMap::collect`. The checker guards this at the
+    // surface (E0402), so the diagnostic below is defense-in-depth mirroring
+    // the duplicate-transition check further down — a shadowed canonical
+    // state would corrupt the shared transition tables.
+    let mut states: HashMap<String, ResolvedState> = HashMap::new();
+    let mut duplicate_states = 0usize;
+    for state in &flow.states {
+        {
             let id = StateId {
                 flow: flow_id.clone(),
                 name: state.name.clone(),
@@ -5819,18 +6416,30 @@ fn collect_flow(
                 declaration_span(state.meta, state.meta.span),
                 errors,
             );
-            (
-                state.name.clone(),
-                ResolvedState {
-                    node_id,
-                    id,
-                    payload,
-                    field_ids,
-                    origin,
-                },
-            )
-        })
-        .collect();
+            let resolved_state = ResolvedState {
+                node_id,
+                id,
+                payload,
+                field_ids,
+                origin,
+            };
+            if states.insert(state.name.clone(), resolved_state).is_some() {
+                duplicate_states += 1;
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: duplicate canonical state '{}::{}'",
+                        qualified_name, state.name
+                    ),
+                    declaration_span(state.meta, state.meta.span),
+                ));
+            }
+        }
+    }
+    mimi_debug_assert!(
+        states.len() + duplicate_states == flow.states.len(),
+        "flow '{}' state collection must account for every declaration",
+        qualified_name
+    );
     let mut flow_transition_ids = Vec::with_capacity(flow.transitions.len());
     for transition in &flow.transitions {
         let source = StateId {
@@ -6040,8 +6649,17 @@ fn collect_program_call_sites(
     out: &mut HashMap<NodeId, ResolvedCallSite>,
     errors: &mut Vec<Diagnostic>,
 ) {
+    // Full audit 2026-08-05 (#13): these fact tables were built over raw
+    // HashMap iteration — bare-name collisions resolved by nondeterministic
+    // last-wins. Every catalog is now iterated in sorted node-id order.
+    // Qualified `Actor.method` / `Type.method` keys are recorded alongside
+    // bare names; resolve_call_callee prefers the qualified key, and bare
+    // entries take a deterministic first-in-sorted-order signature when
+    // several definitions share the name (see the admission note below).
     let mut function_info: HashMap<String, (usize, Vec<String>, String)> = HashMap::new();
-    for function in functions.values() {
+    let mut function_entries = functions.values().collect::<Vec<_>>();
+    function_entries.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for function in function_entries {
         function_info.insert(
             function.qualified_name.clone(),
             (
@@ -6052,7 +6670,9 @@ fn collect_program_call_sites(
         );
     }
     let mut extern_info: HashMap<String, (usize, String)> = HashMap::new();
-    for block in extern_blocks.values() {
+    let mut extern_entries = extern_blocks.values().collect::<Vec<_>>();
+    extern_entries.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for block in extern_entries {
         for sig in &block.signatures {
             extern_info.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
         }
@@ -6064,45 +6684,58 @@ fn collect_program_call_sites(
         }
     }
     let mut method_info: HashMap<String, (usize, Vec<String>, String)> = HashMap::new();
-    for actor in actors.values() {
+    let mut bare_method_signatures: HashMap<String, Vec<(usize, Vec<String>, String)>> =
+        HashMap::new();
+    let mut actor_entries = actors.values().collect::<Vec<_>>();
+    actor_entries.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for actor in actor_entries {
         for method in &actor.method_signatures {
-            // Prefer bare method name; qualified actor.method also recorded.
-            method_info.insert(
-                method.name.clone(),
-                (
-                    method.params.len(),
-                    method.effects.clone(),
-                    method.ret.clone(),
-                ),
+            let signature = (
+                method.params.len(),
+                method.effects.clone(),
+                method.ret.clone(),
             );
+            bare_method_signatures
+                .entry(method.name.clone())
+                .or_default()
+                .push(signature.clone());
             method_info.insert(
                 format!("{}.{}", actor.qualified_name, method.name),
-                (
-                    method.params.len(),
-                    method.effects.clone(),
-                    method.ret.clone(),
-                ),
+                signature,
             );
         }
     }
-    for impl_def in impls.values() {
+    let mut impl_entries = impls.values().collect::<Vec<_>>();
+    impl_entries.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for impl_def in impl_entries {
         for method in &impl_def.method_signatures {
-            method_info.insert(
-                method.name.clone(),
-                (
-                    method.params.len(),
-                    method.effects.clone(),
-                    method.ret.clone(),
-                ),
+            let signature = (
+                method.params.len(),
+                method.effects.clone(),
+                method.ret.clone(),
             );
-            method_info.insert(
-                format!("{}.{}", impl_def.type_name, method.name),
-                (
-                    method.params.len(),
-                    method.effects.clone(),
-                    method.ret.clone(),
-                ),
-            );
+            bare_method_signatures
+                .entry(method.name.clone())
+                .or_default()
+                .push(signature.clone());
+            method_info.insert(format!("{}.{}", impl_def.type_name, method.name), signature);
+        }
+    }
+    // Bare-name admission: the bare entry takes the FIRST signature in sorted
+    // catalog order (deterministic), replacing raw-HashMap last-wins. When
+    // several actors/impls define the same bare method name with conflicting
+    // signatures the bare entry is therefore marked ambiguous by comment, not
+    // by shape — but it must stay PRESENT: the entry feeds the call-site
+    // KIND facts (ResolvedCallKind::Method), and dropping it would push
+    // receiver-typed method calls into the Unknown arm. `lower_method_call`
+    // re-resolves the actual callable from the receiver type, so the choice
+    // among conflicting entries does not change call semantics — it only
+    // removes the nondeterminism.
+    let mut bare_names = bare_method_signatures.into_iter().collect::<Vec<_>>();
+    bare_names.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, signatures) in bare_names {
+        if let Some(first) = signatures.into_iter().next() {
+            method_info.insert(name, first);
         }
     }
     let ids = NodeIdBuilder::new(&file.sources);

@@ -61,10 +61,22 @@ fn builtin_to_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     match &args[0] {
         Value::Float(v) => Ok(Value::Float(*v)),
         Value::Int(v) => Ok(Value::Float(*v as f64)),
-        Value::String(s) => s
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|e| InterpError::new(format!("to_float parse error: {}", e))),
+        Value::String(s) => {
+            // Audit fix #13 (SD-9): Rust's `f64::parse` accepts "NaN"/"inf" —
+            // that would inject a non-finite value past the finiteness
+            // invariant. Mirror `parse_float` (string.rs), which rejects
+            // non-finite parses.
+            let v = s
+                .parse::<f64>()
+                .map_err(|e| InterpError::new(format!("to_float parse error: {}", e)))?;
+            if !v.is_finite() {
+                return Err(InterpError::new(format!(
+                    "to_float parse error: non-finite value '{}'",
+                    s
+                )));
+            }
+            Ok(Value::Float(v))
+        }
         _ => Err(InterpError::new("to_float cannot convert this type")),
     }
 }

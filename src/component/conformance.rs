@@ -359,12 +359,19 @@ mod tests {
 
         // Step 9: Rust bindings
         let rust_bind = generate_rust_bindings(&ir);
-        assert!(rust_bind.contains("#[repr(C)]"));
+        // Audit 2026-08-05: the phantom MimiString/MimiSlice structs were
+        // removed from the core registry, so it carries opaque handles only —
+        // no #[repr(C)] structs. Pin the opaque aliases instead.
+        assert!(rust_bind.contains("pub type ListHandle = usize;"));
+        assert!(rust_bind.contains("pub type MapHandle = usize;"));
         assert!(rust_bind.contains("extern \"C\" {"));
         assert_eq!(
             rust_bind.matches('{').count(),
             rust_bind.matches('}').count()
         );
+        // Audit 2026-08-05: corrected signature survives into Rust bindings.
+        assert!(rust_bind.contains("pub fn mimi_cap_register(name: *mut u8) -> i64;"));
+        assert!(rust_bind.contains("pub fn mimi_cap_check(cap: i64, name: *mut u8) -> bool;"));
 
         // Step 10: Fixpoint (serialize → deserialize → re-serialize)
         let json2 = abi2.to_json().expect("re-serialize");
@@ -443,6 +450,140 @@ mod tests {
         assert!(diff.has_breaking_changes());
         assert!(diff.breaking_count() >= 1); // removed mimi_rc_alloc
         assert!(diff.non_breaking_count() >= 1); // added mimi_new_feature
+    }
+
+    /// Audit 2026-08-05 (full audit §12): the core registry was corrected
+    /// against the real `#[no_mangle]` runtime symbols. Pin the fixed
+    /// signatures at the pipeline level (build → serialize → deserialize →
+    /// reverse) so a regression through ANY stage is caught.
+    #[test]
+    fn pipeline_registry_real_runtime_signatures() {
+        use crate::component::types::{AbiPrimitive, AbiTypeRef};
+
+        let mut gen = AbiGenerator::new();
+        register_core_runtime_abi(&mut gen);
+        let ir = gen.build();
+
+        // Round-trip through .mimiabi so the pin covers serialization too.
+        let abi = MimiAbi::from_component_ir(&ir);
+        let json = abi.to_json().expect("serialize");
+        let ir2 = MimiAbi::from_json_validated(&json)
+            .expect("validated")
+            .to_component_ir();
+
+        let ptr_u8 = || AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)));
+        let ptr_i64 = || AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I64)));
+        let prim_i64 = AbiTypeRef::Primitive(AbiPrimitive::I64);
+        let prim_bool = AbiTypeRef::Primitive(AbiPrimitive::Bool);
+        let prim_uintptr = AbiTypeRef::Primitive(AbiPrimitive::UIntPtr);
+        let void = AbiTypeRef::Void;
+
+        // name → (param types, return type) pinned against runtime/*.rs
+        let pinned: &[(&str, &[AbiTypeRef], AbiTypeRef)] = &[
+            // capability.rs:34
+            ("mimi_cap_register", &[ptr_u8()], prim_i64.clone()),
+            // capability.rs:69
+            (
+                "mimi_cap_check",
+                &[prim_i64.clone(), ptr_u8()],
+                prim_bool.clone(),
+            ),
+            // capability.rs:86
+            (
+                "mimi_cap_consume",
+                &[prim_i64.clone(), ptr_u8()],
+                prim_bool.clone(),
+            ),
+            // capability.rs:61
+            ("mimi_cap_drop", std::slice::from_ref(&prim_i64), void.clone()),
+            // mod.rs:18534
+            (
+                "mimi_json_deserialize",
+                &[ptr_u8(), ptr_i64(), prim_i64.clone()],
+                ptr_u8(),
+            ),
+            // net.rs:192
+            (
+                "mimi_recv",
+                &[prim_i64.clone(), prim_i64.clone(), ptr_i64()],
+                ptr_u8(),
+            ),
+            // mod.rs:1833
+            (
+                "mimi_str_clone",
+                &[ptr_u8(), prim_i64.clone()],
+                prim_uintptr.clone(),
+            ),
+            // crypto.rs:256 — 10 params
+            (
+                "mimi_str_format",
+                &[
+                    prim_i64.clone(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                    ptr_u8(),
+                ],
+                ptr_u8(),
+            ),
+            // actor.rs:720 — 4 params
+            (
+                "mimi_broadcast",
+                &[
+                    AbiTypeRef::Pointer(Box::new(ptr_u8())),
+                    prim_i64.clone(),
+                    ptr_u8(),
+                    ptr_i64(),
+                ],
+                AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I64))),
+            ),
+            // mod.rs:19089 — noreturn surfaced as void + effect
+            ("mimi_runtime_abort", &[ptr_u8()], void.clone()),
+        ];
+
+        for (name, params, ret) in pinned {
+            for candidate in [&ir, &ir2] {
+                let sym = candidate
+                    .export(name)
+                    .unwrap_or_else(|| panic!("{name}: missing after round-trip"));
+                let got: Vec<AbiTypeRef> = sym.params.iter().map(|p| p.ty.clone()).collect();
+                assert_eq!(&got[..], *params, "{name}: param types regressed");
+                assert_eq!(&sym.ret, ret, "{name}: return type regressed");
+            }
+        }
+
+        // noreturn marker on abort/try_exit/match_panic.
+        for name in ["mimi_runtime_abort", "mimi_try_exit", "mimi_match_panic"] {
+            let sym = ir.export(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert!(
+                sym.effects.iter().any(|e| e == "noreturn"),
+                "{name}: noreturn effect missing"
+            );
+        }
+
+        // Phantoms must stay absent after the round-trip too.
+        for name in [
+            "mimi_list_new",
+            "mimi_list_len",
+            "mimi_print_line",
+            "mimi_print_err",
+            "mimi_sleep_ms",
+            "mimi_timestamp",
+            "mimi_timestamp_ms",
+            "mimi_string_new",
+            "mimi_string_len",
+            "mimi_string_as_slice",
+        ] {
+            assert!(
+                ir2.export(name).is_none(),
+                "{name}: phantom resurrected through serialization"
+            );
+        }
     }
 
     /// Callback category round-trip through serialization.

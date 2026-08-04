@@ -17,6 +17,8 @@ NC='\033[0m'
 
 PASSED=0
 FAILED=0
+# Advisory cells：如实报告退出码，但不计入 PASSED/FAILED 核算（见 run_matrix_cell_advisory）。
+ADVISORY=0
 
 run_matrix_cell() {
     local name="$1"
@@ -45,6 +47,35 @@ run_matrix_cell() {
     echo ""
 }
 
+# Advisory cell：如实运行并报告退出码，但不计入 PASSED/FAILED 核算。
+# 用于本 checkout 中可能不存在的附加套件（如 allocator 测试矩阵）。
+# 绝不在命令尾部追加 `; true` 之类的手段伪造 PASSED —— 那是 vacuous pass。
+run_matrix_cell_advisory() {
+    local name="$1"
+    shift
+    local cmd=("$@")
+
+    echo -e "${CYAN}[MATRIX/ADVISORY]${NC} $name"
+    echo "  Command: ${cmd[*]}"
+    echo ""
+
+    set +e
+    (
+        set -e
+        "${cmd[@]}"
+    )
+    local exit_code=$?
+    set -e
+
+    ADVISORY=$((ADVISORY + 1))
+    if [ "$exit_code" -eq 0 ]; then
+        echo -e "${YELLOW}  ○ $name advisory-pass (exit=0, not counted in PASSED/FAILED)${NC}"
+    else
+        echo -e "${YELLOW}  ○ $name advisory-fail (exit=$exit_code, not counted in PASSED/FAILED)${NC}"
+    fi
+    echo ""
+}
+
 echo "========================================="
 echo "  本地 CI 矩阵运行器"
 echo "========================================="
@@ -57,10 +88,13 @@ run_matrix_cell "clippy" cargo clippy --manifest-path "$PROJECT_DIR/Cargo.toml" 
 # 2. 解释器矩阵 (Debug, 3 allocators)
 echo "--- 2. 解释器测试 (Debug, 3 allocators) ---"
 run_matrix_cell "interp-system" cargo test --manifest-path "$PROJECT_DIR/Cargo.toml" -- --test-threads=4
-run_matrix_cell "interp-arena" \
-    bash -c 'cd '"$PROJECT_DIR"' && cargo test -- --test-threads=4 arena 2>/dev/null; true'
-run_matrix_cell "interp-bump" \
-    bash -c 'cd '"$PROJECT_DIR"' && cargo test -- --test-threads=4 bump 2>/dev/null; true'
+# Advisory：arena/bump allocator 套件在本 checkout 中可能不存在；如实报告
+# 结果但不计入 PASSED/FAILED（旧实现在命令尾部追加 `; true` 强制 exit 0，
+# 任何失败都被伪装成 PASSED —— 已移除）。
+run_matrix_cell_advisory "interp-arena" \
+    bash -c 'cd '"$PROJECT_DIR"' && cargo test -- --test-threads=4 arena 2>/dev/null'
+run_matrix_cell_advisory "interp-bump" \
+    bash -c 'cd '"$PROJECT_DIR"' && cargo test -- --test-threads=4 bump 2>/dev/null'
 
 # 3. 代码生成测试
 echo "--- 3. 代码生成测试 ---"
@@ -108,6 +142,7 @@ echo "  矩阵运行完成"
 echo "========================================="
 echo -e "  ${GREEN}Passed: $PASSED${NC}"
 echo -e "  ${RED}Failed: $FAILED${NC}"
+echo -e "  ${YELLOW}Advisory: $ADVISORY cell(s) — honest exit status only, not counted in Passed/Failed${NC}"
 
 # Update all scripts status
 # Also test all examples through the interpreter

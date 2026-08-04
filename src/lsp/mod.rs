@@ -27,6 +27,11 @@ pub(crate) mod tokens;
 pub(crate) mod util;
 
 const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024; // 16MB
+/// AU-LSP-6 (full audit 2026-08-05): hard cap for draining oversized bodies.
+/// Messages between MAX_CONTENT_LENGTH and this limit are discarded in
+/// bounded chunks (never buffered whole — memory bomb) so the stream stays
+/// in sync; anything above this limit closes the connection cleanly.
+const HARD_MAX_CONTENT_LENGTH: usize = 64 * 1024 * 1024; // 64MB
 const MAX_DOCUMENTS: usize = 256;
 /// Maximum number of verification cache entries before LRU eviction.
 /// Prevents unbounded memory growth in long-running LSP sessions.
@@ -35,6 +40,54 @@ pub(crate) const MAX_VERIFICATION_CACHE: usize = 4096;
 /// origin alongside the stable SourceKey/span. Earlier schemas cannot prove
 /// provenance and are rejected wholesale.
 const VERIFICATION_CACHE_VERSION: u32 = 4;
+
+/// Consume the separator between the header block and the body. The protocol
+/// requires `\r\n`; tolerate a bare `\n` sent by some clients. `read_line`
+/// already consumed the header line's terminating `\n`, so at most two
+/// further bytes remain before the body.
+fn consume_body_separator<R: Read>(reader: &mut R) -> io::Result<()> {
+    let mut single = [0u8; 1];
+    let n = reader.read(&mut single)?;
+    if n == 0 {
+        // Header already ended the stream — nothing to consume.
+        return Ok(());
+    }
+    if single[0] == b'\r' {
+        // \r\n — consume the trailing \n too
+        let mut nl = [0u8; 1];
+        let m = reader.read(&mut nl)?;
+        if m == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "body separator: stream ended after CR",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Discard exactly `len` bytes from `reader`, reading in bounded chunks so
+/// the body is never buffered whole. AU-LSP-6 (full audit 2026-08-05): an
+/// oversized message must still have its body consumed; skipping it desyncs
+/// the stream and every subsequent message is misparsed until EOF.
+pub(crate) fn drain_discard<R: Read>(reader: &mut R, mut remaining: usize) -> io::Result<()> {
+    let mut sink = [0u8; 8192];
+    while remaining > 0 {
+        let want = remaining.min(sink.len());
+        match reader.read(&mut sink[..want]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "LSP body truncated before Content-Length bytes",
+                ))
+            }
+            Ok(read) => remaining -= read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CacheEntry {
@@ -514,31 +567,45 @@ impl LspServer {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
 
-            if len == 0 || len > MAX_CONTENT_LENGTH {
+            if len == 0 {
+                continue;
+            }
+
+            // AU-LSP-6 (full audit 2026-08-05): an oversized message must still
+            // consume its body. The old `continue` left the body in the stream,
+            // desyncing it so subsequent messages were misparsed until EOF.
+            // Between the soft and hard caps the body is discarded in bounded
+            // chunks (never allocated whole); above the hard cap the connection
+            // closes cleanly instead of draining an unbounded memory bomb.
+            if len > MAX_CONTENT_LENGTH {
+                if len > HARD_MAX_CONTENT_LENGTH {
+                    eprintln!(
+                        "[mimi lsp] Content-Length {} exceeds hard cap ({} bytes); closing",
+                        len, HARD_MAX_CONTENT_LENGTH
+                    );
+                    return Ok(());
+                }
+                if let Err(e) = consume_body_separator(&mut reader) {
+                    eprintln!("[mimi lsp] failed to read separator byte: {e}");
+                    return Ok(());
+                }
+                if let Err(e) = drain_discard(&mut reader, len) {
+                    eprintln!("[mimi lsp] failed to drain oversized body: {e}");
+                    return Ok(());
+                }
+                continue;
+            }
+
+            // CL-C1: consume the separator between Content-Length header and JSON body.
+            // read_line includes the trailing \n. Protocol requires \r\n before body,
+            // but some clients send only \n. Handle both.
+            if let Err(e) = consume_body_separator(&mut reader) {
+                eprintln!("[mimi lsp] failed to read separator byte: {}", e);
                 continue;
             }
 
             // Read JSON body
             let mut body = vec![0u8; len];
-
-            // CL-C1: consume the separator between Content-Length header and JSON body.
-            // read_line includes the trailing \n. Protocol requires \r\n before body,
-            // but some clients send only \n. Handle both by reading one byte and
-            // optionally discarding a \r:
-            let mut single = [0u8; 1];
-            if let Err(e) = reader.read(&mut single) {
-                eprintln!("[mimi lsp] failed to read separator byte: {}", e);
-                continue;
-            }
-            if single[0] == b'\r' {
-                // \r\n — consume the trailing \n too
-                let mut nl = [0u8; 1];
-                if let Err(e) = reader.read(&mut nl) {
-                    eprintln!("[mimi lsp] failed to read newline byte: {}", e);
-                    continue;
-                }
-            }
-
             reader
                 .read_exact(&mut body)
                 .map_err(|e| format!("read error: {}", e))?;

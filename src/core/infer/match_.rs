@@ -20,7 +20,24 @@ impl<'a> Checker<'a> {
             return Type::Name("unknown".into(), vec![]);
         }
 
-        let all_variants = self.get_enum_variants(&subject_ty);
+        let mut all_variants = self.get_enum_variants(&subject_ty);
+        // Audit 2026-08-05 fix 10 support: surface-spelled `Option<T>` /
+        // `Result<T, E>` annotations resolve to `Type::Name("Option", _)` /
+        // `Type::Name("Result", _)` (resolve_type does not normalize them),
+        // which get_enum_variants does not recognize. Give those subjects
+        // their canonical variants so exhaustiveness works for both
+        // representations — matching `check_pattern`'s dual-form handling.
+        if all_variants.is_empty() {
+            match subject_ty.unlocated() {
+                Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                    all_variants = vec!["Some".into(), "None".into()];
+                }
+                Type::Name(n, args) if n == "Result" && args.len() == 2 => {
+                    all_variants = vec!["Ok".into(), "Err".into()];
+                }
+                _ => {}
+            }
+        }
         // v0.31.25: Multi-target flow transition results — use tracked target
         // states for exhaustiveness checking instead of get_enum_variants
         // (flow states are TypeDefKind::Record, not Enum).
@@ -51,12 +68,19 @@ impl<'a> Checker<'a> {
         for arm in arms {
             let (pattern_covered, is_catchall) =
                 self.pattern_covers_variants(&arm.pat, &subject_ty);
-            if is_catchall {
-                has_catchall = true;
-            }
-            for variant in pattern_covered {
-                if !covered_variants.contains(&variant) {
-                    covered_variants.push(variant);
+            // Audit 2026-08-05 fix 9: a guarded arm can fail at runtime (the
+            // guard evaluates false), leaving its variants unmatched — guarded
+            // arms must NOT count toward coverage. A variant stays covered only
+            // if some UNguarded arm (or an unguarded wildcard) covers it; the
+            // union over unguarded arms is position-independent.
+            if arm.guard.is_none() {
+                if is_catchall {
+                    has_catchall = true;
+                }
+                for variant in pattern_covered {
+                    if !covered_variants.contains(&variant) {
+                        covered_variants.push(variant);
+                    }
                 }
             }
 
@@ -124,12 +148,19 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if effective_variants.is_empty() && !has_catchall {
-            // D3: non-enum types (i32, string, etc.) without catch-all — warn
-            let is_non_enum = matches!(
-                subject_ty.unlocated(),
-                Type::Name(n, _) if matches!(n.as_str(), "i32" | "i64" | "f64" | "string")
-            );
-            if is_non_enum {
+            // D3 + audit 2026-08-05 fix 10: the no-wildcard guard used to fire
+            // only for i32/i64/f64/string subjects; every other non-enum subject
+            // (tuples, newtypes, records, refs, …) silently matched nothing when
+            // no arm applied. Extend the diagnostic to all subject types except
+            // unresolved inference surfaces, where exhaustiveness is not yet
+            // decidable (TypeVar) or the type is an escape hatch / error poison
+            // (Infer/TyErr/unknown) — emitting there would only add cascade noise.
+            let exempt = match subject_ty.unlocated() {
+                Type::TypeVar(_) | Type::Infer | Type::TyErr => true,
+                Type::Name(n, _) if n == "unknown" => true,
+                _ => false,
+            };
+            if !exempt {
                 self.errors.push(
                     Diagnostic::error_code(
                         crate::diagnostic::codes::E0215,
@@ -191,8 +222,22 @@ impl<'a> Checker<'a> {
                 (covered, false)
             }
             PatternKind::Constructor(name, _) => {
-                // Constructor pattern covers only that specific variant
-                (vec![name.clone()], false)
+                // Constructor pattern covers only that specific variant.
+                // Audit 2026-08-05 fix 10 support: a constructor pattern naming
+                // the subject's OWN nominal type always matches (flow-state
+                // record results, newtypes), so it is a catch-all for that
+                // subject. Without this, exhaustive single-constructor matches
+                // (e.g. `match u { Dead { tag } => …, Fault { … } => … }` where
+                // `u`'s checker type is `Dead`, or `match u { UserId(v) => v }`)
+                // would trip the extended no-wildcard guard.
+                let self_covering = match subject_ty.unlocated() {
+                    Type::Name(sname, _) => {
+                        sname == name && self.flow_state_type_names.contains(name.as_str())
+                    }
+                    Type::Newtype(sname, _) => sname == name,
+                    _ => false,
+                };
+                (vec![name.clone()], self_covering)
             }
             PatternKind::Tuple(pats) => {
                 // Tuple pattern - handle both Type::Tuple and Type::Name("Tuple", args)
@@ -202,19 +247,41 @@ impl<'a> Checker<'a> {
                     Type::Name(n, args) if n == "Tuple" => Some(args.as_slice()),
                     _ => None,
                 };
+                // Audit 2026-08-05 fix 10 support: a tuple pattern is itself a
+                // catch-all iff the arity matches and EVERY sub-pattern is a
+                // catch-all (`(a, b)` / `(_, _)` bind any element values). The
+                // old code discarded the sub-pattern catch-all flags and always
+                // reported false.
+                let mut all_catchall = false;
                 if let Some(elem_types) = elem_types_opt {
-                    for (i, p) in pats.iter().enumerate() {
-                        if i < elem_types.len() {
-                            let (vars, _) = self.pattern_covers_variants(p, &elem_types[i]);
+                    if pats.len() == elem_types.len() {
+                        all_catchall = true;
+                        for (i, p) in pats.iter().enumerate() {
+                            let (vars, sub_catchall) =
+                                self.pattern_covers_variants(p, &elem_types[i]);
+                            if !sub_catchall {
+                                all_catchall = false;
+                            }
                             for v in vars {
                                 if !covered.contains(&v) {
                                     covered.push(v);
                                 }
                             }
                         }
+                    } else {
+                        for (i, p) in pats.iter().enumerate() {
+                            if i < elem_types.len() {
+                                let (vars, _) = self.pattern_covers_variants(p, &elem_types[i]);
+                                for v in vars {
+                                    if !covered.contains(&v) {
+                                        covered.push(v);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                (covered, false)
+                (covered, all_catchall)
             }
             PatternKind::Array(_) | PatternKind::Slice(_, _) => (Vec::new(), false),
         }

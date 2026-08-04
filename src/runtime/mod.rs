@@ -418,10 +418,51 @@ fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
     ptr as *mut std::ffi::c_char
 }
 
+/// audit-wave1 (JSON `\uXXXX`): decode one JSON unicode escape starting at the
+/// first hex digit (`bytes[pos]`). Returns `Some((char, consumed))` where
+/// `consumed` counts the hex-digit bytes after 'u' (4 for BMP chars, 10 for a
+/// combined `\uD800-\uDBFF\uDC00-\uDFFF` surrogate pair). serde parity:
+/// malformed hex and lone/unpaired surrogates FAIL the parse instead of being
+/// silently dropped (old code discarded them → silent data corruption).
+fn json_decode_unicode_escape(bytes: &[u8], pos: usize) -> Option<(char, usize)> {
+    if pos.checked_add(4)? > bytes.len() {
+        return None;
+    }
+    let hex = std::str::from_utf8(&bytes[pos..pos + 4]).ok()?;
+    // 4 hex digits always fit in u16; this fails only on non-hex input.
+    let hi = u16::from_str_radix(hex, 16).ok()?;
+    if (0xD800..=0xDBFF).contains(&hi) {
+        // High surrogate: a low surrogate (\uDC00-\uDFFF) MUST follow.
+        if pos.checked_add(10)? > bytes.len() {
+            return None;
+        }
+        if bytes[pos + 4] != b'\\' || bytes[pos + 5] != b'u' {
+            return None;
+        }
+        let hex2 = std::str::from_utf8(&bytes[pos + 6..pos + 10]).ok()?;
+        let lo = u16::from_str_radix(hex2, 16).ok()?;
+        if !(0xDC00..=0xDFFF).contains(&lo) {
+            return None;
+        }
+        let cp = 0x10000u32 + (((hi as u32) - 0xD800) << 10) + ((lo as u32) - 0xDC00);
+        let ch = char::from_u32(cp)?;
+        Some((ch, 10))
+    } else if (0xDC00..=0xDFFF).contains(&hi) {
+        // Lone low surrogate — malformed per serde.
+        None
+    } else {
+        Some((char::from_u32(hi as u32)?, 4))
+    }
+}
+
 /// JSON-escape a string: wrap in double quotes, escape `"`, `\`, and control chars.
 /// JSON unescape: convert escape sequences \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
 /// into the actual characters they represent. Used during deserialization.
-fn json_unescape(s: &[u8]) -> Vec<u8> {
+///
+/// Returns `None` on malformed input (bad `\uXXXX` hex, lone/unpaired
+/// surrogate, dangling backslash) — callers must fail the JSON parse rather
+/// than emit corrupted data (serde parity, audit-wave1).
+fn json_unescape(s: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
@@ -432,8 +473,8 @@ fn json_unescape(s: &[u8]) -> Vec<u8> {
         }
         i += 1;
         if i >= s.len() {
-            out.push(b'\\');
-            break;
+            // Dangling backslash at EOF — malformed escape.
+            return None;
         }
         match s[i] {
             b'"' => out.push(b'"'),
@@ -445,24 +486,17 @@ fn json_unescape(s: &[u8]) -> Vec<u8> {
             b'r' => out.push(b'\r'),
             b't' => out.push(b'\t'),
             b'u' => {
-                // \uXXXX — parse 4 hex digits
-                if i + 4 < s.len() {
-                    let hex_str = std::str::from_utf8(&s[i + 1..i + 5]).unwrap_or("0000");
-                    if let Ok(code) = u32::from_str_radix(hex_str, 16) {
-                        if let Some(ch) = char::from_u32(code) {
-                            let mut buf = [0u8; 4];
-                            let encoded = ch.encode_utf8(&mut buf);
-                            out.extend_from_slice(encoded.as_bytes());
-                        }
-                    }
-                    i += 4;
-                }
+                // \uXXXX (or surrogate pair) — malformed input fails the parse.
+                let (ch, consumed) = json_decode_unicode_escape(s, i + 1)?;
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                i += consumed;
             }
             c => out.push(c),
         }
         i += 1;
     }
-    out
+    Some(out)
 }
 
 fn json_escape_string(s: &str) -> String {
@@ -1958,6 +1992,84 @@ pub extern "C" fn mimi_str_substring(
     alloc_c_string(&result)
 }
 
+/// audit-wave1 helper: read a `(ptr, len)` string ABI into a Rust String
+/// (lossy UTF-8). Same trust model as `mimi_str_clone`: the caller (codegen)
+/// guarantees `ptr` is valid for `len` readable bytes. Negative or absurd
+/// lengths are rejected loud; null ptr reads as empty.
+fn str_from_ptr_len(ptr: *const std::ffi::c_char, len: i64) -> String {
+    if ptr.is_null() || len <= 0 {
+        return String::new();
+    }
+    // RT-H9 parity with mimi_str_clone: cap absurd allocation/read requests.
+    const MAX_STR_LEN: i64 = 64 * 1024 * 1024; // 64 MiB
+    if len > MAX_STR_LEN {
+        mimi_runtime_abort(
+            b"string builtin: length out of bounds\0".as_ptr() as *const std::ffi::c_char
+        );
+    }
+    // SAFETY: caller guarantees `ptr` points to at least `len` readable bytes
+    // (ptr+len string ABI used by codegen, same contract as mimi_str_clone);
+    // `len` was bounds-checked above.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// audit-wave1 (VM function-form parity, interp builtins/string.rs
+/// builtin_str_substring): substring `[start, end)` with indices CLAMPED to
+/// the char count. Aborts only if `start > end` AFTER clamping. The method
+/// form `mimi_str_substring` above stays strict — do not conflate them.
+#[no_mangle]
+pub extern "C" fn mimi_str_substring_clamp(
+    ptr: *const std::ffi::c_char,
+    len: i64,
+    start: i64,
+    end: i64,
+) -> *mut std::ffi::c_char {
+    let ss = str_from_ptr_len(ptr, len);
+    let chars: Vec<char> = ss.chars().collect();
+    let n = chars.len();
+    // VM parity: negative indices wrap through `as usize` and saturate at n.
+    let si = (start as usize).min(n);
+    let ei = (end as usize).min(n);
+    if si > ei {
+        mimi_runtime_abort(b"str_substring: start > end\0".as_ptr() as *const std::ffi::c_char);
+    }
+    let result: String = chars[si..ei].iter().collect();
+    alloc_c_string(&result)
+}
+
+/// audit-wave1: Unicode-correct full-string case conversion (VM parity:
+/// `s.to_uppercase()`), replacing codegen's byte-wise emulation. Returns a
+/// freshly heap-allocated string (caller frees via mimi_string_free).
+#[no_mangle]
+pub extern "C" fn mimi_str_to_upper(
+    ptr: *const std::ffi::c_char,
+    len: i64,
+) -> *mut std::ffi::c_char {
+    let ss = str_from_ptr_len(ptr, len);
+    alloc_c_string(&ss.to_uppercase())
+}
+
+/// audit-wave1: Unicode-correct full-string case conversion (VM parity:
+/// `s.to_lowercase()`). Returns a freshly heap-allocated string.
+#[no_mangle]
+pub extern "C" fn mimi_str_to_lower(
+    ptr: *const std::ffi::c_char,
+    len: i64,
+) -> *mut std::ffi::c_char {
+    let ss = str_from_ptr_len(ptr, len);
+    alloc_c_string(&ss.to_lowercase())
+}
+
+/// audit-wave1: Unicode-aware trim (VM parity: Rust `str::trim`, which strips
+/// all chars with the White_Space property). Returns a freshly heap-allocated
+/// string.
+#[no_mangle]
+pub extern "C" fn mimi_str_trim(ptr: *const std::ffi::c_char, len: i64) -> *mut std::ffi::c_char {
+    let ss = str_from_ptr_len(ptr, len);
+    alloc_c_string(ss.trim())
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_str_split(
     s: *const std::ffi::c_char,
@@ -2117,34 +2229,65 @@ pub extern "C" fn mimi_list_result_map_to_json(
     list_result_to_json_impl(list, mode + 10)
 }
 
-/// `mode`:
-/// - 0: Ok payload is plain i64
-/// - 10..=13: Ok payload is MapHandle (mode-10 selects map value kind)
+/// True if every page covering `[addr, addr+len)` is currently mapped.
+/// Pattern lifted from `safe_c_string_from_handle`: mincore-probe BEFORE any
+/// read so hostile/garbage pointers can never drive a SIGSEGV.
+fn memory_range_mapped(addr: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    // SAFETY: `libc::sysconf` is an async-signal-safe POSIX function.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let page_size = if page_size == 0 { 4096 } else { page_size };
+    let end = match addr.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    let page_start = (addr / page_size) * page_size;
+    let span = end.saturating_sub(page_start);
+    let n_pages = span.div_ceil(page_size);
+    let mut vec = vec![0u8; n_pages];
+    // SAFETY: `page_start` is page-aligned and `n_pages * page_size >= span`
+    // covers the queried range; vec is a valid buffer of exactly one byte per
+    // page (mincore writes one status byte per page).
+    unsafe { libc::mincore(page_start as *mut std::ffi::c_void, span, vec.as_mut_ptr()) == 0 }
+}
+
 /// Decode Result Err payload to a JSON string fragment (already escaped/quoted).
 fn decode_result_err_string(err: i64) -> String {
     const MIN_HEAP: i64 = 1_048_576;
     if err >= MIN_HEAP && (err as u64) % 8 == 0 {
         // Prefer Mimi string struct {ptr, i64} heap layout.
-        let base = err as *const u8;
-        // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-        let page_size = if page_size == 0 { 4096 } else { page_size };
-        let page_start = ((err as usize) / page_size) * page_size;
-        let mut mvec: u8 = 0;
-        let mapped =
-// SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
-            unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
-        if mapped == 0 {
-            // SAFETY: mincore confirmed mapped; load {ptr, len} if plausible.
-            let ptr = unsafe { *(base as *const *const u8) };
-            let len = unsafe { *(base.add(8) as *const i64) };
+        let base = err as usize;
+        // audit-wave1 (audit §10 HIGH): validate BOTH the struct page(s) AND
+        // the target byte range before dereferencing. The old code only
+        // mincore-probed the base page, then dereferenced the inner {ptr,len}
+        // blind → OOB read / SIGSEGV on garbage payloads.
+        if memory_range_mapped(base, 16) {
+            let base_ptr = base as *const u8;
+            // SAFETY: memory_range_mapped confirmed both i64 slots are on
+            // mapped pages; `err` is 8-aligned (checked above) so both loads
+            // are aligned.
+            let ptr = unsafe { *(base_ptr as *const *const u8) };
+            let len = unsafe { *(base_ptr.add(8) as *const i64) };
             if !ptr.is_null() && (0..1_000_000).contains(&len) {
-                let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-                if let Ok(s) = std::str::from_utf8(slice) {
-                    return json_escape_string(s);
+                // Second validation gate: probe the TARGET range the struct
+                // claims to point at. Unmapped/overflowing → sentinel empty
+                // string, never SIGSEGV or an info-read of foreign memory.
+                if memory_range_mapped(ptr as usize, len as usize) {
+                    // SAFETY: target range confirmed mapped above; len bounds
+                    // checked (0..1_000_000); u8 slice has alignment 1.
+                    let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+                    if let Ok(s) = std::str::from_utf8(slice) {
+                        return json_escape_string(s);
+                    }
                 }
+                // Invalid inner target / non-UTF-8: sentinel empty string.
+                return json_escape_string("");
             }
-            // Fallback: C string at err address.
+            // {ptr,len} implausible — not a string struct. Fallback: bounded
+            // C-string decode at the err address itself (mincore-checked
+            // internally by safe_c_string_from_handle).
             if let Some(s) = safe_c_string_from_handle(err as ValueHandle) {
                 return json_escape_string(&s);
             }
@@ -3081,6 +3224,12 @@ pub extern "C" fn mimi_sleep(ms: i64) {
 // ---------------------------------------------------------------------------
 // JSON parser (recursive descent, self-contained)
 // ---------------------------------------------------------------------------
+// TODO(#audit-wave2-json-parser-unify): this hand parser diverges from serde
+// in edge cases — it accepts leading-zero numbers ("01") and overflows
+// exponents to inf ("1e999"), and `parse_number` routes through str::parse
+// which also accepts "inf"/"nan". Do NOT rewrite the parser in audit-wave1;
+// the fail-loud accessors (json_get_*) and surrogate handling were fixed
+// around it instead. Unify on serde (or a strict hand parser) in wave 2.
 
 const JSON_MAX_DEPTH: i32 = 64;
 
@@ -3171,17 +3320,11 @@ impl<'a> JsonParser<'a> {
                     b'r' => result.push('\r'),
                     b't' => result.push('\t'),
                     b'u' => {
-                        // Parse 4-digit hex
-                        if self.pos + 4 >= self.p.len() {
-                            return None;
-                        }
-                        let hex_str = &self.p[self.pos + 1..self.pos + 5];
-                        let hex = std::str::from_utf8(hex_str).ok()?;
-                        let cp = u32::from_str_radix(hex, 16).ok()?;
-                        if let Some(ch) = char::from_u32(cp) {
-                            result.push(ch);
-                        }
-                        self.pos += 4;
+                        // audit-wave1: surrogate pairs combined, lone surrogates
+                        // and malformed hex fail the parse (serde parity).
+                        let (ch, consumed) = json_decode_unicode_escape(self.p, self.pos + 1)?;
+                        result.push(ch);
+                        self.pos += consumed;
                     }
                     _ => {
                         result.push(c as char);
@@ -3405,12 +3548,22 @@ pub extern "C" fn mimi_is_valid_json(json_str: *const std::ffi::c_char) -> i64 {
     parser.is_valid() as i64
 }
 
+/// Walk a top-level JSON object and extract the value for `key`.
+///
+/// audit-wave1 (fail-loud JSON accessors): distinguishes the three outcomes
+/// the extern accessors need:
+/// - `Ok(Some(val))` — well-formed object, key present, value parsed.
+/// - `Ok(None)`      — input is a well-formed JSON value but the key is
+///   absent (top-level value not an object, or key missing).
+///   VM parity: `jv.get(key)` on a non-object is `None`.
+/// - `Err(())`       — input is not well-formed JSON (parse failure), or a
+///   null pointer was passed.
 fn json_get_inner(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
-) -> Option<String> {
+) -> Result<Option<String>, ()> {
     if json_str.is_null() || key.is_null() {
-        return None;
+        return Err(());
     }
     // SAFETY: `json_str` was checked non-null above.
     let json = unsafe { cstr_to_string(json_str) };
@@ -3423,29 +3576,43 @@ fn json_get_inner(
     while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
         pos += 1;
     }
-    if pos >= bytes.len() || bytes[pos] != b'{' {
-        return None;
+    if pos >= bytes.len() {
+        return Err(());
+    }
+    if bytes[pos] != b'{' {
+        // Not an object. If it still parses as some JSON value, the key is
+        // simply absent (VM: `get` on non-object → None). Unparseable input
+        // is a genuine parse error.
+        let mut probe = JsonParser::new(&json[pos..]);
+        return if probe.parse_value().is_some() {
+            Ok(None)
+        } else {
+            Err(())
+        };
     }
     pos += 1;
 
     loop {
-        if pos >= bytes.len() || bytes[pos] == b'}' {
-            return None;
-        }
         while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
             pos += 1;
+        }
+        if pos >= bytes.len() {
+            return Err(()); // unterminated object
+        }
+        if bytes[pos] == b'}' {
+            return Ok(None); // well-formed object, key not present
         }
 
         // Parse key string
         if bytes[pos] != b'"' {
-            return None;
+            return Err(());
         }
         pos += 1;
         let mut key_buf = String::new();
         let mut key_esc = false;
         loop {
             if pos >= bytes.len() {
-                return None;
+                return Err(());
             }
             let c = bytes[pos];
             if key_esc {
@@ -3459,15 +3626,11 @@ fn json_get_inner(
                     b'r' => key_buf.push('\r'),
                     b't' => key_buf.push('\t'),
                     b'u' => {
-                        if pos + 4 >= bytes.len() {
-                            return None;
-                        }
-                        let hex_str = std::str::from_utf8(&bytes[pos + 1..pos + 5]).ok()?;
-                        let cp = u32::from_str_radix(hex_str, 16).ok()?;
-                        if let Some(ch) = char::from_u32(cp) {
-                            key_buf.push(ch);
-                        }
-                        pos += 4;
+                        // audit-wave1: surrogate pairs combined, lone
+                        // surrogates / malformed hex fail the parse.
+                        let (ch, consumed) = json_decode_unicode_escape(bytes, pos + 1).ok_or(())?;
+                        key_buf.push(ch);
+                        pos += consumed;
                     }
                     _ => {
                         key_buf.push(c as char);
@@ -3494,7 +3657,7 @@ fn json_get_inner(
             pos += 1;
         }
         if pos >= bytes.len() || bytes[pos] != b':' {
-            return None;
+            return Err(());
         }
         pos += 1;
         while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
@@ -3505,20 +3668,22 @@ fn json_get_inner(
             // Extract the value at current position
             let val_start = pos;
             let mut parser = JsonParser::new(&json[val_start..]);
-            return parser.parse_value();
+            return parser.parse_value().ok_or(()).map(Some);
         }
 
         // Skip value
         let val_start = pos;
         let mut dummy_parser = JsonParser::new(&json[val_start..]);
-        dummy_parser.parse_value()?;
+        if dummy_parser.parse_value().is_none() {
+            return Err(());
+        }
         pos = val_start + dummy_parser.pos;
 
         while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
             pos += 1;
         }
         if pos >= bytes.len() {
-            return None;
+            return Err(());
         }
         if bytes[pos] == b',' {
             pos += 1;
@@ -3526,56 +3691,116 @@ fn json_get_inner(
     }
 }
 
+/// audit-wave1 (fail-loud JSON accessors): abort helper. Builds a
+/// NUL-terminated message of the form `{prefix}{detail}{suffix}` and aborts.
+/// The temporary leaks is irrelevant — the process terminates.
+fn json_accessor_abort(prefix: &str, detail: &str, suffix: &str) -> ! {
+    let mut msg = String::with_capacity(prefix.len() + detail.len() + suffix.len() + 1);
+    msg.push_str(prefix);
+    msg.push_str(detail);
+    msg.push_str(suffix);
+    msg.push('\0');
+    mimi_runtime_abort(msg.as_ptr() as *const std::ffi::c_char)
+}
+
+/// True if the document parses as SOME JSON value (used by accessors to tell
+/// "well-formed but wrong shape" apart from "malformed input").
+fn json_parses_as_value(json: &str) -> bool {
+    let mut probe = JsonParser::new(json);
+    probe.parse_value().is_some()
+}
+
+/// Read `key` for error messages (defensive: null → empty label).
+fn json_key_label(key: *const std::ffi::c_char) -> String {
+    if key.is_null() {
+        return String::new();
+    }
+    // SAFETY: callers pass codegen-owned NUL-terminated strings; the
+    // non-null case here is only reached from accessors that already
+    // validated non-null before deciding to build a message.
+    unsafe { cstr_to_string(key) }
+}
+
+/// audit-wave1 (fail-loud, audit §10): aborts instead of returning NULL.
+/// VM-matching messages (src/interp/bytecode/builtins/misc.rs):
+/// malformed JSON, missing key. Codegen keeps its NULL guards as defense.
 #[no_mangle]
 pub extern "C" fn json_get_string(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
     match json_get_inner(json_str, key) {
-        Some(val) => alloc_c_string(&val),
-        None => std::ptr::null_mut(),
+        Ok(Some(val)) => alloc_c_string(&val),
+        Ok(None) => {
+            let k = json_key_label(key);
+            json_accessor_abort("json_get_string: key '", &k, "' not found")
+        }
+        Err(()) => json_accessor_abort("json_get_string parse error: ", "invalid JSON", ""),
     }
 }
 
 /// CRITICAL #18 fix: Check if a key exists in a JSON object.
 /// Returns 1 if the key exists, 0 if not. This avoids the ambiguity of
 /// json_get_string returning "" for both missing keys and empty-string values.
+///
+/// audit-wave1: a MISSING key still returns 0 (that is the function's
+/// purpose, VM parity); malformed JSON now aborts instead of masquerading
+/// as "key absent".
 #[no_mangle]
 pub extern "C" fn json_has_key(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
 ) -> i64 {
-    // json_get_inner returns None when key is missing, Some(val) when key
+    // json_get_inner returns Ok(None) when key is missing, Ok(Some) when key
     // exists (regardless of value content). This correctly distinguishes
-    // {"x": ""} (key exists, Some("")) from {} (key missing, None).
+    // {"x": ""} (key exists) from {} (key missing). Err = malformed JSON.
     match json_get_inner(json_str, key) {
-        Some(_) => 1,
-        None => 0,
+        Ok(Some(_)) => 1,
+        Ok(None) => 0,
+        Err(()) => json_accessor_abort("json_has_key parse error: ", "invalid JSON", ""),
     }
 }
 
+/// audit-wave1 (fail-loud, audit §10): aborts with VM-matching messages on
+/// malformed JSON / missing key / wrong type instead of returning 0.
 #[no_mangle]
 pub extern "C" fn json_get_int(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
 ) -> i64 {
-    match json_get_inner(json_str, key) {
-        Some(val) => {
-            // C6-fix: log parse failure instead of silently returning 0
-            val.parse::<i64>().unwrap_or_else(|e| {
-                eprintln!(
-                    "[mimi runtime] json_get_int: parse error for '{}': {}",
-                    val, e
-                );
-                0
-            })
+    let inner = json_get_inner(json_str, key);
+    let val = match inner {
+        Err(()) => json_accessor_abort("json_get_int parse error: ", "invalid JSON", ""),
+        Ok(None) => {
+            let k_label = json_key_label(key);
+            json_accessor_abort("json_get_int: key '", &k_label, "' not found")
         }
-        None => 0,
+        Ok(Some(val)) => val,
+    };
+    // The hand parser flattens values to strings; numeric-ness is re-derived
+    // here (see TODO(#audit-wave2-json-parser-unify)).
+    if let Ok(v) = val.parse::<i64>() {
+        return v;
+    }
+    let k_label = json_key_label(key);
+    if val.parse::<f64>().is_ok() {
+        // Number but not integral (e.g. 1.5) — VM: "is not an integer".
+        json_accessor_abort(
+            "json_get_int: value for key '",
+            &k_label,
+            "' is not an integer",
+        )
+    } else {
+        // String/bool/null/object/array — VM: "is not a number".
+        json_accessor_abort("json_get_int: key '", &k_label, "' is not a number")
     }
 }
 
-#[no_mangle]
-pub extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
+/// Internal sentinel variant: 0 on null/non-array/malformed input.
+/// Used by runtime-internal consumers (mimi_set_from_json_*) whose
+/// historical behavior is "empty set on unusable input"; the PUBLIC extern
+/// below fails loud instead.
+fn json_array_length_try(json_str: *const std::ffi::c_char) -> i64 {
     if json_str.is_null() {
         return 0;
     }
@@ -3627,13 +3852,45 @@ pub extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
     }
 }
 
+/// audit-wave1 (fail-loud, audit §10): aborts with VM-matching messages on
+/// malformed JSON / non-array input instead of silently returning 0.
 #[no_mangle]
-pub extern "C" fn json_get_element(
+pub extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
+    if json_str.is_null() {
+        json_accessor_abort("json_array_length parse error: ", "invalid JSON", "");
+    }
+    // SAFETY: `json_str` was checked non-null above.
+    let json = unsafe { cstr_to_string(json_str) };
+    let first = json
+        .bytes()
+        .enumerate()
+        .find(|(_, b)| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        .map(|(i, _)| i);
+    match first {
+        None => json_accessor_abort("json_array_length parse error: ", "invalid JSON", ""),
+        Some(i) if json.as_bytes()[i] != b'[' => {
+            // VM parity: a well-formed non-array value → "not an array";
+            // anything unparseable is a parse error.
+            if json_parses_as_value(&json[i..]) {
+                json_accessor_abort("json_array_length: ", "value is not an array", "")
+            } else {
+                json_accessor_abort("json_array_length parse error: ", "invalid JSON", "")
+            }
+        }
+        _ => {}
+    }
+    json_array_length_try(json_str)
+}
+
+/// Internal sentinel variant: null on malformed JSON / non-array / OOB index.
+/// Used by runtime-internal consumers (mimi_set_from_json_*) whose historical
+/// behavior is "skip unusable elements"; the PUBLIC extern below fails loud.
+fn json_get_element_try(
     json_str: *const std::ffi::c_char,
     index: i64,
-) -> *mut std::ffi::c_char {
+) -> Option<*mut std::ffi::c_char> {
     if json_str.is_null() {
-        return std::ptr::null_mut();
+        return None;
     }
     // SAFETY: `json_str` was checked non-null above.
     let json = unsafe { cstr_to_string(json_str) };
@@ -3644,14 +3901,14 @@ pub extern "C" fn json_get_element(
         pos += 1;
     }
     if pos >= bytes.len() || bytes[pos] != b'[' {
-        return std::ptr::null_mut();
+        return None;
     }
     pos += 1;
 
     let mut idx: i64 = 0;
     loop {
         if pos >= bytes.len() || bytes[pos] == b']' {
-            return std::ptr::null_mut();
+            return None;
         }
         while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
             pos += 1;
@@ -3660,16 +3917,13 @@ pub extern "C" fn json_get_element(
         if idx == index {
             let val_start = pos;
             let mut parser = JsonParser::new(&json[val_start..]);
-            return match parser.parse_value() {
-                Some(val) => alloc_c_string(&val),
-                None => std::ptr::null_mut(),
-            };
+            return parser.parse_value().map(|val| alloc_c_string(&val));
         }
 
         let val_start = pos;
         let mut dummy_parser = JsonParser::new(&json[val_start..]);
         if dummy_parser.parse_value().is_none() {
-            return std::ptr::null_mut();
+            return None;
         }
         pos = val_start + dummy_parser.pos;
 
@@ -3677,12 +3931,52 @@ pub extern "C" fn json_get_element(
             pos += 1;
         }
         if pos >= bytes.len() {
-            return std::ptr::null_mut();
+            return None;
         }
         if bytes[pos] == b',' {
             pos += 1;
         }
         idx += 1;
+    }
+}
+
+/// audit-wave1 (fail-loud, audit §10): aborts with VM-matching messages on
+/// malformed JSON / out-of-bounds index instead of returning NULL.
+#[no_mangle]
+pub extern "C" fn json_get_element(
+    json_str: *const std::ffi::c_char,
+    index: i64,
+) -> *mut std::ffi::c_char {
+    if json_str.is_null() {
+        json_accessor_abort("json_get_element parse error: ", "invalid JSON", "");
+    }
+    // SAFETY: `json_str` was checked non-null above.
+    let json = unsafe { cstr_to_string(json_str) };
+    let first = json
+        .bytes()
+        .enumerate()
+        .find(|(_, b)| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        .map(|(i, _)| i);
+    match first {
+        None => json_accessor_abort("json_get_element parse error: ", "invalid JSON", ""),
+        Some(i) if json.as_bytes()[i] != b'[' => {
+            // VM parity: `.get(idx)` on a well-formed non-array is None →
+            // "index out of bounds"; unparseable input is a parse error.
+            if json_parses_as_value(&json[i..]) {
+                let idx_s = index.to_string();
+                json_accessor_abort("json_get_element: index ", &idx_s, " out of bounds")
+            } else {
+                json_accessor_abort("json_get_element parse error: ", "invalid JSON", "")
+            }
+        }
+        _ => {}
+    }
+    match json_get_element_try(json_str, index) {
+        Some(ptr) => ptr,
+        None => {
+            let idx_s = index.to_string();
+            json_accessor_abort("json_get_element: index ", &idx_s, " out of bounds")
+        }
     }
 }
 
@@ -5184,18 +5478,10 @@ pub extern "C" fn mimi_list_from_json_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): struct allocated via Box and
+    // freed via Box::from_raw in mimi_list_free; element_kind set explicitly
+    // (elements are malloc'd `{disc, i64[n]}` option-product packs → Record).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Record)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -5352,14 +5638,9 @@ pub extern "C" fn mimi_list_from_json_option_product_i64(
         }
         handles.push(ptr as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * std::mem::size_of::<i64>();
     let data = if data_size > 0 {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     } else {
         std::ptr::null_mut()
@@ -5370,13 +5651,14 @@ pub extern "C" fn mimi_list_from_json_option_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated with `size_of::<MimiList>()` bytes by `libc::malloc`; writing fields is safe before any other access
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct (mimi_list_free frees via
+    // Box::from_raw) + explicit element_kind (malloc'd option-product packs).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Record,
+    )))
 }
 
 /// List of Option of product Display/JSON.
@@ -5447,18 +5729,9 @@ pub extern "C" fn mimi_list_from_json_option_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are malloc'd `{opt_disc, set_handle}` packs).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Record)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -5578,22 +5851,14 @@ pub extern "C" fn mimi_list_from_json_option_set_product_i64(
         }
         handles.push(pack as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -5602,13 +5867,14 @@ pub extern "C" fn mimi_list_from_json_option_set_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(size_of::<MimiList>())` and confirmed non-null; the MimiList fields are properly laid out at this pointer
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (malloc'd `{opt_disc, set_handle}` packs → Record).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Record,
+    )))
 }
 
 /// List of Option of Set of product Display/JSON.
@@ -6833,18 +7099,9 @@ pub extern "C" fn mimi_list_from_json_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are MapHandles → Map, owned by the registry).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Map)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -6906,22 +7163,14 @@ pub extern "C" fn mimi_list_from_json_map_list_product_i64(
         }
         handles.push(mh as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -6930,13 +7179,14 @@ pub extern "C" fn mimi_list_from_json_map_list_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(size_of::<MimiList>())` and confirmed non-null; the MimiList fields are properly laid out at this pointer
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are MapHandles).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Map,
+    )))
 }
 
 /// List of Map of List of product Display/JSON.
@@ -8758,18 +9008,9 @@ pub extern "C" fn mimi_list_from_json_set_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are SetHandles → Set, owned by the registry).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Set)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -8831,22 +9072,14 @@ pub extern "C" fn mimi_list_from_json_set_map_product_i64(
         }
         handles.push(set_h as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -8855,13 +9088,14 @@ pub extern "C" fn mimi_list_from_json_set_map_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(sizeof(MimiList))` and verified non-null; writing to its fields is valid
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are SetHandles).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Set,
+    )))
 }
 
 /// List of Set of Map of product Display/JSON.
@@ -8911,18 +9145,9 @@ pub extern "C" fn mimi_list_from_json_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are SetHandles → Set, owned by the registry).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Set)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -8984,22 +9209,14 @@ pub extern "C" fn mimi_list_from_json_set_product_i64(
         }
         handles.push(set_h as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -9008,13 +9225,14 @@ pub extern "C" fn mimi_list_from_json_set_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(sizeof(MimiList))` and verified non-null; writing to its fields is valid
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are SetHandles).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Set,
+    )))
 }
 
 /// Set of List of product from JSON array of list-of-product arrays.
@@ -9192,18 +9410,9 @@ pub extern "C" fn mimi_list_from_json_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are MapHandles → Map, owned by the registry).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Map)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -9265,22 +9474,14 @@ pub extern "C" fn mimi_list_from_json_map_product_i64(
         }
         handles.push(mh as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -9289,13 +9490,14 @@ pub extern "C" fn mimi_list_from_json_map_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(sizeof(MimiList))` and verified non-null; writing to its fields is valid
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are MapHandles).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Map,
+    )))
 }
 
 /// List of Map of product Display/JSON.
@@ -10479,18 +10681,9 @@ pub extern "C" fn mimi_list_from_json_set_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are SetHandles → Set, owned by the registry).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Set)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -10552,22 +10745,14 @@ pub extern "C" fn mimi_list_from_json_set_option_product_i64(
         }
         handles.push(set_h as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -10576,13 +10761,14 @@ pub extern "C" fn mimi_list_from_json_set_option_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(sizeof(MimiList))` and verified non-null; writing to its fields is valid
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are SetHandles).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Set,
+    )))
 }
 
 /// List of Set of Option of product Display/JSON.
@@ -10632,18 +10818,9 @@ pub extern "C" fn mimi_list_from_json_set_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are SetHandles → Set, owned by the registry).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Set)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -10705,22 +10882,14 @@ pub extern "C" fn mimi_list_from_json_set_result_product_i64(
         }
         handles.push(set_h as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -10729,13 +10898,14 @@ pub extern "C" fn mimi_list_from_json_set_result_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(sizeof(MimiList))` and verified non-null; writing to its fields is valid
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are SetHandles).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Set,
+    )))
 }
 
 /// List of Set of Result of product Display/JSON.
@@ -10786,18 +10956,9 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are malloc'd result-option packs → Record).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Record)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -10873,22 +11034,14 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
         }
         handles.push(h);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return empty();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return empty();
     }
     if !data.is_null() {
@@ -10897,13 +11050,14 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was just allocated by `libc::malloc(sizeof(MimiList))` and verified non-null; writing to its fields is valid
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct + explicit element_kind
+    // (elements are malloc'd result-option packs → Record).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Record,
+    )))
 }
 
 /// List of Result of Option of product Display/JSON.
@@ -16663,18 +16817,9 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are malloc'd `{disc, ok/err}` packs → Record).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Record)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -16840,22 +16985,14 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
         }
         handles.push(ptr as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return std::ptr::null_mut();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return std::ptr::null_mut();
     }
     if !data.is_null() {
@@ -16864,13 +17001,14 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was allocated by `libc::malloc` at line 16537 and confirmed non-null at line 16538; `data` is a valid heap allocation or null for empty lists
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct (mimi_list_free frees via
+    // Box::from_raw) + explicit element_kind (malloc'd result packs → Record).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Record,
+    )))
 }
 
 /// List of Result of Set of product from JSON.
@@ -16880,18 +17018,10 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are malloc'd 24-byte `{disc, ok, set_or_err}`
+    // packs → Record).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Record)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -17036,22 +17166,14 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
         }
         handles.push(pack as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return std::ptr::null_mut();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return std::ptr::null_mut();
     }
     if !data.is_null() {
@@ -17060,13 +17182,14 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was allocated by `libc::malloc` at line 16727 and confirmed non-null at line 16728; `data` is a valid heap allocation or null for empty lists
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct (mimi_list_free frees via
+    // Box::from_raw) + explicit element_kind (malloc'd packs → Record).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Record,
+    )))
 }
 
 /// Display/JSON for List of Result of Set of product.
@@ -17156,18 +17279,10 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
-    let empty = || {
-        // SAFETY: `size` is a valid, non-negative allocation size
-        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-        if !list.is_null() {
-            unsafe {
-                (*list).len = 0;
-                (*list).data = std::ptr::null_mut();
-                (*list).owns_data = true;
-            }
-        }
-        list
-    };
+    // audit-wave1 CRITICAL (allocator mismatch): Box allocation + explicit
+    // element_kind (elements are malloc'd 24-byte `{disc, ok, map_or_err}`
+    // packs → Record).
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::Record)));
     if json.is_null() || arity <= 0 || arity > 16 {
         return empty();
     }
@@ -17312,22 +17427,14 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
         }
         handles.push(pack as i64);
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
-    if list.is_null() {
-        return std::ptr::null_mut();
-    }
     let data_size = handles.len() * 8;
     let data = if data_size == 0 {
         std::ptr::null_mut()
     } else {
-        // SAFETY: `size` is a valid, non-negative allocation size
+        // SAFETY: `data_size` is positive; result is checked for null below.
         unsafe { libc::malloc(data_size) as *mut i64 }
     };
     if data_size > 0 && data.is_null() {
-        unsafe {
-            libc::free(list as *mut _);
-        }
         return std::ptr::null_mut();
     }
     if !data.is_null() {
@@ -17336,13 +17443,14 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
             std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
         }
     }
-    // SAFETY: `list` was allocated by `libc::malloc` at line 16997 and confirmed non-null at line 16998; `data` is a valid heap allocation or null for empty lists
-    unsafe {
-        (*list).len = handles.len() as i64;
-        (*list).data = data as *mut *mut std::ffi::c_char;
-        (*list).owns_data = true;
-    }
-    list
+    // audit-wave1 CRITICAL: Box-allocated struct (mimi_list_free frees via
+    // Box::from_raw) + explicit element_kind (malloc'd packs → Record).
+    Box::into_raw(Box::new(MimiList::with_data(
+        data as *mut *mut std::ffi::c_char,
+        handles.len() as i64,
+        true,
+        ListElementKind::Record,
+    )))
 }
 
 /// Display/JSON for List of Result of Map of product.
@@ -18146,18 +18254,19 @@ pub extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -> SetHa
     }
     // SAFETY: non-null JSON C string from codegen.
     let s = unsafe { cstr_to_string(json) };
-    let len = json_array_length(json);
+    // audit-wave1: internal consumer keeps sentinel behavior via _try variant.
+    let len = json_array_length_try(json);
     if len <= 0 {
         return handle;
     }
     const MAX: i64 = 1_000_000;
     let n = len.min(MAX);
     for i in 0..n {
-        let elem = json_get_element(json, i);
+        let elem = json_get_element_try(json, i).unwrap_or(std::ptr::null_mut());
         if elem.is_null() {
             continue;
         }
-        // SAFETY: elem is a heap C string from json_get_element.
+        // SAFETY: elem is a heap C string from json_get_element_try.
         let es = unsafe { cstr_to_string(elem) };
         let bits = es.trim().parse::<f64>().unwrap_or(0.0).to_bits() as i64;
         unsafe {
@@ -18211,18 +18320,19 @@ pub extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> Se
     }
     // SAFETY: non-null JSON C string from codegen.
     let s = unsafe { cstr_to_string(json) };
-    let len = json_array_length(json);
+    // audit-wave1: internal consumer keeps sentinel behavior via _try variant.
+    let len = json_array_length_try(json);
     if len <= 0 {
         return handle;
     }
     const MAX: i64 = 1_000_000;
     let n = len.min(MAX);
     for i in 0..n {
-        let elem = json_get_element(json, i);
+        let elem = json_get_element_try(json, i).unwrap_or(std::ptr::null_mut());
         if elem.is_null() {
             continue;
         }
-        // SAFETY: elem is a heap C string from json_get_element.
+        // SAFETY: elem is a heap C string from json_get_element_try.
         let es = unsafe { cstr_to_string(elem) };
         // Strip surrounding quotes if present (json_get_element may return quoted).
         let body = es.trim().trim_matches('"');
@@ -18274,20 +18384,21 @@ pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHa
     }
     // SAFETY: non-null JSON C string from codegen.
     let s = unsafe { cstr_to_string(json) };
-    let len = json_array_length(json);
+    // audit-wave1: internal consumer keeps sentinel behavior via _try variant.
+    let len = json_array_length_try(json);
     if len <= 0 {
         return handle;
     }
     const MAX: i64 = 1_000_000;
     let n = len.min(MAX);
     for i in 0..n {
-        let elem = json_get_element(json, i);
+        let elem = json_get_element_try(json, i).unwrap_or(std::ptr::null_mut());
         if elem.is_null() {
             continue;
         }
         let v = mimi_json_as_i64(elem);
-        // SAFETY: `elem` is non-null (null elements filtered at line 17957) and was allocated by `json_get_element` which uses `libc::malloc`
-        // Free the element string allocated by json_get_element.
+        // SAFETY: `elem` is non-null (null-checked above) and was allocated by `json_get_element_try` which uses `libc::malloc`
+        // Free the element string allocated by json_get_element_try.
         unsafe {
             libc::free(elem as *mut std::ffi::c_void);
         }
@@ -18377,12 +18488,13 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
     if len == 0 {
         return std::ptr::null_mut();
     }
-    let mut vec: Vec<SetValueHandle> = set.inner.iter().copied().collect();
-    // RT-C5: shrink so len == capacity, matching mimi_set_list_free reconstruction.
-    vec.shrink_to_fit();
-    debug_assert_eq!(vec.len(), vec.capacity());
-    let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // ownership transferred to caller
+    let vec: Vec<SetValueHandle> = set.inner.iter().copied().collect();
+    // audit-wave1 (RT-C5): shrink_to_fit is only a HINT — relying on it to make
+    // len == capacity before a from_raw_parts reconstruction is UB. Convert to a
+    // boxed slice, which is guaranteed to be an exact-size allocation.
+    let boxed: Box<[SetValueHandle]> = vec.into_boxed_slice();
+    let ptr = boxed.as_ptr() as *mut SetValueHandle;
+    std::mem::forget(boxed); // ownership transferred to caller
     ptr
 }
 
@@ -18394,14 +18506,18 @@ pub extern "C" fn mimi_set_list_free(ptr: *mut SetValueHandle, len: i64) {
     if ptr.is_null() || len <= 0 {
         return;
     }
-    // RT-C5: mimi_set_to_list always shrink_to_fit, so capacity == len.
-    // Reconstruct the Vec from the raw pointer and length, then drop it.
-    // SAFETY: `ptr` was obtained from `mimi_set_to_list` which forgets a
-    // `Vec<SetValueHandle>` after shrink_to_fit (len == capacity).
-    // `SetValueHandle` has no custom Drop. The pointer is non-null and
-    // `len > 0` (checked above).
+    // audit-wave1 (RT-C5): mimi_set_to_list hands out a boxed-slice
+    // allocation (exact size, guaranteed). Reconstruct the `Box<[T]>` from the
+    // thin pointer + length and drop it.
+    // SAFETY: `ptr` came from `mimi_set_to_list`, which forgets a
+    // `Box<[SetValueHandle]>` of exactly `len` elements (the precondition for
+    // handing the pointer to the caller). The caller guarantees it passes back
+    // the same pointer/length pair. `SetValueHandle` has no custom Drop.
+    // `ptr` is non-null and `len > 0` (checked above).
     unsafe {
-        drop(Vec::from_raw_parts(ptr, len as usize, len as usize));
+        let raw_slice: *mut [SetValueHandle] =
+            std::ptr::slice_from_raw_parts_mut(ptr, len as usize);
+        drop(Box::from_raw(raw_slice));
     }
 }
 
@@ -18692,7 +18808,27 @@ pub extern "C" fn mimi_json_deserialize(
                 // M19 fix: unescape JSON escape sequences (\n, \", \\, \uXXXX, etc.)
                 let end = usize::min(pos, bytes.len());
                 let raw_bytes = bytes[start..usize::min(end, start + MAX_JSON_STR_LEN)].to_vec();
-                let unescaped = json_unescape(&raw_bytes);
+                // audit-wave1: json_unescape now fails (serde parity) on bad
+                // \uXXXX / lone surrogates. Treat as a JSON parse failure:
+                // free the already-allocated element strings, out_len=0, null.
+                let unescaped = match json_unescape(&raw_bytes) {
+                    Some(u) => u,
+                    None => {
+                        for j in 0..idx {
+                            let p = data[j as usize] as *mut std::ffi::c_char;
+                            if !p.is_null() {
+                                // SAFETY: slot holds a C string allocated by
+                                // alloc_c_string_from_bytes earlier in this loop.
+                                unsafe { libc::free(p as *mut std::ffi::c_void) };
+                            }
+                        }
+                        if !out_len.is_null() {
+                            // SAFETY: `out_len` was checked non-null above.
+                            unsafe { *out_len = 0 };
+                        }
+                        return std::ptr::null_mut();
+                    }
+                };
                 data[idx as usize] = alloc_c_string_from_bytes(&unescaped) as i64;
                 if pos < bytes.len() && bytes[pos] == b'"' {
                     pos += 1;
@@ -18742,41 +18878,46 @@ pub extern "C" fn mimi_json_deserialize(
         }
     }
 
-    // RT-H3: shrink so capacity == filled len; free reconstructs with cap == len.
-    // Without this, out_len=idx may be < original count and from_raw_parts is UB.
+    // RT-H3 (audit-wave1): truncate to the filled prefix and hand out a boxed
+    // slice — an exact-size allocation by construction. The old code relied on
+    // shrink_to_fit (a HINT, not a guarantee) before a capacity-sensitive
+    // reconstruction; reconstructing now needs no capacity assumption.
     data.truncate(idx as usize);
-    data.shrink_to_fit();
-    debug_assert_eq!(data.len(), data.capacity());
-    let result = data.as_mut_ptr();
     let out = idx;
-    std::mem::forget(data);
     if !out_len.is_null() {
         // SAFETY: `out_len` was checked non-null above.
         unsafe {
             *out_len = out;
         }
     }
-    // Empty result: no heap buffer (shrink_to_fit of empty Vec may leave null ptr).
+    // Empty result: no heap buffer (an empty boxed slice has a dangling
+    // non-null pointer that must never cross the FFI boundary).
     if out == 0 {
         return std::ptr::null_mut();
     }
+    let boxed: Box<[i64]> = data.into_boxed_slice();
+    let result = boxed.as_ptr() as *mut i64;
+    std::mem::forget(boxed); // ownership transferred to caller
     result as *mut std::ffi::c_void
 }
 
 /// C11: Free a buffer returned by mimi_json_deserialize / mimi_list_deserialize.
-/// Reconstructs the Vec<i64> and drops it, freeing both the data buffer and
+/// Reconstructs the boxed slice and drops it, freeing both the data buffer and
 /// any heap-allocated string pointers (elem_type==2).
 ///
-/// RT-H3: `mimi_json_deserialize` shrink_to_fit so capacity == len.
+/// RT-H3 (audit-wave1): the producer hands out a boxed slice (exact-size
+/// allocation), so reconstruction reads `len` elements and makes no capacity
+/// assumption.
 #[no_mangle]
 pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i64, elem_type: i64) {
     if buf.is_null() || len <= 0 {
         return;
     }
     let count = len as usize;
-    // Rebuild Vec from the pointer, then drop it (frees the allocation).
     // SAFETY: `buf` was created by a prior mimi_json_deserialize call with
-    // matching `len` and `elem_type`, after shrink_to_fit (capacity == len).
+    // matching `len` and `elem_type`; the caller guarantees it passes back the
+    // same pointer/length pair. The producer allocated an exact-size boxed
+    // slice of `count` i64 (or bit-cast f64 / C-string pointers).
     unsafe {
         let ptr = buf as *mut i64;
         // If this was a string-typed deserialization, free each C string first.
@@ -18788,9 +18929,10 @@ pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i6
                 }
             }
         }
-        // Drop the Vec without running element destructors (i64 is trivially
-        // copy, and strings were already freed above). capacity == len (RT-H3).
-        let _ = Vec::from_raw_parts(ptr, 0, count);
+        // Drop the boxed slice (i64 is trivially copy; strings were already
+        // freed above, so no element destructor needs to run).
+        let raw_slice: *mut [i64] = std::ptr::slice_from_raw_parts_mut(ptr, count);
+        drop(Box::from_raw(raw_slice));
     }
 }
 
@@ -18961,22 +19103,40 @@ pub extern "C" fn mimi_tuple_deserialize(
                 }
                 // M19 fix: unescape JSON escape sequences
                 let raw_bytes = bytes[start..pos].to_vec();
-                let unescaped = json_unescape(&raw_bytes);
-                if !unescaped.is_empty() {
-                    // SAFETY: out_values is the caller's array with `count`
-                    // entries; idx is bounds-checked above against count.
-                    // The store overwrites a previously-written slot in
-                    // the same array.
-                    unsafe {
-                        *out_values.offset(idx as isize) =
-                            alloc_c_string_from_bytes(&unescaped) as i64;
+                // audit-wave1: json_unescape fails (serde parity) on bad
+                // \uXXXX / lone surrogates. Treat as a parse failure: free the
+                // string elements already written into out_values, return -1.
+                let unescaped = match json_unescape(&raw_bytes) {
+                    Some(u) => u,
+                    None => {
+                        for j in 0..idx {
+                            if (j as usize) < types.len() && types[j as usize] == 2 {
+                                // SAFETY: out_values is the caller's array with
+                                // `count` entries; slot j (< idx <= count) of a
+                                // string-typed element holds a C string allocated
+                                // by alloc_c_string_from_bytes earlier in this call.
+                                let p = unsafe {
+                                    *out_values.offset(j as isize) as *mut std::ffi::c_char
+                                };
+                                if !p.is_null() {
+                                    // SAFETY: same slot contract as the load above.
+                                    unsafe { libc::free(p as *mut std::ffi::c_void) };
+                                }
+                            }
+                        }
+                        return -1;
                     }
-                } else {
-                    // SAFETY: same as the if-branch: out_values is bounds-checked
-                    // by the caller-supplied count.
-                    unsafe {
-                        *out_values.offset(idx as isize) = 0;
-                    }
+                };
+                // audit-wave1 (audit §10 MEDIUM): allocate a proper "" string
+                // for empty values — the list deserializer allocates, so the
+                // tuple path must too (uniform owning-pointer contract; writing
+                // 0/NULL made codegen treat "" as "no string" → puts(NULL) UB).
+                // SAFETY: out_values is the caller's array with `count`
+                // entries; idx is bounds-checked above against count.
+                // The store overwrites a previously-written slot in
+                // the same array.
+                unsafe {
+                    *out_values.offset(idx as isize) = alloc_c_string_from_bytes(&unescaped) as i64;
                 }
                 if pos < bytes.len() && bytes[pos] == b'"' {
                     pos += 1;
@@ -19239,6 +19399,13 @@ pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
 /// SystemTrace. In codegen, we cannot easily construct the record at runtime,
 /// so we print a diagnostic and abort. This ensures test programs that rely
 /// on inject_fault do not silently continue with a bogus value.
+///
+/// audit-wave1 (audit §10 LOW): the doc said "aborts" but the body returned a
+/// -1 sentinel. Callers (and this doc) expect abort semantics, so make it
+/// actually abort. Codegen rejects `inject_fault` at compile time
+/// (`builtins/mod.rs`: "cannot construct a Fault/SystemTrace value"), so no
+/// generated code depends on the old -1 return; the interp path constructs the
+/// Fault record itself and never calls this symbol.
 #[no_mangle]
 pub extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) -> i64 {
     let state = if state_name.is_null() {
@@ -19250,12 +19417,11 @@ pub extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) -> i64 
             .into_owned()
     };
     eprintln!(
-        "[mimi runtime] inject_fault: injecting Fault into state '{}'",
+        "[mimi runtime] inject_fault: injecting Fault into state '{}' — aborting",
         state
     );
-    // Return a sentinel value; the interp path handles the actual Fault
-    // construction. In codegen, this is a best-effort diagnostic.
-    -1
+    // Abort as documented (fail loud; never hand back a bogus sentinel).
+    std::process::abort();
 }
 
 /// v0.29.38-fix: assert_state(actual_state_cstr, expected_state_cstr)
@@ -19406,5 +19572,391 @@ mod handle_registry_tests {
         let h2 = mimi_set_insert(h, 7);
         assert_eq!(h, h2);
         mimi_set_destroy(h);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// audit-wave1 regression tests (devdocs/full-audit-2026-08-05.md §10)
+// Abort-path checks (fail-loud json accessors, mimi_inject_fault,
+// str_substring_clamp start>end) live in the central e2e abort harness;
+// only non-aborting paths are exercised in-process here.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod audit_wave1_tests {
+    use super::*;
+
+    // ── Fix #7: JSON \uXXXX surrogate handling ────────────────────────
+
+    #[test]
+    fn json_unescape_combines_surrogate_pair() {
+        // U+1F600 GRINNING FACE = 😀
+        let out = json_unescape(br"\ud83d\ude00").expect("valid pair must decode");
+        assert_eq!(out, "\u{1F600}".as_bytes());
+    }
+
+    #[test]
+    fn json_unescape_decodes_bmp_escape() {
+        let out = json_unescape(br"\u0041BC").expect("BMP escape must decode");
+        assert_eq!(out, b"ABC");
+    }
+
+    #[test]
+    fn json_unescape_rejects_lone_high_surrogate() {
+        assert!(json_unescape(br"\ud83dabc").is_none());
+        assert!(json_unescape(br"\ud83d").is_none());
+        assert!(json_unescape(br"\ud800").is_none());
+        assert!(json_unescape(br"\udbff").is_none());
+    }
+
+    #[test]
+    fn json_unescape_rejects_lone_low_surrogate() {
+        assert!(json_unescape(br"\udc00").is_none());
+        assert!(json_unescape(br"\udfff").is_none());
+    }
+
+    #[test]
+    fn json_unescape_rejects_high_surrogate_followed_by_high() {
+        // Two high surrogates in a row: the second is not a valid low.
+        assert!(json_unescape(br"\ud83d\ud83d").is_none());
+    }
+
+    #[test]
+    fn json_unescape_rejects_malformed_hex() {
+        // The old code fell back to "0000" → NUL; serde parity is failure.
+        assert!(json_unescape(br"\uzzzz").is_none());
+        assert!(json_unescape(br"\u12").is_none()); // too short
+    }
+
+    #[test]
+    fn json_unescape_rejects_dangling_backslash() {
+        assert!(json_unescape(b"abc\\").is_none());
+    }
+
+    #[test]
+    fn json_decode_unicode_escape_reports_consumption() {
+        let (_, consumed_pair) = json_decode_unicode_escape(b"d83d\\ude00", 0).unwrap();
+        assert_eq!(consumed_pair, 10);
+        let (_, consumed_bmp) = json_decode_unicode_escape(b"0041rest", 0).unwrap();
+        assert_eq!(consumed_bmp, 4);
+    }
+
+    // ── Fix #3: decode_result_err_string validates inner pointer ──────
+
+    #[test]
+    fn decode_result_err_string_scalar_falls_back_to_decimal() {
+        assert_eq!(decode_result_err_string(42), "42");
+        assert_eq!(decode_result_err_string(-7), "-7");
+    }
+
+    #[test]
+    fn decode_result_err_string_reads_valid_string_struct() {
+        // Heap Mimi string struct {ptr, i64 len}.
+        let payload: &[u8] = b"boom";
+        let s = Box::new([payload.as_ptr() as i64, payload.len() as i64]);
+        let addr = Box::into_raw(s) as *mut [i64; 2];
+        let got = decode_result_err_string(addr as usize as i64);
+        assert_eq!(got, "\"boom\"");
+        // SAFETY: addr came from Box::into_raw just above.
+        unsafe { drop(Box::from_raw(addr)) };
+    }
+
+    #[test]
+    fn decode_result_err_string_unmapped_inner_is_sentinel_empty() {
+        // Outer struct IS mapped (this box), but the inner ptr points at an
+        // unmapped userspace hole. Old code dereferenced it blind (SIGSEGV);
+        // new code must mincore-probe and return the sentinel "".
+        let unmapped: usize = 0x0000_7000_0000_0000; // canonical, unmapped hole
+        let s = Box::new([unmapped as i64, 16i64]);
+        let addr = Box::into_raw(s) as *mut [i64; 2];
+        let got = decode_result_err_string(addr as usize as i64);
+        assert_eq!(got, "\"\"");
+        // SAFETY: addr came from Box::into_raw just above.
+        unsafe { drop(Box::from_raw(addr)) };
+    }
+
+    #[test]
+    fn decode_result_err_string_absurd_len_never_reads_target() {
+        // len outside the plausibility bound → C-string fallback / scalar,
+        // never a 900k-byte probe-read of arbitrary memory.
+        let s = Box::new([0x1000i64, 999_999_999i64]);
+        let addr = Box::into_raw(s) as *mut [i64; 2];
+        let got = decode_result_err_string(addr as usize as i64);
+        // Whatever the fallback resolves to, it must not be the struct read.
+        assert!(!got.contains('\u{1000}'));
+        // SAFETY: addr came from Box::into_raw just above.
+        unsafe { drop(Box::from_raw(addr)) };
+    }
+
+    // ── Fix #1/#2: from_json list builders (Box allocator + kind) ─────
+
+    #[test]
+    fn list_from_json_builders_set_element_kind_and_free_cleanly() {
+        // Option of product: elements are malloc'd packs → Record.
+        let l1 = mimi_list_from_json_option_product_i64(b"[null,[7,8]]\0".as_ptr() as _, 2);
+        assert!(!l1.is_null());
+        assert_eq!(mimi_list_element_kind(l1), ListElementKind::Record as i8);
+        mimi_list_free(l1, true);
+
+        // Set of product: elements are SetHandles → Set.
+        let l2 = mimi_list_from_json_set_product_i64(b"[[1,2],[3,4]]\0".as_ptr() as _, 2);
+        assert!(!l2.is_null());
+        assert_eq!(mimi_list_element_kind(l2), ListElementKind::Set as i8);
+        // Destroy the set handles stored in the data array before freeing.
+        // SAFETY: l2 is non-null with a valid {len, data} layout just built.
+        unsafe {
+            let lst = &*l2;
+            for i in 0..lst.len {
+                let h = *(lst.data as *const i64).offset(i as isize) as SetHandle;
+                if h != 0 {
+                    mimi_set_destroy(h);
+                }
+            }
+        }
+        mimi_list_free(l2, false);
+
+        // Map of product: elements are MapHandles → Map.
+        let l3 = mimi_list_from_json_map_product_i64(b"[{\"a\":1},{\"b\":2}]\0".as_ptr() as _, 1);
+        assert!(!l3.is_null());
+        assert_eq!(mimi_list_element_kind(l3), ListElementKind::Map as i8);
+        // SAFETY: same layout contract as above.
+        unsafe {
+            let lst = &*l3;
+            for i in 0..lst.len {
+                let h = *(lst.data as *const i64).offset(i as isize) as MapHandle;
+                if h != 0 {
+                    mimi_map_destroy(h);
+                }
+            }
+        }
+        mimi_list_free(l3, false);
+
+        // Result of product: elements are malloc'd packs → Record.
+        let l4 = mimi_list_from_json_result_product_i64(
+            b"[{\"Ok\":[1,2]},{\"Err\":\"e\"}]\0".as_ptr() as _,
+            2,
+        );
+        if !l4.is_null() {
+            assert_eq!(mimi_list_element_kind(l4), ListElementKind::Record as i8);
+            mimi_list_free(l4, true);
+        }
+    }
+
+    #[test]
+    fn list_from_json_builders_invalid_input_empty_with_kind() {
+        // Malformed JSON must still yield a Box-allocated list with a valid
+        // element_kind (the empty() path used to leave it uninitialized).
+        let l = mimi_list_from_json_option_product_i64(b"not json\0".as_ptr() as _, 2);
+        assert!(!l.is_null());
+        assert_eq!(mimi_list_element_kind(l), ListElementKind::Record as i8);
+        mimi_list_free(l, true);
+    }
+
+    // ── Fix #4: ptr+len string externs ────────────────────────────────
+
+    fn owned_str(ptr: *mut std::ffi::c_char) -> String {
+        assert!(!ptr.is_null());
+        // SAFETY: alloc_c_string results are NUL-terminated heap strings.
+        let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        mimi_string_free(ptr);
+        s
+    }
+
+    #[test]
+    fn str_substring_clamp_matches_vm_function_form() {
+        let s = b"hello";
+        let p = s.as_ptr() as *const std::ffi::c_char;
+        // In-range: identical to VM function form.
+        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 1, 4)), "ell");
+        // End beyond char count clamps to len (VM parity; method form aborts).
+        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 2, 99)), "llo");
+        // Start beyond char count clamps to len → empty slice.
+        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 99, 100)), "");
+        // Empty range.
+        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 0, 0)), "");
+        // Unicode chars (byte len 6, char count 5): indices are char-based.
+        let u = "héllo"; // é is 2 bytes
+        let up = u.as_ptr() as *const std::ffi::c_char;
+        assert_eq!(
+            owned_str(mimi_str_substring_clamp(up, u.len() as i64, 1, 3)),
+            "él"
+        );
+    }
+
+    #[test]
+    fn str_to_upper_lower_full_unicode() {
+        let s = b"Hello";
+        let p = s.as_ptr() as *const std::ffi::c_char;
+        assert_eq!(owned_str(mimi_str_to_upper(p, 5)), "HELLO");
+        assert_eq!(owned_str(mimi_str_to_lower(p, 5)), "hello");
+        // ß uppercases to SS (multi-char mapping — impossible byte-wise).
+        let sharp = "Straße";
+        let sp = sharp.as_ptr() as *const std::ffi::c_char;
+        assert_eq!(
+            owned_str(mimi_str_to_upper(sp, sharp.len() as i64)),
+            "STRASSE"
+        );
+    }
+
+    #[test]
+    fn str_trim_is_unicode_aware() {
+        let t = "\u{00A0}\t hi \n\u{00A0}"; // NBSP + ASCII whitespace
+        let p = t.as_ptr() as *const std::ffi::c_char;
+        assert_eq!(owned_str(mimi_str_trim(p, t.len() as i64)), "hi");
+    }
+
+    // ── Fix #6/#7: tuple deserialize empty string + surrogate pair ────
+
+    #[test]
+    fn tuple_deserialize_empty_string_allocates() {
+        // Fix #6: "" must come back as an owning "" string, not NULL/0.
+        let json = b"[\"\",\"abc\"]\0";
+        let mut types: [i64; 2] = [2, 2];
+        let mut out: [i64; 2] = [-1, -1];
+        let n = mimi_tuple_deserialize(json.as_ptr() as _, 2, types.as_mut_ptr(), out.as_mut_ptr());
+        assert_eq!(n, 2);
+        for slot in out.iter() {
+            assert_ne!(*slot, 0, "empty string must allocate, not write NULL");
+            // SAFETY: each slot holds a C string allocated by the runtime.
+            let c = unsafe { std::ffi::CStr::from_ptr(*slot as *const std::ffi::c_char) };
+            let _ = c.to_string_lossy();
+            // SAFETY: same allocation; matches mimi_json_deserialize_free's free.
+            unsafe { libc::free(*slot as *mut std::ffi::c_void) };
+        }
+        // First slot is exactly "".
+        // (Re-run to inspect content without use-after-free.)
+        let mut out2: [i64; 2] = [-1, -1];
+        let _ =
+            mimi_tuple_deserialize(json.as_ptr() as _, 2, types.as_mut_ptr(), out2.as_mut_ptr());
+        // SAFETY: out2[0] is a fresh "" allocation from the runtime.
+        let first = unsafe { std::ffi::CStr::from_ptr(out2[0] as *const std::ffi::c_char) };
+        assert_eq!(first.to_string_lossy(), "");
+        for slot in out2.iter() {
+            // SAFETY: see above.
+            unsafe { libc::free(*slot as *mut std::ffi::c_void) };
+        }
+    }
+
+    #[test]
+    fn tuple_deserialize_surrogate_pair_and_lone_surrogate_fails() {
+        let mut types: [i64; 1] = [2];
+        let mut out: [i64; 1] = [-1];
+        // Valid pair →😀
+        let ok = b"[\"\\ud83d\\ude00\"]\0";
+        let n = mimi_tuple_deserialize(ok.as_ptr() as _, 1, types.as_mut_ptr(), out.as_mut_ptr());
+        assert_eq!(n, 1);
+        // SAFETY: out[0] holds the runtime-allocated unescaped string.
+        let s = unsafe { std::ffi::CStr::from_ptr(out[0] as *const std::ffi::c_char) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(s, "\u{1F600}");
+        // SAFETY: see above.
+        unsafe { libc::free(out[0] as *mut std::ffi::c_void) };
+
+        // Lone surrogate → parse failure (-1).
+        let bad = b"[\"\\ud800\"]\0";
+        let mut out2: [i64; 1] = [-1];
+        let n2 =
+            mimi_tuple_deserialize(bad.as_ptr() as _, 1, types.as_mut_ptr(), out2.as_mut_ptr());
+        assert_eq!(n2, -1);
+    }
+
+    // ── Fix #7+#8: list deserialize surrogates + boxed-slice free ─────
+
+    #[test]
+    fn json_deserialize_strings_and_free_via_boxed_slice() {
+        let json = b"[\"a\",\"\\ud83d\\ude00\",\"c\"]\0";
+        let mut len: i64 = -1;
+        let buf = mimi_json_deserialize(json.as_ptr() as _, &mut len as *mut i64, 2);
+        assert!(!buf.is_null());
+        assert_eq!(len, 3);
+        // Element 1 must be the combined surrogate pair.
+        // SAFETY: buf is a boxed slice of `len` string-pointer i64 slots.
+        unsafe {
+            let ptr = buf as *mut i64;
+            let mid = *ptr.add(1) as *const std::ffi::c_char;
+            let s = std::ffi::CStr::from_ptr(mid).to_string_lossy().into_owned();
+            assert_eq!(s, "\u{1F600}");
+        }
+        mimi_json_deserialize_free(buf, len, 2);
+    }
+
+    #[test]
+    fn json_deserialize_lone_surrogate_fails_parse() {
+        let json = b"[\"\\udc00\"]\0";
+        let mut len: i64 = -1;
+        let buf = mimi_json_deserialize(json.as_ptr() as _, &mut len as *mut i64, 2);
+        assert!(buf.is_null(), "lone surrogate must fail the JSON parse");
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn set_to_list_round_trips_through_boxed_slice_free() {
+        let h = mimi_set_new();
+        assert_ne!(h, 0);
+        mimi_set_insert(h, 11);
+        mimi_set_insert(h, 22);
+        mimi_set_insert(h, 33);
+        let mut len: i64 = -1;
+        let ptr = mimi_set_to_list(h, &mut len as *mut i64);
+        assert!(!ptr.is_null());
+        assert_eq!(len, 3);
+        // SAFETY: mimi_set_to_list hands out a boxed slice of `len` handles.
+        unsafe {
+            let slice = std::slice::from_raw_parts(ptr, len as usize);
+            let mut vals: Vec<i64> = slice.to_vec();
+            vals.sort_unstable();
+            assert_eq!(vals, vec![11, 22, 33]);
+        }
+        mimi_set_list_free(ptr, len);
+        mimi_set_destroy(h);
+    }
+
+    // ── Fix #9: fail-loud json accessors (non-aborting paths only) ────
+
+    #[test]
+    fn json_accessors_happy_paths_still_work() {
+        let obj = b"{\"name\":\"mimi\",\"count\":3,\"pi\":3.5}\0";
+        let key_name = b"name\0";
+        let key_count = b"count\0";
+        let key_missing = b"nope\0";
+        // json_get_string returns the value for present keys.
+        let s = json_get_string(obj.as_ptr() as _, key_name.as_ptr() as _);
+        assert_eq!(owned_str(s), "mimi");
+        // json_get_int parses integer values.
+        assert_eq!(json_get_int(obj.as_ptr() as _, key_count.as_ptr() as _), 3);
+        // json_has_key distinguishes present/missing without aborting.
+        assert_eq!(json_has_key(obj.as_ptr() as _, key_name.as_ptr() as _), 1);
+        assert_eq!(
+            json_has_key(obj.as_ptr() as _, key_missing.as_ptr() as _),
+            0
+        );
+        // json_is_valid_json must NEVER abort: 1 for valid...
+        assert_eq!(mimi_is_valid_json(obj.as_ptr() as _), 1);
+        // ...0 for malformed.
+        assert_eq!(mimi_is_valid_json(b"{oops\0".as_ptr() as _), 0);
+    }
+
+    #[test]
+    fn json_array_length_and_get_element_happy_paths() {
+        let arr = b"[10,\"twenty\",[3]]\0";
+        assert_eq!(json_array_length(arr.as_ptr() as _), 3);
+        let e = json_get_element(arr.as_ptr() as _, 1);
+        assert_eq!(owned_str(e), "twenty");
+    }
+
+    #[test]
+    fn json_accessor_parse_error_and_type_errors_abort() {
+        // Covered by the central e2e abort harness (process death cannot be
+        // asserted in-process). Cases exercised there:
+        //   json_get_string("{malformed", "k")  → "json_get_string parse error"
+        //   json_get_string("{}", "k")          → "key 'k' not found"
+        //   json_get_int("{\"a\":\"x\"}", "a")  → "is not a number"
+        //   json_get_int("{\"a\":1.5}", "a")    → "is not an integer"
+        //   json_get_element("[1]", 5)          → "index 5 out of bounds"
+        //   json_array_length("{\"a\":1}")       → "value is not an array"
+        //   json_has_key("{bad", "k")           → "json_has_key parse error"
+        //   mimi_inject_fault("S")              → abort (fix #10)
     }
 }

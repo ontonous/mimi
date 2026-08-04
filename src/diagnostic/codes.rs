@@ -217,6 +217,10 @@ pub const E0811: &str = "E0811"; // builtin function runtime error
 pub const E0812: &str = "E0812"; // type mismatch at runtime
 pub const E0813: &str = "E0813"; // floating-point error (NaN, infinity)
 pub const E0814: &str = "E0814"; // slice out of bounds at runtime
+pub const E0820: &str = "E0820"; // let binding requires an initializer
+
+/// Resolved-body lowering error codes (E083x) — full audit 2026-08-05 wave-1.
+pub const E0830: &str = "E0830"; // resolved body lowering lacks a canonical fact (fail-closed; never infer)
 
 /// Codegen error code not yet defined as constant (used inline)
 pub const E0712: &str = "E0712"; // codegen internal error (json builtin)
@@ -401,6 +405,8 @@ pub fn describe(code: &str) -> &'static str {
         E0812 => "runtime type mismatch",
         E0813 => "floating-point error",
         E0814 => "slice out of bounds at runtime",
+        E0820 => "let binding requires an initializer",
+        E0830 => "resolved body lowering lacks a canonical fact (fail-closed)",
         E0712 => "codegen internal error (json builtin)",
 
         W001 => "standalone desc/rule has no implementation",
@@ -616,6 +622,9 @@ mod tests {
             super::E0812,
             super::E0813,
             super::E0814,
+            super::E0820,
+            // Resolved-body lowering (E083x)
+            super::E0830,
             // Warning codes (W0xx)
             super::W001,
             super::W002,

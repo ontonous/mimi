@@ -80,8 +80,10 @@ def main():
     output.insert(1, f'> **{total_funcs} public functions + constants across {len(modules)} modules.**\n')
     output.append('')
 
+    # scripts/.. = repo root → in-repo mimispecref/stdlib_api.md (AGENTS.md §12).
+    # (Previously one '..' too many, which wrote to the repo's PARENT directory.)
     out_path = os.path.join(
-        os.path.dirname(__file__), '..', '..', 'mimispecref', 'stdlib_api.md'
+        os.path.dirname(__file__), '..', 'mimispecref', 'stdlib_api.md'
     )
     out_dir = os.path.dirname(out_path)
     os.makedirs(out_dir, exist_ok=True)

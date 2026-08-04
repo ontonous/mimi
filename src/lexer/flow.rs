@@ -5,9 +5,10 @@
 //! Transitions consume self and return new state (no output — tokens accumulate in acc).
 
 use crate::lexer::errors::{
-    dedent_mismatch, indent_not_multiple_of_four, invalid_escape, tabs_not_allowed,
-    unexpected_character, unterminated_block_comment, unterminated_escape, unterminated_fstring,
-    unterminated_fstring_escape, unterminated_interpolation, unterminated_string, LexerError,
+    dedent_mismatch, indent_not_multiple_of_four, invalid_digit_separator, invalid_escape,
+    tabs_not_allowed, unexpected_character, unterminated_block_comment, unterminated_escape,
+    unterminated_fstring, unterminated_fstring_escape, unterminated_interpolation,
+    unterminated_string, LexerError,
 };
 use crate::lexer::keywords::keyword_or_ident;
 use crate::lexer::token::{LexerMode, Token, TokenKind};
@@ -401,7 +402,13 @@ impl<'a> LexerPos<'a> {
         Ok((pos, s))
     }
 
-    fn scan_number(self) -> (Self, TokenKind) {
+    /// LX-C3 (hardened, full-audit 2026-08-05): digit separators (`_`) are only
+    /// legal BETWEEN two digits. A trailing/double/leading separator adjacent to
+    /// a number (`1_`, `1__2`, `1e_5`, `0o1__2`) used to silently re-tokenize as
+    /// number + identifier (changing meaning); it is now a lex error. A
+    /// standalone `_` is still a valid identifier — scan_number is only entered
+    /// on a leading ASCII digit, so every `_` seen here is adjacent to a number.
+    fn scan_number(self) -> Result<(Self, TokenKind), LexerError> {
         let mut pos = self;
         let mut s = String::new();
         let mut is_float = false;
@@ -419,22 +426,22 @@ impl<'a> LexerPos<'a> {
                             pos = next!(pos);
                         } else if c == '_' {
                             // LX-C3: separator only between digits.
+                            let (sep_line, sep_col) = (pos.line, pos.col);
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
                                 Some(n) if n.is_ascii_hexdigit() => {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
-                                _ => break,
+                                _ => {
+                                    return Err(invalid_digit_separator(sep_line, sep_col));
+                                }
                             }
                         } else {
                             break;
                         }
                     }
-                    while s.ends_with('_') {
-                        s.pop();
-                    }
-                    return (pos, TokenKind::Int(s));
+                    return Ok((pos, TokenKind::Int(s)));
                 }
                 Some('b') | Some('B') => {
                     s.push('0');
@@ -446,22 +453,22 @@ impl<'a> LexerPos<'a> {
                             s.push(c);
                             pos = next!(pos);
                         } else if c == '_' {
+                            let (sep_line, sep_col) = (pos.line, pos.col);
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
                                 Some(n) if n == '0' || n == '1' => {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
-                                _ => break,
+                                _ => {
+                                    return Err(invalid_digit_separator(sep_line, sep_col));
+                                }
                             }
                         } else {
                             break;
                         }
                     }
-                    while s.ends_with('_') {
-                        s.pop();
-                    }
-                    return (pos, TokenKind::Int(s));
+                    return Ok((pos, TokenKind::Int(s)));
                 }
                 Some('o') | Some('O') => {
                     s.push('0');
@@ -473,24 +480,26 @@ impl<'a> LexerPos<'a> {
                             s.push(c);
                             pos = next!(pos);
                         } else if c == '_' {
+                            // Aligned with hex/bin (full-audit 2026-08-05): the
+                            // old `|| n == '_'` arm accepted `0o1__2`; any '_'
+                            // not followed by an octal digit is a separator
+                            // violation.
+                            let (sep_line, sep_col) = (pos.line, pos.col);
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
-                                Some(n)
-                                    if (n.is_ascii_digit() && n != '8' && n != '9') || n == '_' =>
-                                {
+                                Some(n) if n.is_ascii_digit() && n != '8' && n != '9' => {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
-                                _ => break,
+                                _ => {
+                                    return Err(invalid_digit_separator(sep_line, sep_col));
+                                }
                             }
                         } else {
                             break;
                         }
                     }
-                    while s.ends_with('_') {
-                        s.pop();
-                    }
-                    return (pos, TokenKind::Int(s));
+                    return Ok((pos, TokenKind::Int(s)));
                 }
                 _ => {}
             }
@@ -512,26 +521,21 @@ impl<'a> LexerPos<'a> {
                     break;
                 }
             } else if c == '_' {
-                // LX-C3: digit separators must be between digits, not trailing.
-                // Peek next char; only accept '_' when followed by a digit (or
-                // another separator that will itself be validated later).
+                // LX-C3: digit separators must sit strictly between two digits.
+                let (sep_line, sep_col) = (pos.line, pos.col);
                 let mut tmp = pos.chars.clone();
                 match tmp.next() {
-                    // F-H9: separators only between digits; consecutive '__' is invalid
-                    // and is left for the next token (surface as error later).
                     Some(n) if n.is_ascii_digit() => {
                         s.push(c);
                         pos = next!(pos);
                     }
-                    _ => break, // trailing/double '_' → leave for next token / error path
+                    // Trailing/double/misplaced '_' (e.g. `1_`, `1__2`, `1_x`)
+                    // is an error, not a silent token break.
+                    _ => return Err(invalid_digit_separator(sep_line, sep_col)),
                 }
             } else {
                 break;
             }
-        }
-        // LX-C3: strip a trailing '_' that slipped through (e.g. "1_").
-        while s.ends_with('_') {
-            s.pop();
         }
         // LE-H4: Scientific notation: 1e5, 1.5e-3, 2E+10
         // HIGH fix: "1e" without following digits should not consume 'e'.
@@ -540,13 +544,20 @@ impl<'a> LexerPos<'a> {
         if let Some(ch) = pos.peek() {
             if ch == 'e' || ch == 'E' {
                 // pos.chars points to characters AFTER the peeked 'e'/'E'.
+                let exp_col = pos.col;
                 let mut tmp = pos.chars.clone();
                 let first_after_e = tmp.next();
-                let first_digit = if first_after_e == Some('+') || first_after_e == Some('-') {
-                    tmp.next()
-                } else {
-                    first_after_e
-                };
+                let (digit_col, first_digit) =
+                    if first_after_e == Some('+') || first_after_e == Some('-') {
+                        (exp_col + 2, tmp.next())
+                    } else {
+                        (exp_col + 1, first_after_e)
+                    };
+                if first_digit == Some('_') {
+                    // `1e_5`: separator directly after the exponent marker (or
+                    // its sign) — previously re-tokenized as Int("1") + ident.
+                    return Err(invalid_digit_separator(pos.line, digit_col));
+                }
                 if first_digit.is_some_and(|d| d.is_ascii_digit()) {
                     s.push(ch);
                     pos = next!(pos);
@@ -558,9 +569,21 @@ impl<'a> LexerPos<'a> {
                     }
                     is_float = true;
                     while let Some(d) = pos.peek() {
-                        if d.is_ascii_digit() || d == '_' {
+                        if d.is_ascii_digit() {
                             s.push(d);
                             pos = next!(pos);
+                        } else if d == '_' {
+                            let (sep_line, sep_col) = (pos.line, pos.col);
+                            let mut tmp = pos.chars.clone();
+                            match tmp.next() {
+                                Some(n) if n.is_ascii_digit() => {
+                                    s.push(d);
+                                    pos = next!(pos);
+                                }
+                                _ => {
+                                    return Err(invalid_digit_separator(sep_line, sep_col));
+                                }
+                            }
                         } else {
                             break;
                         }
@@ -573,7 +596,7 @@ impl<'a> LexerPos<'a> {
         } else {
             TokenKind::Int(s)
         };
-        (pos, kind)
+        Ok((pos, kind))
     }
 
     fn scan_ident(self, first: char) -> (Self, String) {
@@ -932,7 +955,7 @@ fn lex_scan_token(
             let (pos, s) = pos.scan_string()?;
             Ok((pos, TokenKind::String(s)))
         }
-        '0'..='9' => Ok(pos.scan_number()),
+        '0'..='9' => pos.scan_number(),
         'a'..='z' | 'A'..='Z' | '_' => {
             let (pos, first_ch) = consume!(pos);
             // LX-C6: never panic — if consume returned None, fall through as unexpected.

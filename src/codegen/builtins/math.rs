@@ -2,11 +2,11 @@ use super::CodeGenerator;
 use crate::codegen::CallSiteValueExt;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, IntValue};
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_abs(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
@@ -15,53 +15,71 @@ impl<'ctx> CodeGenerator<'ctx> {
         match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
                 // abs(x) = x < 0 ? -x : x
-                // MEM-C14 (deep audit): for iN::MIN, -x overflows back to iN::MIN.
-                // Add a special case: if x == iN::MIN, return iN::MAX (saturating abs).
-                // Use the operand's own type for constants — i32 and i64 are both valid.
+                // Audit 2026-08-05 §8 [CRITICAL] FIX-5: the old code SATURATED
+                // iN::MIN to iN::MAX — a silent SD-7 violation. abs(iN::MIN)
+                // overflows (two's-complement asymmetry); the bytecode VM's
+                // checked_abs errors on it (interp/bytecode/builtins/math.rs:234).
+                // Trap with the E0802 integer-overflow machinery instead, same
+                // pattern as compile_int_binop (expr/operator.rs), including
+                // Fault absorption in fallible multi-target transitions.
                 let ty = iv.get_type();
                 let bw = ty.get_bit_width();
-                let zero = ty.const_int(0, true);
-                let min_val = ty.const_int(
-                    if bw >= 64 {
-                        i64::MIN as u64
+                if bw >= 8 {
+                    // iN::MIN at the operand's OWN width is 0x8000...0, i.e.
+                    // 1 << (N-1). (FIX-5: the old code built i32/i64 constants
+                    // and truncated them into narrower types — i8/i16 got wrong
+                    // MIN values.) bw < 8 (i1) has no meaningful MIN overflow.
+                    let min_val = ty.const_int(1u64 << (bw - 1), false);
+                    let is_min = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, iv, min_val, "is_min")
+                        .map_err(|e| format!("cmp error: {}", e))?;
+                    let function = self.current_function().ok_or_else(|| {
+                        CompileError::LlvmError("abs: no enclosing function".into())
+                    })?;
+                    let trap_bb = self.context.append_basic_block(function, "trap_abs_min");
+                    let ok_bb = self.context.append_basic_block(function, "abs_ok");
+                    self.builder
+                        .build_conditional_branch(is_min, trap_bb, ok_bb)
+                        .map_err(|e| format!("br error: {}", e))?;
+                    self.builder.position_at_end(trap_bb);
+                    if self.in_fallible_multi_target() {
+                        self.emit_panic_fault_return("E0802")?;
                     } else {
-                        i32::MIN as u64
-                    },
-                    false,
-                );
-                let max_val = ty.const_int(
-                    if bw >= 64 {
-                        i64::MAX as u64
-                    } else {
-                        i32::MAX as u64
-                    },
-                    false,
-                );
+                        let trap_fn = self.get_runtime_fn("mimi_trap_overflow")?;
+                        let op_cstr = self
+                            .builder
+                            .build_global_string_ptr("abs", "abs_op_name")
+                            .map_err(|e| format!("global string error: {}", e))?;
+                        self.builder
+                            .build_call(
+                                trap_fn,
+                                &[BasicMetadataValueEnum::PointerValue(
+                                    op_cstr.as_pointer_value(),
+                                )],
+                                "",
+                            )
+                            .map_err(|e| format!("call error: {}", e))?;
+                        self.builder
+                            .build_unreachable()
+                            .map_err(|e| format!("unreachable error: {}", e))?;
+                    }
+                    self.builder.position_at_end(ok_bb);
+                }
+                // The only overflow case (x == iN::MIN) trapped above, so the
+                // negation here is exact. No saturation anywhere.
+                let zero = ty.const_zero();
                 let neg = self
                     .builder
                     .build_int_sub(zero, iv, "neg")
                     .map_err(|e| format!("neg error: {}", e))?;
                 let cmp = self
                     .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::SLT,
-                        iv,
-                        ty.const_int(0, false),
-                        "is_neg",
-                    )
-                    .map_err(|e| format!("cmp error: {}", e))?;
-                let abs_val = self
-                    .builder
-                    .build_select(cmp, neg, iv, "abs_val")
-                    .map_err(|e| format!("select error: {}", e))?
-                    .into_int_value();
-                let is_min = self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::EQ, iv, min_val, "is_min")
+                    .build_int_compare(inkwell::IntPredicate::SLT, iv, zero, "is_neg")
                     .map_err(|e| format!("cmp error: {}", e))?;
                 let result = self
                     .builder
-                    .build_select(is_min, max_val, abs_val, "abs_safe")
+                    .build_select(cmp, neg, iv, "abs_val")
                     .map_err(|e| format!("select error: {}", e))?
                     .into_int_value();
                 Ok(result.into())
@@ -92,12 +110,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn compile_sqrt(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
             return Err("sqrt expects 1 argument".into());
         }
+        // Audit 2026-08-05 §8 [HIGH] FIX-6: sqrt is subject to the SD-9
+        // finiteness invariant — the bytecode VM's builtin_sqrt runs
+        // check_float (unary_float! macro), so sqrt(-1.0) = NaN traps with
+        // E0813 outside ieee_float{}. Also coerce the operand to f64 so
+        // integer arguments produce a well-typed call (the old code passed
+        // raw args at whatever LLVM type they had into the f64 libc
+        // signature).
+        let arg = self.coerce_to_f64(args[0], "sqrt")?;
         let sqrt_fn = self.module.get_function("sqrt").unwrap_or_else(|| {
             let sqrt_ty = self.context.f64_type().fn_type(
                 &[inkwell::types::BasicMetadataTypeEnum::FloatType(
@@ -110,9 +136,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
         let call = self
             .builder
-            .build_call(sqrt_fn, args, "sqrt_call")
+            .build_call(
+                sqrt_fn,
+                &[BasicMetadataValueEnum::FloatValue(arg)],
+                "sqrt_call",
+            )
             .map_err(|e| format!("sqrt error: {}", e))?;
-        self.expect_basic_value(&call, "sqrt")
+        let result = self.expect_basic_value(&call, "sqrt")?.into_float_value();
+        let result = self.enforce_float_finite(result, "sqrt")?;
+        Ok(result.into())
     }
 
     pub(super) fn compile_min_max(
@@ -186,37 +218,55 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn compile_pow(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
             return Err("pow expects 2 arguments".into());
         }
         let f64_ty = self.context.f64_type();
-        let a = match args[0] {
-            BasicMetadataValueEnum::FloatValue(fv) => fv,
-            BasicMetadataValueEnum::IntValue(iv) => self
+        // Audit 2026-08-05 §8 [CRITICAL] FIX-4: int×int must NOT detour
+        // through f64 + libc pow — that silently loses precision above 2^53
+        // and, far worse, turns integer overflow (pow(10, 19) > i64::MAX)
+        // into a silent Inf-ish float. Bytecode VM semantics are the
+        // reference (interp/bytecode/builtins/math.rs:348-369): integer pow
+        // is checked_pow — overflow and negative exponents are errors.
+        // Route to the runtime's __mimi_pow_i64 (runtime/mod.rs:1101), which
+        // implements exactly those traps (CG-H3).
+        if let (BasicMetadataValueEnum::IntValue(a), BasicMetadataValueEnum::IntValue(b)) =
+            (args[0], args[1])
+        {
+            let a64 = self.widen_pow_arg_to_i64(a, "pow_base")?;
+            let b64 = self.widen_pow_arg_to_i64(b, "pow_exp")?;
+            let pow_fn = self.get_or_declare_pow_i64();
+            let call = self
                 .builder
-                .build_signed_int_to_float(iv, f64_ty, "a_f64")
-                .map_err(|e| format!("int_to_float error: {}", e))?,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "pow requires numeric arguments".into(),
-                ))
-            }
-        };
-        let b = match args[1] {
-            BasicMetadataValueEnum::FloatValue(fv) => fv,
-            BasicMetadataValueEnum::IntValue(iv) => self
+                .build_call(
+                    pow_fn,
+                    &[
+                        BasicMetadataValueEnum::IntValue(a64),
+                        BasicMetadataValueEnum::IntValue(b64),
+                    ],
+                    "pow_i64_call",
+                )
+                .map_err(|e| format!("pow error: {}", e))?;
+            let r64 = self.expect_basic_value(&call, "pow")?.into_int_value();
+            // The checker types pow(_, _) -> f64 (core/infer/call/simple.rs:838),
+            // so keep the value-type contract: convert the exact i64 result to
+            // f64. The trap semantics (overflow / negative exponent) are fully
+            // decided by the runtime call above; results with |v| <= 2^53
+            // round-trip exactly through f64.
+            let rf = self
                 .builder
-                .build_signed_int_to_float(iv, f64_ty, "b_f64")
-                .map_err(|e| format!("int_to_float error: {}", e))?,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "pow requires numeric arguments".into(),
-                ))
-            }
-        };
+                .build_signed_int_to_float(r64, f64_ty, "pow_i64_to_f64")
+                .map_err(|e| format!("pow int_to_float error: {}", e))?;
+            return Ok(rf.into());
+        }
+        // Float path (float×float and int×float mixes): coerce to f64, libc
+        // pow, then the SD-9 finiteness invariant — the bytecode VM runs
+        // check_float on this path too (builtin_pow float arm).
+        let a = self.coerce_to_f64(args[0], "pow")?;
+        let b = self.coerce_to_f64(args[1], "pow")?;
         let pow_fn = self.module.get_function("pow").unwrap_or_else(|| {
             let ty = f64_ty.fn_type(
                 &[
@@ -239,7 +289,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "pow_call",
             )
             .map_err(|e| format!("pow error: {}", e))?;
-        self.expect_basic_value(&call, "pow")
+        let result = self.expect_basic_value(&call, "pow")?.into_float_value();
+        let result = self.enforce_float_finite(result, "pow")?;
+        Ok(result.into())
     }
 
     pub(super) fn compile_random(
@@ -340,7 +392,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn compile_math_unary(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
         fn_name: &str,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
@@ -353,11 +405,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(f, &[BasicMetadataValueEnum::FloatValue(arg)], "math_call")
             .map_err(|e| format!("{} error: {}", fn_name, e))?;
-        self.expect_basic_value(&call, fn_name)
+        // Audit 2026-08-05 §8 [HIGH] FIX-6: SD-9 parity with the bytecode
+        // VM's unary_float! macro — every unary math builtin runs check_float
+        // on its result (E0813 outside ieee_float{}).
+        let result = self.expect_basic_value(&call, fn_name)?.into_float_value();
+        let result = self.enforce_float_finite(result, fn_name)?;
+        Ok(result.into())
     }
 
     pub(super) fn compile_math_binary(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
         fn_name: &str,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
@@ -378,12 +435,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "math_call",
             )
             .map_err(|e| format!("{} error: {}", fn_name, e))?;
-        self.expect_basic_value(&call, fn_name)
+        // Audit 2026-08-05 §8 [HIGH] FIX-6: SD-9 (VM builtin_atan2 runs
+        // check_float on the result).
+        let result = self.expect_basic_value(&call, fn_name)?.into_float_value();
+        let result = self.enforce_float_finite(result, fn_name)?;
+        Ok(result.into())
     }
 
     /// log(x) = natural log; log(x, base) = base-N logarithm (log(x)/log(base)).
     pub(super) fn compile_math_log(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.is_empty() || args.len() > 2 {
@@ -391,30 +452,84 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let x = self.coerce_to_f64(args[0], "log")?;
         let ln_fn = self.get_or_declare_unary_f64("log");
+        // Audit 2026-08-05 §8 [HIGH] FIX-6: base-domain check with the VM's
+        // semantics (interp/bytecode/builtins/math.rs:288-307): log(x, base)
+        // with base <= 0 or base == 1 errors UNCONDITIONALLY — the VM checks
+        // it before check_float, i.e. even inside ieee_float{}. log(x, 1.0)
+        // used to produce Inf silently here (audit: "log(x,1)→Inf 静默").
+        let base = if args.len() == 2 {
+            let base = self.coerce_to_f64(args[1], "log")?;
+            let zero = base.get_type().const_float(0.0);
+            let one = base.get_type().const_float(1.0);
+            let le_zero = self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::OLE, base, zero, "log_base_le0")
+                .map_err(|e| format!("log base cmp error: {}", e))?;
+            let eq_one = self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::OEQ, base, one, "log_base_eq1")
+                .map_err(|e| format!("log base cmp error: {}", e))?;
+            let bad_base = self
+                .builder
+                .build_or(le_zero, eq_one, "log_base_bad")
+                .map_err(|e| format!("log base or error: {}", e))?;
+            let function = self
+                .current_function()
+                .ok_or_else(|| CompileError::LlvmError("log: no enclosing function".into()))?;
+            let trap_bb = self.context.append_basic_block(function, "trap_log_base");
+            let ok_bb = self.context.append_basic_block(function, "log_base_ok");
+            self.builder
+                .build_conditional_branch(bad_base, trap_bb, ok_bb)
+                .map_err(|e| format!("log base br error: {}", e))?;
+            self.builder.position_at_end(trap_bb);
+            // VM message parity (no E08xx code exists for math domain
+            // errors — use the generic loud abort, same as list OOB).
+            let abort_fn = self.get_or_declare_abort_fn();
+            let msg = self
+                .builder
+                .build_global_string_ptr("log: base must be positive and not 1", "log_base_msg")
+                .map_err(|e| format!("global string error: {}", e))?;
+            self.build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+                "log_base_abort",
+            )?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| format!("unreachable error: {}", e))?;
+            self.builder.position_at_end(ok_bb);
+            Some(base)
+        } else {
+            None
+        };
         let ln_call = self
             .builder
             .build_call(ln_fn, &[BasicMetadataValueEnum::FloatValue(x)], "log_x")
             .map_err(|e| format!("log error: {}", e))?;
         let ln_x = self.expect_basic_value(&ln_call, "log")?.into_float_value();
-        if args.len() == 1 {
-            return Ok(BasicValueEnum::FloatValue(ln_x));
-        }
-        let base = self.coerce_to_f64(args[1], "log")?;
-        let ln_base_call = self
-            .builder
-            .build_call(
-                ln_fn,
-                &[BasicMetadataValueEnum::FloatValue(base)],
-                "log_base",
-            )
-            .map_err(|e| format!("log error: {}", e))?;
-        let ln_base = self
-            .expect_basic_value(&ln_base_call, "log")?
-            .into_float_value();
-        let result = self
-            .builder
-            .build_float_div(ln_x, ln_base, "log_result")
-            .map_err(|e| format!("log div error: {}", e))?;
+        let result = match base {
+            None => ln_x,
+            Some(base) => {
+                let ln_base_call = self
+                    .builder
+                    .build_call(
+                        ln_fn,
+                        &[BasicMetadataValueEnum::FloatValue(base)],
+                        "log_base",
+                    )
+                    .map_err(|e| format!("log error: {}", e))?;
+                let ln_base = self
+                    .expect_basic_value(&ln_base_call, "log")?
+                    .into_float_value();
+                self.builder
+                    .build_float_div(ln_x, ln_base, "log_result")
+                    .map_err(|e| format!("log div error: {}", e))?
+            }
+        };
+        // Audit 2026-08-05 §8 [HIGH] FIX-6: SD-9 on the FINAL result only
+        // (the VM's builtin_log runs check_float once on r). ln(-1) = NaN or
+        // ln(0) = -Inf therefore trap here with E0813 outside ieee_float{}.
+        let result = self.enforce_float_finite(result, "log")?;
         Ok(BasicValueEnum::FloatValue(result))
     }
 
@@ -591,6 +706,135 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     // === Helpers ===
+
+    /// Audit 2026-08-05 §8 FIX-4/FIX-6 — SD-9 finiteness invariant for math
+    /// builtins. Mirrors `compile_float_binop` (expr/operator.rs:745-851,
+    /// read-only reference): suspended inside `ieee_float { }`
+    /// (`ieee_depth > 0`); otherwise a NaN/Inf result traps with E0813 —
+    /// absorbed into a `Fault` in a fallible multi-target transition, or
+    /// aborting via `mimi_trap_float_not_finite` everywhere else.
+    fn enforce_float_finite(
+        &mut self,
+        result: FloatValue<'ctx>,
+        op_name: &str,
+    ) -> MimiResult<FloatValue<'ctx>> {
+        // v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant
+        // is suspended — IEEE 754 NaN/Inf are legitimate there.
+        if self.ieee_depth > 0 {
+            return Ok(result);
+        }
+        let f_ty = result.get_type();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("math builtin: no enclosing function".into()))?;
+
+        // NaN: fcmp uno x, x → true only for NaN.
+        let is_nan = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::UNO, result, result, "is_nan")
+            .map_err(|e| format!("fcmp error: {}", e))?;
+        // Inf: |x| == Inf via llvm.fabs (width-generic, as in operator.rs).
+        let fabs_name = format!("llvm.fabs.f{}", f_ty.get_bit_width());
+        let fabs_fn = self.module.get_function(&fabs_name).unwrap_or_else(|| {
+            self.module.add_function(
+                &fabs_name,
+                f_ty.fn_type(&[BasicMetadataTypeEnum::FloatType(f_ty)], false),
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let abs_val = self
+            .builder
+            .build_call(
+                fabs_fn,
+                &[BasicMetadataValueEnum::FloatValue(result)],
+                "fabs",
+            )
+            .map_err(|e| format!("fabs call error: {}", e))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("fabs returned void".into()))?
+            .into_float_value();
+        let inf_const = f_ty.const_float(f64::INFINITY);
+        let is_inf = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OEQ, abs_val, inf_const, "is_inf")
+            .map_err(|e| format!("fcmp error: {}", e))?;
+        let not_finite = self
+            .builder
+            .build_or(is_nan, is_inf, "not_finite")
+            .map_err(|e| format!("or error: {}", e))?;
+
+        // Branch: trap or continue.
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "trap_float_builtin");
+        let ok_bb = self
+            .context
+            .append_basic_block(function, "float_builtin_ok");
+        self.builder
+            .build_conditional_branch(not_finite, trap_bb, ok_bb)
+            .map_err(|e| format!("br error: {}", e))?;
+
+        // Trap block — or absorb into Fault in a fallible transition.
+        self.builder.position_at_end(trap_bb);
+        if self.in_fallible_multi_target() {
+            self.emit_panic_fault_return("E0813")?;
+        } else {
+            let trap_fn = self.get_runtime_fn("mimi_trap_float_not_finite")?;
+            let op_cstr = self
+                .builder
+                .build_global_string_ptr(op_name, "math_op_name")
+                .map_err(|e| format!("global string error: {}", e))?;
+            self.builder
+                .build_call(
+                    trap_fn,
+                    &[BasicMetadataValueEnum::PointerValue(
+                        op_cstr.as_pointer_value(),
+                    )],
+                    "",
+                )
+                .map_err(|e| format!("call error: {}", e))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| format!("unreachable error: {}", e))?;
+        }
+
+        // OK block.
+        self.builder.position_at_end(ok_bb);
+        Ok(result)
+    }
+
+    /// Get-or-declare the runtime's checked integer power (runtime/mod.rs:
+    /// `__mimi_pow_i64`, FIX-4). Declared lazily, same pattern as operator.rs.
+    fn get_or_declare_pow_i64(&self) -> inkwell::values::FunctionValue<'ctx> {
+        self.module
+            .get_function("__mimi_pow_i64")
+            .unwrap_or_else(|| {
+                let i64_ty = self.context.i64_type();
+                let ty = i64_ty.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64_ty),
+                        BasicMetadataTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                self.module.add_function(
+                    "__mimi_pow_i64",
+                    ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            })
+    }
+
+    /// Sign-extend a narrower integer to i64 (the runtime's integer
+    /// arithmetic width — the bytecode VM also computes in i64).
+    fn widen_pow_arg_to_i64(&self, iv: IntValue<'ctx>, name: &str) -> MimiResult<IntValue<'ctx>> {
+        if iv.get_type().get_bit_width() == 64 {
+            return Ok(iv);
+        }
+        self.builder
+            .build_int_s_extend(iv, self.context.i64_type(), name)
+            .map_err(|e| format!("{} widen error: {}", name, e).into())
+    }
 
     fn get_or_declare_fabs(&self) -> MimiResult<inkwell::values::FunctionValue<'ctx>> {
         let f64_ty = self.context.f64_type();

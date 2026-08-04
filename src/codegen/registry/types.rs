@@ -91,18 +91,30 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// slot). Single-primitive payloads (`PayloadKind::Single`) are stored
     /// inline in the i64 slot and are NOT boxed; unit payloads (`None`) carry
     /// no data.
+    ///
+    /// 0.34.36 (audit §6.12): the owning enum is resolved FIRST via
+    /// `find_variant_info` — the same lookup the constructor call site uses —
+    /// and the payload is classified within THAT enum. The old blind scan over
+    /// `type_defs.values()` returned the first enum that happened to declare a
+    /// same-named variant; HashMap iteration order is nondeterministic, so two
+    /// enums sharing a variant name could flip the boxing classification
+    /// between builds (wrong free / missed free of the payload box).
     pub(in crate::codegen) fn variant_payload_is_boxed(&self, name: &str) -> bool {
-        for td in self.type_defs.values() {
-            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
-                if let Some(v) = variants.iter().find(|v| v.name == name) {
-                    return matches!(
-                        self.classify_variant_payload(&v.payload),
-                        PayloadKind::Packed(_)
-                    );
-                }
-            }
-        }
-        false
+        let Some((owner, _)) = self.find_variant_info(name) else {
+            return false;
+        };
+        let Some(td) = self.type_defs.get(&owner) else {
+            return false;
+        };
+        let crate::ast::TypeDefKind::Enum(variants) = &td.kind else {
+            return false;
+        };
+        variants.iter().find(|v| v.name == name).is_some_and(|v| {
+            matches!(
+                self.classify_variant_payload(&v.payload),
+                PayloadKind::Packed(_)
+            )
+        })
     }
 
     /// L6: the sorted-ordinal indices of the variants of custom enum
@@ -472,10 +484,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     enum_ty
                 }
             }
-            crate::ast::TypeDefKind::Alias(ty) => types::mimi_type_to_llvm(self.context, ty)
+            // 0.34.36 (audit §6.12): route Alias/Newtype lowering through the
+            // registry (`llvm_type_for`), NOT the bare `mimi_type_to_llvm`
+            // name map. An alias to a user record (`type P = Point`) lowered
+            // to bare i64 because mimi_type_to_llvm's `_` arm swallows unknown
+            // names; `llvm_type_for` consults `type_llvm` first, so the alias
+            // inherits the real struct layout.
+            crate::ast::TypeDefKind::Alias(ty) => self
+                .llvm_type_for(ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
             crate::ast::TypeDefKind::Newtype(inner_ty) => {
-                let llvm_ty = types::mimi_type_to_llvm(self.context, inner_ty)
+                let llvm_ty = self
+                    .llvm_type_for(inner_ty)
                     .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
                 // Register newtype constructor as identity function: Name(value) -> value
                 if self.module.get_function(&t.name).is_none() {
@@ -506,12 +526,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let max_size = fields
                     .iter()
                     .map(|f| {
-                        let llvm_ty = types::mimi_type_to_llvm(self.context, &f.ty)
+                        // Same registry routing as Alias/Newtype above: a union
+                        // field of record type must size from the real layout,
+                        // not mimi_type_to_llvm's i64 fallback (audit §6.12).
+                        let llvm_ty = self
+                            .llvm_type_for(&f.ty)
                             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                        // size_of() returns None for structs containing opaque
+                        // pointers; fall back to the portable layout computer.
                         llvm_ty
                             .size_of()
                             .and_then(|s| s.get_zero_extended_constant())
-                            .unwrap_or(8)
+                            .unwrap_or_else(|| self.llvm_type_size_bytes(llvm_ty))
                     })
                     .max()
                     .unwrap_or(8);

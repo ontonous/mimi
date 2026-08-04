@@ -440,6 +440,31 @@ fn collect_function_syntax<'a>(
                     collect_nested_function_syntax(&method.body, &owner, out);
                 }
             }
+            Item::Flow(flow) => {
+                // Full audit 2026-08-05 (#10): nested callables declared in
+                // user-implemented transition bodies receive catalog records
+                // (resolved/mod.rs); the syntax map must pair with them. The
+                // User-origin restriction mirrors collect_transition_syntax,
+                // which is the slice lower_checked_transition_bodies lowers.
+                let qualified = if module.is_empty() {
+                    flow.name.clone()
+                } else {
+                    format!("{module}::{}", flow.name)
+                };
+                for transition in &flow.transitions {
+                    if !matches!(transition.meta.origin, AstOrigin::User) {
+                        continue;
+                    }
+                    let Some(body) = &transition.body else {
+                        continue;
+                    };
+                    let owner = NodeId(format!(
+                        "transition:{qualified}::{}::{}",
+                        transition.name, transition.from_state
+                    ));
+                    collect_nested_function_syntax(body, &owner, out);
+                }
+            }
             _ => {}
         }
     }
@@ -457,26 +482,185 @@ fn collect_nested_function_syntax<'a>(
                 out.insert(nested.clone(), function);
                 collect_nested_function_syntax(&function.body, &nested, out);
             }
-            Stmt::If { then_, else_, .. } | Stmt::IfLet { then_, else_, .. } => {
+            Stmt::If { cond, then_, else_ } => {
+                collect_nested_function_syntax_in_expr(cond, owner, out);
                 collect_nested_function_syntax(then_, owner, out);
                 if let Some(else_) = else_ {
                     collect_nested_function_syntax(else_, owner, out);
                 }
             }
-            Stmt::While { body, .. }
-            | Stmt::WhileLet { body, .. }
-            | Stmt::Loop(body)
-            | Stmt::For { body, .. }
+            Stmt::IfLet { init, then_, else_, .. } => {
+                collect_nested_function_syntax_in_expr(init, owner, out);
+                collect_nested_function_syntax(then_, owner, out);
+                if let Some(else_) = else_ {
+                    collect_nested_function_syntax(else_, owner, out);
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_nested_function_syntax_in_expr(cond, owner, out);
+                collect_nested_function_syntax(body, owner, out);
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                collect_nested_function_syntax_in_expr(init, owner, out);
+                collect_nested_function_syntax(body, owner, out);
+            }
+            Stmt::For { iterable, body, .. } => {
+                collect_nested_function_syntax_in_expr(iterable, owner, out);
+                collect_nested_function_syntax(body, owner, out);
+            }
+            Stmt::Loop(body)
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
             | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
             | Stmt::Parasteps(body)
-            | Stmt::Alloc { body, .. }
-            | Stmt::Pinned { body, .. } => collect_nested_function_syntax(body, owner, out),
+            // Full audit 2026-08-05 (#3): the catalog walker
+            // (resolved/mod.rs `collect_nested_function_records`) descends
+            // through Defer blocks; the syntax map must collect the same
+            // nested callables, otherwise a nested func inside `defer { }`
+            // has a signature but no syntax and body lowering fails.
+            | Stmt::Defer(body)
+            | Stmt::Alloc { body, .. } => collect_nested_function_syntax(body, owner, out),
+            Stmt::Pinned { expr, body, .. } => {
+                collect_nested_function_syntax_in_expr(expr, owner, out);
+                collect_nested_function_syntax(body, owner, out);
+            }
+            // Full audit 2026-08-05 (#10): expression positions can carry
+            // blocks/lambdas with nested function declarations (mirrors the
+            // exhaustive meta walk).
+            Stmt::Let { init: Some(init), .. } | Stmt::SharedLet { init, .. } => {
+                collect_nested_function_syntax_in_expr(init, owner, out);
+            }
+            Stmt::Expr(expr)
+            | Stmt::Return(Some(expr))
+            | Stmt::Break(Some(expr))
+            | Stmt::Drop(expr) => collect_nested_function_syntax_in_expr(expr, owner, out),
+            Stmt::Assign { target, value } => {
+                collect_nested_function_syntax_in_expr(target, owner, out);
+                collect_nested_function_syntax_in_expr(value, owner, out);
+            }
+            Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) | Stmt::Invariant(expr, _) => {
+                collect_nested_function_syntax_in_expr(expr, owner, out);
+            }
+            Stmt::Math(expressions) => {
+                for expression in expressions {
+                    collect_nested_function_syntax_in_expr(expression, owner, out);
+                }
+            }
             _ => {}
         }
+    }
+}
+
+/// Full audit 2026-08-05 (#10): collect nested function syntax from every
+/// expression tree. Nested callables can be declared inside block
+/// expressions, lambda bodies, and `if`/`arena` block expressions. Quote and
+/// Comptime interiors are deliberately skipped: the checker never finalizes
+/// nested function declarations there (`infer_expr` types a quote as an
+/// opaque AST value; `infer_comptime` ignores `Stmt::Func`), so a catalog
+/// entry would have no checker-finalized signature to pair with.
+fn collect_nested_function_syntax_in_expr<'a>(
+    expr: &'a Expr,
+    owner: &NodeId,
+    out: &mut BTreeMap<NodeId, &'a FuncDef>,
+) {
+    match expr.unlocated() {
+        Expr::Block(body) | Expr::Arena(body) => {
+            collect_nested_function_syntax(body, owner, out);
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_nested_function_syntax_in_expr(cond, owner, out);
+            collect_nested_function_syntax(then_, owner, out);
+            if let Some(else_) = else_ {
+                collect_nested_function_syntax(else_, owner, out);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            collect_nested_function_syntax(body, owner, out);
+        }
+        Expr::Binary(_, left, right) => {
+            collect_nested_function_syntax_in_expr(left, owner, out);
+            collect_nested_function_syntax_in_expr(right, owner, out);
+        }
+        Expr::Unary(_, operand)
+        | Expr::Try(operand)
+        | Expr::OptionalChain(operand, _)
+        | Expr::Spawn(operand)
+        | Expr::Await(operand)
+        | Expr::TypeOf(operand)
+        | Expr::Old(operand)
+        | Expr::QuoteInterpolate(operand)
+        | Expr::NamedArg(_, operand)
+        | Expr::Cast(operand, _) => {
+            collect_nested_function_syntax_in_expr(operand, owner, out);
+        }
+        Expr::Call(callee, arguments) => {
+            collect_nested_function_syntax_in_expr(callee, owner, out);
+            for argument in arguments {
+                collect_nested_function_syntax_in_expr(argument, owner, out);
+            }
+        }
+        Expr::Field(base, _) | Expr::TupleIndex(base, _) => {
+            collect_nested_function_syntax_in_expr(base, owner, out);
+        }
+        Expr::Index(base, index) => {
+            collect_nested_function_syntax_in_expr(base, owner, out);
+            collect_nested_function_syntax_in_expr(index, owner, out);
+        }
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            for item in items {
+                collect_nested_function_syntax_in_expr(item, owner, out);
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_nested_function_syntax_in_expr(expr, owner, out);
+            collect_nested_function_syntax_in_expr(iter, owner, out);
+            if let Some(guard) = guard {
+                collect_nested_function_syntax_in_expr(guard, owner, out);
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_nested_function_syntax_in_expr(scrutinee, owner, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_nested_function_syntax_in_expr(guard, owner, out);
+                }
+                collect_nested_function_syntax_in_expr(&arm.body, owner, out);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for field in fields {
+                collect_nested_function_syntax_in_expr(&field.value, owner, out);
+            }
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_nested_function_syntax_in_expr(target, owner, out);
+            if let Some(start) = start {
+                collect_nested_function_syntax_in_expr(start, owner, out);
+            }
+            if let Some(end) = end {
+                collect_nested_function_syntax_in_expr(end, owner, out);
+            }
+        }
+        Expr::Turbofish(_, _, arguments) => {
+            for argument in arguments {
+                collect_nested_function_syntax_in_expr(argument, owner, out);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                collect_nested_function_syntax_in_expr(key, owner, out);
+                collect_nested_function_syntax_in_expr(value, owner, out);
+            }
+        }
+        // See the doc comment: checker never finalizes nested declarations
+        // inside these interiors.
+        Expr::Quote(_) | Expr::Comptime(_) => {}
+        Expr::Literal(_) | Expr::Ident(_) | Expr::TypeInfo(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
     }
 }
 
@@ -877,10 +1061,14 @@ impl BodyLowerer<'_> {
                 else_,
             } => {
                 // v0.34.3: if-let — lower init, bind pattern in a fresh scope
-                // for the then-branch, lower else-branch (if any).
+                // for the then-branch. Full audit 2026-08-05 (#2): the else
+                // branch is lowered AFTER the pattern scope is popped,
+                // mirroring the checker (check_stmt.rs pops before checking
+                // else). Pattern bindings must not leak into the else branch;
+                // an identifier there resolves to the outer binding.
                 let initializer = self.lower_expr(init, &format!("{role}.initializer"))?;
                 self.scopes.push(BTreeMap::new());
-                let lowered = (|| {
+                let pattern_then = (|| {
                     let pattern = self.lower_binding_pattern(
                         pat,
                         &format!("{role}.pattern"),
@@ -889,21 +1077,16 @@ impl BodyLowerer<'_> {
                     )?;
                     let then_block =
                         self.lower_block(then_, &format!("{role}.then"), self.unit.clone(), false)?;
-                    let else_block = else_
-                        .as_ref()
-                        .map(|block| {
-                            self.lower_block(
-                                block,
-                                &format!("{role}.else"),
-                                self.unit.clone(),
-                                false,
-                            )
-                        })
-                        .transpose()?;
-                    Ok::<_, Vec<ResolvedBodyError>>((pattern, then_block, else_block))
+                    Ok::<_, Vec<ResolvedBodyError>>((pattern, then_block))
                 })();
                 self.scopes.pop();
-                let (pattern, then_block, else_block) = lowered?;
+                let (pattern, then_block) = pattern_then?;
+                let else_block = else_
+                    .as_ref()
+                    .map(|block| {
+                        self.lower_block(block, &format!("{role}.else"), self.unit.clone(), false)
+                    })
+                    .transpose()?;
                 ResolvedStmtKind::IfLet {
                     pattern,
                     initializer,
@@ -1259,20 +1442,45 @@ impl BodyLowerer<'_> {
             Expr::Ident(name) => {
                 if let Some(local) = self.lookup_local(name) {
                     ResolvedExprKind::Load(ResolvedPlace::root(local))
-                } else if name == "None" {
+                } else if name == "None" && self.is_builtin_option_type(&ty) {
+                    // Full audit 2026-08-05 (#1): the builtin interception is
+                    // gated on the checker-finalized node type, not the bare
+                    // name. A user enum variant named `None` (registered by
+                    // the checker, items.rs:510; sanctioned by
+                    // ck8_user_defined_none_not_shadowed) carries the user
+                    // enum type here; hijacking it emitted the builtin Option
+                    // shape {i1,i64} into user-enum slots. The pattern side
+                    // (lower_constructor_pattern) was already type-guarded.
                     ResolvedExprKind::Constant(NodeId("builtin:value:None".into()))
                 } else {
-                    let functions = self
+                    // Full audit 2026-08-05 (#6): deterministic,
+                    // checker-aligned resolution. Prefer the exact
+                    // qualified-name match; short-name matches are admitted
+                    // only when unique (the fail-closed ambiguity error below
+                    // is kept). Residual divergence: the checker resolves bare
+                    // names by import order and scope walk, which this
+                    // catalog-based approximation cannot fully reproduce.
+                    // TODO(#audit-wave2): mirror checker import-order
+                    // resolution if bare-name collisions produce false
+                    // positives in practice.
+                    let exact_functions = self
                         .functions
                         .values()
-                        .filter(|function| {
-                            function.qualified_name == *name
-                                || function
+                        .filter(|function| function.qualified_name == *name)
+                        .collect::<Vec<_>>();
+                    let functions = if !exact_functions.is_empty() {
+                        exact_functions
+                    } else {
+                        self.functions
+                            .values()
+                            .filter(|function| {
+                                function
                                     .qualified_name
                                     .rsplit_once("::")
                                     .is_some_and(|(_, short)| short == name)
-                        })
-                        .collect::<Vec<_>>();
+                            })
+                            .collect::<Vec<_>>()
+                    };
                     if let [function] = functions.as_slice() {
                         ResolvedExprKind::Callable(ResolvedCallee::Function(
                             function.node_id.clone(),
@@ -1313,17 +1521,28 @@ impl BodyLowerer<'_> {
                             if let Some(variant_id) = unit_variants {
                                 ResolvedExprKind::Constant(variant_id)
                             } else {
-                                let candidates = self
+                                // Full audit 2026-08-05 (#6): same discipline
+                                // as function resolution above — exact
+                                // qualified match first, unique short-name
+                                // fallback only, fail-closed ambiguity error.
+                                let exact_candidates = self
                                     .constants
                                     .values()
-                                    .filter(|constant| {
-                                        constant.qualified_name == *name
-                                            || constant
+                                    .filter(|constant| constant.qualified_name == *name)
+                                    .collect::<Vec<_>>();
+                                let candidates = if !exact_candidates.is_empty() {
+                                    exact_candidates
+                                } else {
+                                    self.constants
+                                        .values()
+                                        .filter(|constant| {
+                                            constant
                                                 .qualified_name
                                                 .rsplit_once("::")
                                                 .is_some_and(|(_, short)| short == name)
-                                    })
-                                    .collect::<Vec<_>>();
+                                        })
+                                        .collect::<Vec<_>>()
+                                };
                                 let [constant] = candidates.as_slice() else {
                                     return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
@@ -1616,10 +1835,27 @@ impl BodyLowerer<'_> {
                 }
                 ResolvedExprKind::Map(lowered)
             }
-            Expr::Try(value) => ResolvedExprKind::Try {
-                value: Box::new(self.lower_expr(value, &format!("{role}.inner"))?),
-                propagation_target: self.owner.clone(),
-            },
+            Expr::Try(value) => {
+                // Full audit 2026-08-05 (#8): propagation_target must be the
+                // callable the error propagates OUT of. Inside a lambda body
+                // `self.owner` is the enclosing function — a wrong target —
+                // and ResolvedLambda carries no propagation contract, so the
+                // correct target is not trivially derivable. The checker
+                // admits `?` in lambdas (infer/helpers.rs `infer_try_expr`),
+                // so fail closed here rather than fabricate a target.
+                // TODO(#audit-wave2): introduce lambda-level propagation and
+                // lift this restriction.
+                if !self.lambda_contexts.is_empty() {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        "[E0830] error propagation (?) inside a lambda has no resolved-body propagation target; lowering fails closed rather than assigning the enclosing function owner",
+                    )]);
+                }
+                ResolvedExprKind::Try {
+                    value: Box::new(self.lower_expr(value, &format!("{role}.inner"))?),
+                    propagation_target: self.owner.clone(),
+                }
+            }
             Expr::Cast(value, _) => {
                 let value = self.lower_expr(value, &format!("{role}.inner"))?;
                 let conversion = self.checked_explicit_conversion(&node_id, &value.ty, &ty)?;
@@ -2007,7 +2243,7 @@ impl BodyLowerer<'_> {
                         type_arguments,
                     );
                 }
-                if let Some(function) =
+                let top_level_nested =
                     self.function
                         .body
                         .iter()
@@ -2016,8 +2252,27 @@ impl BodyLowerer<'_> {
                                 Some(function.clone())
                             }
                             _ => None,
-                        })
-                {
+                        });
+                // Full audit 2026-08-05 (#11): nested callables declared in
+                // branch blocks (if/else, defer, block expressions, lambda
+                // bodies) are invisible to the top-level statement scan.
+                // Fall back to the same exhaustive walker used for syntax
+                // collection; iteration is NodeId-sorted, so the pick stays
+                // deterministic. The checker itself conflates same-named
+                // nested callables in its bare-name table (check_stmt
+                // registers by bare name), so every candidate shares one
+                // checker signature; TODO(#audit-wave2) tracks scope-aware
+                // nested-name resolution.
+                let nested_scan = top_level_nested.or_else(|| {
+                    let mut nested = BTreeMap::new();
+                    collect_nested_function_syntax(&self.function.body, &self.owner, &mut nested);
+                    nested
+                        .into_iter()
+                        .filter(|(_, function)| function.name == *name)
+                        .map(|(_, function)| function.clone())
+                        .next()
+                });
+                if let Some(function) = nested_scan {
                     return self.lower_nested_function_call(
                         node_id,
                         &function,
@@ -3009,9 +3264,22 @@ impl BodyLowerer<'_> {
                 "unsafe_cast_protocol call has no checker-finalized type",
             )]
         })?;
-        let mut value = value;
-        value.ty = ty;
-        Ok(Some(value.kind))
+        // Full audit 2026-08-05 (#4): record the cast as an explicit Cast
+        // node. The previous shape rewrote `value.ty` and returned only
+        // `value.kind`; for a Load argument lower_expr's post-processing
+        // recomputed `ty` from the place type, silently dropping the cast.
+        // Routing through `implicit_conversion` (concrete → dyn emits
+        // DynamicPack, the same path as a proven `let s: dyn T = v`) keeps
+        // the checker-finalized dyn type through lowering; body validation
+        // then enforces conversion.to == expression type.
+        if value.ty == ty {
+            return Ok(Some(value.kind));
+        }
+        let conversion = self.implicit_conversion(node_id, &value.ty, &ty)?;
+        Ok(Some(ResolvedExprKind::Cast {
+            value: Box::new(value),
+            conversion,
+        }))
     }
 
     /// Capability method dispatch: `c.split()` / `c.drop()` on a capability
@@ -3854,7 +4122,7 @@ impl BodyLowerer<'_> {
             // directory (ResolvedFlow.states). Multi-target match arms name the
             // state constructors (Small/Large), which never appear in type_defs.
             // Fall through to the flow-state directory lookup.
-            let flow_state_variant: Option<(NodeId, Vec<(String, NodeId, ResolvedTypeId)>)> =
+            let mut flow_state_variant: Option<(NodeId, Vec<(String, NodeId, ResolvedTypeId)>)> =
                 flow_variant.map(|(variant_id, def)| {
                     (
                         variant_id.clone(),
@@ -3875,36 +4143,64 @@ impl BodyLowerer<'_> {
                             .collect(),
                     )
                 });
-            let flow_state_variant = flow_state_variant.or_else(|| {
-                self.flows.values().find_map(|flow| {
-                    let state = flow.states.get(name)?;
+            if flow_state_variant.is_none() {
+                // Deterministic selection: flows are stored in a HashMap, so
+                // sort before picking the state's owner (same-name states in
+                // different flows previously resolved nondeterministically).
+                let mut candidate_flows = self
+                    .flows
+                    .values()
+                    .filter(|flow| flow.states.contains_key(name))
+                    .collect::<Vec<_>>();
+                candidate_flows.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+                if let Some(flow) = candidate_flows.first() {
+                    let state = &flow.states[name];
                     let variant_id = NodeId(format!("state:{}::{}", flow.id.0, state.id.name));
-                    let declared = state
-                        .payload
-                        .iter()
-                        .map(|(fname, fty)| {
-                            let field_id =
-                                state.field_ids.get(fname).cloned().unwrap_or_else(|| {
-                                    NodeId(format!("{}/field:{}", variant_id.0, fname))
-                                });
-                            // Prefer the field's canonical type from the field
-                            // types table; fall back to unit (the checker has
-                            // already validated pattern fields against the
-                            // state payload — resolved IR only needs a
-                            // consistent slot type for bindings).
-                            let ty_id = self
-                                .field_types
-                                .get(&field_id)
-                                .cloned()
-                                .or_else(|| self.node_types.get(&field_id).cloned())
-                                .unwrap_or_else(|| self.unit.clone());
-                            let _ = fty;
-                            (fname.clone(), field_id, ty_id)
-                        })
-                        .collect();
-                    Some((variant_id, declared))
-                })
-            });
+                    let mut declared = Vec::with_capacity(state.payload.len());
+                    for (fname, fty) in &state.payload {
+                        // Full audit 2026-08-05 (#5): fail closed instead of
+                        // inventing identities. Every payload field registered
+                        // by collect_flow carries a canonical field identity.
+                        let field_id =
+                            state.field_ids.get(fname).cloned().ok_or_else(|| {
+                                vec![ResolvedBodyError::new(
+                                    node_id.clone(),
+                                    format!(
+                                        "[E0830] flow state '{}::{}' payload field '{}' has no canonical field identity",
+                                        flow.id.0, state.id.name, fname
+                                    ),
+                                )]
+                            })?;
+                        // Full audit 2026-08-05 (#5): use the interned form of
+                        // the declared payload type (`fty`).
+                        // build_canonical_function_signatures interns every
+                        // flow-state payload field type into the field table;
+                        // the previous `unwrap_or(unit)` silently discarded the
+                        // checker-finalized payload type (`let _ = fty;`).
+                        // Missing canonical facts are lowering errors — the
+                        // module contract forbids inferring a type here.
+                        let ty_id = self
+                            .field_types
+                            .get(&field_id)
+                            .cloned()
+                            .or_else(|| self.node_types.get(&field_id).cloned())
+                            .ok_or_else(|| {
+                                vec![ResolvedBodyError::new(
+                                    node_id.clone(),
+                                    format!(
+                                        "[E0830] flow state '{}::{}' payload field '{}' (declared '{}') has no canonical field type",
+                                        flow.id.0,
+                                        state.id.name,
+                                        fname,
+                                        crate::core::fmt_type(fty)
+                                    ),
+                                )]
+                            })?;
+                        declared.push((fname.clone(), field_id, ty_id));
+                    }
+                    flow_state_variant = Some((variant_id, declared));
+                }
+            }
             if let Some((variant_id, declared)) = flow_state_variant {
                 let lowered =
                     self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
@@ -4800,6 +5096,21 @@ impl BodyLowerer<'_> {
         )
     }
 
+    /// Full audit 2026-08-05 (#1): true when the canonical type is the
+    /// builtin Option, in either representation (structural `Option<T>` or
+    /// nominal `builtin:type:Option<T>`). Gates the value-position `None`
+    /// interception so user-defined variants named `None` fall through to
+    /// the function/variant/constant resolution chain.
+    fn is_builtin_option_type(&self, ty: &ResolvedTypeId) -> bool {
+        match self.types.get(ty) {
+            Some(ResolvedType::Option(_)) => true,
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) => item.as_str() == "builtin:type:Option" && arguments.len() == 1,
+            _ => false,
+        }
+    }
+
     fn implicit_conversion(
         &self,
         node_id: &NodeId,
@@ -4872,31 +5183,44 @@ impl BodyLowerer<'_> {
             }
         }
         if let Some((from_inner, to_inner)) = container_payloads {
-            let payload_match = if from_inner == to_inner {
-                true
-            } else {
-                let from_eff = self
-                    .instantiated_type_target(node_id, from_inner)
-                    .ok()
-                    .flatten()
-                    .map(|(_, target)| target)
-                    .unwrap_or_else(|| from_inner.clone());
-                let to_eff = self
-                    .instantiated_type_target(node_id, to_inner)
-                    .ok()
-                    .flatten()
-                    .map(|(_, target)| target)
-                    .unwrap_or_else(|| to_inner.clone());
-                from_eff == to_eff || self.types.get(&from_eff) == self.types.get(&to_eff)
-            };
-            if payload_match {
-                // identity_conversion() would reject the distinct ids; the
-                // conversion is still content-identity for transparent wrappers.
+            if from_inner == to_inner {
+                // Full audit 2026-08-05 (#7): equal canonical payload ids on
+                // representationally divergent containers (e.g. structural
+                // `Option<T>` vs nominal `builtin:type:Option<T>`).
+                // `Identity` is refused by the body validator because the
+                // canonical container id changes; `ContainerAliasErase`
+                // records the shape equality and is admitted there
+                // (body.rs `visit_conversion`).
                 return Ok(CheckedConversion {
-                    kind: CheckedConversionKind::Identity,
+                    kind: CheckedConversionKind::ContainerAliasErase,
                     from: from.clone(),
                     to: to.clone(),
                 });
+            }
+            // Alias-level payload equality: the unwrapped targets agree but
+            // the payload ids differ. The previous code emitted an Identity
+            // conversion with from≠to (and a second, tautological disjunct
+            // comparing interned values — with a canonical interner, equal
+            // values imply equal ids, so it never fired beyond id equality).
+            // The body validator cannot see through aliases, so erasure here
+            // would fail validation anyway; fail closed explicitly instead.
+            let from_eff = self
+                .instantiated_type_target(node_id, from_inner)?
+                .map(|(_, target)| target)
+                .unwrap_or_else(|| from_inner.clone());
+            let to_eff = self
+                .instantiated_type_target(node_id, to_inner)?
+                .map(|(_, target)| target)
+                .unwrap_or_else(|| to_inner.clone());
+            if from_eff == to_eff {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "[E0830] container payloads '{}' and '{}' are alias-equivalent but not canonical-id-equal; resolved lowering fails closed",
+                        from_inner.as_str(),
+                        to_inner.as_str()
+                    ),
+                )]);
             }
         }
         if matches!(

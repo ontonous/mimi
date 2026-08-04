@@ -88,6 +88,18 @@ pub struct Handle {
     generation: u32,
 }
 
+/// Maximum generation value encodable in the 64-bit wire format.
+///
+/// The wire layout reserves 16 bits for the generation
+/// (`[kind:8][runtime:8][generation:16][index:32]`), while the in-memory
+/// registry counts generations up to `u32::MAX`. Once a slot's generation
+/// exceeds this limit, its handles can no longer be serialized without
+/// truncation — and truncation would silently re-enable ABA collisions
+/// (a stale wire handle from generation `g` would collide with generation
+/// `g + 0x10000`). Packing therefore fails closed at the boundary instead
+/// of truncating (audit fix 2026-08-05, full audit §12).
+pub const MAX_WIRE_GENERATION: u32 = 0xFFFF;
+
 impl Handle {
     pub fn kind(&self) -> HandleKind {
         self.kind
@@ -106,17 +118,32 @@ impl Handle {
     /// Layout (MSB→LSB): `[kind:8][runtime:8][generation:16][index:32]`.
     /// This is an *identifier*, never a pointer — safe to serialize
     /// (COMPONENT-WIRE-001).
-    pub fn to_u64(&self) -> u64 {
-        ((self.kind.tag() as u64) << 56)
+    ///
+    /// **Wire-generation limit** (audit fix 2026-08-05): the generation
+    /// field is 16 bits wide, but the registry counts generations up to
+    /// `u32::MAX`. Returns `Err(HandleError::GenerationNotWireEncodable)`
+    /// once the generation exceeds [`MAX_WIRE_GENERATION`] instead of
+    /// silently truncating — truncation would wrap the wire generation to
+    /// an earlier occupant's value and re-open the ABA hole this type
+    /// exists to close. Fail closed at the packing boundary.
+    pub fn to_u64(&self) -> Result<u64, HandleError> {
+        if self.generation > MAX_WIRE_GENERATION {
+            return Err(HandleError::GenerationNotWireEncodable {
+                generation: self.generation,
+            });
+        }
+        Ok(((self.kind.tag() as u64) << 56)
             | ((self.runtime.tag() as u64) << 48)
-            | (((self.generation & 0xFFFF) as u64) << 32)
-            | (self.index as u64)
+            | ((self.generation as u64) << 32)
+            | (self.index as u64))
     }
 
     /// Unpack from a 64-bit opaque identifier.
     ///
     /// Returns `None` if the kind or runtime tags are not recognized.
-    /// The generation is truncated to 16 bits (matching `to_u64`).
+    /// The decoded generation lies in the wire-encodable range
+    /// (`0..=MAX_WIRE_GENERATION`) by construction — `to_u64` refuses to
+    /// pack anything beyond it.
     pub fn from_u64(packed: u64) -> Option<Self> {
         let kind_tag = (packed >> 56) as u8;
         let runtime_tag = ((packed >> 48) & 0xFF) as u8;
@@ -174,6 +201,9 @@ pub enum HandleError {
     LeaseOverflow,
     /// Generation counter would wrap around (ABA risk after 2^32 cycles).
     GenerationWrap,
+    /// Generation exceeds the 16-bit wire format limit ([`MAX_WIRE_GENERATION`]);
+    /// packing fails closed instead of truncating (ABA risk). Audit 2026-08-05.
+    GenerationNotWireEncodable { generation: u32 },
 }
 
 impl std::fmt::Display for HandleError {
@@ -204,6 +234,12 @@ impl std::fmt::Display for HandleError {
             HandleError::LeaseOverflow => write!(f, "lease count overflow (u32::MAX)"),
             HandleError::GenerationWrap => {
                 write!(f, "generation counter wrap-around (ABA risk)")
+            }
+            HandleError::GenerationNotWireEncodable { generation } => {
+                write!(
+                    f,
+                    "generation {generation} exceeds 16-bit wire limit {MAX_WIRE_GENERATION:#x} (ABA risk; refusing to truncate)"
+                )
             }
         }
     }
@@ -506,7 +542,7 @@ mod tests {
     fn to_u64_encodes_identity_not_pointer() {
         let reg = HandleRegistry::new(RuntimeId::Native);
         let h = reg.acquire(HandleKind::Map).unwrap();
-        let packed = h.to_u64();
+        let packed = h.to_u64().expect("wire-encodable generation");
         // kind tag in top byte
         assert_eq!((packed >> 56) as u8, HandleKind::Map.tag());
         assert_eq!(((packed >> 48) & 0xFF) as u8, RuntimeId::Native.tag());
@@ -516,7 +552,7 @@ mod tests {
     fn from_u64_roundtrip() {
         let reg = HandleRegistry::new(RuntimeId::Native);
         let h = reg.acquire(HandleKind::Foreign).unwrap();
-        let packed = h.to_u64();
+        let packed = h.to_u64().expect("wire-encodable generation");
         let unpacked = Handle::from_u64(packed).expect("should unpack");
         assert_eq!(unpacked.kind(), HandleKind::Foreign);
         assert_eq!(unpacked.runtime(), RuntimeId::Native);
@@ -613,20 +649,46 @@ mod tests {
     }
 
     #[test]
-    fn from_u64_generation_truncation_documented() {
-        // to_u64 truncates generation to 16 bits. Verify the behavior
-        // is consistent: a handle with generation > 0xFFFF roundtrips
-        // with truncated generation.
-        let h = Handle {
+    fn to_u64_rejects_generation_beyond_wire_limit() {
+        // Audit fix 2026-08-05 (full audit §12): to_u64 packs generation
+        // into 16 bits but the registry counts to 2^32, so a truncated
+        // generation would collide after 65536 reuses of one slot (ABA).
+        // Packing must fail closed at the boundary, never truncate.
+        let over_limit = Handle {
             kind: HandleKind::List,
             runtime: RuntimeId::Interp,
             index: 42,
-            generation: 0x1_2345, // > 16 bits
+            generation: MAX_WIRE_GENERATION + 1, // 0x1_0000
         };
-        let packed = h.to_u64();
-        let unpacked = Handle::from_u64(packed).unwrap();
-        // Generation is truncated to 16 bits
-        assert_eq!(unpacked.generation(), 0x2345);
-        assert_ne!(unpacked, h); // NOT equal due to truncation
+        assert_eq!(
+            over_limit.to_u64(),
+            Err(HandleError::GenerationNotWireEncodable {
+                generation: MAX_WIRE_GENERATION + 1,
+            })
+        );
+
+        // Deep in the overflow region (would truncate to 0x2345).
+        let deep = Handle {
+            kind: HandleKind::List,
+            runtime: RuntimeId::Interp,
+            index: 42,
+            generation: 0x1_2345,
+        };
+        assert!(matches!(
+            deep.to_u64(),
+            Err(HandleError::GenerationNotWireEncodable {
+                generation: 0x1_2345
+            })
+        ));
+
+        // Boundary value itself still packs, and round-trips exactly.
+        let at_limit = Handle {
+            kind: HandleKind::List,
+            runtime: RuntimeId::Interp,
+            index: 42,
+            generation: MAX_WIRE_GENERATION,
+        };
+        let packed = at_limit.to_u64().expect("limit value is encodable");
+        assert_eq!(Handle::from_u64(packed), Some(at_limit));
     }
 }

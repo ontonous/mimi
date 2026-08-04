@@ -32,7 +32,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Built-in Result<T,E> uses {i1, T, i64} (3 fields),
         // built-in Option<T> uses {i1, T} (2 fields),
         // user-defined enums use {i32, T} (2 fields, from register_type_def).
-        let inner_type_name = match inner {
+        // Match on the unlocated form: parser-produced subexpressions may be
+        // wrapped in Expr::Located, and bare-pattern probes silently miss them.
+        let inner_type_name = match inner.unlocated() {
             Expr::Ident(name) => self.var_type_names.get(name).cloned(),
             Expr::Call(callee, _) => {
                 if let Expr::Ident(fname) = callee.unlocated() {
@@ -44,16 +46,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                     None
                 }
             }
+            // full-audit 2026-08-05 §7: `?` on a record FIELD (e.g. `self.res?`)
+            // previously fell through with no type probe, so a 3-field Result
+            // defaulted to the 2-field Option layout and the Err path fed the
+            // OK slot to mimi_try_exit. Recover the declared field type from
+            // the owner record so Result-ness (and string errors) resolve.
+            Expr::Field(obj, field_name) => {
+                let obj_type = self.infer_object_type(obj, vars);
+                let base_name = match obj_type.find('<') {
+                    Some(pos) => &obj_type[..pos],
+                    None => obj_type.as_str(),
+                };
+                self.type_defs.get(base_name).and_then(|td| match &td.kind {
+                    TypeDefKind::Record(fields) => fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|f| crate::core::fmt_type(&f.ty)),
+                    _ => None,
+                })
+            }
             _ => None,
         };
-        let is_user_enum = inner_type_name
+        let mut is_user_enum = inner_type_name
             .as_ref()
             .map(|tn| self.type_defs.contains_key(tn))
             .unwrap_or(false);
-        let is_result = inner_type_name
+        let mut is_result = inner_type_name
             .as_ref()
             .map(|tn| tn.starts_with("Result<") || tn == "Result")
             .unwrap_or(false);
+
+        // Shape fallback (mirrors compile_try_rejected's field-count probe):
+        // when the value is a struct whose layout contradicts or refines the
+        // name probe, the LLVM shape is authoritative. 3+ fields → Result
+        // {disc, ok, err}; 2 fields with an i32 discriminant → user enum
+        // {tag, payload}; 2 fields with an i1 discriminant → Option. This
+        // fixes `?` on expressions the name probe cannot see (fields, index
+        // results, aliased types) — previously they loaded/exited through the
+        // Option layout with a wrong err slot.
+        if let BasicTypeEnum::StructType(st) = result_val.get_type() {
+            let fields = st.get_field_types();
+            if fields.len() >= 3 {
+                is_result = true;
+                is_user_enum = false;
+            } else if fields.len() == 2 {
+                if let Some(BasicTypeEnum::IntType(disc)) = fields.first() {
+                    if disc.get_bit_width() == 32 {
+                        is_user_enum = true;
+                        is_result = false;
+                    }
+                }
+            }
+        }
 
         // Build the appropriate struct type for loading
         let struct_ty_to_use = if is_user_enum {

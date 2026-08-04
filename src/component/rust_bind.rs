@@ -270,12 +270,44 @@ mod tests {
         let ir = make_ir();
         let bindings = generate_rust_bindings(&ir);
 
+        // Audit 2026-08-05: the phantom MimiString/MimiSlice structs were
+        // removed from the core registry (no runtime counterparts), so the
+        // core bindings carry no #[repr(C)] structs — only opaque handles.
+        assert!(!bindings.contains("pub struct MimiString"));
+        assert!(!bindings.contains("pub struct MimiSlice"));
+
+        // Struct emission must still work for components that define real
+        // repr(C) structs:
+        use crate::component::types::{AbiField, AbiPrimitive, AbiStruct, AbiTypeDef};
+        use crate::component::ComponentIdentity;
+        let ir_with_struct = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![],
+            imports: vec![],
+            types: vec![AbiTypeDef::Struct(AbiStruct {
+                name: "Point".to_string(),
+                fields: vec![
+                    AbiField {
+                        name: "x".to_string(),
+                        ty: AbiTypeRef::Primitive(AbiPrimitive::I32),
+                        offset: Some(0),
+                    },
+                    AbiField {
+                        name: "y".to_string(),
+                        ty: AbiTypeRef::Primitive(AbiPrimitive::I32),
+                        offset: Some(4),
+                    },
+                ],
+                is_repr_c: true,
+                size: Some(8),
+                align: Some(4),
+            })],
+        };
+        let bindings = generate_rust_bindings(&ir_with_struct);
         assert!(bindings.contains("#[repr(C)]"));
-        assert!(bindings.contains("pub struct MimiString {"));
-        assert!(bindings.contains("pub data: *mut u8,"));
-        assert!(bindings.contains("pub len: usize,"));
-        assert!(bindings.contains("pub capacity: usize,"));
-        assert!(bindings.contains("pub struct MimiSlice {"));
+        assert!(bindings.contains("pub struct Point {"));
+        assert!(bindings.contains("pub x: i32,"));
+        assert!(bindings.contains("pub y: i32,"));
     }
 
     #[test]
@@ -294,9 +326,13 @@ mod tests {
         let bindings = generate_rust_bindings(&ir);
 
         assert!(bindings.contains("extern \"C\" {"));
-        assert!(bindings.contains("pub fn mimi_rc_alloc(size: usize) -> isize;"));
-        assert!(bindings.contains("pub fn mimi_rc_retain(ptr: isize);"));
-        assert!(bindings.contains("pub fn mimi_timestamp() -> i64;"));
+        // Audit fix 2026-08-05: mimi_rc_alloc really is (size: i64) -> *mut c_void
+        assert!(bindings.contains("pub fn mimi_rc_alloc(size: i64) -> *mut u8;"));
+        assert!(bindings.contains("pub fn mimi_rc_retain(ptr: *mut u8);"));
+        // mimi_timestamp was phantom; the real time source is mimi_now.
+        assert!(bindings.contains("pub fn mimi_now() -> i64;"));
+        // Corrected real signature (capability.rs:34).
+        assert!(bindings.contains("pub fn mimi_cap_register(name: *mut u8) -> i64;"));
     }
 
     #[test]

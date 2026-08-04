@@ -48,23 +48,33 @@ run_ffi_test() {
     case "$expected" in
         "z3-pass")
             # Phase A: Z3 静态验证（合约 consistency，不涉及 C 实现）
+            local exit_code=0
             local output=""
-            output=$("$MIMI_BIN" verify "$mimi_file" 2>&1) || true
-            # Z3 verification should never fail for consistent contracts
-            if echo "$output" | grep -qi "✗\|failed\|unsatisfiable"; then
+            output=$("$MIMI_BIN" verify "$mimi_file" 2>&1) || exit_code=$?
+            # 正向断言成功，而非"未见失败标记"：
+            #   1) verify 退出码必须为 0 —— Disproven/inconclusive/"Z3 solver
+            #      not available" 均非零退出（src/main/verify.rs + main.rs:517-520）；
+            #   2) 输出必须非空且含显式成功标记：src/main/verify.rs 的
+            #      "N/M verified" 汇总行或 "No contracts to verify"。
+            # 旧逻辑只看 absence-of-failure，verifier 崩溃/"Z3 not found" 也会 PASS。
+            if [ "$exit_code" -eq 0 ] && [ -n "$output" ] \
+                && echo "$output" | grep -qiE 'verified|no contracts to verify'; then
+                PASSED=$((PASSED + 1))
+                log_pass "$name (Z3 verified)"
+            else
                 FAILED=$((FAILED + 1))
                 log_fail "$name (Z3 verify expected pass, got failure)"
                 echo "    $output"
-            else
-                PASSED=$((PASSED + 1))
-                log_pass "$name (Z3 verified)"
             fi
             ;;
         "runtime-pass")
             # Phase B: 运行时验证，C 实现满足合约
+            # exit_code 必须先初始化为 0 并在 if 中引用：赋值语句自身状态恒为 0，
+            # 旧代码 `if [ $? -eq 0 ]` 测的是赋值状态而非二进制退出码（恒真）。
+            local exit_code=0
             local output=""
             output=$("$MIMI_BIN" run --verify-ffi "$mimi_file" 2>&1) || exit_code=$?
-            if [ $? -eq 0 ]; then
+            if [ "$exit_code" -eq 0 ]; then
                 PASSED=$((PASSED + 1))
                 log_pass "$name (runtime passed)"
             else
@@ -75,9 +85,14 @@ run_ffi_test() {
             ;;
         "runtime-fail")
             # Phase B: 运行时验证，C 实现故意违反合约
+            local exit_code=0
             local output=""
             output=$("$MIMI_BIN" run --verify-ffi "$mimi_file" 2>&1) || exit_code=$?
-            if echo "$output" | grep -qi "ensures\|requires\|violation\|failed\|assert"; then
+            # 违约被检出的判据：运行必须失败（退出码非零，违约错误经
+            # src/interp/ffi_runtime.rs 的 "FFI contract violation" → Err → exit 1）
+            # 且输出必须带合约违约标记。仅凭标记或仅凭退出码都不充分。
+            if [ "$exit_code" -ne 0 ] \
+                && echo "$output" | grep -qi "ensures\|requires\|violation\|failed\|assert"; then
                 PASSED=$((PASSED + 1))
                 log_pass "$name (runtime correctly caught violation)"
             else

@@ -145,7 +145,21 @@ fn restore_handlers(saved: &SavedHandlers) {
 /// If the closure calls back into `call_guarded` (e.g. C callback → Mimi → FFI),
 /// the inner call runs WITHOUT signal protection (returns the closure result
 /// directly). This avoids deadlock on GUARD_LOCK and is acceptable because
-/// the outer call already has a recovery point active.
+/// the outer call already has a recovery point active. A panic in the inner
+/// (re-entrant) closure unwinds into the OUTER call's `catch_unwind`, which
+/// performs the state cleanup described below.
+///
+/// # Panic safety (2026-08-05 audit fix)
+/// The closure invocation is wrapped in `std::panic::catch_unwind`. If the
+/// closure panics (a Rust unwind, not a C signal), unwinding straight up
+/// would skip the cleanup below and leave the process permanently poisoned:
+/// `crash_handler` still installed, `RECOVERY_BUF` pointing at a dead stack
+/// frame, and `IN_GUARDED_CALL` stuck true — the next SIGSEGV would then
+/// `siglongjmp` into dead stack. On unwind we therefore: null out
+/// `RECOVERY_BUF` (so the handler's fast path cannot reuse it; the next
+/// guarded call must re-establish it), clear `IN_GUARDED_CALL`, restore the
+/// saved signal handlers, and then resume the unwind via
+/// `std::panic::resume_unwind` (the caller observes the original panic).
 pub(crate) fn call_guarded<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce() -> R,
@@ -180,7 +194,29 @@ where
 
             if sig == 0 {
                 // Initial call: execute the protected closure.
-                Ok(f())
+                //
+                // Audit fix (signal_guard.rs:149-208): intercept Rust
+                // panics. A bare unwind would skip the cleanup after
+                // JMP_BUF.with(..) and leave crash_handler installed with
+                // RECOVERY_BUF pointing at this dying frame and
+                // IN_GUARDED_CALL stuck true — the next SIGSEGV would
+                // siglongjmp into dead stack. AssertUnwindSafe: the closure
+                // borrows nothing whose invariants we must re-check here;
+                // any state it touched is leaked per the documented
+                // "resources acquired before the crash are leaked"
+                // limitation, same as the signal (longjmp) path.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+                    Ok(v) => Ok(v),
+                    Err(payload) => {
+                        // Neutralize the guard state BEFORE resuming the
+                        // unwind so the signal handler can never longjmp
+                        // into this frame once it unwinds.
+                        RECOVERY_BUF.with(|r| r.set(std::ptr::null_mut()));
+                        IN_GUARDED_CALL.with(|flag| flag.set(false));
+                        restore_handlers(&saved);
+                        std::panic::resume_unwind(payload)
+                    }
+                }
             } else {
                 // Signal caught: siglongjmp returned here with the signal number.
                 let sig_name = match sig {
@@ -295,5 +331,50 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("SIGSEGV"));
+    }
+
+    #[test]
+    fn signal_guard_panic_leaves_clean_state() {
+        // 2026-08-05 audit fix: a panic inside call_guarded must not poison
+        // the process-wide signal state. Before the fix the unwind skipped
+        // cleanup, leaving IN_GUARDED_CALL stuck true and RECOVERY_BUF
+        // dangling at a dead frame — the next SIGSEGV would siglongjmp into
+        // dead stack.
+        let r = std::panic::catch_unwind(|| {
+            let _ = call_guarded(|| -> i32 { panic!("deliberate audit test panic") });
+        });
+        assert!(r.is_err(), "the panic must propagate to the caller");
+
+        // Guard state must be clean on this thread after the unwind.
+        IN_GUARDED_CALL.with(|flag| assert!(!flag.get()));
+        RECOVERY_BUF.with(|rec| assert!(rec.get().is_null()));
+
+        // And a subsequent guarded call must still catch real crashes.
+        // (With IN_GUARDED_CALL stuck true this would run unprotected and
+        // kill the test process instead of returning Err.)
+        let result = call_guarded(|| -> i32 {
+            // SAFETY: deliberate null dereference to verify the signal
+            // guard still recovers after a panicked guarded call.
+            unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SIGSEGV"));
+    }
+
+    #[test]
+    fn signal_guard_reentrant_panic_cleaned_by_outer() {
+        // A panic in a re-entrant (inner) closure unwinds into the outer
+        // call's catch_unwind, which performs the cleanup.
+        let r = std::panic::catch_unwind(|| {
+            let _ = call_guarded(|| -> i32 {
+                let _inner = call_guarded(|| -> i32 { panic!("inner panic") });
+                0
+            });
+        });
+        assert!(r.is_err());
+        IN_GUARDED_CALL.with(|flag| assert!(!flag.get()));
+        RECOVERY_BUF.with(|rec| assert!(rec.get().is_null()));
+        // Sanity: guard still usable afterwards.
+        assert_eq!(call_guarded(|| 7), Ok(7));
     }
 }

@@ -52,6 +52,10 @@ pub enum LexerError {
         line: usize,
         col: usize,
     },
+    InvalidDigitSeparator {
+        line: usize,
+        col: usize,
+    },
 }
 
 impl LexerError {
@@ -68,7 +72,8 @@ impl LexerError {
             | LexerError::UnterminatedFStringEscape { line, col }
             | LexerError::UnterminatedInterpolation { line, col }
             | LexerError::UnterminatedBlockComment { line, col }
-            | LexerError::InvalidEscape { line, col, .. } => (*line, *col),
+            | LexerError::InvalidEscape { line, col, .. }
+            | LexerError::InvalidDigitSeparator { line, col } => (*line, *col),
         }
     }
 }
@@ -121,6 +126,13 @@ impl fmt::Display for LexerError {
             }
             LexerError::InvalidEscape { escape, line, col } => {
                 write!(f, "invalid {} escape at {}:{}", escape, line, col)
+            }
+            LexerError::InvalidDigitSeparator { line, col } => {
+                write!(
+                    f,
+                    "invalid digit separator '_' at {}:{} (separators must sit between two digits)",
+                    line, col
+                )
             }
         }
     }
@@ -184,4 +196,8 @@ pub fn invalid_escape(escape: &str, line: usize, col: usize) -> LexerError {
         line,
         col,
     }
+}
+
+pub fn invalid_digit_separator(line: usize, col: usize) -> LexerError {
+    LexerError::InvalidDigitSeparator { line, col }
 }

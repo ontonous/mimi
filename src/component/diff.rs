@@ -271,6 +271,20 @@ mod tests {
         MimiAbi::from_component_ir(&ir)
     }
 
+    /// The core registry no longer ships struct typedefs (phantom
+    /// MimiString/MimiSlice removed, audit 2026-08-05), so type-diff tests
+    /// build their own struct ABI.
+    fn make_abi_with_struct() -> MimiAbi {
+        let mut abi = make_abi();
+        abi.types.push(crate::component::serialize::MimiAbiType::Struct {
+            name: "AuditStruct".to_string(),
+            fields: vec![],
+            size: Some(24),
+            align: Some(8),
+        });
+        abi
+    }
+
     #[test]
     fn identical_abis_no_changes() {
         let abi = make_abi();
@@ -320,15 +334,16 @@ mod tests {
     fn changed_return_type_is_breaking() {
         let old = make_abi();
         let mut new = make_abi();
-        // Change mimi_timestamp return type from I64 to I32
-        if let Some(sym) = new.exports.iter_mut().find(|s| s.name == "mimi_timestamp") {
+        // Change mimi_now return type from I64 to I32 (mimi_timestamp was
+        // phantom and removed, audit 2026-08-05; mimi_now is the real source).
+        if let Some(sym) = new.exports.iter_mut().find(|s| s.name == "mimi_now") {
             sym.ret = crate::component::serialize::MimiAbiTypeRef::Primitive("I32".to_string());
         }
 
         let diff = diff_abi(&old, &new);
         assert!(diff.has_breaking_changes());
         assert!(diff.changes.iter().any(
-            |c| matches!(c, AbiChange::ChangedExport { name, .. } if name == "mimi_timestamp")
+            |c| matches!(c, AbiChange::ChangedExport { name, .. } if name == "mimi_now")
         ));
     }
 
@@ -355,16 +370,16 @@ mod tests {
 
     #[test]
     fn removed_type_is_breaking() {
-        let old = make_abi();
-        let mut new = make_abi();
-        new.types.retain(|t| type_name(t) != "MimiString");
+        let old = make_abi_with_struct();
+        let mut new = make_abi_with_struct();
+        new.types.retain(|t| type_name(t) != "AuditStruct");
 
         let diff = diff_abi(&old, &new);
         assert!(diff.has_breaking_changes());
         assert!(diff
             .changes
             .iter()
-            .any(|c| matches!(c, AbiChange::RemovedType(n) if n == "MimiString")));
+            .any(|c| matches!(c, AbiChange::RemovedType(n) if n == "AuditStruct")));
     }
 
     #[test]
@@ -426,12 +441,12 @@ mod tests {
 
     #[test]
     fn changed_type_definition_is_breaking() {
-        let old = make_abi();
-        let mut new = make_abi();
-        // Change MimiString struct size
+        let old = make_abi_with_struct();
+        let mut new = make_abi_with_struct();
+        // Change AuditStruct size
         for ty in &mut new.types {
             if let crate::component::serialize::MimiAbiType::Struct { name, size, .. } = ty {
-                if name == "MimiString" {
+                if name == "AuditStruct" {
                     *size = Some(32); // was 24
                 }
             }
@@ -442,7 +457,7 @@ mod tests {
         assert!(diff
             .changes
             .iter()
-            .any(|c| matches!(c, AbiChange::ChangedType { name, .. } if name == "MimiString")));
+            .any(|c| matches!(c, AbiChange::ChangedType { name, .. } if name == "AuditStruct")));
     }
 
     // ── Attack tests (0.31.37) ──

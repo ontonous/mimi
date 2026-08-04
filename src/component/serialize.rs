@@ -681,8 +681,8 @@ mod tests {
         assert_eq!(sym1, sym2);
 
         // Spot-check a type
-        let ty1 = ir1.type_def("MimiString").expect("should exist");
-        let ty2 = ir2.type_def("MimiString").expect("should exist");
+        let ty1 = ir1.type_def("ListHandle").expect("should exist");
+        let ty2 = ir2.type_def("ListHandle").expect("should exist");
         assert_eq!(ty1, ty2);
     }
 

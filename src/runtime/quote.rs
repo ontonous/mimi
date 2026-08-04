@@ -197,6 +197,27 @@ pub extern "C" fn mimi_quote_new_list(
         return std::ptr::null_mut();
     }
     let len = len.max(0) as usize;
+    // Audit fix (quote.rs argc truncation): `argc` is an i32 field; the old
+    // code silently truncated `len as i32`, which desynchronized argc from
+    // data2/children_count and leaked children past the truncated count.
+    // Reject oversized input instead. Ownership of the children transferred
+    // to us with the call, so on the failure path they must be dropped.
+    let argc = match i32::try_from(len) {
+        Ok(v) => v,
+        Err(_) => {
+            if !children.is_null() && len > 0 {
+                // SAFETY: caller guarantees `children` points to `len` valid
+                // `*mut MimiQuotedAst` pointers, each owned by the new node;
+                // rejecting the node means we must consume that ownership.
+                unsafe {
+                    for &child in std::slice::from_raw_parts(children, len) {
+                        mimi_quote_drop(child);
+                    }
+                }
+            }
+            return std::ptr::null_mut();
+        }
+    };
     // SAFETY: caller guarantees `children` points to `len` valid
     // `*mut MimiQuotedAst` pointers, each owned by the new node.
     let vec: Vec<*mut MimiQuotedAst> = if children.is_null() || len == 0 {
@@ -208,7 +229,7 @@ pub extern "C" fn mimi_quote_new_list(
     let ptr = Box::into_raw(boxed) as i64;
     let node = Box::new(MimiQuotedAst {
         tag,
-        argc: len as i32,
+        argc,
         data0: ptr,
         data1: 0,
         data2: len as i64,
@@ -218,37 +239,57 @@ pub extern "C" fn mimi_quote_new_list(
     node
 }
 
-/// Recursively free a QuotedAst subtree, including any children-array
-/// blobs. Safe to call on null (no-op).
+/// Free a QuotedAst subtree, including any children-array blobs. Safe to
+/// call on null (no-op); idempotent for already-dropped nodes (live-quote
+/// registry).
+///
+/// Audit fix (quote.rs unbounded recursion): implemented iteratively with an
+/// explicit heap work stack instead of recursion — a deeply nested quote
+/// tree (one child per node) used to overflow the stack here.
 #[no_mangle]
 pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
-    if !quote_take_live(node) {
-        return;
+    // Explicit work stack: nodes whose children still need processing.
+    let mut work: Vec<*mut MimiQuotedAst> = Vec::new();
+    if quote_take_live(node) {
+        work.push(node);
     }
-    // SAFETY: `node` was created by `mimi_quote_new_*` and not yet
-    // dropped.
-    unsafe {
-        let n = Box::from_raw(node);
-        if n.argc <= 0 {
-            return;
-        }
-        if n.argc == 1 {
-            let child = n.data0 as *mut MimiQuotedAst;
-            mimi_quote_drop(child);
-        } else if n.argc == 2 {
-            mimi_quote_drop(n.data0 as *mut MimiQuotedAst);
-            mimi_quote_drop(n.data1 as *mut MimiQuotedAst);
-        } else {
-            // Variable-arity: data0 is a pointer to a `Vec<*mut MimiQuotedAst>`.
-            // M9/C15: always attempt Box::from_raw for argc>2. This value was
-            // created by mimi_quote_new_list which always uses Box + into_raw,
-            // so the pointer is always valid. We only skip if null.
-            let arr_ptr = n.data0 as *mut Vec<*mut MimiQuotedAst>;
-            if !arr_ptr.is_null() {
-                // SAFETY: `arr_ptr` was created by `mimi_quote_new_list`.
-                let vec = Box::from_raw(arr_ptr);
-                for &child in vec.iter() {
-                    mimi_quote_drop(child);
+    while let Some(n) = work.pop() {
+        // SAFETY: `n` was created by `mimi_quote_new_*` and its live token
+        // was taken (at push time), so this call holds exclusive ownership
+        // and the node has not been dropped yet.
+        unsafe {
+            let nn = Box::from_raw(n);
+            if nn.argc <= 0 {
+                continue;
+            }
+            if nn.argc == 1 {
+                let child = nn.data0 as *mut MimiQuotedAst;
+                if quote_take_live(child) {
+                    work.push(child);
+                }
+            } else if nn.argc == 2 {
+                let c0 = nn.data0 as *mut MimiQuotedAst;
+                let c1 = nn.data1 as *mut MimiQuotedAst;
+                if quote_take_live(c0) {
+                    work.push(c0);
+                }
+                if quote_take_live(c1) {
+                    work.push(c1);
+                }
+            } else {
+                // Variable-arity: data0 is a pointer to a `Vec<*mut MimiQuotedAst>`.
+                // M9/C15: always attempt Box::from_raw for argc>2. This value was
+                // created by mimi_quote_new_list which always uses Box + into_raw,
+                // so the pointer is always valid. We only skip if null.
+                let arr_ptr = nn.data0 as *mut Vec<*mut MimiQuotedAst>;
+                if !arr_ptr.is_null() {
+                    // SAFETY: `arr_ptr` was created by `mimi_quote_new_list`.
+                    let vec = Box::from_raw(arr_ptr);
+                    for &child in vec.iter() {
+                        if quote_take_live(child) {
+                            work.push(child);
+                        }
+                    }
                 }
             }
         }

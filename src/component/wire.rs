@@ -390,17 +390,126 @@ impl WireType {
         }
     }
 
-    /// Decode an optional value from wire bytes.
+    /// Decode one self-delimiting value of this type from the head of
+    /// `data`, returning `(value_bytes, bytes_consumed)`.
     ///
-    /// Returns `(Some(value), bytes_consumed)` or `(None, 1)`.
-    /// Returns `None` (the outer Option) if the data is empty.
-    pub fn decode_optional(data: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+    /// Audit fix 2026-08-05 (full audit §12): decoding must report the
+    /// exact number of bytes consumed. The previous `decode_optional`
+    /// consumed `data.len()` — everything to the end of the buffer — so an
+    /// `Optional<variable T>` followed by another field misparsed: the next
+    /// field's bytes were swallowed into the optional's payload. Decoding is
+    /// type-driven now, mirroring the type-driven encoding, so every
+    /// composite decoder (Optional, Result, Array, Map) lands on exact
+    /// offsets.
+    ///
+    /// Returns `None` on truncation, bad tags, or nesting deeper than 128
+    /// (stack-overflow guard; also bounds adversarial type bombs).
+    pub fn decode_value(&self, data: &[u8]) -> Option<(Vec<u8>, usize)> {
+        self.decode_value_depth(data, 0)
+    }
+
+    fn decode_value_depth(&self, data: &[u8], depth: usize) -> Option<(Vec<u8>, usize)> {
+        if depth > 128 {
+            return None;
+        }
+        match self {
+            ty @ (WireType::Bool
+            | WireType::I8
+            | WireType::I16
+            | WireType::I32
+            | WireType::I64
+            | WireType::U8
+            | WireType::U16
+            | WireType::U32
+            | WireType::U64
+            | WireType::F32
+            | WireType::F64
+            | WireType::Handle) => {
+                let n = ty.fixed_size().unwrap_or(0);
+                if data.len() < n {
+                    return None;
+                }
+                Some((data[..n].to_vec(), n))
+            }
+            WireType::Unit => Some((Vec::new(), 0)),
+            WireType::String => {
+                let (_, consumed) = Self::decode_string(data)?;
+                Some((data[..consumed].to_vec(), consumed))
+            }
+            WireType::Bytes => {
+                let (_, consumed) = Self::decode_bytes(data)?;
+                Some((data[..consumed].to_vec(), consumed))
+            }
+            WireType::Array(elem) => {
+                let (count, mut consumed) = Self::decode_array_header(data)?;
+                for _ in 0..count {
+                    if consumed > data.len() {
+                        return None;
+                    }
+                    let (_, n) = elem.decode_value_depth(&data[consumed..], depth + 1)?;
+                    consumed = consumed.checked_add(n)?;
+                }
+                Some((data[..consumed].to_vec(), consumed))
+            }
+            WireType::Map(k, v) => {
+                let (count, mut consumed) = Self::decode_map_header(data)?;
+                for _ in 0..count {
+                    if consumed > data.len() {
+                        return None;
+                    }
+                    let (_, kn) = k.decode_value_depth(&data[consumed..], depth + 1)?;
+                    consumed = consumed.checked_add(kn)?;
+                    if consumed > data.len() {
+                        return None;
+                    }
+                    let (_, vn) = v.decode_value_depth(&data[consumed..], depth + 1)?;
+                    consumed = consumed.checked_add(vn)?;
+                }
+                Some((data[..consumed].to_vec(), consumed))
+            }
+            WireType::Optional(inner) => {
+                let (_, consumed) = Self::decode_optional_depth(inner, data, depth + 1)?;
+                Some((data[..consumed].to_vec(), consumed))
+            }
+            WireType::Result(ok, err) => {
+                let (_, consumed) = Self::decode_result_depth(ok, err, data, depth + 1)?;
+                Some((data[..consumed].to_vec(), consumed))
+            }
+        }
+    }
+
+    /// Decode an optional value from wire bytes given the **inner type**.
+    ///
+    /// Returns `(Some(value), bytes_consumed)` or `(None, 1)`. The consumed
+    /// count is exact: `1 + encoded_size(inner)` for `Some`, `1` for `None`.
+    /// Returns `None` (the outer Option) if the data is empty, the tag is
+    /// invalid, or the inner value is truncated.
+    ///
+    /// Audit fix 2026-08-05: the inner type is required because only the
+    /// type knows where a variable-length payload ends; the old type-blind
+    /// decoder consumed the rest of the buffer and corrupted any field that
+    /// followed the optional.
+    pub fn decode_optional(inner: &WireType, data: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+        Self::decode_optional_depth(inner, data, 0)
+    }
+
+    fn decode_optional_depth(
+        inner: &WireType,
+        data: &[u8],
+        depth: usize,
+    ) -> Option<(Option<Vec<u8>>, usize)> {
+        if depth > 128 {
+            return None; // nesting bomb guard
+        }
         if data.is_empty() {
             return None;
         }
         match data[0] {
             0 => Some((None, 1)),
-            1 => Some((Some(data[1..].to_vec()), data.len())),
+            1 => {
+                let (value, consumed) = inner.decode_value_depth(&data[1..], depth + 1)?;
+                Some((Some(value), consumed.checked_add(1)?))
+            }
             _ => None,
         }
     }
@@ -459,6 +568,39 @@ impl WireType {
             _ => None,
         }
     }
+
+    /// Decode a full Result value (tag + payload) given both payload types.
+    ///
+    /// Returns `(Ok(payload), consumed)` / `(Err(payload), consumed)` with an
+    /// **exact** consumed count: `1 + encoded_size(active payload type)`.
+    /// Audit fix 2026-08-05: same consumed-bytes discipline as
+    /// [`WireType::decode_optional`] — the payload boundary comes from the
+    /// type, not from "rest of buffer".
+    pub fn decode_result(
+        ok_ty: &WireType,
+        err_ty: &WireType,
+        data: &[u8],
+    ) -> Option<(Result<Vec<u8>, Vec<u8>>, usize)> {
+        Self::decode_result_depth(ok_ty, err_ty, data, 0)
+    }
+
+    fn decode_result_depth(
+        ok_ty: &WireType,
+        err_ty: &WireType,
+        data: &[u8],
+        depth: usize,
+    ) -> Option<(Result<Vec<u8>, Vec<u8>>, usize)> {
+        if depth > 128 {
+            return None; // nesting bomb guard
+        }
+        let (is_err, tag_consumed) = Self::decode_result_tag(data)?;
+        let payload_ty = if is_err { err_ty } else { ok_ty };
+        let (payload, payload_consumed) =
+            payload_ty.decode_value_depth(&data[tag_consumed..], depth + 1)?;
+        let total = tag_consumed.checked_add(payload_consumed)?;
+        let value = if is_err { Err(payload) } else { Ok(payload) };
+        Some((value, total))
+    }
 }
 
 /// Wire field: a field in a wire message.
@@ -488,10 +630,12 @@ pub struct WireSchema {
 impl WireSchema {
     /// Validate schema consistency.
     ///
-    /// Checks:
+    /// Checks (all enforced; audit fix 2026-08-05 made check 3 real):
     /// 1. No duplicate field indices
     /// 2. No duplicate field names
-    /// 3. Field indices are contiguous from 0 (recommended, not required)
+    /// 3. Field indices are contiguous from 0 — the sorted unique indices
+    ///    must be exactly `0..fields.len()`. Skipped when duplicates were
+    ///    found (the duplicate report is the actionable one).
     ///
     /// Returns a list of validation errors (empty = consistent).
     pub fn validate(&self) -> Vec<WireSchemaError> {
@@ -508,6 +652,24 @@ impl WireSchema {
             }
         }
 
+        // Index-contiguity check (audit fix 2026-08-05): previously this was
+        // documented but never implemented. Positional wire encoding relies
+        // on dense 0-based indices; a gap makes field positions ambiguous.
+        if errors.is_empty() {
+            let mut indices: Vec<u32> = self.fields.iter().map(|f| f.index).collect();
+            indices.sort_unstable();
+            for (pos, &index) in indices.iter().enumerate() {
+                let expected = u32::try_from(pos).unwrap_or(u32::MAX);
+                if index != expected {
+                    errors.push(WireSchemaError::NonContiguousIndex {
+                        expected,
+                        got: index,
+                    });
+                    break;
+                }
+            }
+        }
+
         errors
     }
 }
@@ -519,6 +681,10 @@ pub enum WireSchemaError {
     DuplicateIndex(u32),
     /// Duplicate field name.
     DuplicateName(String),
+    /// Field indices are not contiguous from 0: at position `expected`
+    /// (0-based, sorted) the schema carries index `got` (a gap or a
+    /// non-zero start). Audit fix 2026-08-05.
+    NonContiguousIndex { expected: u32, got: u32 },
 }
 
 /// Wire error.
@@ -739,6 +905,103 @@ mod tests {
             .any(|e| matches!(e, WireSchemaError::DuplicateName(n) if n == "x")));
     }
 
+    /// Audit fix 2026-08-05: the index-contiguity check documented on
+    /// `validate` was never implemented. It is now enforced.
+    #[test]
+    fn wire_schema_validate_index_contiguity() {
+        // Gap: indices 0, 1, 3 (missing 2).
+        let schema = WireSchema {
+            name: "gap".to_string(),
+            version: 1,
+            fields: vec![
+                WireField {
+                    name: "a".to_string(),
+                    ty: WireType::I32,
+                    index: 0,
+                    optional: false,
+                },
+                WireField {
+                    name: "b".to_string(),
+                    ty: WireType::I32,
+                    index: 1,
+                    optional: false,
+                },
+                WireField {
+                    name: "c".to_string(),
+                    ty: WireType::I32,
+                    index: 3, // gap at 2
+                    optional: false,
+                },
+            ],
+        };
+        let errors = schema.validate();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                WireSchemaError::NonContiguousIndex {
+                    expected: 2,
+                    got: 3
+                }
+            )),
+            "expected contiguity error at expected=2 got=3, got {errors:?}"
+        );
+
+        // Non-zero start: indices 1, 2, 3.
+        let schema = WireSchema {
+            name: "start_at_one".to_string(),
+            version: 1,
+            fields: vec![
+                WireField {
+                    name: "a".to_string(),
+                    ty: WireType::I32,
+                    index: 1,
+                    optional: false,
+                },
+                WireField {
+                    name: "b".to_string(),
+                    ty: WireType::I32,
+                    index: 2,
+                    optional: false,
+                },
+            ],
+        };
+        let errors = schema.validate();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            WireSchemaError::NonContiguousIndex {
+                expected: 0,
+                got: 1
+            }
+        )));
+
+        // Order-independent: declared out of order but the set is 0..=2.
+        let schema = WireSchema {
+            name: "unordered_ok".to_string(),
+            version: 1,
+            fields: vec![
+                WireField {
+                    name: "a".to_string(),
+                    ty: WireType::I32,
+                    index: 2,
+                    optional: false,
+                },
+                WireField {
+                    name: "b".to_string(),
+                    ty: WireType::I32,
+                    index: 0,
+                    optional: false,
+                },
+                WireField {
+                    name: "c".to_string(),
+                    ty: WireType::I32,
+                    index: 1,
+                    optional: false,
+                },
+            ],
+        };
+        assert!(schema.validate().is_empty());
+    }
+
     #[test]
     fn wire_type_primitive_encode_decode_roundtrip() {
         // I32
@@ -828,23 +1091,147 @@ mod tests {
         // None
         let encoded = WireType::encode_optional(None);
         assert_eq!(encoded, vec![0]);
-        let (decoded, consumed) = WireType::decode_optional(&encoded).unwrap();
+        let (decoded, consumed) = WireType::decode_optional(&WireType::I64, &encoded).unwrap();
         assert_eq!(decoded, None);
         assert_eq!(consumed, 1);
 
-        // Some
+        // Some (fixed-size inner)
         let value = vec![1, 2, 3, 4];
         let encoded = WireType::encode_optional(Some(&value));
         assert_eq!(encoded[0], 1);
         assert_eq!(&encoded[1..], &value);
-        let (decoded, consumed) = WireType::decode_optional(&encoded).unwrap();
+        let (decoded, consumed) = WireType::decode_optional(&WireType::I32, &encoded).unwrap();
         assert_eq!(decoded, Some(value));
         assert_eq!(consumed, 5);
+
+        // Some (length-prefixed inner: String) — consumed must be exact,
+        // not "rest of buffer" (audit fix 2026-08-05).
+        let inner = WireType::encode_string("hi").unwrap();
+        let encoded = WireType::encode_optional(Some(&inner));
+        let (decoded, consumed) = WireType::decode_optional(&WireType::String, &encoded).unwrap();
+        assert_eq!(decoded, Some(inner));
+        assert_eq!(consumed, 1 + 4 + 2); // tag + u32 len + "hi"
     }
 
     #[test]
     fn wire_optional_decode_empty() {
-        assert!(WireType::decode_optional(&[]).is_none());
+        assert!(WireType::decode_optional(&WireType::I64, &[]).is_none());
+    }
+
+    /// Audit fix 2026-08-05 regression: `Optional<variable T>` followed by
+    /// another field must decode at exact offsets. The old decoder consumed
+    /// `data.len()` and swallowed the trailing field into the payload.
+    #[test]
+    fn wire_optional_then_field_exact_offsets() {
+        // Message: [Optional<String>][I64]
+        let mut buf = Vec::new();
+        buf.extend(WireType::encode_optional(Some(
+            &WireType::encode_string("payload").unwrap(),
+        )));
+        let expected_opt_len = 1 + 4 + 7; // tag + u32 len + 7 bytes
+        assert_eq!(buf.len(), expected_opt_len);
+        buf.extend(
+            WireType::I64
+                .encode_primitive(0x5152_5354_5556_5758)
+                .unwrap(),
+        );
+
+        // Field 1: optional — exact consumed count stops before the i64.
+        let (opt, consumed1) = WireType::decode_optional(&WireType::String, &buf).unwrap();
+        assert_eq!(consumed1, expected_opt_len);
+        let (s, str_consumed) = WireType::decode_string(&opt.unwrap()).unwrap();
+        assert_eq!(s, "payload");
+        assert_eq!(str_consumed, 4 + 7);
+
+        // Field 2: i64 starts at exactly consumed1.
+        let rest = &buf[consumed1..];
+        assert_eq!(rest.len(), 8);
+        assert_eq!(
+            WireType::I64.decode_primitive(rest),
+            Some(0x5152_5354_5556_5758)
+        );
+
+        // Same message with None: consumed is exactly 1, i64 at offset 1.
+        let mut buf2 = Vec::new();
+        buf2.extend(WireType::encode_optional(None));
+        buf2.extend(WireType::I64.encode_primitive(42).unwrap());
+        let (opt2, consumed2) = WireType::decode_optional(&WireType::String, &buf2).unwrap();
+        assert_eq!(opt2, None);
+        assert_eq!(consumed2, 1);
+        assert_eq!(WireType::I64.decode_primitive(&buf2[consumed2..]), Some(42));
+
+        // Truncated inner: declared len exceeds available bytes → None.
+        let mut bad = vec![1]; // Some tag
+        bad.extend_from_slice(&100u32.to_le_bytes()); // claims 100 bytes
+        bad.extend_from_slice(b"short");
+        assert!(WireType::decode_optional(&WireType::String, &bad).is_none());
+    }
+
+    /// Audit fix 2026-08-05 regression: Result payloads decode with exact
+    /// consumed counts, driven by the active branch's type.
+    #[test]
+    fn wire_result_payload_exact_offsets() {
+        // Ok(String) followed by an I32 field.
+        let mut buf = Vec::new();
+        buf.extend(WireType::encode_result_tag(false));
+        buf.extend(WireType::encode_string("ok-value").unwrap());
+        let expected = 1 + 4 + 8;
+        buf.extend(WireType::I32.encode_primitive(7).unwrap());
+
+        let ok_ty = WireType::String;
+        let err_ty = WireType::I64;
+        let (result, consumed) = WireType::decode_result(&ok_ty, &err_ty, &buf).unwrap();
+        assert_eq!(consumed, expected);
+        let payload = result.expect("Ok branch");
+        let (s, _) = WireType::decode_string(&payload).unwrap();
+        assert_eq!(s, "ok-value");
+        // Trailing field untouched.
+        assert_eq!(WireType::I32.decode_primitive(&buf[consumed..]), Some(7));
+
+        // Err(I64) branch: tag + 8 bytes.
+        let mut buf_err = Vec::new();
+        buf_err.extend(WireType::encode_result_tag(true));
+        buf_err.extend(WireType::I64.encode_primitive(0xDEAD).unwrap());
+        let (result, consumed) = WireType::decode_result(&ok_ty, &err_ty, &buf_err).unwrap();
+        assert_eq!(consumed, 1 + 8);
+        assert_eq!(result.unwrap_err(), 0xDEADu64.to_le_bytes().to_vec());
+
+        // Invalid tag byte rejected.
+        assert!(WireType::decode_result(&ok_ty, &err_ty, &[2, 0, 0]).is_none());
+        assert!(WireType::decode_result(&ok_ty, &err_ty, &[]).is_none());
+    }
+
+    /// decode_value tracks exact consumption for composite types too.
+    #[test]
+    fn wire_decode_value_exact_consumption() {
+        // Array of 2 I32 followed by an I64.
+        let mut buf = WireType::encode_array_header(2);
+        buf.extend(WireType::I32.encode_primitive(1).unwrap());
+        buf.extend(WireType::I32.encode_primitive(2).unwrap());
+        buf.extend(WireType::I64.encode_primitive(9).unwrap());
+        let ty = WireType::Array(Box::new(WireType::I32));
+        let (raw, consumed) = ty.decode_value(&buf).unwrap();
+        assert_eq!(consumed, 4 + 2 * 4);
+        assert_eq!(raw, buf[..consumed]);
+        assert_eq!(WireType::I64.decode_primitive(&buf[consumed..]), Some(9));
+
+        // Map<String, I32> with 1 pair followed by an I64.
+        let mut buf = WireType::encode_map_header(1);
+        buf.extend(WireType::encode_string("k").unwrap());
+        buf.extend(WireType::I32.encode_primitive(5).unwrap());
+        buf.extend(WireType::I64.encode_primitive(11).unwrap());
+        let ty = WireType::Map(Box::new(WireType::String), Box::new(WireType::I32));
+        let (_, consumed) = ty.decode_value(&buf).unwrap();
+        assert_eq!(consumed, 4 + (4 + 1) + 4);
+        assert_eq!(WireType::I64.decode_primitive(&buf[consumed..]), Some(11));
+
+        // Unit and fixed primitives.
+        let (_, consumed) = WireType::Unit.decode_value(&[]).unwrap();
+        assert_eq!(consumed, 0);
+        let (_, consumed) = WireType::F64.decode_value(&[1u8; 16]).unwrap();
+        assert_eq!(consumed, 8);
+        // Truncation.
+        assert!(WireType::I64.decode_value(&[1, 2, 3]).is_none());
     }
 
     #[test]

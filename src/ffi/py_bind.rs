@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
-use crate::ffi::contract::{FfiArgContract, FfiContract, ERRNO_CHECK_FUNC_NAMES};
+use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// Python binding generator — produces a pybind11 `.cpp` file.
 pub struct PyBindGenerator {
@@ -184,6 +184,8 @@ impl PyBindGenerator {
         writeln!(out, "#include <cstdint>")?;
         writeln!(out, "#include <cstddef>")?;
         writeln!(out, "#include <cerrno>")?;
+        writeln!(out, "#include <cstdlib>")?;
+        writeln!(out, "#include <cstring>")?;
         writeln!(out, "#include <stdexcept>")?;
         writeln!(out, "#include <functional>")?;
         writeln!(out, "extern \"C\" {{")?;
@@ -335,8 +337,13 @@ impl PyBindGenerator {
             param_decls.push(format!("{} {}", cpp_type, param.name));
         }
 
-        let fname: &str = &func.name;
-        let check_errno = ERRNO_CHECK_FUNC_NAMES.contains(&fname);
+        // SD-3: errno policy comes from the FFI contract — the explicit
+        // #[errno] attribute is the source of truth, with the legacy
+        // ERRNO_CHECK_FUNC_NAMES fallback applied once in
+        // FfiContract::from_extern_with_caps_repr (deprecation transition).
+        // This keeps Python bindings consistent with the interpreter and
+        // codegen FFI paths, which consume the same contract.check_errno.
+        let check_errno = contract.check_errno;
 
         writeln!(out, "    // {} — {}", func_name, func.name)?;
         writeln!(
@@ -385,6 +392,18 @@ impl PyBindGenerator {
         }
 
         write!(out, "{}", callback_assignments)?;
+
+        // Document ownership handover in the generated source so downstream
+        // maintainers don't "fix" the missing post-call free into a UAF.
+        for (i, param) in func.params.iter().enumerate() {
+            if matches!(contract.args[i], FfiArgContract::StringTransfer) {
+                writeln!(
+                    out,
+                    "        // parameter '{}': ownership transferred to C (StringTransfer contract) — C must free the received buffer; the wrapper must not.",
+                    param.name
+                )?;
+            }
+        }
 
         if matches!(contract.ret, crate::ffi::contract::FfiRetContract::Unit) {
             writeln!(out, "        try {{")?;
@@ -630,10 +649,22 @@ impl PyBindGenerator {
         }
         let name = &param.name;
         match &contract.args[index] {
-            FfiArgContract::StringBorrow
-            | FfiArgContract::StringTransfer
-            | FfiArgContract::Json => {
+            // Borrowed: C only reads the buffer for the duration of the call;
+            // the std::string parameter stays alive across it.
+            FfiArgContract::StringBorrow | FfiArgContract::Json => {
                 format!("{}.c_str()", name)
+            }
+            // FfiArgContract::StringTransfer: ownership moves TO C. Hand over
+            // a heap-allocated NUL-terminated copy (malloc, so C's free(3) is
+            // the correct deallocator — mirrors the interpreter's StringTransfer
+            // marshalling in interp/ffi_runtime.rs) and NEVER free it after the
+            // call. Passing `.c_str()` of the local std::string here was a
+            // double-free/UAF: C freed a pointer into the wrapper's buffer.
+            FfiArgContract::StringTransfer => {
+                format!(
+                    "[&]() -> char* {{ char* _b = static_cast<char*>(std::malloc({n}.size() + 1)); if (!_b) throw std::runtime_error(\"FFI: malloc failed for StringTransfer argument '{n}'\"); std::memcpy(_b, {n}.c_str(), {n}.size() + 1); return _b; }}()",
+                    n = name
+                )
             }
             _ => name.clone(),
         }
@@ -650,12 +681,20 @@ impl PyBindGenerator {
             crate::ffi::contract::FfiRetContract::Unit => {
                 format!("{}({}), py::none()", func_name, args)
             }
-            crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned => {
-                // Safe nullptr handling: capture result, build std::string, then free the runtime-owned C string.
+            crate::ffi::contract::FfiRetContract::String => {
+                // BORROWED from C (FfiRetContract::String): copy into
+                // std::string but do NOT free — C retains ownership.
+                // Freeing here corrupted the C heap (the interpreter reference
+                // behavior warns instead of freeing: interp/ffi_runtime.rs).
+                format!("[&]() -> std::string {{ char* _r = {}({}); if (!_r) return std::string(); return std::string(_r); }}()", func_name, args)
+            }
+            crate::ffi::contract::FfiRetContract::StringOwned => {
+                // OWNED: copy into std::string, then free the C pointer with
+                // the documented runtime deallocator.
                 format!("[&]() -> std::string {{ char* _r = {}({}); if (!_r) return std::string(); std::string s(_r); mimi_string_free(_r); return s; }}()", func_name, args)
             }
             crate::ffi::contract::FfiRetContract::Json => {
+                // OWNED (runtime-serialized JSON): copy, then free.
                 format!("[&]() -> std::string {{ char* _r = {}({}); if (!_r) return std::string(); std::string s(_r); mimi_string_free(_r); return s; }}()", func_name, args)
             }
             _ => format!("{}({})", func_name, args),

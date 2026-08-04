@@ -2152,6 +2152,43 @@ impl<'a> Checker<'a> {
                         for (i, (arg, param_ty)) in args.iter().zip(param_types.iter()).enumerate()
                         {
                             let arg_ty = self.infer_expr(arg, scopes);
+                            // Audit 2026-08-05 (wave-1 fix 5): the E0432
+                            // linear-into-generic rejection existed on direct
+                            // global calls (below) and turbofish
+                            // (method.rs:913) but not on this local-closure
+                            // arm: `let f = generic_sink; f(cap_value)`
+                            // unified T := cap through the fresh instantiation
+                            // TypeVar and the callee's GenericParameter
+                            // (is_linear() == false) silently discarded the
+                            // value — an exactly-once escape. Mirror the
+                            // global-call scan: reject linear argument types
+                            // while the parameter still carries an unresolved
+                            // generic binder (TypeVar originating from ForAll
+                            // instantiation). Must run BEFORE unify binds the
+                            // binder. Resolution failure is treated as an open
+                            // binder (fail-closed).
+                            if self.is_linear_surface_type(&arg_ty) {
+                                let has_unresolved_binder =
+                                    match self.unification.resolve_infer(param_ty) {
+                                        Ok(resolved) => crate::core::type_folder::type_any(
+                                            &resolved,
+                                            &|candidate| matches!(candidate, Type::TypeVar(_)),
+                                        ),
+                                        Err(_) => true,
+                                    };
+                                if has_unresolved_binder {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0432,
+                                        format!(
+                                            "linear type '{}' cannot be passed as generic argument {} of '{}'; \
+                                             generic parameters are not linearly tracked (use a concrete function signature)",
+                                            fmt_type(&arg_ty),
+                                            i + 1,
+                                            name
+                                        ),
+                                    );
+                                }
+                            }
                             let coerced = is_numeric_coercion(param_ty, &arg_ty);
                             if !coerced && self.unification.unify(param_ty, &arg_ty).is_err() {
                                 self.emit_code(

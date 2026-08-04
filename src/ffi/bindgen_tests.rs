@@ -167,9 +167,15 @@ mod tests {
         // Regression: raw extern symbols must be in a submodule so wrappers can reuse function names.
         assert!(out.contains("mod ffi_raw"));
         assert!(out.contains("super::ffi_raw::add("));
-        // Regression: safe wrapper for string returns must copy and free the runtime-owned C string.
+        // Regression (corrected FFI contract): `greet` returns a BORROWED string
+        // (FfiRetContract::String) — the safe wrapper must copy it but must NOT
+        // free the C pointer; C retains ownership. mimi_string_free calls are
+        // reserved for StringOwned/Json returns (see audit_fix_bind_rust.rs).
         assert!(out.contains("std::ffi::CStr::from_ptr(raw)"));
-        assert!(out.contains("super::ffi_raw::mimi_string_free(raw)"));
+        assert!(
+            !out.contains("super::ffi_raw::mimi_string_free(raw)"),
+            "borrowed String returns must NOT be freed by the generated wrapper"
+        );
     }
 
     #[test]
@@ -284,8 +290,15 @@ mod tests {
         assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
         // Regression: callback slot must be cleared after the call to release the Python callable.
         assert!(out.contains("g_apply_callback_f_cb = nullptr;"));
-        // Regression: string returns must be freed after copying to std::string.
-        assert!(out.contains("mimi_string_free(_r)"));
+        // Regression (corrected FFI contract): `greet` returns a BORROWED string
+        // (FfiRetContract::String) — copy it, but do NOT free it (C retains
+        // ownership). Freeing mimi_string_free(_r) is reserved for StringOwned/
+        // Json returns (see audit_fix_bind_py.rs). Null-safety stays intact.
+        assert!(
+            !out.contains("mimi_string_free(_r)"),
+            "borrowed String returns must NOT be freed by the generated wrapper"
+        );
+        assert!(out.contains("if (!_r) return std::string();"));
         assert!(pyi.contains("def add("));
         assert!(pyi.contains("def greet("));
         assert!(pyi.contains("class Point:"));

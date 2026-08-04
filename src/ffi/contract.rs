@@ -160,7 +160,9 @@ pub const ERRNO_CHECK_FUNC_NAMES: &[&str] = &[
     "epoll_create",
     "epoll_ctl",
     "epoll_wait",
-    "fork",
+    // NOTE: "fork" was removed from this list (SD-4): fork() isolation was
+    // deleted and replaced with SIGSEGV/SIGABRT signal guards. It must not be
+    // re-added.
     "execve",
     "wait",
     "waitpid",
@@ -327,7 +329,8 @@ impl FfiContract {
 
         // SD-3: explicit #[errno] attribute takes priority.
         // Transition period: fall back to ERRNO_CHECK_FUNC_NAMES name-guessing
-        // for unannotated functions, with deprecation warning.
+        // for unannotated functions. The legacy fallback emits a one-shot
+        // deprecation warning per process (see below) and is removed in 1.0.
         let fname: &str = &func.name;
         let check_errno = if func.returns_errno {
             // Explicit attribute: always check errno (if return type is i32/i64)
@@ -337,10 +340,27 @@ impl FfiContract {
             )
         } else {
             // Legacy fallback: name-guessing (deprecated, removed in 1.0)
-            matches!(
+            let legacy_guess = matches!(
                 func.ret.as_ref().map(Type::unlocated),
                 Some(Type::Name(name, _)) if name == "i32" || name == "i64"
-            ) && ERRNO_CHECK_FUNC_NAMES.contains(&fname)
+            ) && ERRNO_CHECK_FUNC_NAMES.contains(&fname);
+            if legacy_guess {
+                // SD-3 deprecation: warn once per process so externs relying
+                // on name-guessing get migrated to the explicit #[errno]
+                // attribute. Mirrors the one-shot warning pattern used by the
+                // interpreter FFI String-leak warning (interp/ffi_runtime.rs).
+                static LEGACY_ERRNO_WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LEGACY_ERRNO_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "[mimi] FFI DEPRECATION: extern '{}' relies on legacy errno \
+                         name-guessing (ERRNO_CHECK_FUNC_NAMES). Add the #[errno] \
+                         attribute explicitly; name-guessing is removed in 1.0.",
+                        fname
+                    );
+                }
+            }
+            legacy_guess
         };
 
         Self {

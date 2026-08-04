@@ -60,8 +60,47 @@ impl Formatter {
         crate::source_scan::SourceScanner::strip_string_contents(line)
     }
 
+    /// FMT-OP1 (full audit 2026-08-05 §13.1): multi-character operators that
+    /// the lexer scans as single tokens (`src/lexer/scan.rs` `scan_token`).
+    /// Spacing normalization must keep these glued: splitting `==` into `= =`
+    /// changes the token stream (EqEq → Eq, Eq) and makes the formatted
+    /// output unparseable. The lexer is greedy, so preserving the original
+    /// adjacency guarantees identical re-tokenization. All entries are 2 chars.
+    ///
+    /// Note: `>>` is also glued; the parser splits a `Shr` token into two
+    /// closing `>` brackets in generic position (`parser/helpers.rs`
+    /// `expect_gt`), so nested generics like `List<List<i32>>` still parse.
+    fn multi_char_operator(chars: &[char], i: usize) -> Option<&'static str> {
+        let next = *chars.get(i + 1)?;
+        Some(match (chars[i], next) {
+            ('=', '=') => "==", // EqEq
+            ('=', '>') => "=>", // FatArrow
+            ('!', '=') => "!=", // Ne
+            ('<', '=') => "<=", // Le
+            ('<', '<') => "<<", // Shl
+            ('>', '=') => ">=", // Ge
+            ('>', '>') => ">>", // Shr
+            ('+', '=') => "+=", // PlusEq
+            ('-', '>') => "->", // Arrow
+            ('-', '=') => "-=", // MinusEq
+            ('*', '*') => "**", // Pow
+            ('*', '=') => "*=", // StarEq
+            ('/', '=') => "/=", // SlashEq
+            ('&', '&') => "&&", // AndAnd
+            ('&', '=') => "&=", // BitAndEq
+            ('|', '|') => "||", // OrOr
+            ('|', '=') => "|=", // BitOrEq
+            ('|', '>') => "|>", // PipeArrow
+            ('^', '=') => "^=", // BitXorEq
+            _ => return None,
+        })
+    }
+
     /// Normalize spacing around operators and punctuation.
-    /// Handles: space before `{`, after `,`, around `:`, around `->`.
+    /// Handles: space before `{`, after `,`, around `:`, around operators.
+    ///
+    /// FMT-OP1: lexer multi-char operators (== => != <= >= += -= *= /= && ||
+    /// |> -> ** << >> &= |= ^=) are emitted glued with spacing around them.
     ///
     /// A7: Uses `source_scan::SourceScanner` for correct string/comment tracking.
     /// String literals and comments are copied verbatim.
@@ -90,6 +129,31 @@ impl Formatter {
                 }
                 i += 1;
                 continue;
+            }
+
+            // FMT-OP1: keep lexer multi-char operators glued. Must run before
+            // the single-char arms below, which would otherwise insert a space
+            // inside the operator (`==` → `= =`, `&&` → `& &`, ...).
+            // Spacing around the operator mirrors the single-char arm rules.
+            if regions.get(i + 1) == Some(&crate::source_scan::Region::Code) {
+                if let Some(op) = Self::multi_char_operator(&chars, i) {
+                    // Space before (unless at start / already spaced / opening bracket)
+                    if i > 0
+                        && chars[i - 1] != ' '
+                        && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
+                    {
+                        out.push(' ');
+                    }
+                    out.push_str(op);
+                    // Space after (unless at end / already spaced / closing punct)
+                    if let Some(&after) = chars.get(i + 2) {
+                        if after != ' ' && !matches!(after, ')' | ']' | '}' | ',' | ';') {
+                            out.push(' ');
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
             }
 
             match c {
@@ -150,17 +214,10 @@ impl Formatter {
                     }
                 }
                 '-' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '>' {
-                        out.push(' ');
-                        out.push('-');
-                        out.push('>');
-                        i += 1;
-                        if i + 1 < chars.len() && chars[i + 1] != ' ' {
-                            out.push(' ');
-                        }
-                    } else {
-                        out.push('-');
-                    }
+                    // FMT-OP1: `->` and `-=` are consumed by the multi-char
+                    // pre-match above; a bare `-` is copied verbatim
+                    // (existing behavior: subtraction is not re-spaced).
+                    out.push('-');
                 }
                 '/' => {
                     // DAT-C1 (deep audit): don't insert spaces inside // or /* or */

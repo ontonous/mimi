@@ -2,9 +2,17 @@
 //!
 //! LSP positions use **UTF-16 code unit** offsets (per the LSP specification).
 //! Rust strings are UTF-8.  Mimi's internal spans use 1-indexed line/column
-//! where column is a **byte** offset.
+//! where column is a **char count** — the lexer advances one column per char
+//! (`lexer/flow.rs` `LexerPos::advance`), NOT per byte.  Byte offsets and
+//! char columns only coincide on pure-ASCII lines; feeding char columns into
+//! byte-based conversion shifts every range on non-ASCII source.
 //!
-//! This module provides bidirectional conversion that handles:
+//! Conversion entry points:
+//! - `lsp_to_byte` / `byte_to_lsp`: UTF-16 ↔ **byte** offsets.
+//! - `span_to_lsp`: Mimi span (1-indexed char columns) → LSP range, walking
+//!   chars and counting UTF-16 units (AU-LSP-3, full audit 2026-08-05).
+//!
+//! This module handles:
 //! - Multi-byte UTF-8 characters (e.g. é = 2 bytes, 1 UTF-16 unit)
 //! - Surrogate pairs (e.g. 😀 = 4 bytes, 2 UTF-16 units)
 //! - CRLF line endings (counted as 1 character in LSP line numbering)
@@ -92,7 +100,12 @@ impl<'a> PositionMap<'a> {
         (line, utf16_offset)
     }
 
-    /// Convert Mimi span (1-indexed line, 1-indexed byte column) to LSP range.
+    /// Convert Mimi span (1-indexed line, 1-indexed **char** column) to LSP range.
+    ///
+    /// AU-LSP-3 (full audit 2026-08-05): columns from lexer spans count chars,
+    /// not bytes (end column is exclusive). Convert by walking the line's
+    /// chars and summing UTF-16 units; feeding char columns into
+    /// `byte_to_utf16` shifted every diagnostic range on non-ASCII source.
     #[allow(dead_code)]
     pub fn span_to_lsp(
         &self,
@@ -102,15 +115,14 @@ impl<'a> PositionMap<'a> {
         end_col: usize,
     ) -> serde_json::Value {
         // Mimi spans are 1-indexed; LSP is 0-indexed.
-        // Mimi columns are byte offsets; LSP characters are UTF-16 units.
         let sl = start_line.saturating_sub(1);
         let el = end_line.saturating_sub(1);
 
         let sl_text = self.line_text(sl);
         let el_text = self.line_text(el);
 
-        let sc = byte_to_utf16(&sl_text, start_col.saturating_sub(1).min(sl_text.len()));
-        let ec = byte_to_utf16(&el_text, end_col.saturating_sub(1).min(el_text.len()));
+        let sc = char_to_utf16(&sl_text, start_col.saturating_sub(1));
+        let ec = char_to_utf16(&el_text, end_col.saturating_sub(1));
 
         serde_json::json!({
             "start": { "line": sl, "character": sc },
@@ -161,6 +173,13 @@ fn byte_to_utf16(s: &str, byte_offset: usize) -> usize {
         byte_count += c.len_utf8();
     }
     utf16_count
+}
+
+/// Convert char-index offset to UTF-16 code unit offset within a string.
+/// AU-LSP-3: Mimi span columns are char counts, so columns must walk chars,
+/// not bytes. Offsets beyond the line clamp to its full UTF-16 length.
+fn char_to_utf16(s: &str, char_idx: usize) -> usize {
+    s.chars().take(char_idx).map(|c| c.len_utf16()).sum()
 }
 
 #[cfg(test)]

@@ -45,8 +45,10 @@ pub(crate) fn fmt_files(files: &[PathBuf], check: bool) -> Result<(), String> {
             eprintln!("would format: {}", path.display());
             had_changes = true;
         } else if !check && changed {
-            fs::write(path, &formatted)
-                .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
+            // Full audit 2026-08-05 §13: overwrite via unique temp file +
+            // rename. A direct fs::write can leave the user's source
+            // truncated/corrupted on a crash mid-write.
+            mimi::manifest::write_text_atomic(path, &formatted)?;
             println!("formatted: {}", path.display());
         } else if !check {
             println!("already formatted: {}", path.display());

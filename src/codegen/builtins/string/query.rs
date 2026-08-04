@@ -608,7 +608,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("strstr returned void")?
             .into_pointer_value();
-        // found - s = index
+        // found - s = BYTE offset
         let found_int = self
             .builder
             .build_ptr_to_int(found, i64_ty, "found_int")
@@ -617,18 +617,32 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_ptr_to_int(s_ptr, i64_ty, "s_int")
             .map_err(|e| CompileError::LlvmError(format!("ptr_to_int error: {}", e)))?;
-        let idx = self
+        let byte_idx = self
             .builder
-            .build_int_sub(found_int, s_int, "index")
+            .build_int_sub(found_int, s_int, "byte_index")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        // Wrap in Option<i32> = {i1 disc, i32 payload}
-        let bool_ty = self.context.bool_type();
-        let i32_ty = self.context.i32_type();
         // Check if strstr returned NULL (not found)
         let is_null = self
             .builder
             .build_is_null(found, "is_null")
             .map_err(|e| CompileError::LlvmError(format!("is_null: {}", e)))?;
+        // Byte offset → char index: the VM returns `s[..byte_idx].chars().count()`
+        // (interp/bytecode/builtins/string.rs builtin_str_index_of), not the byte
+        // offset. Count UTF-8 leading bytes in s[0..byte_idx]. When not found,
+        // the byte offset is garbage (NULL ptrtoint − s) — clamp the scan bound
+        // to 0 so the loop never iterates; the payload is unobserved (disc=0).
+        let zero = i64_ty.const_int(0, false);
+        let char_bound = self
+            .builder
+            .build_select(is_null, zero, byte_idx, "char_bound")
+            .map_err(|e| CompileError::LlvmError(format!("select: {}", e)))?
+            .into_int_value();
+        let char_idx = self.count_utf8_chars(s_ptr, Some(char_bound))?;
+        // Wrap in Option<i32> — codegen's Option convention is {i1 disc, i64
+        // payload} (see compile_none_constructor); the i64 char count is the
+        // payload WITHOUT narrowing (narrowing here corrupted option_value_or,
+        // which reads the {i1,i64} layout — full-audit 2026-08-05 central fix).
+        let bool_ty = self.context.bool_type();
         let disc = self
             .builder
             .build_select(
@@ -639,14 +653,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("select: {}", e)))?
             .into_int_value();
-        let payload = self
-            .builder
-            .build_int_truncate(idx, i32_ty, "opt_payload")
-            .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?;
+        let payload = char_idx;
         let opt_ty = self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(bool_ty),
-                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::IntType(i64_ty),
             ],
             false,
         );

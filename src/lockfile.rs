@@ -37,24 +37,12 @@ impl Lockfile {
     /// Save mimi.lock to a directory (atomic write via temp+rename)
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let lock_path = dir.join("mimi.lock");
-        let tmp_path = dir.join("mimi.lock.tmp");
         let content = toml::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize lockfile: {}", e))?;
-        // CL-H3 (deep audit): use atomic write (temp + rename) to prevent
-        // corruption on crash or concurrent access.
-        std::fs::write(&tmp_path, &content)
-            .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
-        std::fs::rename(&tmp_path, &lock_path).map_err(|e| {
-            // Clean up temp file on rename failure
-            let _ = std::fs::remove_file(&tmp_path);
-            format!(
-                "failed to rename {} to {}: {}",
-                tmp_path.display(),
-                lock_path.display(),
-                e
-            )
-        })?;
-        Ok(())
+        // CL-H3 (deep audit) + full audit 2026-08-05 §13: atomic write with a
+        // per-pid unique temp name (the fixed `mimi.lock.tmp` raced between
+        // concurrent installs). Rename within the same directory is atomic.
+        crate::manifest::write_text_atomic(&lock_path, &content)
     }
 
     /// Create a new empty lockfile

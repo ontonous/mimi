@@ -276,9 +276,21 @@ impl<'a> ActionEmitter<'a> {
                             .get(binding)
                             .is_some_and(|local| self.is_linear(&local.ty))
                         {
-                            self.resources
-                                .entry(binding.clone())
-                                .or_insert_with(|| ResourceId(binding.0.clone()));
+                            // Audit 2026-08-05 (wave-1 fix 6): mirror the
+                            // Bind/split catalog rule — when the pinned value
+                            // is a single linear place, the binding takes over
+                            // that place's resource identity so a later
+                            // Drop/Move on the binding resolves the same fact
+                            // the Move retargeted (P1-10 alignment).
+                            let sources = self.capability_places(value);
+                            if sources.len() == 1 {
+                                let resource = self.resource_for_place(&sources[0]);
+                                self.resources.entry(binding.clone()).or_insert(resource);
+                            } else {
+                                self.resources
+                                    .entry(binding.clone())
+                                    .or_insert_with(|| ResourceId(binding.0.clone()));
+                            }
                         }
                     }
                     self.catalog_block(body);
@@ -459,6 +471,53 @@ impl<'a> ActionEmitter<'a> {
                     let sources = self.capability_places(initializer);
                     let mut bindings = Vec::new();
                     self.linear_bindings(pattern, &mut bindings);
+                    // Audit 2026-08-05 (wave-1 fix 1): positional pairing
+                    // (`sources.get(index)`) is only sound when every linear
+                    // source is matched by a linear binding. Wildcards and
+                    // length mismatches mispair or strand sources:
+                    // `let (_, y) = (a, b)` emits a Move for the FIRST source
+                    // (a → y) while the untouched source b stays Available →
+                    // `drop(b); drop(y)` was accepted (verified use-after-move
+                    // + silent leak of a). Fail-closed: reject every mismatch
+                    // except the two shapes where no obligation is stranded:
+                    // * the sanctioned split() lowering — a single-element
+                    //   Tuple([receiver]) with one source and >=2 bindings
+                    //   (the first binding moves the receiver, the rest are
+                    //   the split-out atoms, see catalog_pattern P1-10);
+                    // * sources.len() == 0 — the initializer contributes no
+                    //   linear place (e.g. a call result), so every binding
+                    //   is a fresh introduction and nothing can be mispaired.
+                    // Source count is deduplicated by resource identity: an
+                    // if-expression duplicates its branch places
+                    // (`if f { c } else { c }`) but carries one obligation.
+                    let mut unique_source_resources = BTreeSet::new();
+                    for source in &sources {
+                        unique_source_resources.insert(self.resource_for_place(source));
+                    }
+                    let split_shape = sources.len() == 1
+                        && bindings.len() >= 2
+                        && matches!(&initializer.kind, ResolvedExprKind::Tuple(values) if values.len() == 1);
+                    if unique_source_resources.len() != bindings.len()
+                        && !split_shape
+                        && !unique_source_resources.is_empty()
+                    {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0304,
+                                format!(
+                                    "destructuring with wildcards consumes linear values ambiguously: \
+                                     {} linear source(s) cannot be paired positionally with {} linear binding(s)",
+                                    unique_source_resources.len(),
+                                    bindings.len()
+                                ),
+                                statement.origin.user_span(),
+                            )
+                            .with_help(
+                                "bind every linear element explicitly; wildcard `_` positions and \
+                                 shortened patterns strand or mispair linear sources (only `split()` tuples are exempt)",
+                            ),
+                        );
+                    }
                     for (index, binding) in bindings.into_iter().enumerate() {
                         let target = self.place_from_local(&binding);
                         if let Some(source) = sources.get(index) {
@@ -590,8 +649,75 @@ impl<'a> ActionEmitter<'a> {
                     self.visit_expr(expression, None);
                 }
             }
-            ResolvedStmtKind::Pinned { value, body, .. } => {
+            ResolvedStmtKind::Pinned {
+                value,
+                binding,
+                body,
+            } => {
                 self.visit_expr(value, None);
+                // Audit 2026-08-05 (wave-1 fix 6): a pinned binding of linear
+                // type used to get a catalog entry but NO action — the pinned
+                // resource was invisible to dataflow and could escape without
+                // consumption. Mirror the Bind arm: a single linear source
+                // MOVES into the binding (consuming the source's fact), a
+                // source-free value INTRODUCES the binding as a fresh
+                // obligation, and multiple sources are ambiguous → fail-closed.
+                // Not Introduce-only: introducing without consuming the source
+                // would double-count (`pinned(cap_val) |p| drop(p)` leaking
+                // cap_val) — the option that cannot regress is Move semantics.
+                if let Some(binding) = binding {
+                    if self
+                        .body
+                        .locals
+                        .get(binding)
+                        .is_some_and(|local| self.is_linear(&local.ty))
+                    {
+                        let target = self.place_from_local(binding);
+                        let sources = self.capability_places(value);
+                        if sources.len() == 1 {
+                            let source = sources.into_iter().next().expect("len == 1");
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Move,
+                                    resource: self.resource_for_place(&source),
+                                    source: Some(source.clone()),
+                                    target: Some(target),
+                                    loan: None,
+                                },
+                            );
+                        } else if sources.is_empty() {
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Introduce,
+                                    resource: self.resource_for_local(binding),
+                                    source: Some(target.clone()),
+                                    target: Some(target),
+                                    loan: None,
+                                },
+                            );
+                        } else {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0304,
+                                    format!(
+                                        "pinned binding consumes linear values ambiguously: \
+                                         {} linear sources cannot be paired with one binding",
+                                        sources.len()
+                                    ),
+                                    statement.origin.user_span(),
+                                )
+                                .with_help(
+                                    "pin a single linear place; multiple linear sources cannot \
+                                     be positionally assigned to one pinned binding",
+                                ),
+                            );
+                        }
+                    }
+                }
                 self.visit_block(body, false);
             }
         }

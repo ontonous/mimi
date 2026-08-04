@@ -3,35 +3,78 @@
 //!
 //! Extracted verbatim from `runtime/mod.rs` (the `MimiFuture + MimiExecutor`
 //! section) during the 0.1.0 mechanical split (behavior bit-exact).
-//! Self-contained: `MimiFutureRepr` / `SendPtr` / `EXECUTOR_QUEUE` /
+//! Self-contained: `MimiFutureHeader` / `SendPtr` / `EXECUTOR_QUEUE` /
 //! `SPAWN_HANDLES` all defined within. Pure `extern "C"` leaf (no crate-level
 //! Rust-path callers). Part of the planned concurrency surface; uses `libc`
 //! in standalone mode.
-
-use std::sync::atomic::Ordering;
+//!
+//! # Future memory layout — ABI contract (must match codegen, `src/codegen/func.rs`)
+//!
+//! Futures are allocated by `mimi_future_alloc(data_size)` via
+//! `std::alloc::alloc` with alignment 8:
+//!
+//! ```text
+//!   offset 0..4   : AtomicI32 `completed`     (0=pending, 1=ready, -1=freed intent)
+//!   offset 4..8   : AtomicI32 `refs`          (refcount; starts at 1)
+//!   offset 8..16  : u64 `data_capacity`       (exact size in bytes of the data
+//!                                              region written at alloc time; >= 64)
+//!   offset 16..   : data region — `data_capacity` bytes. Codegen stores the
+//!                   async fn's arguments and result here (FUTURE_DATA_OFFSET).
+//! ```
+//!
+//! Total allocation size = `FUTURE_HEADER_SIZE (16) + data_capacity`, where
+//! `data_capacity = max(requested_data_size, 64)`. `data_capacity` stores the
+//! ACTUAL allocated data size so `mimi_future_free` can reconstruct the exact
+//! `Layout` (16 + data_capacity, align 8) and deallocate precisely.
+//!
+//! OLD ABI (removed by the 2026-08-05 full-audit fix, CRITICAL #11): a fixed
+//! 72-byte `Box` (`completed`, `refs`, `data: [u8; 64]`) with the data region
+//! at offset 8. `mimi_future_alloc` ignored its size argument while codegen
+//! stored args/result past offset 8 by the computed size → heap overflow for
+//! async fns with large args/results. Do not reintroduce a fixed-size future.
+//!
+//! R-C5: free/poll must not UAF. Use atomic refcount so free only drops
+//! when the last concurrent accessor releases.
 
 #[cfg(standalone)]
 use super::libc;
+use std::sync::atomic::Ordering;
 
-// Future memory layout (managed by codegen):
-//   offset 0: i32 (completed flag: 0=pending, 1=ready, -1=freed intent)
-//   offset 4: i32 (refcount; starts at 1)
-//   offset 8: <result> (8-byte aligned, up to 64 bytes)
-//
-// R-C5: free/poll must not UAF. Use atomic refcount so free only drops
-// when the last concurrent accessor releases.
-
+/// Header prefix of every future allocation. The data region immediately
+/// follows (see module docs). `#[repr(C)]` pins the field offsets:
+/// completed @0, refs @4, data_capacity @8.
 #[repr(C)]
-struct MimiFutureRepr {
+struct MimiFutureHeader {
     completed: std::sync::atomic::AtomicI32,
     refs: std::sync::atomic::AtomicI32,
-    data: [u8; 64],
+    data_capacity: u64,
+}
+
+const FUTURE_HEADER_SIZE: usize = 16;
+const FUTURE_DATA_OFFSET: usize = 16;
+const FUTURE_MIN_DATA_CAPACITY: usize = 64;
+const FUTURE_ALIGN: usize = 8;
+
+/// Reconstruct the allocation Layout for a future with the given stored
+/// `data_capacity`. Returns `None` if the capacity is below the minimum
+/// (corruption) or the total size overflows / exceeds `Layout` limits.
+fn future_layout(data_capacity: u64) -> Option<std::alloc::Layout> {
+    // Reject unrepresentable sizes on narrow (32-bit) targets explicitly.
+    if data_capacity > usize::MAX as u64 {
+        return None;
+    }
+    if (data_capacity as usize) < FUTURE_MIN_DATA_CAPACITY {
+        return None;
+    }
+    let total = FUTURE_HEADER_SIZE.checked_add(data_capacity as usize)?;
+    std::alloc::Layout::from_size_align(total, FUTURE_ALIGN).ok()
 }
 
 /// Try to retain a live future. Returns false if already fully freed (refs==0).
 /// SAFETY: `fut` must be null or a pointer from `mimi_future_alloc` that has
 /// not yet been fully deallocated (refs may still be > 0 during free races).
-unsafe fn future_try_retain(fut: *mut MimiFutureRepr) -> bool {
+unsafe fn future_try_retain(fut: *mut MimiFutureHeader) -> bool {
+    // SAFETY: caller guarantees `fut` points to a live allocation.
     let rep = &*fut;
     let mut cur = rep.refs.load(Ordering::Acquire);
     loop {
@@ -48,36 +91,93 @@ unsafe fn future_try_retain(fut: *mut MimiFutureRepr) -> bool {
     }
 }
 
-/// Release one ref; drop allocation when last ref is gone.
+/// Release one ref; deallocate when the last ref is gone.
 /// SAFETY: `fut` must have been successfully retained or be the owner ref.
-unsafe fn future_release(fut: *mut MimiFutureRepr) {
+unsafe fn future_release(fut: *mut MimiFutureHeader) {
+    // SAFETY: caller guarantees `fut` points to a live allocation.
     let rep = &*fut;
     if rep.refs.fetch_sub(1, Ordering::Release) == 1 {
         // Ensure all prior accesses complete before deallocation.
         std::sync::atomic::fence(Ordering::Acquire);
-        drop(Box::from_raw(fut));
+        // We hold the last reference, so reading `data_capacity` (written
+        // once by mimi_future_alloc, immutable afterwards) cannot race.
+        let data_capacity = rep.data_capacity;
+        let layout = match future_layout(data_capacity) {
+            Some(l) => l,
+            // Corrupt header: fail loud instead of freeing with a wrong layout.
+            None => super::mimi_runtime_abort(
+                b"mimi_future_free: corrupt data_capacity in future header\0".as_ptr()
+                    as *const std::ffi::c_char,
+            ),
+        };
+        // SAFETY: `fut` was allocated by mimi_future_alloc with exactly this
+        // Layout (16 + data_capacity, align 8) and all references are gone.
+        std::alloc::dealloc(fut as *mut u8, layout);
     }
 }
 
+/// Allocate a future with a data region of at least `result_size` bytes
+/// (minimum 64). See the module-level ABI contract for the layout.
+/// Returns null if the size cannot be represented or allocation fails.
 #[no_mangle]
-pub extern "C" fn mimi_future_alloc(_result_size: u64) -> *mut std::ffi::c_void {
-    use std::sync::atomic::AtomicI32;
-    let b = Box::new(MimiFutureRepr {
-        completed: AtomicI32::new(0),
-        refs: AtomicI32::new(1),
-        data: [0; 64],
-    });
-    Box::into_raw(b) as *mut std::ffi::c_void
+pub extern "C" fn mimi_future_alloc(result_size: u64) -> *mut std::ffi::c_void {
+    // Audit fix (CRITICAL #11): honor the requested size. The old
+    // implementation ignored it and always allocated a fixed 72-byte box,
+    // while codegen stored args/result by computed size → heap overflow.
+    let requested = match usize::try_from(result_size) {
+        Ok(v) => v,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let data_capacity = requested.max(FUTURE_MIN_DATA_CAPACITY);
+    // data_capacity >= 64 and FUTURE_HEADER_SIZE is small, so this cannot fail;
+    // keep the fallible path for defensive symmetry with future_release.
+    let layout = match future_layout(data_capacity as u64) {
+        Some(l) => l,
+        None => return std::ptr::null_mut(),
+    };
+    // SAFETY: layout size >= 80 and alignment 8 is a power of two;
+    // std::alloc::alloc returns null on failure, which we propagate.
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `ptr` points to a fresh, uninitialized allocation of at least
+    // 80 bytes (>= size_of::<MimiFutureHeader>() == 16), aligned for every
+    // header field (AtomicI32 @0/@4 need align 4, u64 @8 needs align 8).
+    // Fields are written with ptr::write so the uninitialized memory is never
+    // read and nothing is dropped in place.
+    unsafe {
+        let hdr = ptr as *mut MimiFutureHeader;
+        std::ptr::write(
+            std::ptr::addr_of_mut!((*hdr).completed),
+            std::sync::atomic::AtomicI32::new(0),
+        );
+        std::ptr::write(
+            std::ptr::addr_of_mut!((*hdr).refs),
+            std::sync::atomic::AtomicI32::new(1),
+        );
+        std::ptr::write(
+            std::ptr::addr_of_mut!((*hdr).data_capacity),
+            data_capacity as u64,
+        );
+    }
+    ptr as *mut std::ffi::c_void
 }
 
+/// Mark a freed intent and release the owner ref. The allocation is
+/// deallocated when the refcount reaches zero (see `future_release`).
+///
+/// SAFETY precondition (unchanged by the audit fix): `fut` must point at a
+/// live future allocation (not yet fully freed); a double-free dereferences
+/// the header before the retain check can reject it.
 #[no_mangle]
 pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
-    // SAFETY: non-null pointer from mimi_future_alloc (or already freed → retain fails).
+    // SAFETY: non-null pointer from mimi_future_alloc (precondition above).
     unsafe {
-        let fut = fut as *mut MimiFutureRepr;
+        let fut = fut as *mut MimiFutureHeader;
         // Mark freed-intent so set_completed CAS fails; then drop owner ref.
         (*fut).completed.store(-1, Ordering::Release);
         future_release(fut);
@@ -90,11 +190,14 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
         return;
     }
     // R-C5: retain for the duration of the CAS so free cannot drop under us.
+    // SAFETY: `fut` comes from mimi_future_alloc; the retain below rejects
+    // already-freed futures before the header is touched for the CAS.
     unsafe {
-        let fut = fut as *mut MimiFutureRepr;
+        let fut = fut as *mut MimiFutureHeader;
         if !future_try_retain(fut) {
             return;
         }
+        // SAFETY: successfully retained → allocation is live.
         let rep = &*fut;
         let _ = rep
             .completed
@@ -109,11 +212,14 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
         return 1;
     }
     // R-C5: retain before reading so concurrent free cannot UAF.
+    // SAFETY: `fut` comes from mimi_future_alloc; the retain below rejects
+    // already-freed futures before the header is read.
     unsafe {
-        let fut = fut as *mut MimiFutureRepr;
+        let fut = fut as *mut MimiFutureHeader;
         if !future_try_retain(fut) {
             return 1; // already freed — treat as completed/dead
         }
+        // SAFETY: successfully retained → allocation is live.
         let v = (*fut).completed.load(Ordering::Acquire);
         future_release(fut);
         if v < 0 {
@@ -167,16 +273,17 @@ pub extern "C" fn mimi_spawn_future(
     // R-C5: retain one ref for the worker thread; release when poll_fn returns.
     // SAFETY: non-null pointer from mimi_future_alloc.
     unsafe {
-        let fut = future as *mut MimiFutureRepr;
+        let fut = future as *mut MimiFutureHeader;
         if !future_try_retain(fut) {
             return std::ptr::null_mut();
         }
     }
     let future_addr = future as usize;
     let handle = std::thread::spawn(move || {
-        // SAFETY: retained above for this thread's lifetime.
+        // SAFETY: retained above for this thread's lifetime; the ref is
+        // released after poll_fn returns, so the pointer stays live for both.
         unsafe {
-            let fut = future_addr as *mut MimiFutureRepr;
+            let fut = future_addr as *mut MimiFutureHeader;
             poll_fn(fut as *mut std::ffi::c_void);
             future_release(fut);
         }
@@ -210,12 +317,13 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     // R-C5: retain for the spin so concurrent free cannot free under us.
     // SAFETY: non-null pointer from mimi_future_alloc.
     unsafe {
-        let fut = future as *mut MimiFutureRepr;
+        let fut = future as *mut MimiFutureHeader;
         if !future_try_retain(fut) {
             return;
         }
         let mut iterations: u64 = 0;
         const MAX_SPIN_ITERATIONS: u64 = 1_000_000;
+        // SAFETY: successfully retained → allocation is live for the spin.
         while (*fut).completed.load(Ordering::Acquire) == 0 {
             std::thread::yield_now();
             iterations += 1;
@@ -235,7 +343,7 @@ type PollFn = unsafe extern "C" fn(*mut std::ffi::c_void);
 /// - Sending a *mut T transfers exclusive ownership of the referent to the receiving thread
 /// - The future pointer is only dereferenced inside `mimi_executor_run` while holding the queue mutex,
 ///   guaranteeing exclusive access (no data race)
-/// - The pointer came from `mimi_rc_alloc` (system allocator, not thread-local), so it is safe to
+/// - The pointer came from `mimi_future_alloc` (system allocator, not thread-local), so it is safe to
 ///   access from any thread after the send
 /// - `Sync` is safe because &SendPtr is never shared across threads (only &mut access via the mutex)
 #[derive(Clone)]
@@ -280,13 +388,15 @@ pub extern "C" fn mimi_executor_run() {
             let mut found = None;
             for i in 0..queue.len() {
                 let (_, future) = &queue[i];
-                // SAFETY: future pointer came from the executor queue.
+                // SAFETY: future pointer came from the executor queue
+                // (mimi_executor_spawn) and was allocated by mimi_future_alloc.
                 // R-C5: retain while reading completed so free cannot UAF.
                 let completed = unsafe {
-                    let fut = future.0 as *mut MimiFutureRepr;
+                    let fut = future.0 as *mut MimiFutureHeader;
                     if !future_try_retain(fut) {
                         1 // freed — treat as done
                     } else {
+                        // SAFETY: successfully retained → allocation is live.
                         let v = (*fut).completed.load(Ordering::Acquire);
                         future_release(fut);
                         if v < 0 {
@@ -313,14 +423,73 @@ pub extern "C" fn mimi_executor_run() {
             }
         };
         if let Some((poll_fn, future)) = entry {
-            // SAFETY: retain for poll duration (R-C5).
+            // SAFETY: future came from the executor queue; retain for the
+            // poll duration (R-C5) so concurrent free cannot drop under us.
             unsafe {
-                let fut = future as *mut MimiFutureRepr;
+                let fut = future as *mut MimiFutureHeader;
                 if future_try_retain(fut) {
                     poll_fn(future);
                     future_release(fut);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the 2026-08-05 audit fix (CRITICAL #11):
+    //! mimi_future_alloc must honor the requested data size instead of always
+    //! allocating the old fixed 72-byte box.
+
+    use super::*;
+
+    #[test]
+    fn future_alloc_honors_requested_size_and_frees_exactly() {
+        let f = mimi_future_alloc(1024);
+        assert!(!f.is_null());
+        // SAFETY: `f` was just allocated by mimi_future_alloc with
+        // data_capacity 1024 (>= header + 1024 bytes, align 8); header reads
+        // and data writes below stay within that allocation.
+        unsafe {
+            let hdr = f as *mut MimiFutureHeader;
+            assert_eq!((*hdr).completed.load(Ordering::SeqCst), 0);
+            assert_eq!((*hdr).refs.load(Ordering::SeqCst), 1);
+            assert_eq!((*hdr).data_capacity, 1024);
+            // The data region (offset 16) must be writable for the FULL
+            // requested size — the old ABI overflowed the 64-byte inline
+            // buffer here.
+            let data = (f as *mut u8).add(FUTURE_DATA_OFFSET);
+            std::ptr::write_volatile(data, 0xAB);
+            std::ptr::write_volatile(data.add(1023), 0xCD);
+            assert_eq!(std::ptr::read_volatile(data), 0xAB);
+            assert_eq!(std::ptr::read_volatile(data.add(1023)), 0xCD);
+        }
+        mimi_future_set_completed(f);
+        assert_eq!(mimi_future_is_completed(f), 1);
+        mimi_future_free(f);
+    }
+
+    #[test]
+    fn future_alloc_applies_min_capacity() {
+        let f = mimi_future_alloc(0);
+        assert!(!f.is_null());
+        // SAFETY: `f` was just allocated by mimi_future_alloc.
+        unsafe {
+            let hdr = f as *mut MimiFutureHeader;
+            assert_eq!((*hdr).data_capacity, FUTURE_MIN_DATA_CAPACITY as u64);
+        }
+        mimi_future_free(f);
+    }
+
+    #[test]
+    fn future_alloc_rejects_unrepresentable_size() {
+        // usize::try_from fails on 64-bit only for values > usize::MAX;
+        // on any platform, u64::MAX must either fail cleanly or allocate —
+        // never panic across the FFI boundary.
+        let f = mimi_future_alloc(u64::MAX);
+        if !f.is_null() {
+            mimi_future_free(f);
         }
     }
 }

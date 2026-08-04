@@ -172,9 +172,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 BasicValueEnum::FloatValue(fv) => Ok(self
-                    .builder
-                    .build_float_to_signed_int(fv, self.context.i32_type(), "fptosi")
-                    .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?
+                    .emit_saturating_float_to_int_cast(fv, self.context.i32_type())?
                     .into()),
                 _ => Err("unsupported cast to i32".into()),
             },
@@ -202,9 +200,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 BasicValueEnum::FloatValue(fv) => Ok(self
-                    .builder
-                    .build_float_to_signed_int(fv, self.context.i64_type(), "fptosi")
-                    .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?
+                    .emit_saturating_float_to_int_cast(fv, self.context.i64_type())?
                     .into()),
                 _ => Err("unsupported cast to i64".into()),
             },
@@ -234,6 +230,103 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Err(format!("unsupported cast target type: {}", target_name).into()),
         }
+    }
+
+    /// Saturating float → signed-int cast, matching the bytecode VM's Rust
+    /// `as` semantics (vm.rs `Op::Cast`: `f as i64` / `f as i32 as i64`):
+    /// NaN → 0, above-range saturates to the target MAX, below-range
+    /// saturates to the target MIN, otherwise truncate toward zero.
+    ///
+    /// full-audit 2026-08-05 §7 (HIGH): the bare `fptosi` this replaces is
+    /// poison on NaN and on out-of-range inputs, so O1 could fold
+    /// `(1e100) as i64` to garbage while the VM saturates.
+    fn emit_saturating_float_to_int_cast(
+        &self,
+        fv: inkwell::values::FloatValue<'ctx>,
+        target: inkwell::types::IntType<'ctx>,
+    ) -> Result<IntValue<'ctx>, CompileError> {
+        let width = target.get_bit_width();
+        if width != 32 && width != 64 {
+            return Err(CompileError::Generic(format!(
+                "float-to-int cast supports only i32/i64 targets, got i{}",
+                width
+            )));
+        }
+        let fty = fv.get_type();
+        // ±2^(width-1) are exactly representable in f64 and form the
+        // saturation boundaries: x ≥ 2^(w-1) overshoots MAX (MAX = 2^(w-1)-1),
+        // while x == -2^(w-1) is exactly MIN and converts cleanly.
+        let hi_bound = fty.const_float((1u64 << (width - 1)) as f64);
+        let lo_bound = fty.const_float(-((1u64 << (width - 1)) as f64));
+
+        let is_nan = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::UNO, fv, fv, "cast_is_nan")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        let is_hi = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, fv, hi_bound, "cast_is_hi")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        let is_lo = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OLT, fv, lo_bound, "cast_is_lo")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+
+        // Replace every non-convertible input (NaN / out-of-range) with 0.0
+        // so the single fptosi below never sees poison.
+        let zero_f = BasicValueEnum::FloatValue(fty.const_zero());
+        let safe = self
+            .builder
+            .build_select(
+                is_nan,
+                zero_f,
+                BasicValueEnum::FloatValue(fv),
+                "cast_safe_nan",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
+        let safe = self
+            .builder
+            .build_select(is_hi, zero_f, safe, "cast_safe_hi")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
+        let safe = self
+            .builder
+            .build_select(is_lo, zero_f, safe, "cast_safe_lo")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
+        let raw = self
+            .builder
+            .build_float_to_signed_int(safe.into_float_value(), target, "fptosi_sat")
+            .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?;
+
+        let (max_i, min_i) = if width == 64 {
+            (
+                target.const_int(i64::MAX as u64, false),
+                target.const_int(i64::MIN as u64, false),
+            )
+        } else {
+            (
+                target.const_int(i32::MAX as u64, false),
+                target.const_int(i32::MIN as u64, false),
+            )
+        };
+        // build_select is generic over a single value type; keep the whole
+        // chain in IntValue (result of each select is coerced back with
+        // into_int_value, matching control.rs's clamp chain).
+        let sat = self
+            .builder
+            .build_select(is_lo, min_i, raw, "cast_sat_lo")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let sat = self
+            .builder
+            .build_select(is_hi, max_i, sat, "cast_sat_hi")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let sat = self
+            .builder
+            .build_select(is_nan, target.const_zero(), sat, "cast_sat_nan")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        Ok(sat)
     }
 
     /// `x?.field` — if `x` is Option::Some (or Result::Ok), load field from

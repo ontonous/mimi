@@ -102,13 +102,39 @@ struct FuncCompiler {
     /// OnFailure blocks per scope (LIFO execution on fault at scope exit).
     on_failure_scopes: Vec<Vec<Block>>,
     /// Instruction index of SetFaultPc for the current scope (for patching).
-    set_fault_pc_idx: Option<usize>,
+    /// Audit fix #2: per-scope LIST — each `on failure` statement in the block
+    /// emits its own SetFaultPc at its execution point (a handler must not
+    /// compensate faults from code ABOVE its declaration; codegen registers
+    /// compensations on encounter, block.rs:1039). Entries pair 1:1 in
+    /// declaration order with `on_failure_scopes`' current level.
+    fault_pc_patches: Vec<Vec<usize>>,
     /// Borrow aliases: variable name → the original place expression it borrows.
     /// Used to resolve `*alias = value` write-back through mutable references.
     borrow_aliases: HashMap<String, Expr>,
     /// Loop result registers: one per active loop (for break-with-value).
     /// `break expr` writes to the top register; the loop expression reads it.
     loop_result_regs: Vec<Reg>,
+    /// Audit fix #9: set while compiling an expression whose result lands in a
+    /// declared-`i32` place (annotated `let`, assignment into an i32 var).
+    /// Literal constant folding must respect the i32 width policy here:
+    /// Pow/Shl folding is SUSPENDED (the guarded op path — MaskShiftAmt/Shl +
+    /// WrapI32 — reproduces codegen's mask-and-wrap semantics, which a
+    /// pre-folded i64 literal cannot), while other folds apply and the
+    /// let/assign-level CheckI32 supplies the codegen-matching trap.
+    i32_ctx_active: bool,
+    /// Audit fix #10: inside a NAMED nested function's body — (name, proto
+    /// idx) of the function itself. Calls to `name` compile to a direct
+    /// Op::Call to that proto (self-recursion). A closure cannot self-capture:
+    /// its own value does not exist until NewClosure executes, so the
+    /// value-capture mechanism is structurally unable to represent the
+    /// self-reference. Anonymous lambdas (Expr::Lambda) keep this None.
+    self_call: Option<(String, FuncIdx)>,
+    /// Audit fix #12: ensures-contract mini-functions only — maps a parameter
+    /// name to its PRE-call snapshot register (appended after `result`).
+    /// `old(x)` in an ensures clause compiles to the snapshot register, while
+    /// plain `x` reads the POST-call parameter register. Empty everywhere
+    /// else (old(x) keeps its identity-evaluation fallback).
+    old_regs: HashMap<String, Reg>,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -144,9 +170,12 @@ impl FuncCompiler {
             scope_regs: vec![Vec::new()],
             defer_scopes: vec![Vec::new()],
             on_failure_scopes: vec![Vec::new()],
-            set_fault_pc_idx: None,
+            fault_pc_patches: vec![Vec::new()],
             borrow_aliases: HashMap::new(),
             loop_result_regs: Vec::new(),
+            i32_ctx_active: false,
+            self_call: None,
+            old_regs: HashMap::new(),
         }
     }
 
@@ -155,6 +184,7 @@ impl FuncCompiler {
         self.scope_regs.push(Vec::new());
         self.defer_scopes.push(Vec::new());
         self.on_failure_scopes.push(Vec::new());
+        self.fault_pc_patches.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
@@ -164,6 +194,7 @@ impl FuncCompiler {
         }
         self.defer_scopes.pop();
         self.on_failure_scopes.pop();
+        self.fault_pc_patches.pop();
     }
 
     /// Innermost variable scope — invariant: at least one scope is always
@@ -226,6 +257,21 @@ impl FuncCompiler {
             Some(v) => v,
             None => {
                 unreachable!("bytecode: no active OnFailure scope (compiler invariant violated)")
+            }
+        }
+    }
+
+    /// SetFaultPc patch sites for the innermost scope (audit fix #2).
+    #[inline]
+    fn fault_pc_patches_mut(&mut self) -> &mut Vec<usize> {
+        mimi_debug_assert!(
+            !self.fault_pc_patches.is_empty(),
+            "bytecode: no active fault-patch scope"
+        );
+        match self.fault_pc_patches.last_mut() {
+            Some(v) => v,
+            None => {
+                unreachable!("bytecode: no active fault-patch scope (compiler invariant violated)")
             }
         }
     }
@@ -516,10 +562,24 @@ impl BytecodeCompiler {
                         mangled_name.clone(),
                     );
                     // +1 for implicit `self` parameter.
-                    self.functions.push(FunctionProto::new(
-                        mangled_name,
-                        method.params.len() as u16 + 1,
-                    ));
+                    let mut proto =
+                        FunctionProto::new(mangled_name, method.params.len() as u16 + 1);
+                    // Audit fix #3: pre-populate mut-param metadata at
+                    // REGISTRATION time — impl-method bodies are compiled in
+                    // pass 3, AFTER their callers (pass 2), and the call-site
+                    // MutateSetup pairing reads the callee proto when the
+                    // caller compiles. Indices are REGISTER indices: implicit
+                    // self occupies register 0, so explicit param i lives at
+                    // register i+1 (mirrors the shift in compile_func_impl).
+                    proto.has_mut_params = method.params.iter().any(|p| p.mut_);
+                    proto.mut_param_indices = method
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.mut_)
+                        .map(|(i, _)| (i + 1) as u16)
+                        .collect();
+                    self.functions.push(proto);
                 }
             }
         }
@@ -995,13 +1055,26 @@ impl BytecodeCompiler {
     /// Compile a single contract expression as a mini-function.
     /// Parameters: same as parent function. For ensures, adds `result` param.
     /// Returns the FuncIdx of the compiled mini-function.
+    ///
+    /// Audit fix #12 (ensures layout): `[param POST values…, result, param PRE
+    /// snapshots…]`. Plain parameter names bind to POST-call values (the VM's
+    /// check_ensures passes the final register values); `old(x)` binds to the
+    /// appended PRE-call snapshot registers via `old_regs`. Pre-fix the
+    /// snapshots were passed as the plain names, so `ensures x == old(x) + 1`
+    /// on a mutated `mut x` saw the PRE value for `x` and raised spurious E0808.
     fn compile_contract_expr(
         &mut self,
         expr: &Expr,
         f: &FuncDef,
         is_ensures: bool,
     ) -> Result<FuncIdx, InterpError> {
-        let param_count = f.params.len() as u16 + if is_ensures { 1 } else { 0 };
+        let n_params = f.params.len() as u16;
+        let param_count = if is_ensures {
+            // POST params + result + PRE snapshots.
+            n_params + 1 + n_params
+        } else {
+            n_params
+        };
         let name = format!(
             "__contract_{}_{}",
             f.name,
@@ -1022,10 +1095,15 @@ impl BytecodeCompiler {
             };
             fc.set_reg_type(&param.name, ty);
         }
-        // For ensures, bind `result` at register N.
+        // For ensures, bind `result` at register N and the PRE-call snapshots
+        // at N+1..; route old(x) to the snapshot registers.
         if is_ensures {
-            let result_reg = f.params.len() as Reg;
+            let result_reg = n_params;
             fc.vars[0].insert("result".to_string(), result_reg);
+            for (i, param) in f.params.iter().enumerate() {
+                fc.old_regs
+                    .insert(param.name.clone(), n_params + 1 + i as Reg);
+            }
         }
         while fc.proto.register_count < param_count {
             fc.proto.alloc_reg();
@@ -1071,6 +1149,16 @@ impl BytecodeCompiler {
         }
 
         fc.has_mut_params(f);
+        // Audit fix #3: `has_mut_params` computes indices into f.params
+        // (0-based), but impl methods bind implicit `self` at register 0 and
+        // explicit params at registers 1..N+1. Shift every mut-param index by
+        // +1 so `collect_mut_param_vals` (vm.rs) reads the correct registers —
+        // pre-fix, param 0 read register 0 (self), corrupting the write-back.
+        // The checker admits `mut`/`mutate` params on impl methods (no
+        // rejection in core/checker), so this path is live.
+        for idx in fc.proto.mut_param_indices.iter_mut() {
+            *idx += 1;
+        }
 
         // Compile body statements.
         let last_reg = self.compile_block(&mut fc, &f.body)?;
@@ -1090,18 +1178,12 @@ impl BytecodeCompiler {
         fc: &mut FuncCompiler,
         block: &Block,
     ) -> Result<Option<Reg>, InterpError> {
-        // Pre-scan for OnFailure blocks in this block to decide whether
-        // to emit a fault handler wrapper. We only care about direct
-        // children (Stmt::OnFailure), not nested ones in sub-blocks.
-        let has_on_failure = block
-            .iter()
-            .any(|s| matches!(s.unlocated(), Stmt::OnFailure(_)));
-
-        let mut set_fault_idx = None;
-        if has_on_failure {
-            set_fault_idx = Some(fc.emit(Op::SetFaultPc { handler_pc: 0 }));
-        }
-
+        // Audit fix #2: NO block-start pre-scan. Each `on failure` statement
+        // emits its own SetFaultPc at its own execution point (Stmt::OnFailure
+        // arm below), so a handler never compensates faults raised by code
+        // ABOVE its declaration (codegen parity: register_comp on encounter,
+        // block.rs:1039). Nested scopes form a handler STACK in the frame
+        // (SetFaultPc pushes / ClearFaultPc pops — matching pairs).
         let mut last_reg = None;
         for (i, stmt) in block.iter().enumerate() {
             // Track source line for error context (D12).
@@ -1131,7 +1213,18 @@ impl BytecodeCompiler {
                                 fc.borrow_aliases.insert(name.clone(), *place.clone());
                             }
                         }
+                        // Audit fix #9: compile the init under the declared-i32
+                        // width context so literal constant folding applies the
+                        // i32 policy (suspend Pow/Shl folds → guarded ops; other
+                        // folds keep the let-level CheckI32 below).
+                        let is_i32_decl = matches!(
+                            ty.as_ref().map(|t| t.unlocated()),
+                            Some(Type::Name(n, _)) if n == "i32"
+                        );
+                        let prev_i32_ctx = fc.i32_ctx_active;
+                        fc.i32_ctx_active = is_i32_decl;
                         let mut r = self.compile_expr(fc, init_expr)?;
+                        fc.i32_ctx_active = prev_i32_ctx;
                         // C2 fix (audit 2026-08-03): materialize the 0.34.6
                         // one-way numeric widening {i32→i64, i32→f64, i64→f64}
                         // at the VALUE layer for annotated lets. `let x: f64 =
@@ -1341,9 +1434,24 @@ impl BytecodeCompiler {
                 // Nested function definition: compile as a closure and bind
                 // the function name as a local variable holding the closure.
                 // Calls to this name will resolve via CallIndirect.
+                //
+                // Audit fix #10: PRE-BIND the name before compiling the body.
+                // Pre-fix the name was bound only AFTER, so the body could not
+                // reference the function at all ("undefined variable" for
+                // self-recursion). Recursion itself compiles to a direct
+                // Op::Call via the reserved proto index (compile_lambda's
+                // `self_call` wiring) — a closure cannot self-capture its own
+                // value, which exists only after NewClosure executes.
                 Stmt::Func(f) => {
-                    let closure_reg = self.compile_lambda(fc, &f.params, &f.body)?;
-                    fc.vars_mut().insert(f.name.clone(), closure_reg);
+                    let r_self = fc.bind_var(&f.name);
+                    let closure_reg =
+                        self.compile_lambda(fc, &f.params, &f.body, Some(f.name.as_str()))?;
+                    if closure_reg != r_self {
+                        fc.emit(Op::Mov {
+                            rd: r_self,
+                            rs: closure_reg,
+                        });
+                    }
                 }
 
                 // ── Phase B: Stmt 补全 I ──────────────────────
@@ -1433,6 +1541,14 @@ impl BytecodeCompiler {
                 }
 
                 Stmt::OnFailure(block) => {
+                    // Audit fix #2: activate the handler at the statement's
+                    // execution point (SetFaultPc pushes onto the frame's
+                    // handler stack at runtime). Faults raised by earlier
+                    // statements in this block are NOT compensated by this
+                    // handler. The handler code itself is emitted out-of-line
+                    // at scope exit and the SetFaultPc is patched to it.
+                    let patch_idx = fc.emit(Op::SetFaultPc { handler_pc: 0 });
+                    fc.fault_pc_patches_mut().push(patch_idx);
                     // Register compensation block for fault-triggered execution at scope exit.
                     fc.on_failure_scopes_mut().push(block.clone());
                 }
@@ -1484,7 +1600,19 @@ impl BytecodeCompiler {
             self.compile_block(fc, &d)?;
         }
 
-        // Emit OnFailure fault handler at scope exit (if any OnFailure blocks were registered).
+        // Audit fix #2: emit OnFailure handlers at scope exit.
+        //
+        // Normal (success) path: one ClearFaultPc per SetFaultPc this block
+        // emitted — matching pairs pop the handlers this scope pushed.
+        //
+        // Fault path: each `on failure` statement owns a handler snippet
+        // (its compensation block + FaultRetEarly), emitted out-of-line here
+        // in declaration order. Each SetFaultPc is patched to its OWN snippet.
+        // At runtime a fault pops the TOP handler (the last declaration
+        // executed), runs its snippet, and FaultRetEarly cascades to the
+        // handlers pushed earlier — so all enclosing compensations run in
+        // LIFO order without one shared handler code path running blocks
+        // that were never activated.
         let on_failure_blocks: Vec<Block> = fc
             .on_failure_scopes
             .last()
@@ -1492,36 +1620,41 @@ impl BytecodeCompiler {
         if let Some(s) = fc.on_failure_scopes.last_mut() {
             s.clear();
         }
-        if !on_failure_blocks.is_empty() {
-            if let Some(idx) = set_fault_idx {
-                // Emit ClearFaultPc for the normal (success) path.
+        let patches: Vec<usize> = fc.fault_pc_patches.last().map_or(Vec::new(), |s| s.clone());
+        if let Some(s) = fc.fault_pc_patches.last_mut() {
+            s.clear();
+        }
+        mimi_debug_assert!(
+            patches.len() == on_failure_blocks.len(),
+            "bytecode: SetFaultPc patch sites ({}) != on_failure blocks ({})",
+            patches.len(),
+            on_failure_blocks.len()
+        );
+        if !patches.is_empty() {
+            // Normal-exit pops (paired with each SetFaultPc above).
+            for _ in 0..patches.len() {
                 fc.emit(Op::ClearFaultPc);
-                // Jump past the fault handler on normal exit.
-                let jmp_past = fc.emit(Op::Jmp { offset: 0 });
+            }
+            // Jump past the fault handlers on normal exit.
+            let jmp_past = fc.emit(Op::Jmp { offset: 0 });
 
-                // Patch SetFaultPc to point to the handler start.
+            for (patch_idx, b) in patches.iter().zip(on_failure_blocks.iter()) {
+                // Patch this statement's SetFaultPc to its snippet start.
                 let handler_pc = fc.proto.code.len() as u32;
                 if let Op::SetFaultPc {
                     handler_pc: ref mut pc,
-                } = fc.proto.code[idx]
+                } = fc.proto.code[*patch_idx]
                 {
                     *pc = handler_pc;
                 }
-
-                // Emit OnFailure blocks in LIFO order (last registered runs first).
-                for b in on_failure_blocks.into_iter().rev() {
-                    self.compile_block(fc, &b)?;
-                }
-
-                // After compensations, return with the original error.
+                self.compile_block(fc, b)?;
+                // Re-raise (cascades to the next enclosing handler, then
+                // propagates the original error value / InterpError).
                 fc.emit(Op::FaultRetEarly);
-
-                // Patch the jump to skip past the handler.
-                fc.proto.patch_jump(jmp_past);
             }
-        } else if let Some(idx) = set_fault_idx {
-            // No OnFailure blocks but SetFaultPc was emitted — patch to Nop.
-            fc.proto.code[idx] = Op::Nop;
+
+            // Patch the jump to skip past the handlers.
+            fc.proto.patch_jump(jmp_past);
         }
 
         Ok(last_reg)
@@ -1707,7 +1840,7 @@ impl BytecodeCompiler {
                 params,
                 ret: _,
                 body,
-            } => self.compile_lambda(fc, params, body),
+            } => self.compile_lambda(fc, params, body, None),
             Expr::Match(subject, arms) => self.compile_match(fc, subject, arms),
 
             // ── Phase B: Expr 补全 ──────────────────────────
@@ -2016,8 +2149,16 @@ impl BytecodeCompiler {
             }
 
             Expr::Old(inner) => {
-                // old(expr) — in the interpreter, just evaluate the inner expression.
-                // Snapshot semantics are handled by the verifier.
+                // Audit fix #12: inside an ensures mini-function, `old(x)` for a
+                // parameter must read the PRE-call snapshot register, not the
+                // (possibly mutated) POST-call parameter register. Everywhere
+                // else old_regs is empty and old(expr) degrades to plain
+                // evaluation (snapshot semantics handled by the verifier).
+                if let Expr::Ident(name) = inner.unlocated() {
+                    if let Some(&r) = fc.old_regs.get(name) {
+                        return Ok(r);
+                    }
+                }
                 self.compile_expr(fc, inner)
             }
 
@@ -2098,41 +2239,53 @@ impl BytecodeCompiler {
         block: &Block,
     ) -> Result<Reg, InterpError> {
         let mut shadowed = std::collections::HashSet::new();
-        self.compile_quote_block(fc, block, &mut shadowed)?;
-        fc.emit(Op::QuoteBlock {
-            n: block.len() as u16,
-        });
+        // Audit fix #5: `n` must count the nodes ACTUALLY pushed onto the
+        // quote stack, not block.len() — skipped statements (defer,
+        // non-variable lets, …) push nothing, and counting them desynced the
+        // stack into a runtime underflow (E0800).
+        let n = self.compile_quote_block(fc, block, &mut shadowed)?;
+        fc.emit(Op::QuoteBlock { n });
         let rd = fc.proto.alloc_reg();
         fc.emit(Op::QuoteResult { rd });
         Ok(rd)
     }
 
     /// Compile a quote block's statements onto the quote stack.
+    /// Returns the number of statement-nodes actually pushed (audit fix #5 —
+    /// QuoteBlock pops exactly this many at runtime).
     fn compile_quote_block(
         &mut self,
         fc: &mut FuncCompiler,
         block: &Block,
         shadowed: &mut std::collections::HashSet<String>,
-    ) -> Result<(), InterpError> {
+    ) -> Result<u16, InterpError> {
+        let mut pushed: u16 = 0;
         for stmt in block {
-            self.compile_quote_stmt(fc, stmt, shadowed)?;
+            if self.compile_quote_stmt(fc, stmt, shadowed)? {
+                pushed += 1;
+            }
         }
-        Ok(())
+        Ok(pushed)
     }
 
-    /// Compile a single statement inside a quote. Unsupported statements are
-    /// skipped (mirroring the tree-walker's `quote_stmt -> None`).
+    /// Compile a single statement inside a quote. Returns `true` when the
+    /// statement pushed exactly one node onto the quote stack. Unsupported
+    /// statements are skipped (mirroring the tree-walker's
+    /// `quote_stmt -> None`) and return `false` so callers can keep the
+    /// QuoteBlock statement accounting in sync (audit fix #5).
     fn compile_quote_stmt(
         &mut self,
         fc: &mut FuncCompiler,
         stmt: &Stmt,
         shadowed: &mut std::collections::HashSet<String>,
-    ) -> Result<(), InterpError> {
-        match stmt.unlocated() {
+    ) -> Result<bool, InterpError> {
+        let pushed: bool = match stmt.unlocated() {
             Stmt::Let { pat, init, .. } => {
                 let name = match &pat.kind {
                     PatternKind::Variable(n) => n.clone(),
-                    _ => return Ok(()),
+                    // Audit fix #5: a pattern let pushes no node — must not be
+                    // counted in the enclosing QuoteBlock's `n`.
+                    _ => return Ok(false),
                 };
                 shadowed.insert(name.clone());
                 if let Some(e) = init {
@@ -2143,10 +2296,12 @@ impl BytecodeCompiler {
                 }
                 let name_idx = fc.proto.add_const(ConstValue::Str(name));
                 fc.emit(Op::QuoteLet { str_idx: name_idx });
+                true
             }
             Stmt::Expr(e) => {
                 self.compile_quote_expr(fc, e, shadowed)?;
                 fc.emit(Op::QuoteExprStmt);
+                true
             }
             Stmt::Return(e) => {
                 if let Some(inner) = e {
@@ -2155,42 +2310,39 @@ impl BytecodeCompiler {
                 } else {
                     fc.emit(Op::QuoteReturn { has_value: false });
                 }
+                true
             }
             Stmt::Block(inner) => {
-                self.compile_quote_block(fc, inner, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: inner.len() as u16,
-                });
+                let n = self.compile_quote_block(fc, inner, shadowed)?;
+                fc.emit(Op::QuoteBlock { n });
+                true
             }
             Stmt::If { cond, then_, else_ } => {
                 self.compile_quote_expr(fc, cond, shadowed)?;
-                self.compile_quote_block(fc, then_, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: then_.len() as u16,
-                });
+                let n_then = self.compile_quote_block(fc, then_, shadowed)?;
+                fc.emit(Op::QuoteBlock { n: n_then });
                 let has_else = else_.is_some();
                 if let Some(e) = else_ {
-                    self.compile_quote_block(fc, e, shadowed)?;
-                    fc.emit(Op::QuoteBlock { n: e.len() as u16 });
+                    let n_else = self.compile_quote_block(fc, e, shadowed)?;
+                    fc.emit(Op::QuoteBlock { n: n_else });
                 }
                 fc.emit(Op::QuoteIf { has_else });
+                true
             }
             Stmt::While { cond, body } => {
                 self.compile_quote_expr(fc, cond, shadowed)?;
-                self.compile_quote_block(fc, body, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: body.len() as u16,
-                });
+                let n = self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock { n });
                 fc.emit(Op::QuoteWhile);
+                true
             }
             Stmt::WhileLet { pat, init, body } => {
                 self.compile_quote_expr(fc, init, shadowed)?;
-                self.compile_quote_block(fc, body, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: body.len() as u16,
-                });
+                let n = self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock { n });
                 let pat_idx = fc.proto.add_const(ConstValue::Pattern(pat.clone()));
                 fc.emit(Op::QuoteWhileLet { pat_idx });
+                true
             }
             Stmt::Break(e) => {
                 if let Some(inner) = e {
@@ -2199,9 +2351,11 @@ impl BytecodeCompiler {
                 fc.emit(Op::QuoteBreak {
                     has_value: e.is_some(),
                 });
+                true
             }
             Stmt::Continue => {
                 fc.emit(Op::QuoteContinue);
+                true
             }
             Stmt::For {
                 var,
@@ -2216,26 +2370,31 @@ impl BytecodeCompiler {
                     })?
                     .to_string();
                 shadowed.insert(var_name.clone());
-                self.compile_quote_block(fc, body, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: body.len() as u16,
-                });
+                let n = self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock { n });
                 shadowed.remove(&var_name);
                 let var_idx = fc.proto.add_const(ConstValue::Str(var_name.clone()));
                 fc.emit(Op::QuoteFor { var_idx });
+                true
             }
             Stmt::Assign { target, value } => {
                 self.compile_quote_expr(fc, target, shadowed)?;
                 self.compile_quote_expr(fc, value, shadowed)?;
                 fc.emit(Op::QuoteAssign);
+                true
             }
             Stmt::Loop(body) => {
-                self.compile_quote_block(fc, body, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: body.len() as u16,
-                });
+                let n = self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock { n });
                 fc.emit(Op::QuoteLoop);
+                true
             }
+            // Audit fix #5: `defer` (and any other statement kind without a
+            // quote opcode) pushes nothing — explicit arm so the skip is
+            // documented and not counted, mirroring the `if let` rejection
+            // discipline (kinds that silently dropped code broke the
+            // QuoteBlock accounting).
+            Stmt::Defer(_) => return Ok(false),
             // 0.31.22 soundness: contracts in quote! must error, not silently skip.
             Stmt::Requires(_, span) => {
                 return Err(InterpError::new(format!(
@@ -2272,10 +2431,11 @@ impl BytecodeCompiler {
                     line
                 )));
             }
-            // Unsupported statements are skipped (tree-walker parity).
-            _ => {}
-        }
-        Ok(())
+            // Unsupported statements are skipped (tree-walker parity) and NOT
+            // counted in the enclosing QuoteBlock's `n` (audit fix #5).
+            _ => false,
+        };
+        Ok(pushed)
     }
 
     /// Compile a quote expression onto the quote stack.
@@ -2360,14 +2520,13 @@ impl BytecodeCompiler {
             }
             Expr::If { cond, then_, else_ } => {
                 self.compile_quote_expr(fc, cond, shadowed)?;
-                self.compile_quote_block(fc, then_, shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: then_.len() as u16,
-                });
+                // Audit fix #5: actual pushed-node counts (skips are possible).
+                let n_then = self.compile_quote_block(fc, then_, shadowed)?;
+                fc.emit(Op::QuoteBlock { n: n_then });
                 let has_else = else_.is_some();
                 if let Some(e) = else_ {
-                    self.compile_quote_block(fc, e, shadowed)?;
-                    fc.emit(Op::QuoteBlock { n: e.len() as u16 });
+                    let n_else = self.compile_quote_block(fc, e, shadowed)?;
+                    fc.emit(Op::QuoteBlock { n: n_else });
                 }
                 fc.emit(Op::QuoteIf { has_else });
             }
@@ -2377,10 +2536,9 @@ impl BytecodeCompiler {
             }
             Expr::Quote(inner_block) => {
                 let mut inner_shadowed = std::collections::HashSet::new();
-                self.compile_quote_block(fc, inner_block, &mut inner_shadowed)?;
-                fc.emit(Op::QuoteBlock {
-                    n: inner_block.len() as u16,
-                });
+                // Audit fix #5: actual pushed-node count (skips are possible).
+                let n = self.compile_quote_block(fc, inner_block, &mut inner_shadowed)?;
+                fc.emit(Op::QuoteBlock { n });
                 let tmp = fc.proto.alloc_reg();
                 fc.emit(Op::QuoteResult { rd: tmp });
                 fc.emit(Op::QuoteAstPush { rs: tmp });
@@ -2694,9 +2852,23 @@ impl BytecodeCompiler {
 
         // Constant folding: if both operands are literals, compute at compile time.
         if let (Expr::Literal(l_lit), Expr::Literal(r_lit)) = (l.unlocated(), r.unlocated()) {
-            if let Some(folded) = self.fold_constants(op, l_lit, r_lit) {
-                let folded = self.compile_literal(fc, &folded)?;
-                return self.copy_into(fc, folded, hint.unwrap_or(folded));
+            // Audit fix #9: in an i32 context (annotated let / i32-var assign),
+            // do NOT fold Pow/Shl. Codegen computes i32 `**` in i64 then WRAPS
+            // (2**31 → i32::MIN, no trap) and MASKS the `<<` amount modulo 32
+            // before wrapping — a pre-folded i64 literal cannot express either
+            // policy (folded `2**31` trapped at the let-level CheckI32 where
+            // codegen wraps; folded `1 << 40` lost the masking). Suspended
+            // folds fall through to the guarded op path below (PowInt+WrapI32 /
+            // MaskShiftAmt+Shl+WrapI32), which reproduces codegen exactly.
+            // Other ops still fold; the let/assign-level CheckI32 supplies the
+            // same width policy the non-folded path would (e.g. folded
+            // `2147483646 + 2` traps E0802 like codegen's checked i32 add).
+            let suspend_fold = fc.i32_ctx_active && matches!(op, BinOp::Pow | BinOp::Shl);
+            if !suspend_fold {
+                if let Some(folded) = self.fold_constants(op, l_lit, r_lit) {
+                    let folded = self.compile_literal(fc, &folded)?;
+                    return self.copy_into(fc, folded, hint.unwrap_or(folded));
+                }
             }
         }
 
@@ -2743,8 +2915,13 @@ impl BytecodeCompiler {
             let lw = self.infer_expr_type(fc, l);
             let rw = self.infer_expr_type(fc, r);
             let int_like = |t: &VarType| !matches!(t, VarType::Float | VarType::String);
-            let i32_ctx =
-                (lw == VarType::Int32 && int_like(&rw)) || (rw == VarType::Int32 && int_like(&lw));
+            // Audit fix #9: the enclosing declared-i32 place (annotated let /
+            // i32-var assign) forces i32 width even when both operands are
+            // literals (which infer as generic Int) — so the suspended Pow/Shl
+            // folds pick up MaskShiftAmt/WrapI32, matching codegen.
+            let i32_ctx = fc.i32_ctx_active
+                || (lw == VarType::Int32 && int_like(&rw))
+                || (rw == VarType::Int32 && int_like(&lw));
             if i32_ctx && matches!(op, BinOp::Div | BinOp::Mod) {
                 // i32::MIN / -1 overflows i32 but not i64 — pre-op operand
                 // guard with the codegen-matching message (also covers %).
@@ -2976,6 +3153,22 @@ impl BytecodeCompiler {
                 }
             }
 
+            // Ruling (a) / audit fix #14: pop(var) → ListPop (IN-PLACE with
+            // write-back, error on empty). The builtin `pop` receives a cloned
+            // argument (value semantics) and cannot mutate the caller's
+            // binding, so the variable form gets a register-mutating op —
+            // mirroring the push(ListPush) special case above. Non-Ident
+            // arguments fall through to the builtin (still errors on empty).
+            if name == "pop" && args.len() == 1 {
+                if let Expr::Ident(var_name) = args[0].unlocated() {
+                    if let Some(var_reg) = fc.lookup_var(var_name) {
+                        let rd = fc.proto.alloc_reg();
+                        fc.emit(Op::ListPop { rd, ra: var_reg });
+                        return Ok(rd);
+                    }
+                }
+            }
+
             // Variant constructors: Ok(v), Err(v), Some(v), None.
             match name.as_str() {
                 "Ok" => {
@@ -3037,7 +3230,10 @@ impl BytecodeCompiler {
                 || self.func_table.contains_key(name.as_str())
                 || self.variant_names.contains(name.as_str())
                 || self.extern_names.contains(name.as_str())
-                || fc.lookup_var(name).is_some();
+                || fc.lookup_var(name).is_some()
+                // Audit fix #10: the enclosing named nested function's own
+                // name (self-recursion — not in any table, not captured).
+                || fc.self_call.as_ref().is_some_and(|(n, _)| n == name);
             if !is_known {
                 return Err(InterpError::new(format!("undefined function '{}'", name)));
             }
@@ -3139,6 +3335,23 @@ impl BytecodeCompiler {
             // CODEGEN side: the call-site directory records Builtin kind
             // without scope awareness, and resolved lowering now prefers a
             // shadowing local closure (lower.rs Builtin-kind guard).
+            // Audit fix #10: self-recursion of the enclosing NAMED nested
+            // function — emit a direct Op::Call to its own (pre-reserved)
+            // proto. The closure mechanism cannot represent the
+            // self-reference (captures are values; the closure's own value
+            // does not exist until NewClosure runs). Precedence matches a
+            // local binding: inside its own body the name is the function.
+            if let Some((self_name, self_idx)) = &fc.self_call {
+                if name == self_name {
+                    fc.emit(Op::Call {
+                        rd,
+                        func: *self_idx,
+                        args_base,
+                        argc: effective_args.len() as u16,
+                    });
+                    return Ok(rd);
+                }
+            }
             if let Some(callee_reg) = fc.lookup_var(name) {
                 fc.emit(Op::CallIndirect {
                     rd,
@@ -3485,6 +3698,9 @@ impl BytecodeCompiler {
                         self.method_table.get(&(type_name.clone(), method.clone()))
                     {
                         if let Some(&fidx) = self.func_table.get(mangled) {
+                            // Audit fix #3: mutate-param write-back for the
+                            // method call (pre-fix: silently dropped).
+                            self.emit_impl_method_mutate_setup(fc, fidx, args);
                             fc.emit(Op::Call {
                                 rd,
                                 func: fidx,
@@ -3509,6 +3725,8 @@ impl BytecodeCompiler {
                 for prefix in &prefixes {
                     let mangled = format!("{}_{}", prefix, method);
                     if let Some(&fidx) = self.func_table.get(&mangled) {
+                        // Audit fix #3: mutate-param write-back (as above).
+                        self.emit_impl_method_mutate_setup(fc, fidx, args);
                         fc.emit(Op::Call {
                             rd,
                             func: fidx,
@@ -3544,6 +3762,54 @@ impl BytecodeCompiler {
             argc: args.len() as u16,
         });
         Ok(rd)
+    }
+
+    /// Audit fix #3: mutate-param write-back for impl-method calls
+    /// (`obj.method(...)`). The method path previously emitted NO MutateSetup,
+    /// so impl-method mut-param mutations were silently dropped (codegen
+    /// passes `mut` params by reference — L1 gap).
+    ///
+    /// Index convention: the callee's `mut_param_indices` are REGISTER indices
+    /// with implicit `self` at 0 (shifted by +1 in `compile_func_impl`), so
+    /// the explicit argument for register index `pi` is `args[pi - 1]` (the
+    /// receiver occupies arg slot 0 and is not a write-back target here —
+    /// mutate-SELF on records flows through value semantics). Non-Ident
+    /// argument expressions skip write-back exactly like the top-level call
+    /// path (silent drop, both backends agree).
+    fn emit_impl_method_mutate_setup(
+        &mut self,
+        fc: &mut FuncCompiler,
+        fidx: FuncIdx,
+        args: &[Expr],
+    ) {
+        let proto = &self.functions[fidx as usize];
+        let mut targets: Vec<Reg> = Vec::new();
+        for &pi in &proto.mut_param_indices {
+            let arg_idx = (pi as usize).wrapping_sub(1);
+            if let Some(Expr::Ident(var_name)) = args.get(arg_idx).map(|a| a.unlocated()) {
+                if let Some(reg) = fc.lookup_var(var_name) {
+                    targets.push(reg);
+                }
+            }
+        }
+        if !targets.is_empty() {
+            let base = fc.proto.alloc_reg();
+            for _ in 1..targets.len() {
+                fc.proto.alloc_reg();
+            }
+            for (i, t) in targets.iter().enumerate() {
+                let target = base + i as Reg;
+                let cidx = fc.proto.add_const(ConstValue::Int(*t as i64));
+                fc.emit(Op::LoadConst {
+                    rd: target,
+                    idx: cidx,
+                });
+            }
+            fc.emit(Op::MutateSetup {
+                regs_base: base,
+                count: targets.len() as u16,
+            });
+        }
     }
 
     fn compile_if_expr(
@@ -3799,7 +4065,19 @@ impl BytecodeCompiler {
                 });
 
                 let mut bindings = Vec::new();
-                let mut test_reg = Some(r_is_tuple);
+                let mut test_reg: Option<Reg> = Some(r_is_tuple);
+
+                // Audit fix #6: GUARDED extraction. Previously TupleGet was
+                // emitted before any runtime jump, so a non-tuple subject
+                // trapped instead of falling through to the next arm. Mirror
+                // the Array/Slice pattern guard: skip element access when the
+                // type test fails (patched to land after the extractions).
+                let skip_elems = test_reg.map(|r_test| {
+                    fc.emit(Op::JmpIfNot {
+                        offset: 0,
+                        ra: r_test,
+                    })
+                });
 
                 for (i, sub_pat) in pats.iter().enumerate() {
                     let r_elem = fc.proto.alloc_reg();
@@ -3822,6 +4100,11 @@ impl BytecodeCompiler {
                         }
                     }
                     bindings.extend(sub_bindings);
+                }
+
+                // Patch the type-test jump to land after element extraction.
+                if let Some(skip_idx) = skip_elems {
+                    fc.proto.patch_jump(skip_idx);
                 }
 
                 Ok((test_reg, bindings))
@@ -4628,7 +4911,14 @@ impl BytecodeCompiler {
                         }
                     }
                 }
+                // Audit fix #9: assignment into a declared-i32 variable compiles
+                // the value under the i32 width context (literal fold policy —
+                // see the identically-shaped annotated-`let` handling).
+                let is_i32_target = fc.var_types.get(name) == Some(&VarType::Int32);
+                let prev_i32_ctx = fc.i32_ctx_active;
+                fc.i32_ctx_active = is_i32_target;
                 let mut r_val = self.compile_expr(fc, value)?;
+                fc.i32_ctx_active = prev_i32_ctx;
                 let r_var = fc.get_or_bind(name);
                 // C2 fix (audit 2026-08-03): value-layer numeric widening on
                 // assignment too — `x = 1` where x is an f64 binding must
@@ -4727,12 +5017,18 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Assign to a field with write-back for nested access.
-    /// For `outer.inner.value = x`:
-    ///   1. Get outer's register (the root variable)
-    ///   2. RecordGet outer.inner → temp_inner
-    ///   3. RecordSet temp_inner.value = x
-    ///   4. RecordSet outer.inner = temp_inner (write-back)
+    /// Assign to a field with FULL-CHAIN write-back for nested access at any
+    /// depth (audit fix #4: the old code cloned the grand-parent into a temp
+    /// and wrote the modified sub-record back into that DEAD clone, so chains
+    /// of depth ≥ 4 — `a.b.c.d = v` — lost the write entirely).
+    ///
+    /// For `a.b.c.d = v` (root `a`, projections `[b, c, d]`):
+    ///   descend:  t1 = RecordGet(a, b); t2 = RecordGet(t1, c)
+    ///   leaf set: RecordSet(t2, d, v)
+    ///   write back UP the chain (innermost first):
+    ///             RecordSet(t1, c, t2); RecordSet(a, b, t1)
+    /// Numeric fields use TupleGet/TupleSet; an Index root (`xs[i].b.c = v`)
+    /// reads the element, mutates it through the chain, then ListSets it back.
     fn compile_field_assign(
         &mut self,
         fc: &mut FuncCompiler,
@@ -4740,99 +5036,119 @@ impl BytecodeCompiler {
         field: &str,
         r_val: Reg,
     ) -> Result<(), InterpError> {
-        match obj.unlocated() {
+        // ── Collect the projection chain down to the root ──
+        // `fields` ends up ordered root-side first: for target `a.b.c.d = v`
+        // (obj = a.b.c, field = "d") → fields = ["b", "c", "d"].
+        let mut fields: Vec<String> = vec![field.to_string()];
+        let mut root: &Expr = obj;
+        while let Expr::Field(parent, parent_field) = root.unlocated() {
+            fields.insert(0, parent_field.clone());
+            root = parent.as_ref();
+        }
+
+        // ── Resolve the root to a register ──
+        // ListElem: the root register is a list ELEMENT that must be ListSet
+        // back after mutation. Var: the root is a live variable register.
+        // Temp: arbitrary expression — mutation stays local (pre-existing
+        // limitation for non-place roots like `make().b = v`).
+        enum Root {
+            Var,
+            ListElem { r_list: Reg, r_idx: Reg },
+            Temp,
+        }
+        let (mut r_cur, root_kind) = match root.unlocated() {
             Expr::Ident(name) => {
-                // Simple case: var.field = value. No write-back needed.
-                let r_obj = fc.lookup_var(name).ok_or_else(|| {
+                let r = fc.lookup_var(name).ok_or_else(|| {
                     InterpError::new(format!("undefined variable '{}' in field assign", name))
                 })?;
-                let field_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
-                // Numeric field (tuple element access): pair.1 = v → TupleSet.
-                if field.parse::<usize>().is_ok() {
-                    fc.emit(Op::TupleSet {
-                        ra: r_obj,
-                        idx: field_idx,
-                        rb: r_val,
-                    });
-                } else {
-                    fc.emit(Op::RecordSet {
-                        ra: r_obj,
-                        field: field_idx,
-                        rb: r_val,
-                    });
-                }
-                Ok(())
-            }
-            Expr::Field(parent, parent_field) => {
-                // Nested: parent.parent_field.field = value.
-                // 1. Compile parent to get its register.
-                let r_parent = self.compile_expr(fc, parent)?;
-                // 2. Get the sub-record.
-                let pf_idx = fc.proto.add_const(ConstValue::Str(parent_field.clone()));
-                let r_sub = fc.proto.alloc_reg();
-                fc.emit(Op::RecordGet {
-                    rd: r_sub,
-                    ra: r_parent,
-                    field: pf_idx,
-                });
-                // 3. Set the target field on the sub-record.
-                let f_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
-                fc.emit(Op::RecordSet {
-                    ra: r_sub,
-                    field: f_idx,
-                    rb: r_val,
-                });
-                // 4. Write back the modified sub-record into the parent.
-                fc.emit(Op::RecordSet {
-                    ra: r_parent,
-                    field: pf_idx,
-                    rb: r_sub,
-                });
-                // 5. If parent is itself nested, propagate write-back upward.
-                //    (Handled recursively: compile_expr for Field chains resolves
-                //    to the root variable's register via RecordGet chains, and
-                //    the write-back at step 4 updates the immediate parent. For
-                //    deeper nesting, the parent's RecordGet reads from the root.)
-                Ok(())
+                (r, Root::Var)
             }
             Expr::Index(list_expr, idx_expr) => {
-                // list[idx].field = value.
                 let r_list = self.compile_expr(fc, list_expr)?;
                 let r_idx = self.compile_expr(fc, idx_expr)?;
-                // Get element.
                 let r_elem = fc.proto.alloc_reg();
                 fc.emit(Op::ListGet {
                     rd: r_elem,
                     ra: r_list,
                     rb: r_idx,
                 });
-                // Set field on element.
-                let f_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
-                fc.emit(Op::RecordSet {
-                    ra: r_elem,
-                    field: f_idx,
-                    rb: r_val,
-                });
-                // Write back element to list.
-                fc.emit(Op::ListSet {
-                    ra: r_list,
-                    rb: r_idx,
-                    rc: r_elem,
-                });
-                Ok(())
+                (r_elem, Root::ListElem { r_list, r_idx })
             }
-            _ => {
-                // Fallback: compile obj normally and set field.
-                let r_obj = self.compile_expr(fc, obj)?;
-                let field_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
-                fc.emit(Op::RecordSet {
-                    ra: r_obj,
-                    field: field_idx,
-                    rb: r_val,
+            _ => (self.compile_expr(fc, root)?, Root::Temp),
+        };
+
+        // ── Descend: clone each intermediate projection into a temp ──
+        // temps[i] holds the value reached after applying fields[0..=i-1]
+        // (temps[0] = the root register). The leaf field is SET in place on
+        // the last temp; every earlier temp needs a write-back.
+        let mut temps: Vec<Reg> = vec![r_cur];
+        for f in &fields[..fields.len() - 1] {
+            let r_next = fc.proto.alloc_reg();
+            let f_idx = fc.proto.add_const(ConstValue::Str(f.clone()));
+            if f.parse::<usize>().is_ok() {
+                fc.emit(Op::TupleGet {
+                    rd: r_next,
+                    ra: r_cur,
+                    idx: f.parse::<u16>().unwrap_or(0),
                 });
-                Ok(())
+            } else {
+                fc.emit(Op::RecordGet {
+                    rd: r_next,
+                    ra: r_cur,
+                    field: f_idx,
+                });
+            }
+            temps.push(r_next);
+            r_cur = r_next;
+        }
+
+        // ── Set the leaf field on the innermost temp ──
+        let leaf = fields.last().expect("fields is never empty");
+        let leaf_idx = fc.proto.add_const(ConstValue::Str(leaf.clone()));
+        if leaf.parse::<usize>().is_ok() {
+            fc.emit(Op::TupleSet {
+                ra: r_cur,
+                idx: leaf_idx,
+                rb: r_val,
+            });
+        } else {
+            fc.emit(Op::RecordSet {
+                ra: r_cur,
+                field: leaf_idx,
+                rb: r_val,
+            });
+        }
+
+        // ── Write back UP the chain (innermost first) ──
+        // temps[i] was extracted from temps[i-1] via fields[i-1]; store the
+        // mutated copy back until the root is reached.
+        for i in (1..temps.len()).rev() {
+            let f = &fields[i - 1];
+            let f_idx = fc.proto.add_const(ConstValue::Str(f.clone()));
+            if f.parse::<usize>().is_ok() {
+                fc.emit(Op::TupleSet {
+                    ra: temps[i - 1],
+                    idx: f_idx,
+                    rb: temps[i],
+                });
+            } else {
+                fc.emit(Op::RecordSet {
+                    ra: temps[i - 1],
+                    field: f_idx,
+                    rb: temps[i],
+                });
             }
         }
+
+        // ── Root-level write-back for list elements ──
+        if let Root::ListElem { r_list, r_idx } = root_kind {
+            fc.emit(Op::ListSet {
+                ra: r_list,
+                rb: r_idx,
+                rc: temps[0],
+            });
+        }
+        Ok(())
     }
 
     /// Compile a range expression (start..end) into a list via the range builtin.
@@ -4966,24 +5282,45 @@ impl BytecodeCompiler {
     /// 2. Create a new FunctionProto for the lambda body
     /// 3. Compile the body with parameters + captured variables bound
     /// 4. Emit NewClosure with the proto index and captured variables
+    ///
+    /// `self_name` (audit fix #10): for NAMED nested functions
+    /// (`Stmt::Func`), the function's own name. The proto slot is reserved
+    /// BEFORE body compilation so self-recursive calls can emit direct
+    /// Op::Call to it (via `FuncCompiler::self_call`); the self name is
+    /// excluded from capture analysis — a closure cannot self-capture (its
+    /// own value exists only after NewClosure executes). Anonymous lambdas
+    /// pass None and behave exactly as before.
     fn compile_lambda(
         &mut self,
         fc: &mut FuncCompiler,
         params: &[Param],
         body: &Block,
+        self_name: Option<&str>,
     ) -> Result<Reg, InterpError> {
+        // Audit fix #10: reserve the proto slot up-front so the index is
+        // known during body compilation (direct self-recursion calls).
+        let lambda_idx = self.functions.len() as FuncIdx;
+        let lambda_name = format!("__lambda_{}", lambda_idx);
+        let mut lambda_fc = FuncCompiler::new(lambda_name.clone(), params.len() as u16);
+        self.functions
+            .push(FunctionProto::new(lambda_name.clone(), params.len() as u16));
+
         // Step 1: Collect free variables that need to be captured.
         let free_vars = self.collect_free_vars(body, params);
 
-        // Filter to only variables that exist in the outer scope.
+        // Filter to only variables that exist in the outer scope. The self
+        // name is excluded (audit fix #10): the pre-bound outer placeholder
+        // would otherwise be captured as Unit (the closure value does not
+        // exist until NewClosure runs).
         let captures: Vec<(String, Reg)> = free_vars
             .iter()
+            .filter(|name| self_name.map_or(true, |s| s != name.as_str()))
             .filter_map(|name| fc.lookup_var(name).map(|reg| (name.clone(), reg)))
             .collect();
 
-        // Create a new function proto for the lambda.
-        let lambda_name = format!("__lambda_{}", self.functions.len());
-        let mut lambda_fc = FuncCompiler::new(lambda_name.clone(), params.len() as u16);
+        // Audit fix #10: route `self_name(...)` calls in the body to a
+        // direct Op::Call (see compile_call).
+        lambda_fc.self_call = self_name.map(|n| (n.to_string(), lambda_idx));
 
         // Bind parameters to registers 0..param_count.
         for (i, param) in params.iter().enumerate() {
@@ -5024,11 +5361,15 @@ impl BytecodeCompiler {
         }
         lambda_fc.pop_scope();
 
-        // Add the lambda proto to the program.
-        let lambda_idx = self.functions.len() as FuncIdx;
+        // Replace the reserved placeholder with the compiled proto (audit fix
+        // #10: the slot was reserved before body compilation so the index was
+        // stable for direct self-recursion calls).
+        if let Some(name) = self_name {
+            lambda_fc.proto.name = name.to_string();
+        }
         // Set capture names in the proto.
         lambda_fc.proto.capture_names = captures.iter().map(|(name, _)| name.clone()).collect();
-        self.functions.push(lambda_fc.proto);
+        self.functions[lambda_idx as usize] = lambda_fc.proto;
 
         // Emit code to capture the variables.
         // Captures are stored as (name, value) pairs in consecutive registers.

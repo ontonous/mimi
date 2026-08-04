@@ -4,12 +4,19 @@ use crate::codegen::types;
 use std::collections::HashMap;
 
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 use crate::error::{CompileError, MimiResult};
 
 use super::CodeGenerator;
 use super::VarEntry;
+
+/// Mailbox blob capacity in bytes. MUST stay in sync with
+/// `MIMI_ACTOR_BLOB_SIZE` in src/runtime/actor.rs: the worker's result blob is
+/// that size and `mimi_actor_call` caps the result copy at it. Packing past
+/// this bound overwrites the stack (args/result blobs are stack allocas on the
+/// caller side, a fixed vec on the worker side), so codegen traps instead.
+const ACTOR_MAILBOX_BLOB_CAPACITY: u64 = 256;
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// ABI slot size for actor mailbox packing: natural type size, rounded up
@@ -17,6 +24,111 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn actor_abi_slot_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
         let size = self.llvm_type_size_bytes(ty).max(1);
         size.div_ceil(8) * 8
+    }
+
+    /// Single-source LLVM lowering for actor method parameter/return types
+    /// crossing the mailbox ABI. 0.34.36 (audit §6.6): the call-site pack,
+    /// the dispatch unpack, AND the `{Actor}__{method}__method` signature must
+    /// agree on the exact type. Previously pack/unpack used
+    /// `types::mimi_type_to_llvm`, whose `_` arm maps any named record to a
+    /// bare i64 slot while the call site stored the full struct value into
+    /// that 8-byte accounting — overlapping writes + wrong-sized reads. The
+    /// registry-backed `llvm_type_for` resolves named records/enums to their
+    /// real struct layout.
+    fn actor_abi_type_for(&self, ty: &crate::ast::Type) -> BasicTypeEnum<'ctx> {
+        self.llvm_type_for(ty)
+            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+    }
+
+    /// Emit an unconditional runtime abort with a clear message (used when a
+    /// statically oversized mailbox pack is detected). The abort block is
+    /// followed by `unreachable`; control continues in a fresh block so any
+    /// subsequent (dead) IR stays well-formed. 0.34.36 (audit §6.6): replaced
+    /// the silent stack overflow of the fixed-size blobs.
+    fn emit_actor_mailbox_overflow_abort(&mut self, msg: &str, tag: &str) -> MimiResult<()> {
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for actor blob guard".into())
+        })?;
+        let abort_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_mailbox_overflow", tag));
+        let cont_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_mailbox_ok", tag));
+        self.build_br(abort_bb)?;
+        self.builder.position_at_end(abort_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg_ptr = self
+            .builder
+            .build_global_string_ptr(msg, &format!("{}_mailbox_msg", tag))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                msg_ptr.as_pointer_value(),
+            )],
+            &format!("{}_mailbox_abort", tag),
+        )?;
+        // SAFETY: mimi_runtime_abort is marked noreturn; this block is
+        // unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
+        self.builder.position_at_end(cont_bb);
+        Ok(())
+    }
+
+    /// Emit a runtime guard: abort with `msg` if `actual` < `required`
+    /// (unsigned). Protects dispatch-side unpack reads: `args_size` crosses a
+    /// thread boundary via the mailbox, so its validity is checked at runtime,
+    /// not assumed. 0.34.36 (audit §6.6).
+    fn emit_actor_mailbox_size_check(
+        &mut self,
+        actual: inkwell::values::IntValue<'ctx>,
+        required: u64,
+        msg: &str,
+        tag: &str,
+    ) -> MimiResult<()> {
+        let i64_ty = self.context.i64_type();
+        let too_small = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                actual,
+                i64_ty.const_int(required, false),
+                &format!("{}_too_small", tag),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("icmp error: {}", e)))?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for actor blob guard".into())
+        })?;
+        let abort_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_args_underflow", tag));
+        let cont_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_args_ok", tag));
+        self.build_cond_br(too_small, abort_bb, cont_bb)?;
+        self.builder.position_at_end(abort_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg_ptr = self
+            .builder
+            .build_global_string_ptr(msg, &format!("{}_args_msg", tag))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                msg_ptr.as_pointer_value(),
+            )],
+            &format!("{}_args_abort", tag),
+        )?;
+        // SAFETY: mimi_runtime_abort is marked noreturn; this block is
+        // unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
+        self.builder.position_at_end(cont_bb);
+        Ok(())
     }
 
     fn is_actor_string_abi_type(ty: BasicTypeEnum<'ctx>) -> bool {
@@ -69,8 +181,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn compile_actor_constructor(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
         let mut param_types = Vec::new();
         for f in &actor.fields {
-            let ty = types::mimi_type_to_llvm(self.context, &f.ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            // Registry-backed lowering (audit §6.6): the struct field slots
+            // come from register_actor_def's llvm_type_for, so constructor
+            // params must agree with them.
+            let ty = self.actor_abi_type_for(&f.ty);
             param_types.push(ty);
         }
 
@@ -164,7 +278,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 CompileError::LlvmError("dispatch: missing args_blob param".to_string())
             })?
             .into_pointer_value();
-        // args_size = param 3 (not used directly; args are unpacked by offset)
+        // args_size = param 3. 0.34.36 (audit §6.6): previously ignored —
+        // unpack offsets were trusted blindly. It now bounds the unpack reads
+        // per case (cross-thread data must be validated, not assumed).
+        let args_size = function
+            .get_nth_param(3)
+            .ok_or_else(|| {
+                CompileError::LlvmError("dispatch: missing args_size param".to_string())
+            })?
+            .into_int_value();
         let result_blob = function
             .get_nth_param(4)
             .ok_or_else(|| {
@@ -216,14 +338,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
             call_args.push(self_fields_ptr.into());
 
+            // 0.34.36 (audit §6.6): bound the unpack before reading. Compute
+            // the exact packed size this method's params occupy (same slot
+            // layout the call site packs with — single source
+            // `actor_abi_type_for` + `actor_abi_slot_size`). Statically
+            // oversized packs trap; a runtime check validates the args_size
+            // that crossed the mailbox before any read.
+            let required_args_size: u64 = method
+                .params
+                .iter()
+                .map(|p| self.actor_abi_slot_size(self.actor_abi_type_for(&p.ty)))
+                .sum();
+            if required_args_size > ACTOR_MAILBOX_BLOB_CAPACITY {
+                self.emit_actor_mailbox_overflow_abort(
+                    &format!(
+                        "actor mailbox overflow: {}.{} packs {} bytes of arguments; capacity is {} bytes",
+                        actor.name, method.name, required_args_size, ACTOR_MAILBOX_BLOB_CAPACITY
+                    ),
+                    &format!("dispatch_{}_{}", actor.name, method.name),
+                )?;
+            } else {
+                self.emit_actor_mailbox_size_check(
+                    args_size,
+                    required_args_size,
+                    &format!(
+                        "actor mailbox args underflow: {}.{} expects {} packed bytes, got fewer",
+                        actor.name, method.name, required_args_size
+                    ),
+                    &format!("dispatch_{}_{}", actor.name, method.name),
+                )?;
+            }
+
             // Unpack params from args_blob with natural type sizes (R-C6).
             // Call site packs each param as its LLVM layout, 8-byte aligned.
             // Previously every slot was 8 bytes while struct loads used natural
             // sizes (e.g. string {ptr,len} = 16), reading past the slot.
             let mut offset: u64 = 0;
             for param in &method.params {
-                let param_ty = types::mimi_type_to_llvm(self.context, &param.ty)
-                    .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+                // actor_abi_type_for (registry-backed) — must agree with the
+                // call-site pack type, audit §6.6.
+                let param_ty = self.actor_abi_type_for(&param.ty);
                 let slot_size = self.actor_abi_slot_size(param_ty);
                 let gep = self
                     .gep()
@@ -335,12 +489,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 BasicValueEnum::FloatValue(fv) => {
-                    // Store float as bits in i64
-                    let as_i64 = self
-                        .builder
-                        .build_bit_cast(fv, i64_ty, "ret_f2i")
-                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
-                    as_i64
+                    // Store float as bits in the i64 slot. 0.34.36 (audit
+                    // §6.14): bitcast requires EQUAL bit widths — the old
+                    // `bitcast f32 -> i64` is invalid IR. Widen via the
+                    // same-width integer first (bitcast f32->i32), then zext
+                    // into the i64 slot. f64 bitcasts straight across.
+                    let fbits = fv.get_type().get_bit_width();
+                    if fbits == 64 {
+                        self.builder
+                            .build_bit_cast(fv, i64_ty, "ret_f2i")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                    } else if fbits < 64 {
+                        // fbits in {16, 32} for real floats — nonzero.
+                        let nz = std::num::NonZeroU32::new(fbits as u32).ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "float slot width: {} is zero",
+                                fbits
+                            ))
+                        })?;
+                        let int_ty = self
+                            .context
+                            .custom_width_int_type(nz)
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("float slot width: {}", e))
+                            })?;
+                        let as_int = self
+                            .builder
+                            .build_bit_cast(fv, int_ty, "ret_f2i_narrow")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                            .into_int_value();
+                        self.builder
+                            .build_int_z_extend(as_int, i64_ty, "ret_f_zext")
+                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                            .into()
+                    } else {
+                        // Wider than 64 (e.g. f128) cannot fit the scalar
+                        // slot: trap instead of silently truncating.
+                        self.emit_actor_mailbox_overflow_abort(
+                            &format!(
+                                "actor mailbox: {}-bit float return from {}.{} does not fit the 64-bit result slot",
+                                fbits, actor.name, method.name
+                            ),
+                            &format!("retf_{}_{}", actor.name, method.name),
+                        )?;
+                        i64_ty.const_int(0, false).into()
+                    }
                 }
                 BasicValueEnum::PointerValue(pv) => self
                     .builder
@@ -350,6 +543,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::StructValue(sv) => {
                     // Store struct by copying into result_blob
                     let sty = sv.get_type();
+                    // result_size = sizeof(struct).
+                    // v0.28.30: StructType::size_of() may return None for
+                    // structs containing opaque pointers. 0.34.36 (audit
+                    // §6.14): the old field-sum hard-coded floats to 8 bytes
+                    // and arrays to len*8 — wrong for f32 fields (4 bytes)
+                    // and non-i64 array elements. Use the recursive portable
+                    // layout computer instead.
+                    let total_size: u64 = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                    // 0.34.36 (audit §6.6): the worker's result blob is
+                    // MIMI_ACTOR_BLOB_SIZE bytes (runtime/actor.rs) — trap on
+                    // an oversized store instead of corrupting the heap vec.
+                    if total_size > ACTOR_MAILBOX_BLOB_CAPACITY {
+                        self.emit_actor_mailbox_overflow_abort(
+                            &format!(
+                                "actor mailbox overflow: {}.{} returns a {}-byte record; result capacity is {} bytes",
+                                actor.name, method.name, total_size, ACTOR_MAILBOX_BLOB_CAPACITY
+                            ),
+                            &format!("retstruct_{}_{}", actor.name, method.name),
+                        )?;
+                    }
                     let result_scast = self
                         .builder
                         .build_bit_cast(
@@ -360,23 +573,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                         .into_pointer_value();
                     self.build_store(result_scast, sv)?;
-                    // result_size = sizeof(struct).
-                    // v0.28.30: On x86_64, LLVM StructType::size_of() may
-                    // return None for structs containing `ptr` (opaque type),
-                    // falling back to 8 bytes which is wrong for 16-byte
-                    // structs like {ptr, i64}. Compute the size from field
-                    // types instead.
-                    let total_size: u64 = sty
-                        .get_field_types()
-                        .iter()
-                        .map(|ft| match ft {
-                            BasicTypeEnum::IntType(t) => (t.get_bit_width() as u64).div_ceil(8),
-                            BasicTypeEnum::PointerType(_) => 8,
-                            BasicTypeEnum::FloatType(_) => 8,
-                            BasicTypeEnum::ArrayType(at) => (at.len() as u64) * 8,
-                            _ => 8,
-                        })
-                        .sum();
                     let struct_size = self.context.i64_type().const_int(total_size, false);
                     self.build_store(result_size_out, struct_size)?;
                     self.build_br(merge_bb)?;
@@ -474,12 +670,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut val = if let Some(init) = &field.init {
                     self.compile_expr(init, &empty_vars)?
                 } else {
-                    let ty = types::mimi_type_to_llvm(self.context, &field.ty)
-                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                    // actor_abi_type_for: the actor struct's field slots are
+                    // registered through the registry (register_actor_def), so
+                    // the zero initializer must use the same lowering — an
+                    // i64 zero stored into a struct slot was invalid IR
+                    // (audit §6.6).
+                    let ty = self.actor_abi_type_for(&field.ty);
                     match ty {
                         BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
                         BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
                         BasicTypeEnum::PointerType(t) => t.const_null().into(),
+                        BasicTypeEnum::StructType(t) => t.const_zero().into(),
+                        BasicTypeEnum::ArrayType(t) => t.const_zero().into(),
                         _ => self.context.i64_type().const_int(0, false).into(),
                     }
                 };
@@ -638,7 +840,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
         let last_val = self.compile_actor_method_body(method, &mut vars)?;
-        let result = self.emit_actor_method_epilogue(&vars, ret_type, last_val);
+        let result = self.emit_actor_method_epilogue(&mut vars, ret_type, last_val);
         self.end_function_heap_scope();
         result
     }
@@ -666,15 +868,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut param_metadata = vec![types::basic_to_metadata(self.context, actor_ptr_ty)];
         let mut param_llvm = vec![actor_ptr_ty];
         for p in &method.params {
-            let ty = types::mimi_type_to_llvm(self.context, &p.ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            // actor_abi_type_for: registry-backed lowering shared with the
+            // mailbox pack/unpack (audit §6.6) — the dispatch unpacks with
+            // exactly these types, so the signature must agree.
+            let ty = self.actor_abi_type_for(&p.ty);
             param_llvm.push(ty);
             param_metadata.push(types::basic_to_metadata(self.context, ty));
         }
 
         let ret_llvm = match &method.ret {
-            Some(ty) => types::mimi_type_to_llvm(self.context, ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
+            Some(ty) => self.actor_abi_type_for(ty),
             None => BasicTypeEnum::IntType(self.context.i64_type()),
         };
 
@@ -693,6 +896,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.push_cap_scope();
         self.push_comp_scope();
+        // 0.34.36 (L1 parity, audit §6.7): actor methods previously dropped
+        // `defer` entirely (no scope, no Defer arm). The bytecode VM runs
+        // defers, so push the method-level defer scope here and pop it on
+        // every exit path (Return arms + epilogue).
+        self.push_defer_scope();
         self.begin_function_heap_scope();
 
         let mut vars: HashMap<String, VarEntry> = HashMap::new();
@@ -709,11 +917,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.var_type_names
             .insert("self".to_string(), actor.name.clone());
 
-        // Bind method params
+        // Bind method params — must use the SAME lowering as the signature
+        // above (actor_abi_type_for), or the alloca/store types mismatch.
         let param_offset = 1;
         for (i, param) in method.params.iter().enumerate() {
-            let ty = types::mimi_type_to_llvm(self.context, &param.ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            let ty = self.actor_abi_type_for(&param.ty);
             let alloca = self.build_alloca(ty, &param.name)?;
             self.build_store(
                 alloca,
@@ -742,9 +950,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ret_type = self
             .current_fn_ret_type()
             .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
+        // 0.34.36 (audit §6.6): a struct/array return needs a zero of ITS OWN
+        // type — the old i64 default built an ill-typed `ret` for record
+        // returns now that the signature uses registry-resolved layouts.
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
             BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
+            BasicTypeEnum::StructType(t) => t.const_zero().into(),
+            BasicTypeEnum::ArrayType(t) => t.const_zero().into(),
             _ => self.context.i64_type().const_int(0, false).into(),
         };
         let mut last_val: BasicValueEnum = default_val;
@@ -802,6 +1015,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 self.pop_shared_scope()?;
                 self.flush_heap_scopes_to_boundary()?;
+                // 0.34.36: run the method's defers on the early-return path
+                // (VM parity) — before the terminator is emitted.
+                self.pop_defer_scope(vars)?;
                 self.pop_comp_scope();
                 self.pop_cap_scope();
                 val = self.load_return_value_if_needed(val)?;
@@ -819,6 +1035,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 self.pop_shared_scope()?;
                 self.flush_heap_scopes_to_boundary()?;
+                self.pop_defer_scope(vars)?;
                 self.pop_comp_scope();
                 self.pop_cap_scope();
                 self.build_return(None)?;
@@ -858,7 +1075,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let mut val = self.compile_expr(init, vars)?;
                 if let Some(decl_ty) = ty {
-                    let target = types::mimi_type_to_llvm(self.context, decl_ty)
+                    // Registry-backed lookup (audit §6.6); keep the
+                    // value-type fallback when the name is unknown.
+                    let target = self
+                        .llvm_type_for(decl_ty)
                         .unwrap_or_else(|| val.get_type());
                     val = self.adjust_int_val(val, target)?;
                 }
@@ -1118,7 +1338,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             Stmt::Drop(expr) => {
                 self.compile_expr(expr, vars)?;
             }
+            Stmt::Defer(block) => {
+                // 0.34.36 (L1 parity, audit §6.7): register the defer block for
+                // LIFO execution on scope exit. Previously fell through and was
+                // silently dropped; the bytecode VM runs it.
+                self.register_defer(block);
+            }
             Stmt::OnFailure(block) => {
+                // Execution-point registration (cross-agent contract 0.34.36):
+                // compensation fires only for faults after this statement —
+                // no block pre-scan, keep inline.
                 self.register_comp(block);
             }
             Stmt::Arena(block) => {
@@ -1183,16 +1412,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// and the implicit return.
     fn emit_actor_method_epilogue(
         &mut self,
-        vars: &HashMap<String, VarEntry<'ctx>>,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
         ret_type: BasicTypeEnum<'ctx>,
         last_val: BasicValueEnum<'ctx>,
     ) -> MimiResult<()> {
         if self.block_has_terminator() {
+            // An early `return` already popped the method's defer scope on its
+            // own path; nothing left to balance here.
             return Ok(());
         }
         self.check_unconsumed_caps()?;
         self.release_all_shared()?;
         self.flush_heap_scopes_to_boundary()?;
+        // 0.34.36 (L1 parity, audit §6.7): run the method-level defers on the
+        // fall-through exit (the VM executes them before return).
+        self.pop_defer_scope(vars)?;
         self.pop_comp_scope();
         self.pop_cap_scope();
 
@@ -1349,15 +1583,38 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
                         vec![self_val.into()];
-                    for arg in args {
-                        call_args.push(self.compile_expr(arg, vars)?.into());
+                    for (arg_idx, arg) in args.iter().enumerate() {
+                        let mut val = self.compile_expr(arg, vars)?;
+                        // 0.34.36 (audit §6.6): the signature now uses
+                        // registry-resolved layouts — struct params cross by
+                        // value, while record expressions are pointer-valued.
+                        // Load through the declared param type so the direct
+                        // call matches the signature.
+                        if let (Some(param), BasicValueEnum::PointerValue(pv)) =
+                            (method_fn.get_nth_param((arg_idx + 1) as u32), val)
+                        {
+                            if let BasicTypeEnum::StructType(st) = param.get_type() {
+                                val = self.build_load(
+                                    BasicTypeEnum::StructType(st),
+                                    pv,
+                                    &format!("self_arg_load_{}", arg_idx),
+                                )?;
+                            }
+                        }
+                        call_args.push(val.into());
                     }
                     let call = self.build_call(method_fn, &call_args, "self_method_call")?;
                     let result =
                         call_try_basic_value(&call).unwrap_or(i64_ty.const_int(0, false).into());
 
-                    // Branch to merge with result.
-                    let result_alloca = self.build_alloca(i64_ty, "self_call_result")?;
+                    // Branch to merge with result. 0.34.36 (audit §6.6): the
+                    // staging slot must carry the method's actual return type
+                    // (record returns are no longer squashed to i64).
+                    let self_ret_ty = method_fn
+                        .get_type()
+                        .get_return_type()
+                        .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+                    let result_alloca = self.build_alloca(self_ret_ty, "self_call_result")?;
                     self.build_store(result_alloca, result)?;
                     self.build_br(merge_bb)?;
 
@@ -1367,7 +1624,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     // ── Merge ──
                     self.builder.position_at_end(merge_bb);
-                    let merged = self.build_load(i64_ty, result_alloca, "merged_result")?;
+                    let merged = self.build_load(self_ret_ty, result_alloca, "merged_result")?;
                     return Ok(Some(merged));
                 }
             }
@@ -1392,8 +1649,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Pack args into a blob with natural type sizes (R-C6 / CG-H6).
         // Must match compile_actor_dispatch unpack layout.
-        let args_blob =
-            self.build_alloca(self.context.i8_type().array_type(256), "actor_args_blob")?;
+        let args_blob = self.build_alloca(
+            self.context
+                .i8_type()
+                .array_type(ACTOR_MAILBOX_BLOB_CAPACITY as u32),
+            "actor_args_blob",
+        )?;
 
         let method_params: Vec<crate::ast::Type> = self
             .actor_defs
@@ -1402,12 +1663,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|m| m.params.iter().map(|p| p.ty.clone()).collect())
             .unwrap_or_default();
 
+        // 0.34.36 (audit §6.6): the packed size is statically known — guard it
+        // BEFORE emitting any stores so an oversized call aborts with a clear
+        // message instead of silently overrunning the stack blob.
+        let packed_args_size: u64 = method_params
+            .iter()
+            .map(|t| self.actor_abi_slot_size(self.actor_abi_type_for(t)))
+            .sum();
+        if packed_args_size > ACTOR_MAILBOX_BLOB_CAPACITY {
+            self.emit_actor_mailbox_overflow_abort(
+                &format!(
+                    "actor mailbox overflow: call of {}.{} packs {} bytes of arguments; capacity is {} bytes",
+                    obj_type, method_name, packed_args_size, ACTOR_MAILBOX_BLOB_CAPACITY
+                ),
+                &format!("call_{}_{}", obj_type, method_name),
+            )?;
+        }
+
         let mut blob_offset: u64 = 0;
         for (i, arg) in args.iter().enumerate() {
             let val = self.compile_expr(arg, vars)?;
-            let param_ty = method_params
-                .get(i)
-                .and_then(|t| types::mimi_type_to_llvm(self.context, t));
+            // actor_abi_type_for (registry-backed): identical lowering to the
+            // dispatch unpack and the method signature (audit §6.6). Named
+            // records pack as their real struct layout, not bare i64.
+            let param_ty = method_params.get(i).map(|t| self.actor_abi_type_for(t));
             let store_ty = param_ty.unwrap_or_else(|| match val {
                 BasicValueEnum::IntValue(iv) => BasicTypeEnum::IntType(iv.get_type()),
                 BasicValueEnum::FloatValue(fv) => BasicTypeEnum::FloatType(fv.get_type()),
@@ -1470,6 +1749,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_store(cast_ptr, pv)?;
                 }
                 (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
+                    // 0.34.36 (audit §6.6): guard the value's real size against
+                    // the declared slot before storing — a value larger than its
+                    // slot would write into the next param's bytes.
+                    let val_bytes =
+                        self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
+                    if val_bytes > slot_size {
+                        self.emit_actor_mailbox_overflow_abort(
+                            &format!(
+                                "actor mailbox overflow: argument {} of {}.{} is {} bytes but its slot is {} bytes",
+                                i, obj_type, method_name, val_bytes, slot_size
+                            ),
+                            &format!("argstore_{}_{}_{}", obj_type, method_name, i),
+                        )?;
+                    }
                     self.build_store(cast_ptr, sv)?;
                 }
                 (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st))
@@ -1478,6 +1771,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Raw C string pointer → wrap to {ptr,len} for string params.
                     let wrapped = self.wrap_c_string(pv)?;
                     self.build_store(cast_ptr, wrapped)?;
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
+                    // 0.34.36 (audit §6.6): a record-typed argument arrives as a
+                    // pointer to its alloca (record literals are pointer-valued).
+                    // Load the aggregate so its BYTES land in the slot — storing
+                    // the pointer left the slot holding an address while the
+                    // dispatch side read a struct value (pack/unpack divergence).
+                    let loaded = self.build_load(
+                        BasicTypeEnum::StructType(st),
+                        pv,
+                        &format!("arg_rec_load_{}", i),
+                    )?;
+                    self.build_store(cast_ptr, loaded)?;
                 }
                 (BasicValueEnum::IntValue(iv), _) => {
                     let stored = if iv.get_type().get_bit_width() < 64 {
@@ -1517,9 +1823,15 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let args_size = i64_ty.const_int(blob_offset, false);
 
-        // Allocate result blob.
-        let result_blob =
-            self.build_alloca(self.context.i8_type().array_type(256), "actor_result_blob")?;
+        // Allocate result blob — same capacity as the worker-side blob
+        // (MIMI_ACTOR_BLOB_SIZE / ACTOR_MAILBOX_BLOB_CAPACITY); the dispatch
+        // traps oversized results before writing (audit §6.6).
+        let result_blob = self.build_alloca(
+            self.context
+                .i8_type()
+                .array_type(ACTOR_MAILBOX_BLOB_CAPACITY as u32),
+            "actor_result_blob",
+        )?;
 
         // Call mimi_actor_call(handle, method_id, args_ptr, args_size, result_ptr)
         let call_fn = self.get_runtime_fn("mimi_actor_call")?;
@@ -1568,26 +1880,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_load(self.context.bool_type(), result_cast, "result_bool")?
             }
             Some(ty) => {
-                if let Some(llvm_ty) = types::mimi_type_to_llvm(self.context, ty) {
-                    match llvm_ty {
-                        BasicTypeEnum::StructType(st) => self.build_load(
-                            BasicTypeEnum::StructType(st),
-                            result_cast,
-                            "mailbox_struct_ret",
-                        )?,
-                        BasicTypeEnum::IntType(t) => {
-                            self.build_load(t, result_cast, "mailbox_int_ret")?
-                        }
-                        BasicTypeEnum::FloatType(t) => {
-                            self.build_load(t, result_cast, "mailbox_float_ret")?
-                        }
-                        BasicTypeEnum::PointerType(t) => {
-                            self.build_load(t, result_cast, "mailbox_ptr_ret")?
-                        }
-                        _ => self.build_load(i64_ty, result_cast, "method_result")?,
+                // actor_abi_type_for: registry-backed lowering, identical to the
+                // dispatch-side result pack and the method signature (audit §6.6).
+                let llvm_ty = self.actor_abi_type_for(ty);
+                match llvm_ty {
+                    BasicTypeEnum::StructType(st) => self.build_load(
+                        BasicTypeEnum::StructType(st),
+                        result_cast,
+                        "mailbox_struct_ret",
+                    )?,
+                    BasicTypeEnum::IntType(t) => {
+                        self.build_load(t, result_cast, "mailbox_int_ret")?
                     }
-                } else {
-                    self.build_load(i64_ty, result_cast, "method_result")?
+                    BasicTypeEnum::FloatType(t) => {
+                        self.build_load(t, result_cast, "mailbox_float_ret")?
+                    }
+                    BasicTypeEnum::PointerType(t) => {
+                        self.build_load(t, result_cast, "mailbox_ptr_ret")?
+                    }
+                    _ => self.build_load(i64_ty, result_cast, "method_result")?,
                 }
             }
             None => self.build_load(i64_ty, result_cast, "method_result")?,

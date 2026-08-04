@@ -427,9 +427,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         let total_args_size: u64 = param_sizes.iter().sum();
-        // total allocation: 8 header + aligned_result (result) + total_args_size (args)
-        let total_alloc_size = 8 + aligned_result + total_args_size;
-        let args_offset: u64 = 8 + aligned_result;
+        // 0.34.36 (cross-agent contract, audit wave-1): future layout is
+        //   header { completed: AtomicI32 @0, refs: AtomicI32 @4,
+        //            data_capacity: u64 @8..16 }
+        //   data region @ offset 16..
+        // total allocation: 16 header + aligned_result (result) + total_args_size (args).
+        // The runtime (src/runtime/future.rs) honors the requested size and
+        // records it in data_capacity.
+        const FUTURE_HEADER_SIZE: u64 = 16;
+        let total_alloc_size = FUTURE_HEADER_SIZE + aligned_result + total_args_size;
+        let args_offset: u64 = FUTURE_HEADER_SIZE + aligned_result;
 
         // i8 pointer type
         let i8_ty = self.context.i8_type();
@@ -508,7 +515,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("poll body returned void".into()))?;
 
-        // Store result at future + 8
+        // Store result at future + FUTURE_HEADER_SIZE (data region start, offset 16)
         if !func.ret.as_ref().map_or(
             true,
             |t| matches!(t.unlocated(), Type::Name(n, _) if n == "unit"),
@@ -518,7 +525,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_gep(
                     i8_ty,
                     poll_future_ptr,
-                    &[i64_ty.const_int(8, false)],
+                    &[i64_ty.const_int(FUTURE_HEADER_SIZE, false)],
                     "poll_result_ptr",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("poll result gep: {}", e)))?;
@@ -1584,7 +1591,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.multi_target_states
                                 ))
                             })?;
-                        let state_ty = self.type_llvm.get(&state_name).copied();
+                        let state_ty = self.flow_state_llvm_type(&state_name);
                         val = self.wrap_multi_target_value(val, tag, state_ty)?;
                     }
                     let val = if self.in_fails_transition {
@@ -2702,7 +2709,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_shared_let_stmt(kind, name, ty, init, vars)?;
                 }
                 Stmt::OnFailure(block) => {
-                    // Register compensation block for LIFO execution on error exit
+                    // Register compensation block for LIFO execution on error
+                    // exit. 0.34.36 (cross-agent contract): registration at the
+                    // statement's execution point (inline, no block pre-scan) —
+                    // compensation fires only for faults after this statement.
                     self.register_comp(block);
                 }
                 Stmt::Arena(block) => {

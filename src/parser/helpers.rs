@@ -7,7 +7,11 @@ use super::*;
 impl Parser {
     /// Guard against deep recursion. Returns Err if depth exceeds limit.
     pub(crate) fn check_depth(&self) -> Result<(), ParseError> {
-        const MAX: usize = 256;
+        // Wave-1 central fix: 256 allowed parser frames (~9 KB each for
+        // session-type chains) to exhaust the 2 MB stacks used by libtest
+        // threads before the guard fired (SIGSEGV). 128 keeps the deepest
+        // guarded recursion inside a 1 MB budget.
+        const MAX: usize = 128;
         if self.recursion_depth.get() >= MAX {
             let tok = self.peek();
             return Err(ParseError::new(
