@@ -6,39 +6,36 @@ on:
   pull_request:
     branches: [main]
 
+# 同一分支的新推送直接顶掉旧流水线（0.34.33：原配置无 concurrency，重复全量跑浪费 runner）
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  # llvm-sys 181.3.0（Cargo.lock）——历史上 release.yml 误写 180 导致发布构建找不到 LLVM
   LLVM_SYS_181_PREFIX: /tmp/llvm-wrapper
+  CARGO_TERM_COLOR: always
 
 jobs:
   lint:
-    name: Lint & Format
+    name: Lint & Static Gates
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mimi
 
-      - name: Install LLVM 18 and deps
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository -y "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq llvm-18-dev llvm-18 libllvm18 libclang-18-dev 2>&1 | tail -5
-          sudo apt-get install -y libpolly-18-dev 2>&1 || echo "Polly dev not found, will use wrapper stub"
+      # ── 静态门禁先行（秒级，失败最快路径）──────────────────────────
+      - name: Language docs gate (spec 同步闸 + 语义新鲜度)
+        run: python3 scripts/check_language_docs.py
 
-      - name: Setup LLVM wrapper
-        run: bash -x scripts/setup-llvm-wrapper.sh
+      - name: unsafe SAFETY gate (non-runtime baseline)
+        run: python3 scripts/check_unsafe_safety.py
 
-      - name: Install additional system deps
-        run: sudo apt-get install -y -qq libz3-dev libffi-dev binutils
+      - name: v0.31 roadmap consistency check
+        run: python3 scripts/check_v031_roadmap.py
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-cache"
-
+      # ── Rust 质量门禁 ──────────────────────────────────────────────
       - name: Check Format
         run: cargo fmt -- --check
 
@@ -48,40 +45,13 @@ jobs:
       - name: Clippy (all targets)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: unsafe SAFETY gate (non-runtime baseline)
-        run: python3 scripts/check_unsafe_safety.py
-
-      - name: v0.31 roadmap consistency check
-        run: python3 scripts/check_v031_roadmap.py
-
   test:
     name: Build & Test
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install LLVM 18 and deps
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository -y "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq llvm-18-dev llvm-18 libllvm18 libclang-18-dev 2>&1 | tail -5
-          sudo apt-get install -y libpolly-18-dev 2>&1 || echo "Polly dev not found, will use wrapper stub"
-
-      - name: Setup LLVM wrapper
-        run: bash -x scripts/setup-llvm-wrapper.sh
-
-      - name: Install additional system deps
-        run: sudo apt-get install -y -qq libz3-dev libffi-dev binutils
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-cache"
+      - uses: ./.github/actions/setup-mimi
 
       - name: Pre-build runtime (prime cache)
         run: rustc --edition 2021 --crate-type staticlib --cfg standalone --crate-name mimi_runtime -o /tmp/mimi_runtime_test.a src/runtime/standalone.rs
@@ -89,6 +59,7 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # ── 分层不变量门禁（AGENTS §14.1/§15.3）────────────────────────
       - name: L1 dual-backend equivalence
         run: cargo test dual_ -- --test-threads=2
 
@@ -101,5 +72,24 @@ jobs:
       - name: Codegen E2E
         run: cargo test codegen_e2e -- --test-threads=2
 
-      - name: Test (full suite)
-        run: cargo test -- --test-threads=2
+      # Z3 arena 不归还内存（AGENTS §3）：验证套件单线程隔离跑，避免与
+      # 并发测试进程叠加。实测（0.34.33）：27 项峰值 RSS ~124MB，风险已收敛，
+      # 隔离步骤保留为纪律性门禁。
+      - name: Z3 verification (single-threaded, AGENTS §3)
+        run: cargo test v1_2_verification -- --test-threads=1
+
+      # ── 全量兜底（AGENTS §3 OOM 防护：ulimit 超限即 kill，不冻 runner）──
+      # 实测（0.34.33）：4598 lib 全量峰值 RSS ~307MB；历史 12GB 警告不复现，
+      # ulimit 保留为保险。GH runner 7GB RAM，--test-threads=2 为保守并发。
+      - name: Test (full suite, OOM-guarded)
+        run: |
+          ulimit -v 20000000
+          cargo test -- --test-threads=2
+
+      # 已知差距（#[ignore]）必须编译且允许失败（AGENTS §15.3 ⚠ 理想门禁收编）。
+      # 当前 7 个 ignored 均为工具门禁（ASan/UBSan/Valgrind×6 + Z3×1），
+      # 工具链缺失时在运行时优雅跳过。
+      - name: Known gaps (ignored tests, advisory)
+        if: always()
+        continue-on-error: true
+        run: cargo test -- --ignored --test-threads=1

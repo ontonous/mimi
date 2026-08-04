@@ -35,6 +35,25 @@
 - **核心文档族闭环（第一轮）**：P0×3（spec §6.12 math/multi-target 清单 +
   requirements FLOW-TURN-001）、pre-1.0 九份源头、support.toml 三条 evidence、
   syntax-reference 真再生成、await 撤销回写、golden 记账、测试卫生、根部垃圾清理。
+- **CI/CD 流水线深度完善**：
+  - **致命缺陷×2 修复**：release.yml 环境变量 `LLVM_SYS_180_PREFIX` → `181`
+    （llvm-sys 181.3.0，旧名导致发布构建找不到 LLVM）；tag 触发器 `mimi-v*` →
+    纯 semver `[0-9]+.[0-9]+.[0-9]+`（AGENTS §15.1 已弃用 mimi-v* 前缀，旧触发器
+    导致 0.1.x tag 永不出包），mimi-v* 保留兼容匹配；
+  - **新增 composite action `.github/actions/setup-mimi/`**：LLVM 18（apt-key 弃用 →
+    keyring）+ wrapper + z3/ffi/binutils + toolchain + cache 收敛为单一事实源，
+    lint/test/release 三处 ~40 行复制安装脚本退役（此前已漂移：release 缺 binutils）；
+  - **门禁补齐**：`check_language_docs.py`（Spec 同步闸 + 0.34.33 语义新鲜度探针）
+    进入 lint job；`cargo test -- --ignored` 收编为 advisory 门禁（continue-on-error，
+    实测无 ASan/Valgrind 工具链时 6/7 失败——allow-fail 是必需而非防御）；
+  - **稳定性防护**：全量测试步骤 `ulimit -v 20000000`（超限 kill 不冻 runner；
+    实测全量峰值 RSS ~307MB，§3 的 12GB 为旧时代数据）；Z3 验证套件单线程隔离步骤；
+    全部 job 补 timeout-minutes；顶层 concurrency 取消同分支旧运行；
+  - **发布加固**：release 前 `mimi check` 冒烟、产物补 sha256sum、发布说明从
+    CHANGELOG 提取当前版本小节（缺失回退全文，旧配置整文件灌入每个 release body）；
+  - **Makefile `ci-check` 假门禁修复**：clippy/fmt 的 `2>/dev/null || true` 吞失败
+    移除，补 language-docs/unsafe 门禁，与 CI 对齐；
+  - AGENTS §3 内存警告补实测数据注记、§15.3 门禁清单重写为新流水线实况。
 - **门禁结果**：fmt/clippy/unsafe gate/check_language_docs 全绿；Rust 代码本轮零改动，
   测试状态与 0.34.32 RC 复核一致（4598 lib + 13 real_world + 28 cli）。
 
