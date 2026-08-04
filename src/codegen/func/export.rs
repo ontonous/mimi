@@ -17,9 +17,35 @@ use crate::codegen::types;
 use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::AddressSpace;
 use std::collections::HashMap;
+
+/// SysV x86-64 classification of a scalar-only `#[repr(C)]` record as it
+/// crosses the C ABI boundary (0.34.35, M-010).
+///
+/// SysV passes structs <= 16 bytes in registers, classified per eightbyte:
+/// each 8-byte chunk is INTEGER (any i32/i64/bool member) or SSE (f64-only
+/// chunk). A C caller therefore passes {i32,i32} PACKED in one register
+/// (rdi), {i64,i64} in rdi+rsi, and {i64,f64} in rdi+xmm0. Declaring the
+/// wrapper parameter as the raw struct type is WRONG: LLVM does not apply
+/// SysV merging/coercion to bare struct params and splits fields across
+/// successive registers (verified by disassembly: {i32,i32} read from
+/// edi+esi while the C caller packed both into rdi). The fix is to use the
+/// "coerced" boundary type — one i64/double per eightbyte — which LLVM
+/// splits/joins into exactly the SysV registers, then reconstruct the
+/// C-layout struct through memory.
+///
+/// Structs > 16 bytes go through memory: C passes large PARAM structs by
+/// hidden pointer (in a register) and returns large structs via sret
+/// (caller-provided buffer as hidden first argument).
+enum SysVCoerce<'ctx> {
+    /// <= 16B: pass/return in registers. The boundary type is a scalar
+    /// (i64 / double) for one eightbyte or a 2-element struct for two.
+    Reg(BasicTypeEnum<'ctx>),
+    /// > 16B: pass by hidden pointer (params) / sret buffer (returns).
+    Mem,
+}
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Compile an exported `extern "C"` function by emitting a C-ABI wrapper
@@ -31,23 +57,53 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         let abi = func.extern_abi.as_deref().unwrap_or("C");
 
+        // 0.34.35 (M-010): SysV coercion for repr(C) records. Params/returns
+        // cross the boundary in coerced eightbyte register types (or via
+        // memory/sret for >16B), not as bare LLVM struct types — see
+        // sysv_coerce_reprc_record for the ABI rationale.
+        let ret_reprc = match &func.ret {
+            Some(ty) => self.reprc_record_info(ty)?,
+            None => None,
+        };
+        let sret = matches!(&ret_reprc, Some((_, _, SysVCoerce::Mem)));
+
         // C ABI return type.
-        let c_ret_ty = match &func.ret {
-            Some(ty) => self.c_abi_llvm_type(ty)?,
-            None => BasicTypeEnum::IntType(self.context.i64_type()),
+        let void_ret = sret;
+        let c_ret_ty = if sret {
+            // sret: caller provides the result buffer; wrapper returns void.
+            BasicTypeEnum::IntType(self.context.i64_type())
+        } else if let Some((_, _, SysVCoerce::Reg(t))) = &ret_reprc {
+            *t
+        } else {
+            match &func.ret {
+                Some(ty) => self.c_abi_llvm_type(ty)?,
+                None => BasicTypeEnum::IntType(self.context.i64_type()),
+            }
         };
 
-        // C ABI parameter types.
-        let c_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = func
-            .params
-            .iter()
-            .map(|p| {
-                let ty = self.c_abi_llvm_type(&p.ty)?;
-                Ok(types::basic_to_metadata(self.context, ty))
-            })
-            .collect::<MimiResult<Vec<_>>>()?;
+        // C ABI parameter types (sret buffer first when returning >16B).
+        let ptr_ty = BasicTypeEnum::PointerType(self.context.ptr_type(AddressSpace::default()));
+        let mut c_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        if sret {
+            c_param_tys.push(types::basic_to_metadata(self.context, ptr_ty));
+        }
+        for p in &func.params {
+            let bty = if let Some((_, _, coerce)) = self.reprc_record_info(&p.ty)? {
+                match coerce {
+                    SysVCoerce::Reg(t) => t,
+                    SysVCoerce::Mem => ptr_ty,
+                }
+            } else {
+                self.c_abi_llvm_type(&p.ty)?
+            };
+            c_param_tys.push(types::basic_to_metadata(self.context, bty));
+        }
 
-        let fn_type = fn_type_for_basic_type(c_ret_ty, &c_param_tys)?;
+        let fn_type = if void_ret {
+            self.context.void_type().fn_type(&c_param_tys, false)
+        } else {
+            fn_type_for_basic_type(c_ret_ty, &c_param_tys)?
+        };
         let function = self.module.add_function(
             &func.name,
             fn_type,
@@ -55,6 +111,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let cc = crate::ffi::abi_to_llvm_call_conv(abi);
         function.set_call_conventions(cc);
+
+        let arg_offset: u32 = if sret { 1 } else { 0 };
+
+        // 0.34.35 (M-010): SysV passes MEMORY-class (>16B) struct PARAMS on
+        // the stack, not via a register pointer — the LLVM encoding for that
+        // is a `byval` pointer parameter (verified against gcc/clang output:
+        // callers copy the struct to the stack top and pass no register; a
+        // plain ptr param made us read rdi garbage). Large struct RETURNS use
+        // the sret hidden buffer in param 0.
+        {
+            use inkwell::attributes::{Attribute, AttributeLoc};
+            if sret {
+                if let Some((rname, _, _)) = &ret_reprc {
+                    let c_sty = self.c_sty_for_reprc_record(rname)?;
+                    let kind = Attribute::get_named_enum_kind_id("sret");
+                    let attr = self.context.create_type_attribute(kind, c_sty.into());
+                    function.add_attribute(AttributeLoc::Param(0), attr);
+                }
+            }
+            for (i, param) in func.params.iter().enumerate() {
+                if let Some((rname, _, SysVCoerce::Mem)) = self.reprc_record_info(&param.ty)? {
+                    let c_sty = self.c_sty_for_reprc_record(&rname)?;
+                    let kind = Attribute::get_named_enum_kind_id("byval");
+                    let attr = self.context.create_type_attribute(kind, c_sty.into());
+                    function.add_attribute(AttributeLoc::Param(i as u32 + arg_offset), attr);
+                }
+            }
+        }
 
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -73,9 +157,37 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         for (i, param) in func.params.iter().enumerate() {
             let c_val = function
-                .get_nth_param(i as u32)
+                .get_nth_param(i as u32 + arg_offset)
                 .ok_or_else(|| CompileError::LlvmError(format!("export param {} not found", i)))?;
-            let internal_val = self.convert_c_arg_to_internal(c_val, &param.ty)?;
+            let internal_val =
+                if let Some((rname, _, coerce)) = self.reprc_record_info(&param.ty)? {
+                    // repr(C) param: undo SysV coercion to the C-layout struct,
+                    // then map fields into the internal representation.
+                    let c_struct_val = match coerce {
+                        SysVCoerce::Reg(coerce_ty) => {
+                            let c_sty = self.c_sty_for_reprc_record(&rname)?;
+                            self.reinterpret_bytes(
+                                c_val,
+                                coerce_ty,
+                                BasicTypeEnum::StructType(c_sty),
+                                &format!("{}_arg_cast", rname),
+                            )?
+                        }
+                        SysVCoerce::Mem => {
+                            // C passes large struct params by hidden pointer.
+                            let c_sty = self.c_sty_for_reprc_record(&rname)?;
+                            let pv = c_val.into_pointer_value();
+                            self.build_load(
+                                BasicTypeEnum::StructType(c_sty),
+                                pv,
+                                &format!("{}_mem_load", rname),
+                            )?
+                        }
+                    };
+                    self.convert_c_reprc_record_to_internal(c_struct_val, &rname)?
+                } else {
+                    self.convert_c_arg_to_internal(c_val, &param.ty)?
+                };
             let internal_ty = self
                 .llvm_type_for(&param.ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
@@ -107,8 +219,31 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("export body returned void".into()))?;
 
-        let c_ret_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
-        self.build_return(Some(&c_ret_val))?;
+        if sret {
+            // Write the C-layout struct into the caller-provided buffer.
+            let sret_ptr = function
+                .get_nth_param(0)
+                .ok_or_else(|| CompileError::LlvmError("sret param not found".into()))?
+                .into_pointer_value();
+            let c_struct_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
+            self.build_store(sret_ptr, c_struct_val)?;
+            self.build_return(None)?;
+        } else if let Some((rname, _, SysVCoerce::Reg(coerce_ty))) = &ret_reprc {
+            // Return the coerced eightbyte aggregate; LLVM splits it into the
+            // SysV registers (rax/rdx for INTEGER, xmm0/xmm1 for SSE).
+            let c_struct_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
+            let c_sty = self.c_sty_for_reprc_record(rname)?;
+            let coerce_val = self.reinterpret_bytes(
+                c_struct_val,
+                BasicTypeEnum::StructType(c_sty),
+                *coerce_ty,
+                &format!("{}_cret_cast", rname),
+            )?;
+            self.build_return(Some(&coerce_val))?;
+        } else {
+            let c_ret_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
+            self.build_return(Some(&c_ret_val))?;
+        }
 
         self.pop_shared_scope()?;
         self.free_heap_allocs()?;
@@ -116,6 +251,56 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.pop_cap_scope();
 
         Ok(())
+    }
+
+    /// If `ty` names a repr(C) record, return (name, fields, SysV coercion).
+    fn reprc_record_info(
+        &self,
+        ty: &Type,
+    ) -> MimiResult<Option<(String, Vec<Field>, SysVCoerce<'ctx>)>> {
+        if let Type::Name(name, _) = ty.unlocated() {
+            if self.repr_c_record_names.contains(name.as_str()) {
+                if let Some(td) = self.type_defs.get(name.as_str()) {
+                    if let TypeDefKind::Record(fields) = &td.kind {
+                        let coerce = self.sysv_coerce_reprc_record(fields)?;
+                        return Ok(Some((name.clone(), fields.clone(), coerce)));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// C-layout LLVM struct type for a repr(C) record.
+    fn c_sty_for_reprc_record(&self, name: &str) -> MimiResult<inkwell::types::StructType<'ctx>> {
+        let td = self.type_defs.get(name).ok_or_else(|| {
+            CompileError::LlvmError(format!("repr(C) record '{}' not found", name))
+        })?;
+        let fields = match &td.kind {
+            TypeDefKind::Record(fields) => fields.clone(),
+            _ => {
+                return Err(CompileError::LlvmError(format!(
+                    "'{}' is not a record",
+                    name
+                )))
+            }
+        };
+        self.c_layout_struct_type(&fields)
+    }
+
+    /// Reinterpret the bytes of `val` (typed `from_ty`) as `to_ty` through a
+    /// stack slot. Both types must have identical size; used to move between
+    /// the SysV-coerced boundary type and the C-layout struct type.
+    fn reinterpret_bytes(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        from_ty: BasicTypeEnum<'ctx>,
+        to_ty: BasicTypeEnum<'ctx>,
+        tag: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let alloca = self.build_alloca(from_ty, &format!("{}_slot", tag))?;
+        self.build_store(alloca, val)?;
+        self.build_load(to_ty, alloca, tag)
     }
 
     /// Map a Mimi type to the LLVM type used at the C ABI boundary for
@@ -137,13 +322,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                             CompileError::LlvmError(format!("unknown repr(C) record '{}'", name))
                         })?;
                         if let TypeDefKind::Record(fields) = &td.kind {
-                            if types::is_simple_reprc_record(fields) {
-                                Ok(BasicTypeEnum::IntType(self.context.i64_type()))
-                            } else {
-                                Ok(BasicTypeEnum::PointerType(
-                                    self.context.ptr_type(AddressSpace::default()),
-                                ))
-                            }
+                            // 0.34.35 (M-010/N-1, L3): repr(C) records cross the
+                            // boundary BY VALUE as their C-layout LLVM struct.
+                            // LLVM's x86-64 legalization implements the SysV
+                            // classification rules (<=16B in registers by class,
+                            // >16B passed/returned indirectly via hidden
+                            // pointer/sret), exactly matching C callers. The old
+                            // split (i64-packed for <=2 all-i32 fields, raw
+                            // pointer otherwise) violated SysV for every other
+                            // shape: {i64}/{i64,i64} parameters read a register
+                            // value as a pointer (SIGSEGV), larger shapes
+                            // returned garbage.
+                            Ok(BasicTypeEnum::StructType(
+                                self.c_layout_struct_type(fields)?,
+                            ))
                         } else {
                             Err(CompileError::LlvmError(format!(
                                 "'{}' is not a record",
@@ -395,8 +587,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Convert a simple #[repr(C)] record from its C ABI representation
-    /// (packed i64 or pointer) to Mimi's internal struct representation.
+    /// Convert a #[repr(C)] record from its C ABI representation to Mimi's
+    /// internal struct representation.
+    ///
+    /// 0.34.35 (M-010): the record now arrives BY VALUE as the C-layout
+    /// struct (the wrapper declares a struct-typed parameter, and LLVM's
+    /// legalization delivers it per SysV). Fields already carry C widths;
+    /// each is adjusted to the internal field type for safety.
     fn convert_c_reprc_record_to_internal(
         &mut self,
         c_val: BasicValueEnum<'ctx>,
@@ -425,76 +622,56 @@ impl<'ctx> CodeGenerator<'ctx> {
                 CompileError::LlvmError(format!("internal type for '{}' missing", name))
             })?;
 
-        if types::is_simple_reprc_record(&fields) {
-            let packed = c_val.into_int_value();
-            let i64_ty = self.context.i64_type();
-            let i32_ty = self.context.i32_type();
-            let mut field_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
-            for (fi, f) in fields.iter().enumerate() {
-                let raw_i32 = if fi == 0 {
-                    self.builder
-                        .build_int_truncate(packed, i32_ty, &format!("{}_{}_lo", name, f.name))
-                        .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
-                } else {
-                    let shifted = self
-                        .builder
-                        .build_right_shift(
-                            packed,
-                            i64_ty.const_int((fi * 32) as u64, false),
-                            false,
-                            &format!("{}_{}_shifted", name, f.name),
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("shift error: {}", e)))?;
-                    self.builder
-                        .build_int_truncate(shifted, i32_ty, &format!("{}_{}_hi", name, f.name))
-                        .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
-                };
-                // CG-C4: internal struct now uses extern field types (i32 for i32 fields),
-                // so push the raw i32 directly without sign-extending to i64.
-                field_vals.push(raw_i32.into());
-            }
-            Ok(internal_sty
-                .const_named_struct(&field_vals)
-                .as_basic_value_enum())
-        } else {
-            // Complex records: C ABI passes a pointer to the C-layout struct.
-            let c_ptr = c_val.into_pointer_value();
-            let c_sty = self.c_layout_struct_type(&fields)?;
-            let c_typed_ptr = self.build_pointer_cast(
-                c_ptr,
-                self.context.ptr_type(AddressSpace::default()),
-                "crecord_ptr",
-            )?;
-            let loaded = self.build_load(
-                BasicTypeEnum::StructType(c_sty),
-                c_typed_ptr,
-                "crecord_load",
-            )?;
-            let mut field_vals = Vec::new();
-            for (fi, _f) in fields.iter().enumerate() {
-                let raw = self
-                    .builder
-                    .build_extract_value(
-                        loaded.into_struct_value(),
-                        fi as u32,
-                        &format!("{}_field_{}", name, fi),
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
-                // CG-C4: internal struct uses extern field types (i32 for i32 fields),
-                // so adjust the C field value to match the internal struct field type.
-                let field_ty = internal_sty
-                    .get_field_type_at_index(fi as u32)
-                    .ok_or_else(|| CompileError::LlvmError(format!("field {} type missing", fi)))?;
-                field_vals.push(self.adjust_int_val(raw, field_ty)?);
-            }
-            Ok(internal_sty
-                .const_named_struct(&field_vals)
-                .as_basic_value_enum())
+        let sv = c_val.into_struct_value();
+        let mut field_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        for (fi, _f) in fields.iter().enumerate() {
+            let raw = self
+                .builder
+                .build_extract_value(sv, fi as u32, &format!("{}_field_{}", name, fi))
+                .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
+            // CG-C4: the internal struct uses extern field types (i32 for i32
+            // fields), so adjust the C field value to the internal field type.
+            let field_ty = internal_sty
+                .get_field_type_at_index(fi as u32)
+                .ok_or_else(|| CompileError::LlvmError(format!("field {} type missing", fi)))?;
+            field_vals.push(self.adjust_int_val(raw, field_ty)?);
         }
+        self.build_struct_from_fields(internal_sty, &field_vals, name)
     }
 
-    /// Convert a simple #[repr(C)] record from Mimi's internal struct
-    /// representation to its C ABI representation.
+    /// 0.34.35 (M-010/N-1): assemble a struct value from RUNTIME field
+    /// values via insertvalue. `const_named_struct` is only legal when every
+    /// operand is a compile-time constant; feeding it runtime SSA values
+    /// produces malformed pseudo-constant IR that LLVM's new pass manager
+    /// crashes on (it does not verify before optimizing; standalone `opt`
+    /// rejects it with "invalid use of function-local name"). insertvalue is
+    /// the correct construction for runtime operands.
+    fn build_struct_from_fields(
+        &self,
+        sty: inkwell::types::StructType<'ctx>,
+        field_vals: &[BasicValueEnum<'ctx>],
+        tag: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let mut agg = sty.get_undef();
+        for (fi, v) in field_vals.iter().enumerate() {
+            agg = self
+                .builder
+                .build_insert_value(agg, *v, fi as u32, &format!("{}_ins_{}", tag, fi))
+                .map_err(|e| CompileError::LlvmError(format!("insert error: {}", e)))?
+                .into_struct_value();
+        }
+        Ok(BasicValueEnum::StructValue(agg))
+    }
+
+    /// Convert a #[repr(C)] record from Mimi's internal struct representation
+    /// to its C ABI representation.
+    ///
+    /// 0.34.35 (M-010/N-1, L3): the record is RETURNED BY VALUE as the
+    /// C-layout struct. LLVM legalizes the struct return per SysV (<=16B in
+    /// rax/rdx/xmm by class, >16B via sret), exactly matching C callers. This
+    /// replaces the old split (i64-packed for <=2 all-i32 fields; heap-malloc
+    /// pointer otherwise), which violated SysV and also leaked a malloc on
+    /// every call.
     fn convert_internal_reprc_record_to_c(
         &mut self,
         internal_val: BasicValueEnum<'ctx>,
@@ -513,86 +690,109 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
-        if types::is_simple_reprc_record(&fields) {
-            let sv = internal_val.into_struct_value();
-            let i64_ty = self.context.i64_type();
-            let i32_ty = self.context.i32_type();
-            let mut packed = i64_ty.const_int(0, false);
-            for (fi, f) in fields.iter().enumerate() {
-                let raw = self
-                    .builder
-                    .build_extract_value(sv, fi as u32, &format!("{}_{}_raw", name, f.name))
-                    .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
-                let truncated = self
-                    .builder
-                    .build_int_truncate(
-                        raw.into_int_value(),
-                        i32_ty,
-                        &format!("{}_{}_trunc", name, f.name),
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
-                let zext = self
-                    .builder
-                    .build_int_z_extend(truncated, i64_ty, &format!("{}_{}_zext", name, f.name))
-                    .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
-                if fi == 0 {
-                    packed = zext;
-                } else {
-                    let shifted = self
-                        .builder
-                        .build_left_shift(
-                            zext,
-                            i64_ty.const_int((fi * 32) as u64, false),
-                            &format!("{}_{}_shifted", name, f.name),
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("shift error: {}", e)))?;
-                    packed = self
-                        .builder
-                        .build_or(packed, shifted, &format!("{}_{}_packed", name, f.name))
-                        .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let c_sty = self.c_layout_struct_type(&fields)?;
+        let internal_sty = self
+            .type_llvm
+            .get(name)
+            .and_then(|t| match t {
+                BasicTypeEnum::StructType(s) => Some(*s),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!("internal type for '{}' missing", name))
+            })?;
+        let sv = match internal_val {
+            BasicValueEnum::StructValue(s) => s,
+            BasicValueEnum::PointerValue(pv) => self
+                .build_load(
+                    BasicTypeEnum::StructType(internal_sty),
+                    pv,
+                    &format!("{}_cret_load", name),
+                )?
+                .into_struct_value(),
+            _ => {
+                return Err(CompileError::LlvmError(format!(
+                    "export return of '{}': unexpected value kind",
+                    name
+                )))
+            }
+        };
+
+        let mut field_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        for (fi, f) in fields.iter().enumerate() {
+            let raw = self
+                .builder
+                .build_extract_value(sv, fi as u32, &format!("{}_{}_raw", name, f.name))
+                .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
+            field_vals.push(self.convert_internal_field_to_c(raw, &f.ty)?);
+        }
+        self.build_struct_from_fields(c_sty, &field_vals, &format!("{}_cret", name))
+    }
+
+    /// Classify a scalar-only repr(C) record for the SysV x86-64 boundary.
+    /// Scalar-only fields (i32/i64/f64/bool) are naturally aligned and never
+    /// straddle an eightbyte boundary, so no eightbyte is ever MEMORY class.
+    fn sysv_coerce_reprc_record(&self, fields: &[Field]) -> MimiResult<SysVCoerce<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+
+        let size = self.compute_c_struct_size(fields)?;
+        if size > 16 {
+            return Ok(SysVCoerce::Mem);
+        }
+
+        // Field byte spans (offset, size).
+        let mut spans: Vec<(usize, usize, bool)> = Vec::new(); // (off, size, is_float)
+        let mut offset = 0usize;
+        let mut max_align = 1usize;
+        for f in fields {
+            let (sz, al) = self.field_c_size_align(&f.ty)?;
+            max_align = max_align.max(al);
+            offset = (offset + al - 1) & !(al - 1);
+            let is_float = matches!(f.ty.unlocated(), Type::Name(n, _) if n == "f64");
+            spans.push((offset, sz, is_float));
+            offset += sz;
+        }
+
+        if size == 0 {
+            // Empty record: pass as zero-width; represent as a single i64 slot.
+            return Ok(SysVCoerce::Reg(BasicTypeEnum::IntType(i64_ty)));
+        }
+
+        let n_eightbytes = size.div_ceil(8);
+        let mut elem_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        for eb in 0..n_eightbytes {
+            let lo = eb * 8;
+            let hi = lo + 8;
+            // A byte is SSE only if every field byte in this eightbyte is f64;
+            // any integer byte makes the eightbyte INTEGER (SysV merge rule).
+            let mut has_int = false;
+            let mut has_any = false;
+            for &(off, sz, is_float) in &spans {
+                let f_lo = off;
+                let f_hi = off + sz;
+                if f_hi <= lo || f_lo >= hi {
+                    continue;
+                }
+                has_any = true;
+                if !is_float {
+                    has_int = true;
                 }
             }
-            Ok(packed.into())
-        } else {
-            // Complex records: return a heap-allocated C-layout struct pointer.
-            // The C caller receives an opaque pointer and must free it.
-            let sv = internal_val.into_struct_value();
-            let c_sty = self.c_layout_struct_type(&fields)?;
-
-            // Compute the struct size via LLVM TargetData or manual computation.
-            let struct_size = self.compute_c_struct_size(&fields)?;
-            let i64_ty = self.context.i64_type();
-            let size_val = i64_ty.const_int(struct_size as u64, false);
-
-            // B4: NULL-checked malloc.
-            let c_ptr = self.malloc_or_abort(size_val, &format!("malloc_cret_{}", name))?;
-
-            let c_typed_ptr = self.build_pointer_cast(
-                c_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                &format!("{}_cret_ptr", name),
-            )?;
-
-            for (fi, f) in fields.iter().enumerate() {
-                let raw = self
-                    .builder
-                    .build_extract_value(sv, fi as u32, &format!("{}_{}_raw", name, f.name))
-                    .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
-                let c_field_val = self.convert_internal_field_to_c(raw, &f.ty)?;
-                let gep = self
-                    .gep()
-                    .build_struct_gep(
-                        c_sty,
-                        c_typed_ptr,
-                        fi as u32,
-                        &format!("{}_{}_gep", name, f.name),
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                self.build_store(gep, c_field_val)?;
-            }
-
-            Ok(c_ptr.into())
+            let cls_is_sse = has_any && !has_int;
+            elem_tys.push(if cls_is_sse {
+                BasicTypeEnum::FloatType(f64_ty)
+            } else {
+                BasicTypeEnum::IntType(i64_ty)
+            });
         }
+
+        let ty = if elem_tys.len() == 1 {
+            elem_tys[0]
+        } else {
+            BasicTypeEnum::StructType(self.context.struct_type(&elem_tys, false))
+        };
+        Ok(SysVCoerce::Reg(ty))
     }
 
     /// Compute the total size in bytes of a C-layout struct with the given fields,

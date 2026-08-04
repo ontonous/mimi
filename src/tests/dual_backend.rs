@@ -15202,3 +15202,97 @@ fn dual_i32_boundary_values_no_trap() {
         "i32 boundary arithmetic inside range",
     );
 }
+
+// --- N-2 (0.34.35): plain function references stored into closure-typed
+// record fields must behave identically on both backends. Codegen previously
+// stored the raw fn pointer into the 16-byte {fn_ptr, env_ptr} slot and the
+// call site injected an uninitialized env as the first argument (silent
+// miscompilation, L1). The VM was always correct, so these pin parity. ---
+
+#[test]
+fn dual_fn_ref_record_field_static_parity() {
+    assert_both_backends_stdout(
+        "func add_impl(a: i64, b: i64) -> i64 { a + b }
+        type VTable { add: func(i64, i64) -> i64 }
+        func main() -> i64 {
+            let vt = VTable { add: add_impl }
+            let f = vt.add
+            println(f(1, 2))
+            0
+        }",
+        "3",
+        "static fn reference into record field",
+    );
+}
+
+#[test]
+fn dual_fn_ref_record_field_typed_let_parity() {
+    assert_both_backends_stdout(
+        "func add_impl(a: i64, b: i64) -> i64 { a + b }
+        type VTable { add: func(i64, i64) -> i64 }
+        func main() -> i64 {
+            let vt: VTable = VTable { add: add_impl }
+            let f = vt.add
+            println(f(10, 20))
+            0
+        }",
+        "30",
+        "static fn reference into annotated record",
+    );
+}
+
+#[test]
+fn dual_fn_ref_record_field_runtime_ptr_parity() {
+    // The callee is a RUNTIME pointer (held in a variable), so codegen must
+    // emit the signature-keyed trampoline (callee rides in the env slot).
+    assert_both_backends_stdout(
+        "func add_impl(a: i64, b: i64) -> i64 { a + b }
+        type VTable { add: func(i64, i64) -> i64 }
+        func main() -> i64 {
+            let g = add_impl
+            let vt = VTable { add: g }
+            let f = vt.add
+            println(f(4, 5))
+            0
+        }",
+        "9",
+        "runtime fn pointer into record field",
+    );
+}
+
+#[test]
+fn dual_fn_ref_record_field_two_fields_parity() {
+    assert_both_backends_stdout(
+        "func plus(a: i64, b: i64) -> i64 { a + b }
+        func mul(a: i64, b: i64) -> i64 { a * b }
+        type VTable { add: func(i64, i64) -> i64, mul: func(i64, i64) -> i64 }
+        func main() -> i64 {
+            let vt = VTable { add: plus, mul: mul }
+            let a = vt.add
+            let m = vt.mul
+            println(a(2, 3) + m(4, 5))
+            0
+        }",
+        "25",
+        "two fn references in one record",
+    );
+}
+
+#[test]
+fn dual_fn_ref_record_field_lambda_still_parity() {
+    // Non-regression: genuine closures (lambdas) stored in func fields must
+    // keep working — the fix must not disturb already-correct closure values.
+    assert_both_backends_stdout(
+        "type VTable { add: func(i64) -> i64 }
+        func main() -> i64 {
+            let base = 100
+            let lam = fn(a: i64) -> i64 { a + base }
+            let vt = VTable { add: lam }
+            let f = vt.add
+            println(f(1))
+            0
+        }",
+        "101",
+        "capturing lambda in record field (regression)",
+    );
+}

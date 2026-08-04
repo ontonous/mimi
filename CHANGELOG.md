@@ -2,6 +2,39 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.35 — FFI 审计闭环：repr(C) 导出 SysV ABI 修复 + fn 字段调用 L1 修复（进行中）
+
+> 依据 2026-08-05 Jupitune dogfood 外部评估审计（`devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md`，
+> 17 条复核 14 成立 + 3 个审计新发现）。本 sprint 处置 L1/L2/L3 级阻断 bug；
+> 特性缺口（f32/指针/数据符号/vtable）登记 0.2 不进本版。
+
+- **N-2｜fn 字段调用 codegen 静默误编译修复（L1）**：裸函数引用存入 closure 型
+  record 字段（`type VTable { add: func(...) }`）时，codegen 把 8 字节 fn 指针存进
+  16 字节 `{fn_ptr, env_ptr}` 槽、env 半初始化，调用端把垃圾 env 当首参注入——VM
+  结果对、codegen 静默错值（`f(1,2)` 返回 255）。修复（`codegen/expr/record.rs`）：
+  静态具名 callee 走 `{closure_wrapper, null}`；运行时 fn 指针（如变量持有）走
+  **签名键 trampoline**（callee 坐 env 槽、trampoline 以声明签名间接调用，无 env
+  注入）。真 closure（lambda）不受影响。新增 5 个 dual 对齐测试（含捕获 lambda 回归）；
+- **M-010/N-1｜repr(C) 导出 SysV ABI 修复（L3 内存安全）**：`extern "C"` 导出函数
+  的 repr(C) struct 按值传递此前违反 SysV——`is_simple_reprc_record` 仅 ≤2 全 i32
+  走寄存器、其余一律当指针，`{i64}`/`{i64,i64}` 参数把寄存器值当指针解引用 →
+  C 侧 dlopen 调用 SIGSEGV，≥24B 返回垃圾，debug 编译器对部分形状直接段错误。
+  根因双层（`codegen/func/export.rs`）：
+  ① ABI 侧实现 **SysV eightbyte 分类/coercion**——≤16B 按 8 字节分类（INTEGER→i64、
+  SSE→double）用 coerce 寄存类型穿越边界（LLVM 原生 struct 参数不做 SysV 合并，
+  实测 `{i32,i32}` 被拆到 edi+esi 而 C 调用方打包进 rdi）；>16B 参数加 `byval`
+  （SysV 栈传递，裸 ptr 读 rdi 是垃圾）、>16B 返回加 `sret` 隐藏缓冲。
+  ② IR 侧把 `const_named_struct` 喂运行时 SSA 的用法全部改 `insertvalue` 链——
+  前者产出"伪常量"IR，独立 `opt` 报 `invalid use of function-local name`，
+  LLVM-18 优化器在 LazyCallGraph/InstCombine 处段错误（即 debug 编译器崩溃根因）。
+  dlopen 探针 5 参数形状 + 2 返回形状 + 混合 SSE 全通过；顺带消除旧堆指针返回的
+  per-call malloc 泄漏；
+- **测试纪律：nextest 每测试硬超时**（`.config/nextest.toml`）：每测试独立进程 +
+  `test-timeout 60s` + 30s 标黄两次即杀 + leak 检测。动机：全量 `cargo test` 遇
+  死锁/死循环会无声挂起只能肉眼盯进度；独立进程使段错误/死锁被单独报失败而非拖死
+  全场。default 60s / ci profile 120s（对齐 2 vCPU runner）。全量 nextest 复跑绿：
+  4623 passed / 0 failed / 7 skipped。
+
 ### 0.34.34 — i32 算术语义钉死：SD-7 trap 对等 + O1 毒值修复（L1 双后端等价闭环）
 
 > 用户报告 i32 标注算术 L1 分歧（VM 以 i64 宽度静默 wrap / codegen E0802 trap），

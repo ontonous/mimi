@@ -149,17 +149,17 @@ fn export_complex_reprc_record_build() {
     );
 
     // Write C caller program.
-    // The complex repr(C) struct is returned as a heap-allocated pointer;
-    // see convert_internal_reprc_record_to_c in export.rs.
+    // 0.34.35 (M-010): repr(C) structs now follow SysV strictly — MixedStruct
+    // (24B) is returned via sret, i.e. the C caller just declares a by-value
+    // return and the compiler passes the hidden buffer in rdi. (Previously
+    // the wrapper returned a heap pointer, which was never the C ABI.)
     let c_src = r#"
         #include <stdio.h>
-        #include <stdlib.h>
         typedef struct { int id; double value; int flag; } MixedStruct;
-        MixedStruct* make_mixed(int id, double val, int flag);
+        MixedStruct make_mixed(int id, double val, int flag);
         int main() {
-            MixedStruct* s = make_mixed(10, 3.5, 1);
-            printf("%d\n%.1f\n%d\n", s->id, s->value, s->flag);
-            free(s);
+            MixedStruct s = make_mixed(10, 3.5, 1);
+            printf("%d\n%.1f\n%d\n", s.id, s.value, s.flag);
             return 0;
         }
     "#;

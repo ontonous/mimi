@@ -316,6 +316,13 @@ pub struct CodeGenerator<'ctx> {
     /// Key: original function name. Value: wrapper fn(i8*, params...) -> ret.
     /// Used when passing a named function where func(T)->U is expected.
     closure_wrappers: HashMap<String, inkwell::values::PointerValue<'ctx>>,
+    /// Cache of signature-keyed function-pointer trampolines (N-2, 0.34.35).
+    /// Key: fingerprint of the func-type field signature. Value: trampoline
+    /// fn(env=callee_ptr, params...) that indirect-calls the callee held in
+    /// its env slot. Used when a RUNTIME function pointer (e.g. one stored in
+    /// a variable) is placed into a closure-typed slot: the callee cannot be
+    /// baked statically, so it rides in the env slot.
+    fnptr_trampolines: HashMap<String, inkwell::values::PointerValue<'ctx>>,
     /// Const values declared at top level (for codegen const support).
     const_values: HashMap<String, crate::ast::Expr>,
 
@@ -606,6 +613,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_callback_tls: Vec::new(),
             list_elem_llvm_types: HashMap::new(),
             closure_wrappers: HashMap::new(),
+            fnptr_trampolines: HashMap::new(),
             const_values: HashMap::new(),
             // v0.28.19 actor concurrency
             actor_names: std::collections::HashSet::new(),
@@ -3335,6 +3343,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // strlen → strlen.11). Confidence baseline: 0.34.34 full-suite +
         // differential fuzz re-run with O1 default.
         if self.optimize {
+            // MIMI_DUMP_MODULE=<path>: dump the module IR right before the
+            // optimization pipeline (diagnostics; mirrors the test-side
+            // MIMI_DUMP_IR hook but for the CLI build path).
+            if let Ok(path) = std::env::var("MIMI_DUMP_MODULE") {
+                let _ = self.module.print_to_file(&path);
+            }
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module
                 .run_passes("default<O1>", tm, options)
