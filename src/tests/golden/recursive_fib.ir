@@ -13,7 +13,9 @@ source_filename = "golden_test"
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
 @op_name = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
 @op_name.10 = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
-@op_name.11 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
+@op_name.11 = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
+@op_name.12 = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
+@op_name.13 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -769,8 +771,8 @@ else:                                             ; preds = %entry
   %op_overflow = extractvalue { i64, i1 } %checked_op, 1
   br i1 %op_overflow, label %trap_overflow, label %op_ok
 
-ifcont:                                           ; preds = %op_ok18, %then
-  %if_result = phi i32 [ %n2, %then ], [ %op_result15, %op_ok18 ]
+ifcont:                                           ; preds = %op_ok23, %then
+  %if_result = phi i32 [ %n2, %then ], [ %op_result20, %op_ok23 ]
   ret i32 %if_result
 
 trap_overflow:                                    ; preds = %else
@@ -778,6 +780,16 @@ trap_overflow:                                    ; preds = %else
   unreachable
 
 op_ok:                                            ; preds = %else
+  %i32_lt_min = icmp slt i64 %op_result, -2147483648
+  %i32_gt_max = icmp sgt i64 %op_result, 2147483647
+  %i32_oob = or i1 %i32_lt_min, %i32_gt_max
+  br i1 %i32_oob, label %trap_i32_ovf, label %i32_ok
+
+trap_i32_ovf:                                     ; preds = %op_ok
+  call void @mimi_trap_overflow(ptr @op_name.10)
+  unreachable
+
+i32_ok:                                           ; preds = %op_ok
   %trunc = trunc i64 %op_result to i32
   %call = call i32 @fib(i32 %trunc)
   %n5 = load i32, ptr %n, align 4
@@ -787,23 +799,33 @@ op_ok:                                            ; preds = %else
   %op_overflow9 = extractvalue { i64, i1 } %checked_op7, 1
   br i1 %op_overflow9, label %trap_overflow10, label %op_ok11
 
-trap_overflow10:                                  ; preds = %op_ok
-  call void @mimi_trap_overflow(ptr @op_name.10)
-  unreachable
-
-op_ok11:                                          ; preds = %op_ok
-  %trunc12 = trunc i64 %op_result8 to i32
-  %call13 = call i32 @fib(i32 %trunc12)
-  %checked_op14 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %call, i32 %call13)
-  %op_result15 = extractvalue { i32, i1 } %checked_op14, 0
-  %op_overflow16 = extractvalue { i32, i1 } %checked_op14, 1
-  br i1 %op_overflow16, label %trap_overflow17, label %op_ok18
-
-trap_overflow17:                                  ; preds = %op_ok11
+trap_overflow10:                                  ; preds = %i32_ok
   call void @mimi_trap_overflow(ptr @op_name.11)
   unreachable
 
-op_ok18:                                          ; preds = %op_ok11
+op_ok11:                                          ; preds = %i32_ok
+  %i32_lt_min12 = icmp slt i64 %op_result8, -2147483648
+  %i32_gt_max13 = icmp sgt i64 %op_result8, 2147483647
+  %i32_oob14 = or i1 %i32_lt_min12, %i32_gt_max13
+  br i1 %i32_oob14, label %trap_i32_ovf15, label %i32_ok16
+
+trap_i32_ovf15:                                   ; preds = %op_ok11
+  call void @mimi_trap_overflow(ptr @op_name.12)
+  unreachable
+
+i32_ok16:                                         ; preds = %op_ok11
+  %trunc17 = trunc i64 %op_result8 to i32
+  %call18 = call i32 @fib(i32 %trunc17)
+  %checked_op19 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %call, i32 %call18)
+  %op_result20 = extractvalue { i32, i1 } %checked_op19, 0
+  %op_overflow21 = extractvalue { i32, i1 } %checked_op19, 1
+  br i1 %op_overflow21, label %trap_overflow22, label %op_ok23
+
+trap_overflow22:                                  ; preds = %i32_ok16
+  call void @mimi_trap_overflow(ptr @op_name.13)
+  unreachable
+
+op_ok23:                                          ; preds = %i32_ok16
   br label %ifcont
 }
 

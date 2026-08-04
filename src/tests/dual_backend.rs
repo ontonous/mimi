@@ -14983,3 +14983,222 @@ fn dual_mutate_param_multiple_calls() {
         "3"
     );
 }
+
+// ============================================================
+// 0.34.34: i32 width fidelity + shift/cast parity (SD-7, L1)
+//
+// Regression for a previously UNREGISTERED L1 divergence: the bytecode VM
+// computed annotated-i32 arithmetic in its i64 register domain (silently
+// producing values past i32::MAX), while codegen emitted native checked
+// i32 (E0802 trap). The suite below locks both backends to identical
+// observable behavior — traps where codegen traps, wrap/truncate/mask
+// where codegen wraps/truncates/masks. Covers the shapes that 830 dual
+// tests missed: there were no *annotated i32 boundary arithmetic* cases
+// (the old trap_i32_* tests used unannotated literals inferred as i64).
+// ============================================================
+
+fn assert_both_backends_trap_e0802(src: &str, what: &str) {
+    let vm = run_source_bytecode_result(src);
+    assert!(vm.is_err(), "VM must trap on {what}, got Ok({vm:?})");
+    let vm_err = vm.unwrap_err();
+    // In-process error strings carry the bare message (the CLI renderer
+    // prefixes [E0802]); trap parity is asserted on the overflow text.
+    assert!(
+        vm_err.contains("overflow"),
+        "VM trap must report integer overflow for {what}: {vm_err}"
+    );
+    if !can_link() {
+        return;
+    }
+    let cg = compile_and_run(src);
+    assert!(cg.is_err(), "codegen must trap on {what}");
+    let cg_err = cg.unwrap_err();
+    assert!(
+        cg_err.contains("overflow"),
+        "codegen trap must report integer overflow for {what}: {cg_err}"
+    );
+}
+
+fn assert_both_backends_stdout(src: &str, expected: &str, what: &str) {
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), expected, "VM {what}");
+    if !can_link() {
+        return;
+    }
+    let cg_out = compile_and_run(src).unwrap_or_else(|e| panic!("codegen {what}: {e}"));
+    assert_eq!(cg_out.trim(), expected, "codegen {what}");
+}
+
+#[test]
+fn dual_i32_add_overflow_trap_parity() {
+    // The original audit repro: annotated i32, two increments past MAX.
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let mut x: i32 = 2147483646
+            x = x + 1
+            x = x + 1
+            println(x)
+            0
+        }",
+        "i32 addition overflow",
+    );
+}
+
+#[test]
+fn dual_i32_sub_overflow_trap_parity() {
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let x: i32 = 2147483647
+            println(x - (-1))
+            0
+        }",
+        "i32 subtraction overflow",
+    );
+}
+
+#[test]
+fn dual_i32_mul_overflow_trap_parity() {
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let x: i32 = 2147483647
+            println(x * 2)
+            0
+        }",
+        "i32 multiplication overflow",
+    );
+}
+
+#[test]
+fn dual_i32_div_min_neg1_trap_parity() {
+    // i32::MIN / -1 overflows i32 but NOT the VM's i64 domain — the
+    // dedicated pre-op guard makes the VM trap identically to codegen.
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let m: i32 = -2147483648
+            println(m / -1)
+            0
+        }",
+        "i32 division MIN / -1",
+    );
+}
+
+#[test]
+fn dual_i32_mod_min_neg1_trap_parity() {
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let m: i32 = -2147483648
+            println(m % -1)
+            0
+        }",
+        "i32 remainder MIN % -1",
+    );
+}
+
+#[test]
+fn dual_i32_neg_min_trap_parity() {
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let m: i32 = -2147483648
+            println(-m)
+            0
+        }",
+        "i32 unary negation of MIN",
+    );
+}
+
+#[test]
+fn dual_i32_const_fold_let_overflow_trap_parity() {
+    // Constant-folded binops bypass op-site guards in the VM; the annotated
+    // let-level guard catches them (codegen folds with checked i32 add).
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let x: i32 = 2147483646 + 2
+            println(x)
+            0
+        }",
+        "constant-folded i32 addition overflow at let",
+    );
+}
+
+#[test]
+fn dual_i32_pow_2_31_wraps_parity() {
+    // pow narrows at the i32 width on BOTH backends (no trap): 2**31
+    // computes in i64 then wraps to i32::MIN.
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let a: i32 = 2
+            let b: i32 = 31
+            println(a ** b)
+            0
+        }",
+        "-2147483648",
+        "i32 pow wrap (2 ** 31)",
+    );
+}
+
+#[test]
+fn dual_i32_shl_masked_and_wrapped_parity() {
+    // Shift amount masked modulo 32, result narrows to i32: 7 << 40 ==
+    // 7 << (40 % 32) == 7 << 8 == 1792 (hardware semantics, O1-safe).
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let a: i32 = 7
+            println(a << 40)
+            let b: i32 = 1
+            println(b << 31)
+            0
+        }",
+        "1792\n-2147483648",
+        "i32 shift masking + wrap",
+    );
+}
+
+#[test]
+fn dual_i64_shl_masked_parity() {
+    // i64 shifts mask modulo 64 on both backends (pre-fix the VM trapped
+    // on amount >= 64 while codegen masked — L1 divergence).
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let a: i64 = 1
+            println(a << 65)
+            println(a << -1)
+            0
+        }",
+        "2\n-9223372036854775808",
+        "i64 shift amount masking",
+    );
+}
+
+#[test]
+fn dual_cast_i64_to_i32_truncates_parity() {
+    // `as i32` truncates with wrap: 3000000000 -> -1294967296.
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let y: i64 = 3000000000
+            let z: i32 = y as i32
+            println(z)
+            0
+        }",
+        "-1294967296",
+        "i64 -> i32 cast truncation",
+    );
+}
+
+#[test]
+fn dual_i32_boundary_values_no_trap() {
+    // Positive control: boundary-touching arithmetic that STAYS in range
+    // must run clean on both backends (no false traps from the guards).
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let mut x: i32 = 2147483646
+            x = x + 1
+            println(x)
+            let mut y: i32 = -2147483647
+            y = y - 1
+            println(y)
+            0
+        }",
+        "2147483647\n-2147483648",
+        "i32 boundary arithmetic inside range",
+    );
+}

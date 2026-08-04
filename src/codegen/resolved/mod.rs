@@ -586,6 +586,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 conversion,
             } => {
                 let value = self.emit_expr(value, frame)?;
+                // SD-7 (0.34.34): narrowing assign into an i32 variable traps
+                // out of range (VM assign-guard parity). Range-check BEFORE
+                // apply_conversion truncates; explicit casts keep wrap.
+                if matches!(
+                    conversion.kind,
+                    crate::core::CheckedConversionKind::NumericNarrowChecked
+                ) {
+                    let conv_target = self.lower_type(&conversion.to)?;
+                    if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it)) =
+                        (value, conv_target)
+                    {
+                        if it.get_bit_width() == 32 && iv.get_type().get_bit_width() > 32 {
+                            self.generator.emit_i32_range_guard(iv, "assign")?;
+                        }
+                    }
+                }
                 let value = self.apply_conversion(value, conversion)?;
                 let target = self.root_place(frame, target)?;
                 let value = self.coerce_to(value, target.llvm_type)?;
@@ -738,6 +754,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             CompileError::LlvmError(format!("load for struct bind: {e}"))
                         })?
                 } else {
+                    // SD-7 (0.34.34): narrowing bind into an i32 slot
+                    // range-checks before the silent truncate — mirrors the
+                    // VM CheckI32 let-guard. Cast narrows via
+                    // ResolvedExprKind::Cast and keeps wrap semantics.
+                    if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it)) =
+                        (value, llvm_type)
+                    {
+                        if it.get_bit_width() == 32 && iv.get_type().get_bit_width() > 32 {
+                            self.generator.emit_i32_range_guard(iv, "let-bind")?;
+                        }
+                    }
                     self.coerce_to(value, llvm_type)?
                 };
                 let storage = self

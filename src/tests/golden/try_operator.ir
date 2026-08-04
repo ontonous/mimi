@@ -12,7 +12,9 @@ source_filename = "golden_test"
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
 @op_name = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
-@op_name.10 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
+@op_name.10 = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
+@op_name.11 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
+@op_name.12 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -763,6 +765,16 @@ trap_overflow:                                    ; preds = %entry
   unreachable
 
 op_ok:                                            ; preds = %entry
+  %i32_lt_min = icmp slt i64 %op_result, -2147483648
+  %i32_gt_max = icmp sgt i64 %op_result, 2147483647
+  %i32_oob = or i1 %i32_lt_min, %i32_gt_max
+  br i1 %i32_oob, label %trap_i32_ovf, label %i32_ok
+
+trap_i32_ovf:                                     ; preds = %op_ok
+  call void @mimi_trap_overflow(ptr @op_name.10)
+  unreachable
+
+i32_ok:                                           ; preds = %op_ok
   %trunc = trunc i64 %op_result to i32
   ret i32 %trunc
 }
@@ -779,10 +791,20 @@ entry:
   br i1 %op_overflow, label %trap_overflow, label %op_ok
 
 trap_overflow:                                    ; preds = %entry
-  call void @mimi_trap_overflow(ptr @op_name.10)
+  call void @mimi_trap_overflow(ptr @op_name.11)
   unreachable
 
 op_ok:                                            ; preds = %entry
+  %i32_lt_min = icmp slt i64 %op_result, -2147483648
+  %i32_gt_max = icmp sgt i64 %op_result, 2147483647
+  %i32_oob = or i1 %i32_lt_min, %i32_gt_max
+  br i1 %i32_oob, label %trap_i32_ovf, label %i32_ok
+
+trap_i32_ovf:                                     ; preds = %op_ok
+  call void @mimi_trap_overflow(ptr @op_name.12)
+  unreachable
+
+i32_ok:                                           ; preds = %op_ok
   %trunc = trunc i64 %op_result to i32
   ret i32 %trunc
 }

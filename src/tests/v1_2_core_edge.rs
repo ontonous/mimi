@@ -61,23 +61,30 @@ fn overflow_power_large() {
 
 #[test]
 fn overflow_shift_left_64() {
+    // 0.34.34: shift amounts use hardware-mask semantics (modulo the width),
+    // matching codegen/x86/aarch64 — the pre-fix VM trap diverged from
+    // codegen's observable mask behavior (L1). Also O1-safe: unmasked
+    // out-of-range shifts are folded to poison by LLVM. `1 << 64` masks the
+    // amount to 0 → 1 on both backends (parity locked in dual_backend
+    // i32/i64 width suite).
     let src = "func main() -> i32 { 1 << 64 }";
     let result = run_source_bytecode_result(src);
-    assert!(result.is_err(), "shift overflow should error");
-    assert!(
-        result.unwrap_err().contains("overflow"),
-        "expected overflow error"
+    assert_eq!(
+        result,
+        Ok(interp::Value::Int(1)),
+        "masked shift amount: 1 << (64 & 63) == 1 (hardware semantics)"
     );
 }
 
 #[test]
 fn overflow_shift_right_64() {
+    // 0.34.34: masked arithmetic shift parity — see overflow_shift_left_64.
     let src = "func main() -> i32 { 1 >> 64 }";
     let result = run_source_bytecode_result(src);
-    assert!(result.is_err(), "shift overflow should error");
-    assert!(
-        result.unwrap_err().contains("overflow"),
-        "expected overflow error"
+    assert_eq!(
+        result,
+        Ok(interp::Value::Int(1)),
+        "masked shift amount: 1 >> (64 & 63) == 1 (hardware semantics)"
     );
 }
 

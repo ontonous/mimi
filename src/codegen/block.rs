@@ -12,6 +12,21 @@ use super::CodeGenerator;
 use super::VarEntry;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// 0.34.34: pierce `Type::Located` wrappers to reach the structural type
+    /// name of an annotation. `let x: i32 = ...` parses the annotation as
+    /// `Located { ty: Name("i32") }`, so a direct `Type::Name` match silently
+    /// misses it (the exact bug that hid the SD-7 let-bind guard).
+    pub(in crate::codegen) fn annotated_type_name(ty: &crate::ast::Type) -> Option<&str> {
+        let mut t = ty.unlocated();
+        while let crate::ast::Type::Located { ty: inner, .. } = t {
+            t = inner.unlocated();
+        }
+        match t {
+            crate::ast::Type::Name(n, _) => Some(n.as_str()),
+            _ => None,
+        }
+    }
+
     pub(super) fn compile_block(
         &mut self,
         block: &Block,
@@ -289,6 +304,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
+                        // SD-7 (0.34.34): a narrowing bind into an annotated i32
+                        // slot must range-check BEFORE the silent truncate in
+                        // adjust_int_val — out-of-range is E0802 overflow, not a
+                        // wrap. Mirrors the VM CheckI32 let-guard. Explicit `as`
+                        // casts keep wrap semantics; annotated binds trap.
+                        if Self::annotated_type_name(decl_ty) == Some("i32") {
+                            if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it)) =
+                                (val, target)
+                            {
+                                if iv.get_type().get_bit_width() > it.get_bit_width() {
+                                    self.emit_i32_range_guard(iv, "let-bind")?;
+                                }
+                            }
+                        }
                         val = self.adjust_int_val(val, target)?;
                         // CG-H4 (audit): for `let xs: List<T> = ...`, do NOT load the
                         // struct from the pointer — that creates a stack temporary copy
@@ -1538,6 +1567,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let val = self.compile_expr(init, vars)?;
                     self.pending_list_elem_type = saved_list_elem;
                     let val = self.normalize_string_value(val, init)?;
+                    // SD-7 (0.34.34): narrowing bind into an annotated i32 slot
+                    // range-checks before the silent truncate (compile_block's
+                    // top-level bodies flow through here via compile_func_legacy).
+                    if let Some(decl_ty) = &ty {
+                        if Self::annotated_type_name(decl_ty) == Some("i32") {
+                            if let BasicValueEnum::IntValue(iv) = val {
+                                if iv.get_type().get_bit_width() > 32 {
+                                    self.emit_i32_range_guard(iv, "let-bind")?;
+                                }
+                            }
+                        }
+                    }
                     let val = if let Some(decl_ty) = &ty {
                         // Populate var_type_names from the type annotation so that
                         // infer_object_type can return e.g. "Option<string>" instead
