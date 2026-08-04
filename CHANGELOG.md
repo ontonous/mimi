@@ -2,6 +2,23 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.32 — 0.1.4 RC 复核 + 工具门禁（Phase F 收尾）
+
+- **unsafe SAFETY gate 清零（61 → 0）**，CI lint 门禁恢复全绿：
+  - `scripts/check_unsafe_safety.py` 增强：
+    - **raw string 剥离**：mimi 测试源码以 `r#"..."#` 嵌入 `unsafe { }` 语言关键字块（`unsafe` 是 Mimi 语言特性），此前被误计为 Rust unsafe（6 处误检）；现在先整文件剥离 raw string 再行扫描。
+    - **行号保留**：raw string 替换保留换行数，`--list` 输出行号与源文件一致（此前偏小 ~200 行）。
+    - **rustfmt 布局兼容**：`unsafe { // SAFETY: ... }` 被 rustfmt 移到块内首行时同样识别。
+  - 为 **61 处真实 unsafe 补 `// SAFETY:` 注释**，含 0.33 bytecode 迁移存量：
+    - `bytecode/builtins/net.rs` 26 处：libc socket/getsockopt/getaddrinfo/freeaddrinfo/bind/listen/accept/send/recv/connect/dup2/close/`__errno_location` 标准调用，参数经 builtin 校验；
+    - `interp/ffi_runtime.rs`：runner 裸指针（`Option<*mut dyn FfiClosureRunner>`）同步调用期有效性、CStr 借用、`Box::into_raw/from_raw` 配对、`call_ffi_raw_struct` 低层入口；
+    - `bytecode/builtins/misc.rs`：close_fd、C 侧字符串 CStr 读取 + `libc::free` 配对；
+    - `ffi/callback.rs`：回调参数槽 C 字符串释放（IP-C3 allocator match）、`FFI_CALLBACK_CTX` runner 指针；
+    - `codegen`：inkwell `build_gep`/`BasicBlock::delete`（LLVM 构建 API）、`errno.rs` `strerror_r`（线程安全 XPG 变体）；
+    - `tests/` + `main/run.rs`：测试 harness FFI 回调、`libc::flock` 文件锁、`libc::signal` SIGINT 安装。
+  - 门禁结果：**0 non-runtime unsafe without SAFETY**（baseline 37），此后新增 unsafe 必须带 SAFETY。
+- **RC 复核**：全量 4598 lib（0 failed / 7 ignored）+ 13 real_world + 28 cli 全绿；clippy `-D warnings` + `fmt --check` 干净。0.1.4 保持 `0.1.4-dev`（用户裁决不 RELEASE）。
+
 ### 0.34.31 — 内存模型切片评估（Phase F 之五，诊断闭环）
 
 - **valgrind 实证三类泄漏（codegen 路径）统一根因** = **codegen C-ABI 无托管内存所有权模型**：
