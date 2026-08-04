@@ -220,6 +220,30 @@ impl UnificationTable {
         }
     }
 
+    /// 0.1.5 (DX backlog #1): finalization entrypoint that fails *visibly*.
+    /// `zonk` additionally rejects residual `Infer` escapes that `resolve`
+    /// silently passed through (scan_residual), so a migrated call site that
+    /// hits an escape errs here instead of returning a poisonable type. The
+    /// unknown fallback matches the pre-migration `resolve` failure behaviour;
+    /// the debug assertion surfaces the escape during development so the call
+    /// site can be given a precise handling. Migrated call sites use this
+    /// instead of `resolve`.
+    pub fn zonk_or_unknown(&mut self, ty: &Type) -> Type {
+        match self.zonk(ty) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                mimi_debug_assert!(
+                    false,
+                    "zonk() failed at a migrated call site: {} for type {} \
+                     (residual Infer escape or resolution failure)",
+                    e,
+                    crate::core::helpers::fmt_type(ty)
+                );
+                Type::Name("unknown".into(), vec![])
+            }
+        }
+    }
+
     fn resolve_with_depth(
         &mut self,
         ty: &Type,
