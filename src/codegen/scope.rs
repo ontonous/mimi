@@ -188,17 +188,15 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Build the embedded violation message for a contract assertion.
     ///
-    /// Shape (phrasing aligned with the bytecode VM's E0808 report):
+    /// Single dense line, phrasing aligned with the bytecode VM's E0808
+    /// report, machine-first (no gutter/caret/arrow decoration — coordinates
+    /// carry the positional information):
     /// ```text
-    /// [E0808] requires condition failed for 'div': b != 0
-    ///  --> src.mimi:2:15
-    ///   |     requires: b != 0
-    /// Hint: rebuild without --verify-contracts to disable contract checking.
+    /// [E0808] requires condition failed for 'div': b != 0 @ src.mimi:2:15-21 | hint: rebuild without --verify-contracts to disable contract checking.
     /// ```
     /// The expression is rendered back to source-like text (`expr_render`),
-    /// never Debug-dumped. Location and the source-line snippet are
-    /// best-effort: synthetic/desugared contracts without spans degrade to the
-    /// first line only.
+    /// never Debug-dumped. Location is best-effort: synthetic/desugared
+    /// contracts without spans degrade to the message line only.
     fn build_contract_violation_message(&self, expr: &Expr, phase: ContractPhase) -> String {
         // Owner name comes from the function currently being compiled.
         // Regular functions use their bare name; actor methods carry a mangled
@@ -226,63 +224,41 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(meta) = expr.meta() {
             let span = meta.span;
             if span.start_line > 0 {
-                let (label, source_line) = self.describe_contract_location(&span);
-                if span.start_col > 0 {
-                    msg.push_str(&format!(
-                        "\n --> {}:{}:{}",
-                        label, span.start_line, span.start_col
-                    ));
+                let label = self.contract_location_label(span.source_id);
+                let columns = if span.start_col > 0 {
+                    if span.end_line == span.start_line && span.end_col > span.start_col {
+                        format!(":{}-{}", span.start_col, span.end_col)
+                    } else {
+                        format!(":{}", span.start_col)
+                    }
                 } else {
-                    msg.push_str(&format!("\n --> {}:{}", label, span.start_line));
-                }
-                if let Some(line_text) = source_line {
-                    msg.push_str(&format!("\n  | {}", line_text));
-                }
+                    String::new()
+                };
+                msg.push_str(&format!(" @ {}:{}{}", label, span.start_line, columns));
             }
         }
 
-        msg.push_str("\nHint: rebuild without --verify-contracts to disable contract checking.");
+        msg.push_str(" | hint: rebuild without --verify-contracts to disable contract checking.");
         msg
     }
 
-    /// Resolve a span to a display label (`path:line:col` components) and —
-    /// best-effort — the source line the contract sits on.
-    ///
-    /// The [`crate::span::SourceRegistry`] stores identity only (no text), so
-    /// the snippet requires a capped re-read of the file from disk. That is
-    /// safe at compile time (single read per contract site, file just parsed);
-    /// in-memory sources (test harnesses) have no `disk_path` and degrade to
-    /// a key-based label without a snippet.
-    fn describe_contract_location(&self, span: &crate::span::Span) -> (String, Option<String>) {
-        let Some(record) = self
-            .comptime_file
+    /// Resolve a `SourceId` to a display label for contract messages:
+    /// disk path when available, then canonical URI, then the registry key.
+    /// In-memory sources (test harnesses) degrade to their key — coordinates
+    /// remain exact either way.
+    fn contract_location_label(&self, source_id: crate::span::SourceId) -> String {
+        self.comptime_file
             .as_ref()
-            .and_then(|f| f.sources.record(span.source_id))
-        else {
-            return ("<unknown source>".to_string(), None);
-        };
-        let label = record
-            .disk_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .or_else(|| record.canonical_uri.clone())
-            .unwrap_or_else(|| record.key.to_string());
-        let line = record.disk_path.as_ref().and_then(|path| {
-            let text = crate::path_safety::read_source_capped(path).ok()?;
-            let line_text = text.lines().nth(span.start_line.saturating_sub(1))?;
-            let trimmed = line_text.trim_end();
-            // Keep embedded strings bounded for pathological lines.
-            if trimmed.len() > 200 {
-                let cut = (0..=200)
-                    .rev()
-                    .find(|&i| trimmed.is_char_boundary(i))
-                    .unwrap_or(0);
-                Some(format!("{} ...", &trimmed[..cut]))
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-        (label, line)
+            .and_then(|f| f.sources.record(source_id))
+            .map(|record| {
+                record
+                    .disk_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .or_else(|| record.canonical_uri.clone())
+                    .unwrap_or_else(|| record.key.to_string())
+            })
+            .unwrap_or_else(|| "<unknown source>".to_string())
     }
 
     /// Push a new capability scope
