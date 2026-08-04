@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "docs/language-spec.md"
 REQUIREMENTS = ROOT / "docs/language-requirements.toml"
 SUPPORT = ROOT / "docs/language-support.toml"
+PRE_1_0 = ROOT / "devdocs/pre-1.0"
+GOLDEN_SYNTAX = ROOT / "devdocs/v0.34/golden/syntax-reference.golden.md"
+SYNTAX_REFERENCE = ROOT / "docs/syntax-reference.md"
 
 TARGETS = {"stable", "experimental", "reserved", "removed"}
 MATURITY = {"unsupported", "partial", "complete", "not_applicable"}
@@ -41,6 +44,114 @@ DIMENSIONS = {
 
 def fail(errors: list[str], message: str) -> None:
     errors.append(message)
+
+
+# ── Semantic freshness checks (0.34.33) ─────────────────────────────────
+# Line-level probes that catch stale references to removed/demoted/promoted
+# syntax across the normative doc family. A hit is exempt when its line
+# already carries a removal/verdict marker (version-tagged history allowed).
+# Regression pins added after the 0.34 doc-sync audit:
+#   become/stay removed 0.34.11 (ADR-001), do removed 0.34.27,
+#   math is a STABLE verifier channel, multi-target is STABLE (0.34.15-16).
+
+REMOVED_MARKERS = re.compile(
+    r"removed|delete[d]?|executed|migrated|abolished|repealed|rescinded|superseded"
+    r"|移除|删除|已删|废止|撤销|纠正|修正|取代"
+    r"|0\.34\.11|0\.34\.27|ADR-001\b|✅|→|sole|唯一|was:",
+    re.IGNORECASE,
+)
+STABLE_MARKERS = re.compile(
+    r"stable|0\.34\.15|0\.34\.28|ADR-002\b|升入|移入|纠正|superseded|rescinded"
+    r"|不是 experimental|verifier|✅",
+    re.IGNORECASE,
+)
+BECOME_STAY_PATTERN = re.compile(r"`become`|`stay`|become/stay|become, stay")
+DO_PATTERN = re.compile(r"\bdo\b\s*['\"`]?\s*['\"`]?\s*\{|\bStmt::Do\b")
+MULTI_TARGET_PATTERN = re.compile(r"multi[- ]?target", re.IGNORECASE)
+
+
+def check_semantic_freshness(errors: list[str]) -> None:
+    scanned: list[tuple[str, str]] = []
+    doc_paths = [SPEC, REQUIREMENTS, SUPPORT, SYNTAX_REFERENCE, GOLDEN_SYNTAX]
+    doc_paths.extend(sorted(PRE_1_0.glob("*.md")))
+    for path in doc_paths:
+        if path.is_file():
+            scanned.append((str(path.relative_to(ROOT)), path.read_text(encoding="utf-8")))
+
+    for rel, text in scanned:
+        for lineno, line in enumerate(text.splitlines(), 1):
+            where = f"{rel}:{lineno}"
+            if BECOME_STAY_PATTERN.search(line) and not REMOVED_MARKERS.search(line):
+                fail(
+                    errors,
+                    f"{where}: become/stay referenced without a removal marker "
+                    "(ADR-001 0.34.11 removed them; sole terminal is `return State {}`)",
+                )
+            if DO_PATTERN.search(line) and not REMOVED_MARKERS.search(line):
+                fail(
+                    errors,
+                    f"{where}: `do` block referenced without a removal marker "
+                    "(v0.34.27 removed the do wrapper; keywords 81→80)",
+                )
+            if (
+                MULTI_TARGET_PATTERN.search(line)
+                and re.search(r"experimental", line, re.IGNORECASE)
+                and not STABLE_MARKERS.search(line)
+            ):
+                fail(
+                    errors,
+                    f"{where}: multi-target described as experimental without a stable "
+                    "marker (0.34.15-16 shipped the stable tagged-union ABI, ADR-002)",
+                )
+            if (
+                re.search(r"\bmath\b", line, re.IGNORECASE)
+                and "[removed]" in line.lower()
+                and not STABLE_MARKERS.search(line)
+            ):
+                fail(
+                    errors,
+                    f"{where}: math tagged [removed] without a stable marker "
+                    "(0.34.28 verdict: math is a stable verifier channel)",
+                )
+
+    # Structural pins on the normative spec checklist (spec §6.12).
+    spec_text = ""
+    for rel, text in scanned:
+        if rel == str(SPEC.relative_to(ROOT)):
+            spec_text = text
+    stable_match = re.search(
+        r"#### Stable targets\s*\n(?P<body>.*?)(?=^#### )",
+        spec_text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if stable_match and not re.search(r"multi[- ]?target", stable_match.group("body"), re.IGNORECASE):
+        fail(errors, "language-spec.md §6.12 Stable targets is missing multi-target (stable since 0.34.15-16)")
+    removed_match = re.search(
+        r"#### Removed / Migrated\s*\n(?P<body>.*?)(?=^### |^## |\Z)",
+        spec_text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if removed_match:
+        for bullet in re.findall(r"^- .*$", removed_match.group("body"), re.MULTILINE):
+            if re.search(r"\bmath\b", bullet, re.IGNORECASE):
+                fail(errors, "language-spec.md §6.12 Removed list must not contain math (it is stable)")
+
+    # Keyword-count drift pin: docs must agree with the golden EBNF count.
+    counts: dict[str, int] = {}
+    for rel, text in scanned:
+        if rel in {str(SYNTAX_REFERENCE.relative_to(ROOT)), str(GOLDEN_SYNTAX.relative_to(ROOT))}:
+            match = re.search(r"当前\s*\**(\d+)\s*个\**\s*`=> TokenKind`", text)
+            if match:
+                counts[rel] = int(match.group(1))
+    if len(counts) == 2 and len(set(counts.values())) > 1:
+        fail(errors, f"keyword count drift between golden and docs: {counts}")
+
+    # Manifest pin: multi-target requirement is stable (0.34.28 verdict).
+    with REQUIREMENTS.open("rb") as stream:
+        req_doc = tomllib.load(stream)
+    for item in req_doc.get("requirement", []):
+        if item.get("id") == "FLOW-MULTI-001" and item.get("target") != "stable":
+            fail(errors, f"FLOW-MULTI-001 target must be stable, got {item.get('target')!r}")
 
 
 def main() -> int:
@@ -156,6 +267,8 @@ def main() -> int:
     if re.search(r"\|[^\n|]*\b(?:stable|experimental|reserved|removed)\b[^\n|]*\|", appendix_text):
         fail(errors, "ast-appendix.md contains target-status vocabulary in a table cell")
 
+    check_semantic_freshness(errors)
+
     if errors:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
@@ -163,7 +276,7 @@ def main() -> int:
 
     print(
         f"language docs valid: {len(requirement_ids)} requirements, "
-        f"{len(support_ids)} support entries"
+        f"{len(support_ids)} support entries, semantic freshness checks passed"
     )
     return 0
 
