@@ -2,6 +2,17 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.31 — 内存模型切片评估（Phase F 之五，诊断闭环）
+
+- **valgrind 实证三类泄漏（codegen 路径）统一根因** = **codegen C-ABI 无托管内存所有权模型**：
+  - **to_json 标量缓冲** 512 B/次（`builtins/json.rs` Float/Bool/Int 三路径 `malloc_or_abort(512)` 裸返回，注释 `returned value owns the allocation`，消费端零释放）；
+  - **字符串拼接** 51 B/次（`acc = acc + "x"` 每次 concat 分配新缓冲，旧 acc heap 指针覆盖丢弃，独立于 to_json 复现）；
+  - **List 容器 box** 24 B/元素（`List<(i32,i32)>` push 时 data buffer 生长 + 元素装箱，List 无析构）。
+  - 运行时**已有** `mimi_string_free`（mod.rs:923）等释放原语，但 **codegen 零调用点**——"有 free 设施、无注入策略"。bytecode VM 无泄漏（Rust 所有权），仅 codegen 路径。
+- **裁决**：完整修复需方案 A（owned 字符串标记 `{ptr,len,flags}` + 消费端 free 注入点清单：重赋值/concat/println/to_json/FFI 边界）与方案 B（容器析构 glue），跨 checker+codegen+FFI 三端，属 **1.x 内存模型主线**（详细设计见 devdocs/v0.34/memory-model-0.34.31.md §3）。
+- **不在 0.1.4 做**：Phase F 是语法冻结 + 语言自洽性战役；任何局部 free 注入都会在字面量（`{ptr,len}` 无法区分 `.rodata` vs 堆）与共享字符串场景触发 UB（L1 双后端大面积回归）。泄漏为**可量化固定量**（非无限增长），不构成 RC 阻断。
+- 复现资产：`/tmp/leak_{json,concat,tuples}.mimi` + valgrind（评估文档 §5）。
+
 ### 0.34.30 — codegen 缺口补齐（Phase F 之四）
 
 - **项一：LEGACY_CODEGEN 嵌套 list 索引测试转正**。harness 重构：从 `compile_and_run_with_config` 抽出 `link_and_run_module`（legacy/checked 两 harness 共享 object/link/run 逻辑）；新增 `checked_codegen_compile_and_run`（check → `compile_checked` → 链接运行，精确复刻 `mimi build` CLI 管线）。`tricky_nested_loop_list`（v1_4_tricky_interaction.rs）un-ignore 并改走 checked harness——此前被 `#[ignore = "LEGACY_CODEGEN"]` 掩盖（legacy `compile_file` harness 跳过类型检查、嵌套 list 循环索引误编译；CLI 全管线本就正确），现由 resolved dispatch 路径直接门禁。v1_4 31 全绿 0 ignore。
