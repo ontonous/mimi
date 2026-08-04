@@ -1,0 +1,24 @@
+# cargo-nextest 配置（0.34.35 测试纪律：每测试独立进程 + 硬超时）
+#
+# 动机（2026-08-05）：全量 cargo test 一旦有测试死锁/死循环，整个套件无声挂起，
+# 只能肉眼盯进度。nextest 每个测试独立进程：段错误/死锁都会被单独报失败而非
+# 拖死全场；超时到点即判败。
+#
+# 阈值依据：0.34.33 实测全量 32 线程 23.3s；最重的 Z3 单测试也在 10s 内。
+# 60s 是充裕的上界，正常测试不可能碰到；30s 先标黄两次再杀。
+
+[profile.default]
+test-timeout = "60s"
+slow-timeout = { period = "30s", terminate-after = 2 }
+# 测试退出后若有泄漏的子进程/线程残留，判 leak 而非静默放过。
+leak-timeout = "200ms"
+# 并行度交给 nextest 自动探测（本机 32 核实测内存安全，见 AGENTS §2）。
+fail-fast = false
+
+[profile.ci]
+# CI runner（2 vCPU）对齐 --test-threads=2 纪律。
+test-threads = 2
+test-timeout = "120s"
+slow-timeout = { period = "60s", terminate-after = 2 }
+leak-timeout = "200ms"
+fail-fast = false
