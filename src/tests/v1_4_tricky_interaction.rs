@@ -10,6 +10,14 @@ fn check(src: &str, expected: &str) {
     assert_eq!(out.trim(), expected, "mismatch\nsrc: {}", src);
 }
 
+/// 0.34.30: run through the checked (resolved) codegen path exactly like the
+/// `mimi build` CLI, instead of the legacy `compile_file` harness path.
+fn check_checked(src: &str, expected: &str) {
+    let _ = run_source(src);
+    let out = checked_codegen_compile_and_run(src).expect("checked codegen failed");
+    assert_eq!(out.trim(), expected, "mismatch\nsrc: {}", src);
+}
+
 // ─── 1. Generic + higher-order function + closure ──────────────────────
 // A generic higher-order function applying a closure.
 
@@ -500,15 +508,12 @@ fn tricky_list_filter_match() {
 
 // 3c: Nested for loops building and accessing 2D list structure.
 // Combines: nested for loops, list push, nested list indexing.
-// NOTE: CLI full pipeline (type check + resolved dispatch) handles this correctly.
-// The test harness compile_and_run() skips type checking and uses the legacy
-// codegen path, which miscompiles nested list indexing inside loops.
-// Tracked: legacy path nested-list-in-loop element reconstruction.
-
-#[ignore = "LEGACY_CODEGEN: nested list indexing in loop miscompiles without type-checked pipeline (CLI works)"]
+// 0.34.30: the checked (`compile_checked`) codegen path matches the CLI, so this
+// runs on the resolved dispatch path rather than the legacy `compile_file`
+// harness path (which miscompiles nested list indexing inside loops).
 #[test]
 fn tricky_nested_loop_list() {
-    check(
+    check_checked(
         "func main() -> i32 {
              let bases = [0, 10, 20];
              let mut rows: List<List<i32>> = [];

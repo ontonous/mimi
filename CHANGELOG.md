@@ -2,6 +2,15 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.30 — codegen 缺口补齐（Phase F 之四）
+
+- **项一：LEGACY_CODEGEN 嵌套 list 索引测试转正**。harness 重构：从 `compile_and_run_with_config` 抽出 `link_and_run_module`（legacy/checked 两 harness 共享 object/link/run 逻辑）；新增 `checked_codegen_compile_and_run`（check → `compile_checked` → 链接运行，精确复刻 `mimi build` CLI 管线）。`tricky_nested_loop_list`（v1_4_tricky_interaction.rs）un-ignore 并改走 checked harness——此前被 `#[ignore = "LEGACY_CODEGEN"]` 掩盖（legacy `compile_file` harness 跳过类型检查、嵌套 list 循环索引误编译；CLI 全管线本就正确），现由 resolved dispatch 路径直接门禁。v1_4 31 全绿 0 ignore。
+- **项二：trait-impl 方法 resolved emitter legacy 回退消除（dx-backlog #11）**。实测根因：含**非 i64 ok 载荷** Result（如 `Result<f64, string>`）的 trait-impl 方法函数体 resolved 编译失败——legacy `compile_err_constructor` 非 list 路径把 ok-pad 硬编码为 i64（产 `{bool,i64,i64}`），而 `Ok(1.5)` 产 `{bool,double,i64}` → if/else 分支合并时 `numeric_convert` 拒绝 struct→struct → 整个 impl 方法落 legacy → 所有调用方（ProtocolMethod callee）连锁落 legacy（dx#11 原判 "callee undeclared" 实为连锁表象）。
+  - 新增 `emit_resolved_optional_ctor`：`Some/None/Ok/Err` 按目标类型 lower 布局构造（`{bool, ok_llvm, i64_err}`），merge/return 类型恒一致；
+  - 新增 `resolved_err_to_handle`：err 载荷 → i64 handle（int widen/truncate、ptrtoint、string heap-pack `{ptr,len}`、enum tag），镜像 legacy B4 语义，`?` 算子的 inttoptr+GEP 重建 ABI 不变。
+  - CLI 实测 `impl FloatGetter for string { func get(...) -> Result<f64, string> }`：`resolved emitter compiled 2/2 function(s), 0 fell back to legacy`（此前 1/2 fallback）；输出 `Ok(1.5)`/`Err(missing)` 双后端一致。
+- **测试**：4598 lib / 0 failed / 7 ignored（6 工具门禁 + 1 Z3 专项，既有不变）；dual_ 830 + v1_4 31 + codegen_e2e 204 全绿；clippy + fmt 干净。
+
 ### 0.34.29 — actor 收敛（裁决重估 + SD-5 文档化，Phase F 之三）
 
 - **await 裁决纠正（重要）**：0.34.23 U6 评估 "await 无意义 / interp no-op / codegen 无路径" 基于**过时证据**。实测：codegen `compile_await_expr`（expr/call/async.rs:327）是**真实 async**（mimi_executor_run + mimi_await_future spin-wait + future+8 结果加载），runtime/future.rs 提供 pthread future，dual_backend.rs "Both interpreter and codegen use real spawn/await with pthread" + `dual_actor_await_get`（1000 call no deadlock）+ real_world concurrency_spawn_await 资产。**await 是完整并发能力，保留**——0.34.23 "删除 await 语法" 裁决基于含错证据，正式撤销。正确语义：actor 场景 `await`（非 Future）由 E0245 `infer_await` 拒绝（helpers.rs:291，即裁决执行）；spawn future 的 await 保留。

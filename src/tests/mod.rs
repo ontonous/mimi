@@ -601,7 +601,6 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     if config.use_valgrind && config.use_asan {
         return Err("cannot use valgrind and ASAN simultaneously".into());
     }
-    use std::process::Command;
 
     let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -618,6 +617,19 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
         codegen.verify_contracts = true;
     }
     codegen.compile_file(&file).map_err(|e| e.to_string())?;
+    link_and_run_module(&codegen, config, counter)
+}
+
+/// Compile the linked object to a binary, link against the cached runtime, and
+/// run. Shared by the legacy (`compile_file`) and checked (`compile_checked`)
+/// codegen harnesses since 0.34.30.
+#[allow(clippy::too_many_lines)]
+fn link_and_run_module<'ctx>(
+    codegen: &crate::codegen::CodeGenerator<'ctx>,
+    config: &E2EConfig,
+    counter: u64,
+) -> Result<String, String> {
+    use std::process::Command;
 
     if std::env::var("MIMI_DUMP_IR").is_ok() {
         eprintln!("{}", codegen.module.print_to_string().to_string());
@@ -725,6 +737,28 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     }
 
     Ok(stdout)
+}
+
+/// 0.34.30: Run source through checker + checked (resolved) codegen exactly as
+/// the `mimi build` CLI does (`compile_checked`), then execute natively. This
+/// catches the codegen path the legacy `compile_file` harness silently
+/// miscompiles (e.g. nested list indexing built inside a loop).
+pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, String> {
+    let file = parse(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|e| format!("{:?}", e))?;
+    link_and_run_module(&codegen, &E2EConfig::default(), counter)
 }
 
 /// Standard E2E codegen test: compile and run, return stdout.
