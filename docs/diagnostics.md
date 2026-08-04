@@ -93,10 +93,15 @@ hint-field      = "hint:" SP message               ; 处置指引（如何关闭
 | G4 | lint 独立格式（`path: [severity] message`，无码无坐标） | 未收敛 | 登记 0.1.5：接入 format_diagnostic |
 | G5 | resolved emitter 列表越界不触发 E0800（静默 OOB 读/写） | P0"错误缺失" | 修复登记（独立于本契约，属 soundness） |
 | G6 | note 位置继承主诊断文件标签（跨文件 note 未启用） | 有效简化 | 跨文件 note 启用时须按 note span 的 source_id 解析标签 |
+| G7 | 未收敛产出点清单（0.34.34 全站审计）：① `warning: comptime function '{}' was not compiled`（codegen/compile.rs:855，未 gate、无码无坐标）；② `[component-ir] warning:`（codegen/mod.rs:1128，debug_assertions-only 开发期噪音）；③ `[mimi runtime] inject_fault:` 前缀变体（runtime/mod.rs:19252，sentinel -1 另见审计 C4）；④ CLI catch-all `error:`（main.rs:518，CLI 层无 span，裸 error 为契约下限）；⑤ 包管理多行指引（main/add.rs:79-95，多行续行）；⑥ `⚠/ℹ FFI violation/info` 无码头（main/build.rs:162/169，其后随致密诊断） | 非契约表面/未收敛警告 | ①③⑤⑥ 登记 0.1.5；② 开发期豁免；④ 明文为 CLI 层下限。已排除项：verify/fmt/profiler/测试报告=工具结果面；LSP=结构化协议面；RT-H5 exec 警告（runtime/fs.rs:286）已符合 `[mimi]` 单行形态 |
 
 ## 6. 版本
 
 - 0.34.34（commit e628b9db / cbfaff3c）：致密格式落地 + 契约断言正向化。
+- 0.34.34（7b078d51）：契约文本化；trap hint（E0802/E0813）收敛为 ` | hint:` 字段。
+- 0.34.34（全站审计）：InterpError Display 潜在多行形态（help/call stack）收敛为
+  ` | help:` / ` | call stack: → 串联` 字段（生产路径暂未消费，预防性收敛；
+  结构化路径 `to_diagnostic` 本就致密）；产出点全量清点入 G7。
 - 1.0：冻结为 `[stable]`，写入 language-spec 错误模型章节交叉引用。
 - 冻结后：修改机器语义（字段集、文法、必选字段）须提升契约版本；
   新增可选字段（如 G1 的位置字段）为兼容变更。
