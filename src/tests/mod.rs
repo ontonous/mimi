@@ -128,6 +128,7 @@ pub(crate) mod audit_fix_checker;
 pub(crate) mod audit_fix_codegen_expr1;
 pub(crate) mod audit_fix_codegen_expr2;
 pub(crate) mod audit_fix_codegen_infra;
+pub(crate) mod audit_fix_codegen_resolved;
 pub(crate) mod audit_fix_component;
 pub(crate) mod audit_fix_fmt_lint;
 pub(crate) mod audit_fix_io;
@@ -143,7 +144,9 @@ pub(crate) mod audit_fix_runtime_sub;
 pub(crate) mod audit_fix_scripts;
 pub(crate) mod audit_fix_stdlib;
 pub(crate) mod audit_fix_verifier;
+pub(crate) mod audit_fix_verifier_resolved;
 pub(crate) mod audit_fix_vm;
+pub(crate) mod audit_fix_vm_exec;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
