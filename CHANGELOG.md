@@ -2,6 +2,16 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.28 — 裁决文档同步战役（Phase F 之二，sprint 规划 `sprint-0.34.28-doc-sync.md`）
+
+- **文档族全链路对齐四组裁决**（do 已删 0.34.27 / math stable / multi-target stable / become-stay 已删 0.34.11）：
+  - **spec** §5.6+§6.8 `math` 由 `[removed]` 修正为 `[stable]`（verifier 通道，Stmt::Math 由 vir.rs:495/878 消费）；§3.7 multi-target 由 `[experimental]` 升 `[stable]`（0.34.15-16 tagged-union ABI）且废止 ":369 not part of the minimum 1.0 RC stable core" 过时句；§6.12 Experimental 清单移除 multi-target；:143 多目标 tag 保留声明升 stable；:1565 RC 阻断条款改稳定表述；§6.12 `do` 加 `(0.34.27 已删除)`。
+  - **pre-1.0 九份源头**（spec 的 source）12 处改写：00:83、01:45（Silent Stay→Silent transition 语义更名）、01:84-85（become/stay→`return Target {}`）、02:180、04:178 + §14 Removed 清单（do 加版本 + math 归 stable）、04:165/186、05:99/183/275/284（multi-target experimental→stable、terminal path 四类→三类）。
+  - **support.toml** FLOW-MULTI-001 evidence 重写（tagged-union ABI 三后端门禁）+ resolved_ir/interp/codegen 维度如实化（unsupported/partial→complete）；become/stay evidence 术语 → `return S{}`。
+  - **AGENTS.md** §13.1 0.1.4 里程碑范围扩至 0.34.32，补 Phase F（do 删除 81→80 达成 ≤80 + 文档同步）。
+- **spec §3.13 implicit main 状态登记（实测推翻规划误判）**：`sprint-0.34.28` 规划引用 bytecode/compiler.rs:654 "no main function found" 判定"未实现"——实测 `mimi run` 输出正常，progressive.rs `apply_progressive_typestate`（v0.29.22）注入 `flow Main { state Single }`、main 体进 run transition，:654 仅为无 main 时的 entry 兜底。spec 改为"已实现"登记，非 not-yet-implemented。
+- **验收**：check_language_docs.py 通过（31 requirements / 31 support）；`grep become|stay` 仅剩带版本的合法历史引用；"not part of the minimum 1.0 RC stable core" 归零。
+
 ### 0.34.27 — `do` wrapper 删除（语言自洽性，sprint 规划 `sprint-0.34.27-do-removal.md`）
 
 - **AST**：删除 `Stmt::Do(Block)`（ast.rs）——`do { X }` ≡ 裸 block `{ X }`（ir/lower.rs 同路径 Lexical Scope + 裸 block 是表达式），无表达力损失。
