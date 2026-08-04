@@ -32,6 +32,10 @@
 - **O1 physreg crash 修复**：multi-target transition 函数在已终结块后被
   `emit_implicit_return` 追加游离 `ret`（无效 IR → `LLVM ERROR: Cannot emit
   physreg copy instruction`）——追加前检查 `block_has_terminator()`；
+- **O1 优化改为默认**：`MIMI_OPT` 语义反转为 opt-out（`MIMI_OPT=0/false` 关闭，
+  未设置或 1/true 保持 O1）。0.31.21 已修复 O1 codegen 两 bug（try_expr i32-vs-i1、
+  extern wrapper 名冲突），本 sprint 4618 全量 + golden + CLI 冒烟矩阵在 O1 默认
+  下全绿，满足放行基线；
 - **诊断输出契约**：新增 `docs/diagnostics.md`（normative 文法：单行致密
   `SEVERITY[CODE] LOCATION MESSAGE | field:...`，机器/AI 优先，caret/gutter 装饰
   由坐标区间无损替代）；runtime `mimi_trap_overflow` / `mimi_trap_float_not_finite`
