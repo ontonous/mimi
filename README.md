@@ -94,8 +94,8 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 | `fails E` rollback path — `?` returns `Err((source, error))`, source generation restored | ✅ |
 | Reset / Recover system verbs (user-overridable) | ✅ |
 | SystemTrace provenance (`last_state`, `unexpected_event`, snapshot) | ✅ |
-| Progressive mode — script `main()` via shell injection (true lowering: post-1.0) | ✅ |
-| Multi-target transition (`-> A \| B` with state tags) | 📋 0.1.4 (0.34.15-16) |
+| Progressive mode — script `main()` via implicit `flow Main { state Single }` shell (genuine semantic desugaring, spec §3.13) | ✅ |
+| Multi-target transition (`-> A \| B` with state tags) | ✅ (stable tagged-union ABI, 0.34.15-16, ADR-002) |
 
 ### Linear Safety & Ownership
 
@@ -106,7 +106,7 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 | CFG-level linearity — `is_linear()` for Flow states in dataflow analysis | ✅ |
 | Session endpoint linearity — scope exit (E0425), use-after-alias (E0426) | ✅ |
 | Shared/weak wrapping of linear resources rejected | ✅ |
-| View/mutate borrowing (pure function parameter passing) | 📋 0.1.4 (0.34.13-14) |
+| View/mutate borrowing (pure function parameter passing) | ✅ (0.34.13-14 closure + 0.34.25c place-grammar fail-closed, E0434/E0435) |
 | Cross-turn exactly-once resource tracking | ✅ |
 | Channel/Mutex/Atomic type-level linearity | 📋 (known limitation: builtin integer handles) |
 
@@ -172,13 +172,13 @@ flow Counter {
     state Positive { count: i32 }
 
     transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
+        return Positive { count: self.count + 1 }
     }
     transition inc(Positive) -> Positive {
-        do { return Positive { count: self.count + 1 } }
+        return Positive { count: self.count + 1 }
     }
     transition reset(Positive) -> Zero {
-        do { return Zero { count: 0 } }
+        return Zero { count: 0 }
     }
 }
 
@@ -440,7 +440,7 @@ Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurre
 
 | Version | Highlight |
 |---------|-----------|
-| **0.1.4-dev** | **Current**. Syntax freeze + semantic rulings (golden document): become/stay removal (ADR-001), multi-target (ADR-002), `'a` removal (ADR-004), trivia-ization of `desc:`/`rule:`/`mms{}`. |
+| **0.1.4-dev** | **Current**. Syntax freeze + semantic rulings + language self-consistency (golden document): become/stay removal (ADR-001, sole terminal `return State {}`), multi-target stable tagged-union ABI (ADR-002), `'a` removal (ADR-004), `do` wrapper removal (keywords 81→80), and/or/not soft keywords, if-let/for-destructuring, `ieee_float {}`, single-direction numeric coercion, View/Mutate closure. Doc-sync campaign closed the four verdicts across spec/pre-1.0/support/syntax-reference; trivia-ization of `desc:`/`rule:`/`mms{}` is registered for 0.1.5. RC gates green (4598 lib); tag deferred by ruling, kept as -dev. |
 | **0.1.3** | Bytecode VM becomes the sole interpreter: tree-walker (24,976 LOC) + ResolvedInterpreter (4,375 lines) deleted, `--legacy` removed, FFI/Actor/quote fully on bytecode. |
 | **0.1.2** | Codegen full migration: `raw_ast()` privatized (3 permanent consumers), gap filling, performance baseline. |
 | **0.1.1** | 51-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. Codegen per-function dispatch active. |

@@ -44,35 +44,49 @@ f-string 中 `{expr}` 会被求值并插入到字符串中。
 
 ## 2. 关键字
 
-以下关键字为保留字，不可用作标识符：
+> **0.34.33 刷新**：以下为 0.1.4 语法冻结后的实况关键字表（共 **80 个** `=> TokenKind`
+> 映射，实测 `src/lexer/keywords.rs:92-177`；其中 `and`/`or`/`not` 为软关键字）。
+> 权威来源：`docs/syntax-reference.md`（golden EBNF 渲染副本）。
+> 已删除的关键字：`do`（0.34.27）、`become`/`stay`（0.34.11）、`subflow`/`steps`/`consume`
+> （0.34.2）——现均 tokenize 为普通标识符；`delegate` 软化为标识符（语句位置保留拒绝诊断）。
 
 **声明与定义**
 ```
 module     type       func       fn         actor      newtype
-trait      impl       cap        extern     use         pub
+trait      impl       cap        extern     use        pub
+dyn        where
 ```
 
 **变量与内存**
 ```
-let        mut        ref        shared     local_shared  weak
-arena      alloc      drop
+let        mut        ref        const      shared     local_shared
+weak       weak_local c_shared   c_borrow   c_borrow_mut
+raw_string arena      alloc      drop
 ```
 
 **控制流**
 ```
-if         else       for        in         while      return
-break      continue   match
+if         else       for        in         while      loop
+return     break      continue   match      defer      unsafe
 ```
 
-**并发**
+**Flow 状态机**
 ```
-spawn      await      parasteps  on         failure
+flow       state      transition fault      fails      persistent
+pinned     protocol   session    dual       end        view
+mutate
 ```
 
-**契约与元数据**
+**并发与恢复**
 ```
-requires   ensures    math       desc       rule       old
-steps      flow       ui         binds      mms        with
+spawn      await      async      parasteps  failure    reset
+recover
+```
+
+**契约与元数据**（`with` 仍为保留字，effect 子句已废止）
+```
+requires   ensures    invariant  math       desc       rule
+old        mms        with
 ```
 
 **元编程**
@@ -80,34 +94,22 @@ steps      flow       ui         binds      mms        with
 comptime   quote
 ```
 
-**逻辑运算符（也可写作符号形式）**
+**逻辑运算符——软关键字**（绑定位置可作标识符）
 ```
 and        or         not
 ```
 
-**字面量与类型**
+**字面量与类型名**
 ```
-true       false      unit       i32        i64        f64
-bool       string     nothing
+true       false      unit       nothing
 ```
-module  type    flow    func    steps
-requires ensures math    if      else    for
-while   to      desc    on      with    error
-and     or      not     in      done    exit
-stack   parallel binds
-parasteps
-rule
-true    false
-actor   spawn   await   mut
-shared  local_shared  weak  ref
-arena   alloc   cap     drop    split
-comptime  quote  ast_dump  ast_eval
-pub     use     as      where
-extern  trait   impl
-let     return  break   continue
-match   to
-newtype
+
+**其它**
 ```
+as
+```
+
+> 注：`i32`/`i64`/`f64`/`bool`/`string` 是内建类型名，tokenize 为标识符，不是关键字。
 
 ---
 

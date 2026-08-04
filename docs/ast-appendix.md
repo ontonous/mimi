@@ -4,7 +4,7 @@
 > **Purpose**: Document current AST transformations and gaps between parser output and backend consumption.
 > **Sources**: `src/ast.rs`, `src/flow_matrix.rs`, `src/progressive.rs`, `src/parser/mod.rs`
 >
-> Snapshot: v0.30.0 (2026-07-17)
+> Snapshot: v0.1.4-dev (2026-08-04 更新至 0.34 语法冻结实况；原基线 v0.30.0, 2026-07-17)
 
 This file cannot define language stability or override the specification. Target IR requirements are indexed by `docs/language-requirements.toml`; current maturity is reported by `docs/language-support.toml`.
 
@@ -39,25 +39,25 @@ The parser produces a `File` containing top-level `Item` entries. This is the ra
 |---|---|---|
 | `Let` | present | Variable binding |
 | `Return` / `Break` / `Continue` | present | Control flow |
-| `If` / `While` / `WhileLet` / `Loop` / `For` | present | Control structures |
+| `If` / `IfLet` / `While` / `WhileLet` / `Loop` / `For` | present | Control structures |
 | `Block` | present | Block statement |
 | `Match` (via `Expr::Match`) | present | Pattern matching |
 | `Assign` | present | Assignment |
 | `Requires` / `Ensures` / `Invariant` | legacy-present | Currently body statements; canonical target is `LANG-CONTRACT-001` |
-| `Math` | legacy-present | Canonical target is `SYNTAX-REMOVED-001` |
-| `Desc` / `Rule` / `MmsBlock` | legacy-present | Canonical target is `SYNTAX-REMOVED-001` |
-| `Do` | legacy-present | Canonical target is `SYNTAX-REMOVED-001` |
+| `Math` | present | Verifier channel (0.34.28 裁决)：`Stmt::Math` 由 verifier 作为 ghost facts 消费，不进执行 AST。见 language-spec §5.6/§6.8 |
+| `Desc` / `Rule` / `MmsBlock` | legacy-present | Super-comment statements; trivia-ization registered for 0.1.5 (dx-backlog #10) |
+| `Do` | **absent** | Variant 已从 `ast.rs` 删除（v0.34.27）；`do` 移出关键字表（81→80）。`SYNTAX-REMOVED-001` 已执行 |
 | `OnFailure` | legacy-present | Canonical target is `SYNTAX-REMOVED-001` |
 | `SharedLet` | legacy-present | Must lower to unified `let` + constructor |
-| `Delegate` | present | Subflow delegation |
-| `Pinned` | present | FFI memory pinning |
+| `Delegate` | **absent** | Variant 已删除（v0.34.1，修正案条款 2）；`delegate` tokenize 为 Ident，语句位置保留拒绝诊断 |
+| `Pinned` | present | FFI memory pinning (`pinned(expr)`; the `pinned(timeout)` form is abolished by amendment clause 10) |
 | `Parasteps` | present | Parallel steps |
 | `Arena` / `Unsafe` / `Drop` / `Alloc` | present | Low-level constructs |
 | `Func(FuncDef)` | present | Nested function definition |
 
 ### 1.3 Expression Variants (`ast.rs:365`)
 
-31 expression variants including: `Literal`, `Ident`, `Binary`, `Unary`, `Call`, `Field`, `Index`, `Tuple`, `List`, `Comprehension`, `Match`, `Record`, `Block`, `Try` (`?`), `Spawn`, `Await`, `Quote`, `Comptime`, `Lambda`, `Old`, `SliceExpr`, `Range`, `Turbofish`, `Cast`, etc.
+34 expression variants (including the `Located` wrapper) including: `Literal`, `Ident`, `Binary`, `Unary`, `Call`, `Field`, `Index`, `Tuple`, `TupleIndex`, `List`, `MapLiteral`, `SetLiteral`, `Comprehension`, `Match`, `Record`, `Block`, `Try` (`?`), `OptionalChain`, `Spawn`, `Await`, `Quote`, `QuoteInterpolate`, `Comptime`, `TypeOf`, `TypeInfo`, `If`, `Lambda`, `Old`, `SliceExpr`, `Turbofish`, `NamedArg`, `Arena`, `Cast`. (`Expr::Range` was removed v0.34.2 — `..` desugars via `BinOp::Range`; `BinOp::Assign` removed the same sprint.)
 
 ---
 
@@ -67,7 +67,7 @@ After parsing, the compiler applies several AST transformations before checker/c
 
 ### 2.1 Progressive Main Desugaring
 
-**Current maturity**: `partial`.
+**Current maturity**: `complete` (v0.34.28 实测纠正：原标 partial 基于过时的 bytecode/compiler.rs:654 误判；该行为是已实现的语义脱糖，language-spec §3.13 登记 implemented)。
 
 **Location**: `src/progressive.rs:17` `fn apply_progressive_typestate`
 
@@ -87,23 +87,23 @@ flow Main {
 
 **Call sites**: `src/parser/mod.rs:167` (parse_file), `:257` (parse_str), `src/parser/flow.rs:465-466, :476`
 
-**Design intent**: Main body is placed into the implicit Flow's startup transition, not a shell. Currently the lowering is not fully genuine semantic desugaring.
+**Design intent**: Main body is placed into the implicit Flow's startup transition, not a shell. This is a genuine semantic desugaring (v0.34.28 实测：`mimi run` 无 main 兜底仅存在于 bytecode/compiler.rs:654 的 entry 分支，正常路径完全脱糖)。
 
 ### 2.2 Transfer Matrix Auto-Completion (+1 Fault Fallback)
 
-**Current maturity**: `partial`; this unconditional behavior conflicts with stable target semantics.
+**Current maturity**: `repealed` (v0.34.18b, amendment clause 1 sparse-irreversible)；N×M 自动补全已删除，稀疏业务图取代：未声明 `(state, event)` 对 = 编译错误 E0211，不做运行时 Fault 兜底。`expand_flow_with_shapes` 现仅保留 `ensure_fault_state`（recovery verb 的 source state）与形状对齐。
 
 **Location**: `src/flow_matrix.rs:83` `fn expand_flow_with_shapes`
 
 **Action**:
 1. `ensure_fault_state(flow)` (`:85`) — ensures `Fault` state exists in the Flow
-2. Iterates `states × events` matrix
-3. For undefined `(state, event)` pairs (`:117`): constructs `TransitionDef { is_fallback: true, to_states: vec!["Fault"] }`
-4. `flow.transitions.extend(fallbacks)` (`:129`)
+2. ~~Iterates `states × events` matrix~~（v0.34.18b 废止）
+3. ~~For undefined `(state, event)` pairs (`:117`): constructs `TransitionDef { is_fallback: true, to_states: vec!["Fault"] }`~~（已删除：未声明对现为 E0211 编译错误，flow_matrix.rs:151-153 留废止注记）
+4. ~~`flow.transitions.extend(fallbacks)` (`:129`)~~
 
-**Injected nodes**: Fallback transitions with `is_fallback: true`, targeting `Fault` state.
+**Injected nodes**: 无 fallback transition（废止）；仅确保 `Fault` state 存在（recovery verb 源态）。
 
-**Design intent** (pre-1.0): Stable mode prohibits auto-completing undeclared combinations into business transitions. Automatic boundary fallback is only permitted for prototype/REPL, explicitly declared open dynamic boundaries, and test fault injection. It is currently applied unconditionally.
+**Design intent** (pre-1.0): Stable mode prohibits auto-completing undeclared combinations into business transitions. **已达成（0.34.18b）**：稀疏图 + E0211 fail-closed；@dense 标记删除（parser 拒绝），16 个 @dense 测试迁移。
 
 ### 2.3 System Verb Injection (reset / recover)
 

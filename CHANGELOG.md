@@ -9,6 +9,35 @@
 > 审计结论：工程侧与代码实现全部达标；0.34.28 同步战役残留 3 处 P0 + 多处 P1/P2，
 > 本 sprint 全部闭环，不留尾巴。
 
+- **外围文档族普查闭环（第二轮）**：
+  - **README.md / README.zh.md**：Hello Flow 主示例 `do { return }` 迁移为裸
+    `return`（0.34.27 删除语法不再教给用户）；特性表 multi-target 与 View/Mutate
+    由 📋 升 ✅（均已落地）；Progressive mode 注记"真 lowering post-1.0"纠正为
+    已实现的语义脱糖（spec §3.13）；0.1.4-dev 版本行重写（trivia 化误称为 0.1.4
+    成果 → 明示登记 0.1.5，补齐 do 删除/软关键字/ieee_float/数值强制等实况）；
+  - **docs/spec/transition-turn.md**（normative profile）：Terminal outcome 分类
+    `Become`/`Stay` → 统一 `Commit(target, payload)`（ADR-001 术语对齐）；Turn 配置
+    移除已废止的 `transaction_log`（修正案条款 3 WAL）；multi-target 条款升 stable 表述；
+  - **docs/ast-appendix.md**：快照版本刷新（v0.30.0 → 0.1.4-dev）；Stmt 表 `Do`/
+    `Delegate` 改 absent（variant 已删）、`Math` 改 verifier 通道描述（0.34.28 裁决）、
+    补 `IfLet`；Expr variant 行纠正（31→34，删已不存在的 `Range`）；§2.1 Progressive
+    maturity partial→complete（0.34.28 实测）、§2.2 N×M 自动补全 partial→repealed
+    （0.34.18b 稀疏图 + E0211）；表格措辞遵守该文件"禁状态词汇"既有门禁；
+  - **readme/ 教程族**：00-index/01-syntax/llmprompt 加 MimiSpec 时代快照状态 banner；
+    01-syntax §2 与 llmprompt §2.4 关键字表**整体重写为冻结实况**——与
+    keywords.rs:92-177 程序化比对 **80/80 精确零差**（删 steps/ui/binds/on 等已失效词，
+    补 flow/state/transition/session/dual/end 等全部现行词）；llmprompt 版本行
+    （v0.7.0 时代）加诚实化注记；
+  - **gramma/mimi-grammar-v1.0.0-rc.md**：加"不再权威"状态 banner，纠正过时的
+    MimiSpec 保留字声明（flow 已是 Mimi 关键字）与权威性措辞；
+  - **门禁再加深**：`check_language_docs.py` 语义新鲜度扫描面扩展至 README/README.zh/
+    docs/spec/*.md/docs/ast-appendix.md；REMOVED_MARKERS 补 `removal`。
+- **核心文档族闭环（第一轮）**：P0×3（spec §6.12 math/multi-target 清单 +
+  requirements FLOW-TURN-001）、pre-1.0 九份源头、support.toml 三条 evidence、
+  syntax-reference 真再生成、await 撤销回写、golden 记账、测试卫生、根部垃圾清理。
+- **门禁结果**：fmt/clippy/unsafe gate/check_language_docs 全绿；Rust 代码本轮零改动，
+  测试状态与 0.34.32 RC 复核一致（4598 lib + 13 real_world + 28 cli）。
+
 - **P0 闭环（spec 同步闸违规项）**：
   - spec §6.12：`math` 移出 Removed 清单（§5.6/§6.8 已标 `[stable]`，清单漏改）；
     multi-target 与 math 升入 Stable 清单（multi-target 移出 Experimental 后未并入）；

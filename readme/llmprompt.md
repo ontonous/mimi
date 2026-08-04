@@ -1,8 +1,14 @@
 # LLM Prompt：让 AI 正确编写 Mimi 代码
 
+> ⚠ **文档状态（0.34.33 标注）**：本文档主体写于 v0.7.0 时代，语言自 0.29 起已演进为
+> **Flow-first typestate** 范式并经 0.1.4 语法冻结。下文仅 **§2.4 关键字表已同步到冻结实况**，
+> 其余章节（意图后缀、部分语法示例）可能滞后。权威语法以 `docs/language-spec.md` +
+> `docs/syntax-reference.md`（golden EBNF 渲染副本）为准；Flow/transition 语法见
+> `tests/real_world/` 语料与 README Hello Flow 示例。全文重写已登记（devdocs/v0.34 审计）。
+>
 > **目标**：本指南面向需要生成 `.mimi` 代码的大语言模型。读完后，你应能独立生成**语法合法、类型正确、惯用风格**的 Mimi 程序。
 >
-> **版本**：基于 Mimi v0.7.0（v1.2 集成版）实现。
+> **版本**：快照基于 Mimi v0.7.0（v1.2 集成版）；关键字表已按 0.1.4-dev（0.34）冻结实况刷新。
 > **输出要求**：只输出 `.mimi` 源码文本，不要用 Markdown 代码块包裹（除非用户要求）。
 
 ---
@@ -55,20 +61,29 @@ func add(a: i32, b: i32) -> i32:
 
 ### 2.4 关键字不可用作标识符
 
+> 0.34.33 刷新：0.1.4 冻结实况，共 80 个 `=> TokenKind` 映射（实测 keywords.rs:92-177）。
+> 已删除：`do`/`become`/`stay`/`subflow`/`steps`/`consume`（现 tokenize 为标识符）。
+
 ```
 module     type       func       fn         actor      newtype
-trait      impl       cap        extern     use         pub
-let        mut        ref        shared     local_shared  weak
-arena      alloc      drop
-if         else       for        in         while      return
-break      continue   match
-spawn      await      parasteps  on         failure
-requires   ensures    math       desc       rule       old
-steps      flow       ui         binds      mms        with
+trait      impl       cap        extern     use        pub
+dyn        where
+let        mut        ref        const      shared     local_shared
+weak       weak_local c_shared   c_borrow   c_borrow_mut
+raw_string arena      alloc      drop
+if         else       for        in         while      loop
+return     break      continue   match      defer      unsafe
+flow       state      transition fault      fails      persistent
+pinned     protocol   session    dual       end        view
+mutate
+spawn      await      async      parasteps  failure    reset
+recover
+requires   ensures    invariant  math       desc       rule
+old        mms        with
 comptime   quote
-and        or         not
-true       false      unit       i32        i64        f64
-bool       string     nothing
+and        or         not        (软关键字：绑定位置可作标识符)
+true       false      unit       nothing
+as
 ```
 
 ### 2.5 冒号规则
