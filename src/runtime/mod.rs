@@ -19153,8 +19153,10 @@ pub extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
     // docs/error-codes.md (E0801 is reserved for division by zero); the
     // bytecode VM's IntegerOverflow also maps to E0802.
     const PREFIX: &[u8] = b"[E0802] integer overflow in ";
+    // 0.34.34 (docs/diagnostics.md §2): hints ride the single dense line as
+    // the `| hint:` field — no separate "Hint:" line.
     const SUFFIX: &[u8] =
-        b"\nHint: use wrapping_add/wrapping_sub/wrapping_mul for wrap-around semantics.\n";
+        b" | hint: use wrapping_add/wrapping_sub/wrapping_mul for wrap-around semantics\n";
     // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
     unsafe {
         let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
@@ -19211,8 +19213,10 @@ pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
         fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     }
     const PREFIX: &[u8] = b"[E0813] float operation produced NaN/Inf in ";
+    // 0.34.34 (docs/diagnostics.md §2): hints ride the single dense line as
+    // the `| hint:` field — no separate "Hint:" line.
     const SUFFIX: &[u8] =
-        b"\nHint: use ieee_float { } block for IEEE 754 semantics (post-0.31.51b).\n";
+        b" | hint: use ieee_float { } block for IEEE 754 semantics (post-0.31.51b)\n";
     // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
     unsafe {
         let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
