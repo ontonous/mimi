@@ -132,6 +132,8 @@ pub const E0430: &str = "E0430"; // from_json::<T> requires concrete type argume
 pub const E0431: &str = "E0431"; // type escape hatch (`_`/Infer) leaked past its top-level inference boundary
 pub const E0432: &str = "E0432"; // linear type (Cap/SessionChan/Flow state) passed as generic argument
 pub const E0433: &str = "E0433"; // fails E combined with a multi-target transition — not yet supported (fail-closed)
+pub const E0434: &str = "E0434"; // mutate argument is not a valid place (must be Ident or single-level Ident.field)
+pub const E0435: &str = "E0435"; // two mutate arguments alias the same place (exclusive borrow violation)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -358,6 +360,9 @@ pub fn describe(code: &str) -> &'static str {
         E0430 => "from_json requires concrete type argument",
         E0431 => "type escape hatch (`_`/Infer) leaked past its top-level inference boundary",
         E0432 => "linear type passed as generic argument (generic parameters are not linearly tracked)",
+        E0433 => "fails E combined with a multi-target transition — not yet supported (fail-closed)",
+        E0434 => "mutate argument is not a valid place (must be Ident or single-level Ident.field)",
+        E0435 => "two mutate arguments alias the same place (exclusive borrow violation)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -566,6 +571,9 @@ mod tests {
             super::E0429,
             super::E0430,
             super::E0432,
+            super::E0433,
+            super::E0434,
+            super::E0435,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,

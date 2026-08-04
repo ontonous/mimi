@@ -3956,7 +3956,8 @@ func main() -> i32 {
     println(m)
     let b = id_view(5)
     println(b)
-    let c = add_mutate(7)
+    let mut cv = 7
+    let c = add_mutate(cv)
     println(c)
     0
 }
@@ -4445,13 +4446,12 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "M3: nested-place mutate writeback (o.inner.value / mutate self.a.b) is silently dropped in BOTH backends. The checker performs no mutate-arg place validation (even `bump(42)` is accepted), and the writeback only matches Field(Ident,_). Needs a design decision: checker place-grammar rejection (fail-closed) vs. nested writeback implementation in both backends. Tracked at compiler.rs mutate field_targets."]
-fn mutate_nested_field_writeback_gap_m3() {
-    // M3 (known gap, NOT an L1 violation — both backends agree on the wrong
-    // answer): `bump(o.inner.value)` is a nested field place. The callee's
-    // mutation of x is silently lost because the writeback machinery only
-    // handles Ident and single-level Field(Ident,_) places.
-    // Expected (once fixed): o.inner.value == 11. Actual (both backends): 10.
+fn mutate_nested_place_rejected_q5() {
+    // Q5 (0.34.25c): `bump(o.inner.value)` is a nested field place. The
+    // mutate borrow's writeback only handles Ident and single-level
+    // Field(Ident,_) places, so a nested place would silently lose the
+    // callee's mutation. Fail-closed: the checker rejects it (E0434)
+    // instead of accepting a writeback that cannot be honoured.
     let src = r#"
 type Inner { value: i32 }
 type Outer { inner: Inner }
@@ -4465,22 +4465,48 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    let (_, bc) = run_source_bytecode_with_stdout(src);
-    assert_eq!(bc.trim(), "11", "bytecode nested mutate writeback");
-    let out = compile_and_run(src).expect("codegen nested mutate writeback");
-    assert_eq!(out.trim(), "11", "codegen nested mutate writeback");
+    let diags = check_source(src).expect_err("nested mutate place must be rejected (E0434)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0434"),
+        "expected E0434 diagnostic, got:\n{rendered}"
+    );
 }
 
 #[test]
-#[ignore = "M6: aliasing simultaneous mutate borrows of the same place (bump2(self.tag, self.tag)) are accepted by the checker but violate mutate's exclusive-borrow invariant. Both backends produce a 'defined' result (4) instead of rejecting. Same root cause as M3: the checker performs no mutate-arg place validation (no place tracking, no alias detection). Needs the checker place-validation pass."]
+fn mutate_literal_place_rejected_q5() {
+    // Q5: `bump(42)` is not a place at all — a mutate borrow cannot target
+    // a literal (nothing to write back). Rejected with E0434.
+    let src = r#"
+func bump(x: mutate i32) {
+    x = x + 1
+}
+func main() -> i32 {
+    bump(42)
+    0
+}
+"#;
+    let diags = check_source(src).expect_err("literal mutate arg must be rejected (E0434)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0434"),
+        "expected E0434 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
 fn mutate_aliasing_borrow_should_be_rejected_m6() {
-    // M6 (known gap, negative test): two simultaneous `mutate` borrows of the
-    // SAME field alias exclusive borrows. The borrow system should reject this
-    // (cf. Rust: two &mut to the same place). Currently accepted; both backends
-    // compute x+y from by-value copies (tag=1 → x=2,y=2 → 4) and the writeback
-    // order is unspecified. Expected once fixed: a checker rejection (E0415
-    // view/mutate borrow violation or a dedicated aliasing diagnostic).
+    // M6 (0.34.25c, negative test): two simultaneous `mutate` borrows of the
+    // SAME field alias exclusive borrows. The borrow system must reject this
+    // (cf. Rust: two &mut to the same place) — E0435.
     let src = r#"
 func bump2(x: mutate i32, y: mutate i32) -> i32 {
     x = x + 1
@@ -4504,11 +4530,17 @@ func main() -> i32 {
     0
 }
 "#;
-    // Goal: the checker rejects aliasing mutate borrows.
-    let result = check_source(src);
+    // The checker rejects aliasing mutate borrows.
+    let diags = check_source(src)
+        .expect_err("aliasing mutate borrows of the same field must be rejected (E0435)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        result.is_err(),
-        "aliasing mutate borrows of the same field must be rejected"
+        rendered.contains("E0435"),
+        "expected E0435 diagnostic, got:\n{rendered}"
     );
 }
 
