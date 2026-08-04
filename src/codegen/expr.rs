@@ -792,7 +792,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // so that chained calls like s.trim().to_upper() work.
                     let obj_type = self.infer_object_type(obj, vars);
                     if obj_type == "string" {
-                        self.infer_string_method_return_type(method)
+                        let r = self.infer_string_method_return_type(method);
+                        if !r.is_empty() {
+                            return r;
+                        }
                     } else if let Expr::Ident(flow_name) = obj.unlocated() {
                         // Flow::transition(from, ...) → to-state of the exact overload.
                         if let Some(flow) = self.flow_defs.get(flow_name) {
@@ -808,10 +811,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 return t.to_states.first().cloned().unwrap_or_default();
                             }
                         }
-                        String::new()
-                    } else {
-                        String::new()
                     }
+                    // Q3 (rc-quality-gate-0.34.25a): trait-impl method results
+                    // (e.g. JsonExt::get_float on a string receiver) lost their
+                    // type here — the print formatter then displayed the raw
+                    // struct `(true, 1.5, 0)` instead of `Ok(1.5)`. Infer the
+                    // declared return type from type_impls.
+                    self.infer_impl_method_return_type(&obj_type, method)
                 } else {
                     String::new()
                 }
@@ -1024,6 +1030,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Q3: declared return type of a trait-impl method on `type_name`
+    /// (type_impls: type → trait → method FuncDefs), rendered the same way
+    /// checker types render (fmt_type) so print/dispatch string gates like
+    /// `starts_with("Result")` recognize it.
+    pub(super) fn infer_impl_method_return_type(&self, type_name: &str, method: &str) -> String {
+        if let Some(trait_impls) = self.type_impls.get(type_name) {
+            for methods in trait_impls.values() {
+                if let Some(m) = methods.iter().find(|m| m.name == method) {
+                    if let Some(ret) = &m.ret {
+                        return crate::core::fmt_type(ret);
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
     fn infer_call_return_type_name(&self, name: &str) -> Option<String> {
         // Built-ins whose return type is not obvious from the name alone.
         match name {
@@ -1167,8 +1190,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         match v {
             Value::Int(i) => Ok(BasicValueEnum::IntValue(i64_ty.const_int(*i as u64, true))),
             Value::Float(f) => Ok(BasicValueEnum::FloatValue(f64_ty.const_float(*f))),
+            // Q4 (rc-quality-gate-0.34.25a): fold bool to i1, not i64.
+            // Previously `comptime { true }` / `ast_eval(quote! { true })`
+            // produced an i64 0/1 constant, so the i1-aware "true"/"false"
+            // display path in extract_print_arg never fired and codegen
+            // printed "1"/"0" where the VM prints "true"/"false".
             Value::Bool(b) => Ok(BasicValueEnum::IntValue(
-                i64_ty.const_int(if *b { 1 } else { 0 }, false),
+                self.context
+                    .bool_type()
+                    .const_int(if *b { 1 } else { 0 }, false),
             )),
             Value::Unit => Ok(BasicValueEnum::IntValue(i64_ty.const_int(0, false))),
             Value::String(s) => {

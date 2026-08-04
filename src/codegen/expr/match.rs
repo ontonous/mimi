@@ -109,6 +109,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         })
                     });
+                // Q1 (rc-quality-gate-0.34.25a): built-in Result<T, string>
+                // stores ptrtoint(heap_{ptr,len}) in the i64 error slot.
+                // decode_payload_struct reconstructs the string struct when it
+                // knows the expected type — but both call sites below passed
+                // None, so the raw heap-pointer i64 leaked into the bound
+                // variable (garbage display; the VM prints the string — L1
+                // divergence). Derive the expected type from the scrutinee's
+                // Result<T, E> AST type. Deliberately restricted to string
+                // errors: Result<T, (Source, E)> rejected tuples have their
+                // own hard-coded {i64,i64} reconstruction below, and other
+                // shapes are unverified.
+                let err_expected_ty: Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> =
+                    if payload_idx == 2 && variant_owner.is_none() {
+                        scrutinee_type.and_then(|st| {
+                            let err_ty: Option<&crate::ast::Type> = match st.unlocated() {
+                                crate::ast::Type::Result(_, err) => Some(err.as_ref()),
+                                // AST surface form: Result<T, E> parses as
+                                // Name("Result", [T, E]) in legacy paths.
+                                crate::ast::Type::Name(n, args)
+                                    if n == "Result" && args.len() == 2 =>
+                                {
+                                    Some(&args[1])
+                                }
+                                _ => None,
+                            };
+                            err_ty
+                                .filter(|t| crate::core::helpers::is_string(t))
+                                .and_then(|t| self.llvm_type_for(t).map(|llvm| (t.clone(), llvm)))
+                        })
+                    } else {
+                        None
+                    };
                 let (payload, payload_ty) = match scrutinee_val {
                     BasicValueEnum::StructValue(sv) => {
                         let payload_val = self
@@ -118,7 +150,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 CompileError::LlvmError(format!("extract payload: {}", e))
                             })?;
                         // Check if the variant's payload is a struct type (ptrtoint encoded)
-                        let (decoded, ty) = self.decode_payload_struct(name, payload_val, None)?;
+                        let (decoded, ty) = self.decode_payload_struct(
+                            name,
+                            payload_val,
+                            err_expected_ty.as_ref().map(|(_, t)| *t),
+                        )?;
                         (decoded, ty)
                     }
                     BasicValueEnum::PointerValue(pv) => {
@@ -157,7 +193,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| {
                                 CompileError::LlvmError(format!("extract payload: {}", e))
                             })?;
-                        let (decoded, ty) = self.decode_payload_struct(name, payload_val, None)?;
+                        let (decoded, ty) = self.decode_payload_struct(
+                            name,
+                            payload_val,
+                            err_expected_ty.as_ref().map(|(_, t)| *t),
+                        )?;
                         (decoded, ty)
                     }
                     BasicValueEnum::IntValue(iv) => {
@@ -376,6 +416,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.var_type_names.insert(bind_name.clone(), full);
                                     }
                                     self.register_list_elem_type(bind_name, ast_ty);
+                                } else if let Some((ref err_ast, _)) = err_expected_ty {
+                                    // Q1: built-in Err string payload — register
+                                    // the scrutinee's error AST type (string) for
+                                    // the bound variable so println/field access
+                                    // treat it as a string, matching the VM.
+                                    self.var_types.insert(bind_name.clone(), err_ast.clone());
+                                    if let Some(full) = self.get_full_type_name(err_ast) {
+                                        self.var_type_names.insert(bind_name.clone(), full);
+                                    }
                                 } else {
                                     // Built-in constructor (Ok/Err/Some/None) from
                                     // Result/Option. The AST type is not in type_defs,
