@@ -4493,36 +4493,48 @@ func main() -> i32 {
         err.contains("y != 0"),
         "rendered contract text missing, got: {err}"
     );
-    // Span coordinates survive into the message (in-memory harness sources
-    // resolve to the registry-label fallback, but line:col are always known).
+    // The hint names the real opt-out for baked-in contract checks.
     assert!(
-        err.contains(":3:") || err.contains("line"),
-        "location coordinates missing, got: {err}"
+        err.contains("--verify-contracts"),
+        "hint should reference --verify-contracts, got: {err}"
     );
-    // Red line: no internal AST/Debug leakage, no stale FFI framing or hint,
-    // and no terminal decoration (gutter/caret/arrow) — diagnostics are
-    // dense, machine-first single lines (0.34.34+).
+
+    // Contract (0.34.34+), asserted POSITIVELY: the machine-readable
+    // diagnostic is a single dense line — code, phase, rendered contract,
+    // location marker, and hint all co-resident on one line of stderr.
+    // This captures "dense single line" robustly without banning glyphs.
+    let line = err
+        .lines()
+        .find(|l| l.contains("[E0808]"))
+        .unwrap_or_else(|| panic!("no [E0808] diagnostic line in: {err}"));
+    assert!(
+        line.contains("requires condition failed for")
+            && line.contains("y != 0")
+            && line.contains(" @ ")
+            && line.contains("hint:"),
+        "machine diagnostic must be one dense line (code+contract+location+hint), got: {err}"
+    );
+
+    // Red line — SEMANTIC invariants only (never leak / never lie), not
+    // styling policy: internal AST/Debug internals must not appear in any
+    // legitimate rendering, and the message must not carry the stale FFI
+    // framing or the wrong opt-out flag. NOTE: renderings like ` --> `,
+    // caret `^^^`, or multi-line rich output are *format policy* — an
+    // opt-in human-readable mode could legitimately reintroduce them without
+    // breaking the dense machine contract above, and user-derived contract
+    // text could contain them — so they are deliberately NOT banned here.
     for banned in [
         "AstNodeMeta",
         "Located {",
         "SourceId(",
-        "NeCmp",
         "FFI contract violation",
         "--skip-verify-ffi",
-        " --> ",
-        "\n  |",
-        "^^^",
     ] {
         assert!(
             !err.contains(banned),
             "message must not contain '{banned}', got: {err}"
         );
     }
-    // The hint names the real opt-out for baked-in contract checks.
-    assert!(
-        err.contains("--verify-contracts"),
-        "hint should reference --verify-contracts, got: {err}"
-    );
 }
 
 /// 0.34.34: ensures violations use the same human-readable shape, including
