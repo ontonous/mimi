@@ -1258,8 +1258,9 @@ func main() -> i32 {
     .expect("codegen must compile signed-comparison quote folds");
     assert_eq!(
         codegen.trim(),
-        "1\n0",
-        "codegen must fold signed comparisons as SIGNED (true=1, false=0)"
+        "true\nfalse",
+        "codegen must fold signed comparisons as SIGNED (true=1, false=0); \
+         bool display now matches the VM (Q4: bool folds to i1)"
     );
 }
 

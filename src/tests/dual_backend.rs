@@ -3347,6 +3347,106 @@ fn dual_i64_min_literal() {
 }
 
 #[test]
+fn dual_match_result_err_string_binding() {
+    // Q1 (rc-quality-gate-0.34.25a): `match r { Err(msg) => … }` on
+    // Result<T, string> bound the raw heap-pointer i64 on codegen (garbage
+    // display) while the VM bound the decoded string — the Err string
+    // payload (ptrtoint-encoded heap {ptr,len} in the i64 slot) was never
+    // reconstructed because decode_payload_struct got expected_ty=None.
+    // Fix derives the expected {ptr,i64} type from the scrutinee's
+    // Result<T, E> AST type (both Type::Result and Name("Result",[_,_])
+    // surface forms). Covers i32/f64 ok payloads, direct and let-bound
+    // scrutinees, and Ok-arm co-dispatch.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func parse(s: string) -> Result<i32, string> {
+            if s == "" { return Err("empty input") }
+            Ok(42)
+        }
+        func main() -> i32 {
+            match parse("") {
+                Ok(v) => println(v),
+                Err(msg) => println(msg),
+            }
+            let r = parse("x")
+            match r {
+                Ok(v) => println(v),
+                Err(_) => println("no"),
+            }
+            0
+        }
+        "#,
+        "empty input\n42"
+    );
+}
+
+#[test]
+fn dual_ast_eval_bool_display() {
+    // Q4 (rc-quality-gate-0.34.25a): value_to_llvm_const folded Value::Bool
+    // to i64 0/1, so `ast_eval(quote! { true })` / `comptime { true }`
+    // printed "1"/"0" in codegen while the VM printed "true"/"false".
+    // Bool now folds to i1, which the i1-aware display path renders as
+    // true/false. int/float/tuple/bool-arg forms must stay consistent.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func takes_bool(b: bool) -> i32 { if b { 1 } else { 0 } }
+        func main() -> i32 {
+            println(ast_eval(quote! { true }))
+            println(ast_eval(quote! { false }))
+            println(comptime { true })
+            let x = ast_eval(quote! { true })
+            println(x)
+            let t = (42, comptime { false })
+            println(t)
+            println(takes_bool(comptime { true }))
+            println(ast_eval(quote! { 7 }))
+            0
+        }
+        "#,
+        "true\nfalse\ntrue\ntrue\n(42, false)\n1\n7"
+    );
+}
+
+#[test]
+fn dual_trait_method_result_display() {
+    // Q3 (rc-quality-gate-0.34.25a): trait-impl method results lost their
+    // type in legacy let-binding / print inference — codegen displayed the
+    // raw Result struct as a product tuple "(true, 1.5, 0)" while the VM
+    // printed "Ok(1.5)". The fix infers the declared impl return type
+    // (infer_impl_method_return_type) in both the direct-call and
+    // let-binding paths.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        trait FloatGetter {
+            func get(key: string) -> Result<f64, string>
+        }
+        impl FloatGetter for string {
+            func get(key: string) -> Result<f64, string> {
+                if key == "a" { Ok(1.5) } else { Err("missing") }
+            }
+        }
+        func main() -> i32 {
+            let s = "data"
+            let r = s.get("a")
+            println(r)
+            println(s.get("zz"))
+            0
+        }
+        "#,
+        "Ok(1.5)\nErr(missing)"
+    );
+}
+
+#[test]
 fn dual_generic_nested_type() {
     if !can_link() {
         return;

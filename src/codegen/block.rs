@@ -463,6 +463,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.infer_string_method_return_type(method_name);
                                         if !ret_type.is_empty() {
                                             self.var_type_names.insert(name.clone(), ret_type);
+                                        } else {
+                                            // Q3 (rc-quality-gate-0.34.25a): trait-impl
+                                            // methods on string receivers (e.g.
+                                            // JsonExt::get_float) — register the
+                                            // declared return type so downstream
+                                            // display/dispatch sees Result<…>.
+                                            let impl_ret = self.infer_impl_method_return_type(
+                                                &obj_type,
+                                                method_name,
+                                            );
+                                            if !impl_ret.is_empty() {
+                                                self.var_type_names.insert(name.clone(), impl_ret);
+                                            }
                                         }
                                     } else if let Expr::Ident(flow_name) = obj.unlocated() {
                                         // Flow::transition(from, ...) → matching overload's to-state
@@ -489,6 +502,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     );
                                                 }
                                             }
+                                        } else {
+                                            // Q3: trait-impl method on a
+                                            // non-string receiver.
+                                            let impl_ret = self.infer_impl_method_return_type(
+                                                &obj_type,
+                                                method_name,
+                                            );
+                                            if !impl_ret.is_empty() {
+                                                self.var_type_names.insert(name.clone(), impl_ret);
+                                            }
+                                        }
+                                    } else {
+                                        // Q3: trait-impl method on a
+                                        // non-flow/non-string receiver.
+                                        let impl_ret = self
+                                            .infer_impl_method_return_type(&obj_type, method_name);
+                                        if !impl_ret.is_empty() {
+                                            self.var_type_names.insert(name.clone(), impl_ret);
                                         }
                                     }
                                 }
@@ -1693,6 +1724,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 );
                                             }
                                         }
+                                    }
+                                }
+                                // Q3 (rc-quality-gate-0.34.25a): non-flow method
+                                // calls — infer the declared return type from
+                                // string builtins or trait impls so `let r =
+                                // s.get_float(k)` keeps its Result<…> identity
+                                // for downstream display/dispatch.
+                                if !self.var_type_names.contains_key(name.as_str()) {
+                                    let obj_type = self.infer_object_type(obj, vars);
+                                    let ret = if obj_type == "string" {
+                                        let r = self.infer_string_method_return_type(method_name);
+                                        if r.is_empty() {
+                                            self.infer_impl_method_return_type(
+                                                &obj_type,
+                                                method_name,
+                                            )
+                                        } else {
+                                            r
+                                        }
+                                    } else {
+                                        self.infer_impl_method_return_type(&obj_type, method_name)
+                                    };
+                                    if !ret.is_empty() {
+                                        self.var_type_names.insert(name.clone(), ret);
                                     }
                                 }
                             }
