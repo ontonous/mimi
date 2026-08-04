@@ -362,13 +362,14 @@ impl fmt::Display for InterpError {
             write!(f, " (line {})", line)?;
         }
         if let Some(help) = &ctx.help {
-            write!(f, "\n  help: {}", help)?;
+            // 0.34.34 (docs/diagnostics.md §2): hints ride the single dense
+            // line as the `| help:` field — no separate indented line.
+            write!(f, " | help: {}", help)?;
         }
         if !ctx.call_stack.is_empty() {
-            write!(f, "\n  call stack:")?;
-            for frame in ctx.call_stack.iter().rev() {
-                write!(f, "\n    at {}", frame)?;
-            }
+            // Dense single-line stack (matches to_diagnostic's note shape);
+            // storage order joined by arrows.
+            write!(f, " | call stack: {}", ctx.call_stack.join(" → "))?;
         }
         Ok(())
     }
