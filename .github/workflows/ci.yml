@@ -79,8 +79,11 @@ jobs:
         run: cargo test v1_2_verification -- --test-threads=1
 
       # ── 全量兜底（AGENTS §3 OOM 防护：ulimit 超限即 kill，不冻 runner）──
-      # 实测（0.34.33）：4598 lib 全量峰值 RSS ~307MB；历史 12GB 警告不复现，
-      # ulimit 保留为保险。GH runner 7GB RAM，--test-threads=2 为保守并发。
+      # 线程数公式（0.34.33 实测，32 核机）：--test-threads 对齐 vCPU 数；
+      #   4→39.5s/289MB，8→28.8s/390MB，16→24.1s/551MB，32→23.3s/924MB。
+      #   16 为拐点（再翻倍只快 3.7%），内存 ~+23MB/线程。
+      # GH 标准 runner = 2 vCPU → --test-threads=2（对齐核心数，非保守猜测）。
+      # runner 升级大机型时按 vCPU 数同比例上调，无需担心内存。
       - name: Test (full suite, OOM-guarded)
         run: |
           ulimit -v 20000000

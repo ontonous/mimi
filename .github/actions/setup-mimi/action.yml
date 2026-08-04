@@ -11,9 +11,12 @@ runs:
       shell: bash
       run: |
         # apt-key is deprecated; install the LLVM signing key into a keyring instead.
+        # apt 源 codename 从宿主发行版派生（jammy/noble 均有 llvm-toolchain-*-18），
+        # 不硬编码发行版——runner 镜像升级（22.04→24.04）不再需要改此处。
+        CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-jammy}")"
         wget -qO /tmp/llvm-key.gpg https://apt.llvm.org/llvm-snapshot.gpg.key
         sudo gpg --yes --dearmor -o /usr/share/keyrings/apt-llvm.gpg /tmp/llvm-key.gpg
-        echo "deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
+        echo "deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-18 main" \
           | sudo tee /etc/apt/sources.list.d/llvm.list
         sudo apt-get update -qq
         sudo apt-get install -y -qq llvm-18-dev llvm-18 libllvm18 libclang-18-dev 2>&1 | tail -5

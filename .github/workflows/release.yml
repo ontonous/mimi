@@ -39,17 +39,22 @@ jobs:
 
       - name: Create release archive
         run: |
-          # 兼容历史 mimi-v* 前缀：有则剥离，纯 semver 原样保留
+          # 兼容历史 mimi-v* 前缀：有则剥离，纯 semver 原样保留。
+          # 目标架构从 uname -m 派生（x86_64/aarch64），不再硬编码——
+          # 同一工作流将来换 arm runner 或加 matrix 时无需改打包逻辑。
           VERSION="${GITHUB_REF_NAME#mimi-v}"
+          ARCH="$(uname -m)"
+          OS="linux"
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_ARCHIVE=mimi-${VERSION}-${ARCH}-${OS}.tar.gz" >> "$GITHUB_ENV"
           mkdir -p dist
           cp target/release/mimi dist/
           cp README.md LICENSE dist/
           cd dist
-          tar czf "../mimi-${VERSION}-x86_64-linux.tar.gz" .
+          tar czf "../mimi-${VERSION}-${ARCH}-${OS}.tar.gz" .
           cd ..
-          sha256sum "mimi-${VERSION}-x86_64-linux.tar.gz" > "mimi-${VERSION}-x86_64-linux.tar.gz.sha256"
-          cat "mimi-${VERSION}-x86_64-linux.tar.gz.sha256"
+          sha256sum "mimi-${VERSION}-${ARCH}-${OS}.tar.gz" > "mimi-${VERSION}-${ARCH}-${OS}.tar.gz.sha256"
+          cat "mimi-${VERSION}-${ARCH}-${OS}.tar.gz.sha256"
 
       # 发布说明只取本版本 CHANGELOG 小节（旧配置整文件灌入每个 release body）；
       # 找不到对应小节时回退全文，保证 body 非空。
@@ -70,7 +75,7 @@ jobs:
           name: Mimi ${{ env.RELEASE_VERSION }}
           body_path: release-notes.md
           files: |
-            mimi-${{ env.RELEASE_VERSION }}-x86_64-linux.tar.gz
-            mimi-${{ env.RELEASE_VERSION }}-x86_64-linux.tar.gz.sha256
+            ${{ env.RELEASE_ARCHIVE }}
+            ${{ env.RELEASE_ARCHIVE }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
