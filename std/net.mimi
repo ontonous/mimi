@@ -62,8 +62,10 @@ impl NetOps for i64 {
         if n < 0 { Err(SendFailed) } else { Ok(n as i32) }
     }
     func recv(buf_size: i32) -> Result<string, NetError> {
+        // The recv builtin returns "" on EOF (peer closed); hard failures
+        // abort before returning, so an empty result is a successful read.
         let data = recv(self, buf_size)
-        if data == "" { Err(RecvFailed) } else { Ok(data) }
+        Ok(data)
     }
     func fetch() -> Result<string, NetError> { Err(HttpGetFailed) }
     func fetch_post(body: string) -> Result<string, NetError> { Err(HttpPostFailed) }
@@ -74,12 +76,16 @@ impl NetOps for string {
     func send(data: string) -> Result<i32, NetError> { Err(SendFailed) }
     func recv(buf_size: i32) -> Result<string, NetError> { Err(RecvFailed) }
     func fetch() -> Result<string, NetError> {
+        // The http_get builtin aborts on failure; any returned body —
+        // including an empty one — is a successful response.
         let body = http_get(self)
-        if body == "" { Err(HttpGetFailed) } else { Ok(body) }
+        Ok(body)
     }
     func fetch_post(body: string) -> Result<string, NetError> {
+        // The http_post builtin aborts on failure; an empty response body
+        // is still a successful response.
         let resp = http_post(self, body)
-        if resp == "" { Err(HttpPostFailed) } else { Ok(resp) }
+        Ok(resp)
     }
 }
 
@@ -131,22 +137,28 @@ pub func tcp_send(fd: i64, data: string) -> Result<i64, NetError> {
     if n < 0 { Err(SendFailed) } else { Ok(n) }
 }
 
-// tcp_recv: Receives up to buf_size bytes from socket fd.
+// tcp_recv: Receives up to buf_size bytes from socket fd (Ok("") means EOF).
 pub func tcp_recv(fd: i64, buf_size: i32) -> Result<string, NetError> {
+    // The recv builtin returns "" only for a successful zero-byte read
+    // (peer closed the connection); empty is not an error here.
     let data = recv(fd, buf_size)
-    if data == "" { Err(RecvFailed) } else { Ok(data) }
+    Ok(data)
 }
 
-// fetch: Performs HTTP GET, returns body string on success.
+// fetch: Performs HTTP GET, returns body string on success (possibly empty).
 pub func fetch(url: string) -> Result<string, NetError> {
+    // The http_get builtin fails hard on real errors, so any returned body
+    // — including an empty one — is a successful response.
     let body = http_get(url)
-    if body == "" { Err(HttpGetFailed) } else { Ok(body) }
+    Ok(body)
 }
 
-// fetch_post: Performs HTTP POST with body, returns response on success.
+// fetch_post: Performs HTTP POST with body, returns response on success (possibly empty).
 pub func fetch_post(url: string, body: string) -> Result<string, NetError> {
+    // The http_post builtin fails hard on real errors; an empty response
+    // body is still a successful response.
     let resp = http_post(url, body)
-    if resp == "" { Err(HttpPostFailed) } else { Ok(resp) }
+    Ok(resp)
 }
 
 // Socket address families

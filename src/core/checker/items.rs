@@ -470,6 +470,19 @@ impl<'a> Checker<'a> {
                         self.check_type_well_formed(&inner, &format!("newtype '{}'", t.name));
                         // The return type is the newtype itself, wrapped in Type::Newtype with name
                         let self_ty = Type::Newtype(t.name.clone(), Box::new(inner.clone()));
+                        // Audit 2026-08-05 fix 7 (mirrors CK3 for enum variants):
+                        // the constructor registration used to overwrite any
+                        // existing same-named entry in the function directory
+                        // without a diagnostic.
+                        if self.funcs.contains_key(&t.name) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0402,
+                                format!(
+                                    "newtype constructor '{}' shadows existing function '{}'",
+                                    t.name, t.name
+                                ),
+                            );
+                        }
                         self.funcs.insert(t.name.clone(), (vec![inner], self_ty));
                     }
                     TypeDefKind::Enum(variants) => {
@@ -830,7 +843,21 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
-                    self.funcs.insert(func.name.clone(), (params, ret));
+                    // Audit 2026-08-05 fix 6: extern registration used to insert
+                    // unconditionally, so a second extern block redeclaring the
+                    // same symbol silently overwrote the first signature. Emit a
+                    // duplicate-definition diagnostic instead of swallowing it.
+                    if self.funcs.contains_key(&func.name) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!(
+                                "duplicate extern function '{}' (conflicting declarations across extern blocks)",
+                                func.name
+                            ),
+                        );
+                    } else {
+                        self.funcs.insert(func.name.clone(), (params, ret));
+                    }
                     // 追加 C: track extern functions for `?` rejection
                     self.extern_funcs.insert(func.name.clone());
                 }
@@ -1210,9 +1237,30 @@ impl<'a> Checker<'a> {
                     let self_ty = Type::Name(actor.name.clone(), vec![]);
                     let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                     scopes[0].insert("self".to_string(), self_ty);
+                    // Audit 2026-08-05 fix 5: per-method hygiene — linearity and
+                    // session tracking state used to bleed between consecutive
+                    // methods (check_func resets all of these for plain funcs).
+                    self.session_residuals.clear();
+                    self.consumed_session_vars.clear();
+                    self.consumed_flow_vars.clear();
                     // Add other params
                     for p in &method.params {
                         let ty = self.resolve_type(&p.ty);
+                        // SessionChan<S> params: seed residual from the declared
+                        // session body (mirrors check_func) so the scope-exit
+                        // E0425 check below can see them.
+                        if let Type::Name(n, args) = ty.unlocated() {
+                            if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
+                                if let Type::Name(sname, _) = args[0].unlocated() {
+                                    if let Some(body) = self.session_types.get(sname).cloned() {
+                                        let resolved =
+                                            crate::session::resolve(&body, &self.session_types)
+                                                .unwrap_or(body);
+                                        self.session_residuals.insert(p.name.clone(), resolved);
+                                    }
+                                }
+                            }
+                        }
                         scopes[0].insert(p.name.clone(), ty);
                     }
                     // Check block with self in scope
@@ -1221,6 +1269,24 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    // Audit 2026-08-05 fix 5: all-paths-return check for actor
+                    // methods (mirrors check_func, E0255). Without it, `func bad()
+                    // -> i32 { let x = 1 }` was accepted with zero diagnostics and
+                    // backends had to fabricate a return value.
+                    if !matches!(ret.unlocated(), Type::Name(n, _) if n == "unit")
+                        && !self.block_returns_on_all_paths(&method.body)
+                    {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0255,
+                                format!(
+                                    "actor method '{}::{}' does not return on all paths (missing return in some branches)",
+                                    actor.name, method.name
+                                ),
+                                self.diagnostic_span(),
+                            ).with_help("add a return statement or make the last expression return the appropriate type")
+                        );
+                    }
                     self.var_scopes.push(HashMap::new());
                     let actor_name = if self.module_path.is_empty() {
                         actor.name.clone()
@@ -1239,9 +1305,31 @@ impl<'a> Checker<'a> {
                         &ret,
                         implicit_return,
                     );
+                    // Audit 2026-08-05 fix 5: session scope-exit check for method
+                    // bodies (mirrors check_func) — non-end residuals must not
+                    // silently leave scope.
+                    let unfinished_sessions: Vec<(String, String)> = self
+                        .session_residuals
+                        .iter()
+                        .filter(|(_, r)| !matches!(r.unlocated(), crate::ast::SessionType::End))
+                        .map(|(v, r)| (v.clone(), crate::session::fmt_session(r)))
+                        .collect();
+                    for (var, residual_str) in unfinished_sessions {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0425,
+                            format!(
+                                "session endpoint '{}' leaves scope with unfinished protocol residual `{}`; \
+                                 complete the protocol (send/recv/close) or return the endpoint",
+                                var, residual_str
+                            ),
+                        );
+                    }
                     self.finish_expression_type_capture();
                     self.end_callable(previous_owner);
                     self.var_scopes.pop();
+                    // Audit 2026-08-05 (wave-1 central): nested-func directory
+                    // entries must not leak past the method body.
+                    self.flush_pending_nested_restores();
                 }
             }
             Item::Type(type_def) => {
@@ -1410,6 +1498,26 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    // Audit 2026-08-05 fix 5: all-paths-return check for impl
+                    // methods (mirrors check_func, E0255).
+                    if !matches!(ret.unlocated(), Type::Name(n, _) if n == "unit")
+                        && !self.block_returns_on_all_paths(&method.body)
+                    {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0255,
+                                format!(
+                                    "method '{}' in impl of '{}' for '{}' does not return on all paths (missing return in some branches)",
+                                    method.name, impl_def.trait_name, impl_def.type_name
+                                ),
+                                self.diagnostic_span(),
+                            ).with_help("add a return statement or make the last expression return the appropriate type")
+                        );
+                    }
+                    // Audit 2026-08-05 fix 5: per-method hygiene (mirrors check_func).
+                    self.session_residuals.clear();
+                    self.consumed_session_vars.clear();
+                    self.consumed_flow_vars.clear();
                     let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                     // Bind self with the implementing type
                     scopes[0].insert(
@@ -1418,6 +1526,19 @@ impl<'a> Checker<'a> {
                     );
                     for p in &method.params {
                         let ty = self.resolve_type(&p.ty);
+                        // SessionChan<S> params: seed residual (mirrors check_func).
+                        if let Type::Name(n, args) = ty.unlocated() {
+                            if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
+                                if let Type::Name(sname, _) = args[0].unlocated() {
+                                    if let Some(body) = self.session_types.get(sname).cloned() {
+                                        let resolved =
+                                            crate::session::resolve(&body, &self.session_types)
+                                                .unwrap_or(body);
+                                        self.session_residuals.insert(p.name.clone(), resolved);
+                                    }
+                                }
+                            }
+                        }
                         scopes[0].insert(p.name.clone(), ty);
                     }
                     self.var_scopes.push(HashMap::new());
@@ -1436,9 +1557,30 @@ impl<'a> Checker<'a> {
                         &ret,
                         implicit_return,
                     );
+                    // Audit 2026-08-05 fix 5: session scope-exit check (mirrors
+                    // check_func, E0425).
+                    let unfinished_sessions: Vec<(String, String)> = self
+                        .session_residuals
+                        .iter()
+                        .filter(|(_, r)| !matches!(r.unlocated(), crate::ast::SessionType::End))
+                        .map(|(v, r)| (v.clone(), crate::session::fmt_session(r)))
+                        .collect();
+                    for (var, residual_str) in unfinished_sessions {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0425,
+                            format!(
+                                "session endpoint '{}' leaves scope with unfinished protocol residual `{}`; \
+                                 complete the protocol (send/recv/close) or return the endpoint",
+                                var, residual_str
+                            ),
+                        );
+                    }
                     self.finish_expression_type_capture();
                     self.end_callable(previous_owner);
                     self.var_scopes.pop();
+                    // Audit 2026-08-05 (wave-1 central): nested-func directory
+                    // entries must not leak past the method body.
+                    self.flush_pending_nested_restores();
                     self.generic_scope
                         .truncate(self.generic_scope.len() - method_generic_names.len());
                 }

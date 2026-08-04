@@ -214,6 +214,9 @@ impl<'a> Checker<'a> {
         self.finish_expression_type_capture();
         self.current_ret = None;
         self.current_callable_owner = None;
+        // Audit 2026-08-05 (wave-1 central): nested-func directory entries
+        // registered during this body must not leak to later items.
+        self.flush_pending_nested_restores();
         self.generic_scope.truncate(generic_scope_len);
         // 0.31.24: Restore comptime context
         self.in_comptime = was_in_comptime;

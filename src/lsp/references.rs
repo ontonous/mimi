@@ -238,7 +238,17 @@ impl LspServer {
                         // Parser positions are 1-indexed; LSP is 0-indexed.
                         if f.meta.span.start_line > 0 || f.meta.span.start_col > 0 {
                             def_line = Some(f.meta.span.start_line.saturating_sub(1));
-                            def_col = Some(f.meta.span.start_col.saturating_sub(1));
+                            // AU-LSP-2: span columns are lexer char counts, but
+                            // the usage scan below yields byte offsets; normalize
+                            // to a byte offset within the definition line.
+                            def_col = def_line.and_then(|l| {
+                                lines.get(l).map(|line| {
+                                    crate::lsp::util::char_col_to_byte(
+                                        line,
+                                        f.meta.span.start_col.saturating_sub(1),
+                                    )
+                                })
+                            });
                             break;
                         }
                         def_line = text
@@ -285,50 +295,38 @@ impl LspServer {
         // Add definition if requested
         if include_decl {
             if let Some(dl) = def_line {
+                // AU-LSP-2: def_col is a byte offset; LSP needs UTF-16 units.
+                let def_line_text = lines.get(dl).copied().unwrap_or("");
+                let dc = def_col.unwrap_or(0);
                 references.push(serde_json::json!({
                     "uri": uri,
                     "range": {
-                        "start": { "line": dl, "character": def_col.unwrap_or(0) },
-                        "end": { "line": dl, "character": def_col.unwrap_or(0) + word.len() }
+                        "start": { "line": dl, "character": byte_col_to_utf16(def_line_text, dc) },
+                        "end": { "line": dl, "character": byte_col_to_utf16(def_line_text, dc + word.len()) }
                     }
                 }));
             }
         }
 
-        // Find all usages in text
+        // Find all usages in text.
+        // AU-LSP-2 (full audit 2026-08-05): byte-safe whole-word scan — the
+        // old loop advanced `start` by 1 byte (panicking mid-char on
+        // multi-byte identifiers) and indexed chars by byte offset.
         for (i, line_text) in lines.iter().enumerate() {
-            let mut start = 0;
-            while let Some(pos) = line_text[start..].find(word.as_str()) {
-                let abs_pos = start + pos;
-                let before = abs_pos > 0
-                    && line_text
-                        .chars()
-                        .nth(abs_pos - 1)
-                        .map(|c| c.is_alphanumeric() || c == '_')
-                        .unwrap_or(false);
-                let after = line_text
-                    .chars()
-                    .nth(abs_pos + word.len())
-                    .map(|c| c.is_alphanumeric() || c == '_')
-                    .unwrap_or(false);
-
-                if !before && !after {
-                    // Skip definition location if we already added it
-                    if let Some(dl) = def_line {
-                        if i == dl && (def_col == Some(abs_pos)) {
-                            start = abs_pos + 1;
-                            continue;
-                        }
+            for abs_pos in crate::lsp::util::find_word_occurrences(line_text, word.as_str()) {
+                // Skip definition location if we already added it
+                if let Some(dl) = def_line {
+                    if i == dl && (def_col == Some(abs_pos)) {
+                        continue;
                     }
-                    references.push(serde_json::json!({
-                        "uri": uri,
-                        "range": {
-                            "start": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos) },
-                            "end": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos + word.len()) }
-                        }
-                    }));
                 }
-                start = abs_pos + 1;
+                references.push(serde_json::json!({
+                    "uri": uri,
+                    "range": {
+                        "start": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos) },
+                        "end": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos + word.len()) }
+                    }
+                }));
             }
         }
 
@@ -390,36 +388,30 @@ impl LspServer {
             enclosing_func_line_range(text, line).unwrap_or((0, lines.len()));
 
         let mut changes = Vec::new();
+        // AU-LSP-1 (full audit 2026-08-05): exclude non-code regions from the
+        // rewrite scan — renaming `x` must not corrupt `"x marks..."` string
+        // literals or `// x` comments. The document-wide scan also tracks
+        // regions that span lines (block comments, multi-line strings).
+        let non_code = crate::lsp::util::non_code_byte_ranges(text);
         for (i, line_text) in lines.iter().enumerate().take(range_end).skip(range_start) {
-            let mut start = 0;
-            while let Some(pos) = line_text[start..].find(word.as_str()) {
-                let abs_pos = start + pos;
-                // Word-boundary check in char space.
-                let before_ok = !line_text[..abs_pos]
-                    .chars()
-                    .next_back()
-                    .map(|c| c.is_alphanumeric() || c == '_')
-                    .unwrap_or(false);
-                let after_ok = !line_text[abs_pos + word.len()..]
-                    .chars()
-                    .next()
-                    .map(|c| c.is_alphanumeric() || c == '_')
-                    .unwrap_or(false);
-
-                if before_ok && after_ok {
-                    // L-H1: LSP ranges use UTF-16 code units, not bytes.
-                    let map = crate::lsp::position_map::PositionMap::new(line_text);
-                    let start_utf16 = map.byte_to_lsp(abs_pos).1;
-                    let end_utf16 = map.byte_to_lsp(abs_pos + word.len()).1;
-                    changes.push(serde_json::json!({
-                        "range": {
-                            "start": { "line": i, "character": start_utf16 },
-                            "end": { "line": i, "character": end_utf16 }
-                        },
-                        "newText": new_name
-                    }));
+            let line_non_code = non_code.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+            // AU-LSP-2: byte-safe whole-word scan (advances by word.len() bytes,
+            // boundary probes on guaranteed char boundaries).
+            for abs_pos in crate::lsp::util::find_word_occurrences(line_text, word.as_str()) {
+                if crate::lsp::util::byte_in_non_code(line_non_code, abs_pos) {
+                    continue;
                 }
-                start = abs_pos + 1;
+                // L-H1: LSP ranges use UTF-16 code units, not bytes.
+                let map = crate::lsp::position_map::PositionMap::new(line_text);
+                let start_utf16 = map.byte_to_lsp(abs_pos).1;
+                let end_utf16 = map.byte_to_lsp(abs_pos + word.len()).1;
+                changes.push(serde_json::json!({
+                    "range": {
+                        "start": { "line": i, "character": start_utf16 },
+                        "end": { "line": i, "character": end_utf16 }
+                    },
+                    "newText": new_name
+                }));
             }
         }
 
@@ -665,7 +657,17 @@ impl LspServer {
                         // Parser positions are 1-indexed; LSP is 0-indexed.
                         if f.meta.span.start_line > 0 || f.meta.span.start_col > 0 {
                             def_line = Some(f.meta.span.start_line.saturating_sub(1));
-                            def_col = Some(f.meta.span.start_col.saturating_sub(1));
+                            // AU-LSP-2: span columns are lexer char counts, but
+                            // the usage scan below yields byte offsets; normalize
+                            // to a byte offset within the definition line.
+                            def_col = def_line.and_then(|l| {
+                                lines.get(l).map(|line| {
+                                    crate::lsp::util::char_col_to_byte(
+                                        line,
+                                        f.meta.span.start_col.saturating_sub(1),
+                                    )
+                                })
+                            });
                             break;
                         }
                         def_line = text
@@ -709,51 +711,36 @@ impl LspServer {
             }
         }
 
-        // Add definition as Write highlight
+        // Add definition as Write highlight.
+        // AU-LSP-2: def_col is a byte offset; LSP needs UTF-16 units.
         if let (Some(dl), Some(dc)) = (def_line, def_col) {
+            let def_line_text = lines.get(dl).copied().unwrap_or("");
             highlights.push(serde_json::json!({
                 "range": {
-                    "start": { "line": dl, "character": dc },
-                    "end": { "line": dl, "character": dc + word.len() }
+                    "start": { "line": dl, "character": byte_col_to_utf16(def_line_text, dc) },
+                    "end": { "line": dl, "character": byte_col_to_utf16(def_line_text, dc + word.len()) }
                 },
                 "kind": 3 // Write
             }));
         }
 
-        // Find all usages as Text highlights
+        // Find all usages as Text highlights.
+        // AU-LSP-2: byte-safe whole-word scan (same fix as compute_references).
         for (i, line_text) in lines.iter().enumerate() {
-            let mut start = 0;
-            while let Some(pos) = line_text[start..].find(word.as_str()) {
-                let abs_pos = start + pos;
-                let before = abs_pos > 0
-                    && line_text
-                        .chars()
-                        .nth(abs_pos - 1)
-                        .map(|c| c.is_alphanumeric() || c == '_')
-                        .unwrap_or(false);
-                let after = line_text
-                    .chars()
-                    .nth(abs_pos + word.len())
-                    .map(|c| c.is_alphanumeric() || c == '_')
-                    .unwrap_or(false);
-
-                if !before && !after {
-                    // Skip definition location
-                    if let (Some(dl), Some(dc)) = (def_line, def_col) {
-                        if i == dl && dc == abs_pos {
-                            start = abs_pos + 1;
-                            continue;
-                        }
+            for abs_pos in crate::lsp::util::find_word_occurrences(line_text, word.as_str()) {
+                // Skip definition location
+                if let (Some(dl), Some(dc)) = (def_line, def_col) {
+                    if i == dl && dc == abs_pos {
+                        continue;
                     }
-                    highlights.push(serde_json::json!({
-                        "range": {
-                            "start": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos) },
-                            "end": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos + word.len()) }
-                        },
-                        "kind": 1 // Text
-                    }));
                 }
-                start = abs_pos + 1;
+                highlights.push(serde_json::json!({
+                    "range": {
+                        "start": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos) },
+                        "end": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos + word.len()) }
+                    },
+                    "kind": 1 // Text
+                }));
             }
         }
 

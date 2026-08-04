@@ -3,6 +3,11 @@ use std::path::Path;
 
 /// Compute a deterministic content-based checksum for a directory.
 /// Walks all files (sorted by path), hashes path + content with SHA-256 (P-H9).
+///
+/// Fail-closed on integrity (full-audit 2026-08-05 §13): if any file cannot be
+/// opened or read, this returns `Err` naming the offending path. Unreadable
+/// files are never silently skipped — a partial checksum would depend on local
+/// file permissions and silently diverge across machines for the "same" package.
 pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
     let mut entries: Vec<_> = Vec::new();
     collect_files(dir, dir, &mut entries).map_err(|e| format!("failed to read dir: {}", e))?;
@@ -16,29 +21,27 @@ pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
         stream.extend_from_slice(b"PATH\0");
         stream.extend_from_slice(rel_bytes.as_bytes());
         stream.extend_from_slice(b"\0DATA\0");
-        match std::fs::File::open(path) {
-            Ok(mut f) => {
-                let mut buf = Vec::new();
-                if let Err(e) = f.read_to_end(&mut buf) {
-                    eprintln!(
-                        "[mimi] warning: checksum skipping unreadable file {}: {}",
-                        path.display(),
-                        e
-                    );
-                } else {
-                    let len = (buf.len() as u64).to_le_bytes();
-                    stream.extend_from_slice(&len);
-                    stream.extend_from_slice(&buf);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "[mimi] warning: checksum skipping unopenable file {}: {}",
-                    path.display(),
-                    e
-                );
-            }
-        }
+        // Fail closed: unreadable file => integrity cannot be guaranteed.
+        let mut f = std::fs::File::open(path).map_err(|e| {
+            format!(
+                "checksum integrity error: cannot read file {}: {} \
+                 (refusing to record a partial checksum)",
+                path.display(),
+                e
+            )
+        })?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).map_err(|e| {
+            format!(
+                "checksum integrity error: failed to read file {}: {} \
+                 (refusing to record a partial checksum)",
+                path.display(),
+                e
+            )
+        })?;
+        let len = (buf.len() as u64).to_le_bytes();
+        stream.extend_from_slice(&len);
+        stream.extend_from_slice(&buf);
         stream.extend_from_slice(b"\0END\0");
     }
 

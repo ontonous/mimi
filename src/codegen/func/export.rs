@@ -145,6 +145,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.push_cap_scope();
         self.push_comp_scope();
+        // 0.34.36 (audit §6.5): the wrapper pops a shared scope at exit, so it
+        // must also push one — the old code popped the baseline/caller frame,
+        // silently dropping any later shared registrations (register_shared_var
+        // on an empty stack is a no-op).
+        self.push_shared_scope();
         self.push_heap_scope();
 
         let body_fn = self.module.get_function(body_name).ok_or_else(|| {
@@ -219,7 +224,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("export body returned void".into()))?;
 
-        if sret {
+        // Compute the C ABI result first; emit scope cleanup BEFORE the
+        // terminator. 0.34.36 (audit §6.5): the old order emitted
+        // pop_shared_scope/free_heap_allocs AFTER build_return — instructions
+        // appended behind a `ret` are dead (the heap temporaries leaked on
+        // every call) and the bookkeeping pops never guarded a live path.
+        let c_ret_val: Option<BasicValueEnum<'ctx>> = if sret {
             // Write the C-layout struct into the caller-provided buffer.
             let sret_ptr = function
                 .get_nth_param(0)
@@ -227,28 +237,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .into_pointer_value();
             let c_struct_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
             self.build_store(sret_ptr, c_struct_val)?;
-            self.build_return(None)?;
+            None
         } else if let Some((rname, _, SysVCoerce::Reg(coerce_ty))) = &ret_reprc {
             // Return the coerced eightbyte aggregate; LLVM splits it into the
             // SysV registers (rax/rdx for INTEGER, xmm0/xmm1 for SSE).
             let c_struct_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
             let c_sty = self.c_sty_for_reprc_record(rname)?;
-            let coerce_val = self.reinterpret_bytes(
+            Some(self.reinterpret_bytes(
                 c_struct_val,
                 BasicTypeEnum::StructType(c_sty),
                 *coerce_ty,
                 &format!("{}_cret_cast", rname),
-            )?;
-            self.build_return(Some(&coerce_val))?;
+            )?)
         } else {
-            let c_ret_val = self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?;
-            self.build_return(Some(&c_ret_val))?;
-        }
+            Some(self.convert_internal_ret_to_c(body_ret, func.ret.as_ref())?)
+        };
 
+        // Flush scopes while the entry block is still unterminated so the
+        // releases/frees are live.
         self.pop_shared_scope()?;
         self.free_heap_allocs()?;
         self.pop_comp_scope();
         self.pop_cap_scope();
+
+        match c_ret_val {
+            Some(v) => self.build_return(Some(&v))?,
+            None => self.build_return(None)?,
+        }
 
         Ok(())
     }

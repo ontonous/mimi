@@ -76,9 +76,148 @@ impl<'ctx> CodeGenerator<'ctx> {
         rhs: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // full-audit 2026-08-05 §7 (VERIFIED CRITICAL, L1): `and`/`or` were
+        // compiled eagerly — both sides evaluated, then bitwise build_and /
+        // build_or. The bytecode VM short-circuits (compile_short_circuit in
+        // interp/bytecode/compiler.rs), so eager lowering trapped on effects
+        // (e.g. div-by-zero) the VM never reaches and evaluated side effects
+        // on the skipped branch. Lower through the short-circuit machine.
+        if matches!(op, BinOp::And | BinOp::Or) {
+            return self.compile_short_circuit_expr(op, lhs, rhs, vars);
+        }
         let l = self.compile_expr(lhs, vars)?;
         let r = self.compile_expr(rhs, vars)?;
         self.compile_binop(op, l, r)
+    }
+
+    /// Short-circuit lowering for `and`/`or`, matching the bytecode VM
+    /// (`compile_short_circuit`, interp/bytecode/compiler.rs):
+    ///
+    /// - `l and r`: evaluate `l`; falsy → `false` without touching `r`;
+    ///   truthy → the value of `r` (evaluated only on this path).
+    /// - `l or r`: evaluate `l`; truthy → `true` without touching `r`;
+    ///   falsy → the value of `r`.
+    ///
+    /// The checker restricts `and`/`or` operands to bool (E0202); i64-bool
+    /// results from builtins (`contains` and friends) are normalized by
+    /// `coerce_condition_value`, which mirrors the VM's `is_truthy`.
+    fn compile_short_circuit_expr(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for short-circuit op".into())
+        })?;
+        let l = self.compile_expr(lhs, vars)?;
+        let cond = self.coerce_condition_value(l)?;
+
+        let rhs_bb = self.context.append_basic_block(function, "sc_rhs");
+        let const_bb = self.context.append_basic_block(function, "sc_const");
+        let merge_bb = self.context.append_basic_block(function, "sc_merge");
+
+        // and: truthy LHS → evaluate RHS; falsy LHS → constant false.
+        // or:  truthy LHS → constant true;  falsy LHS → evaluate RHS.
+        let (truthy_bb, falsy_bb) = match op {
+            BinOp::And => (rhs_bb, const_bb),
+            BinOp::Or => (const_bb, rhs_bb),
+            _ => return Err(format!("unsupported short-circuit operator {:?}", op).into()),
+        };
+        self.builder
+            .build_conditional_branch(cond, truthy_bb, falsy_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        // RHS arm — compiled ONLY on the branch that needs it.
+        self.builder.position_at_end(rhs_bb);
+        let r = self.compile_expr(rhs, vars)?;
+        let result_ty = r.get_type();
+        let rhs_reaches = !self.block_has_terminator();
+        if rhs_reaches {
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        }
+        let rhs_bb_end = rhs_reaches
+            .then(|| self.builder.get_insert_block())
+            .flatten();
+
+        // Constant arm: `false` for `and`, `true` for `or`, in the RHS
+        // value's own type so the merge phi is well-typed. The VM yields
+        // Value::Bool(false/true) here; for wider i64-bool RHS values the
+        // 0/1 constant is truthiness-equivalent.
+        self.builder.position_at_end(const_bb);
+        let const_val = self.short_circuit_const(op, result_ty)?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(result_ty, "sc_result")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        if let Some(bb) = rhs_bb_end {
+            phi.add_incoming(&[(&r as &dyn inkwell::values::BasicValue, bb)]);
+        }
+        phi.add_incoming(&[(&const_val as &dyn inkwell::values::BasicValue, const_bb)]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// The short-circuit result constant in the RHS value's type.
+    fn short_circuit_const(
+        &self,
+        op: BinOp,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let bit = match op {
+            BinOp::And => 0u64, // LHS falsy → false
+            BinOp::Or => 1u64,  // LHS truthy → true
+            _ => return Err(format!("unsupported short-circuit operator {:?}", op).into()),
+        };
+        match ty {
+            BasicTypeEnum::IntType(it) => Ok(it.const_int(bit, false).into()),
+            other => Err(CompileError::Generic(format!(
+                "'and'/'or' result must be boolean, got {}",
+                type_description(&other)
+            ))),
+        }
+    }
+
+    /// Coerce a value to an i1 branch condition, mirroring the bytecode VM's
+    /// `is_truthy` (interp/value.rs): bools pass through, integers are
+    /// `!= 0`, floats are `x != 0.0 && !isnan(x)` (ordered fcmp ONE against
+    /// 0.0 is exactly that — ordered comparisons are false on NaN).
+    fn coerce_condition_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<IntValue<'ctx>, CompileError> {
+        match val {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() == 1 {
+                    Ok(iv)
+                } else {
+                    // Some builtins (e.g. contains) return i64 for bool.
+                    let zero = iv.get_type().const_int(0, false);
+                    Ok(self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::NE, iv, zero, "truthy")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?)
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => {
+                let zero = fv.get_type().const_float(0.0);
+                Ok(self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::ONE, fv, zero, "truthy")
+                    .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?)
+            }
+            other => Err(CompileError::Generic(format!(
+                "'and'/'or' condition requires boolean, got {}",
+                type_description(&other.get_type())
+            ))),
+        }
     }
 
     pub(in crate::codegen) fn compile_unary_expr(
@@ -155,22 +294,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             UnOp::Deref => {
                 if let BasicValueEnum::PointerValue(ptr) = v {
-                    // Try to determine the pointee type from the inner expression's variable entry
+                    // full-audit 2026-08-05 §7: fail-closed pointee resolution.
+                    // The previous chain guessed i64 for every unknown pointee,
+                    // silently loading garbage for narrower/wider referents.
+                    // Derive the load type from tracked types only; anything
+                    // underivable is a compile error, never a guess.
                     let pointee_ty = match inner.unlocated() {
-                        Expr::Ident(name) => self
-                            .var_types
-                            .get(name)
-                            .and_then(|ty| self.llvm_type_for(ty))
-                            .or_else(|| {
-                                vars.get(name).map(|(_, ty)| match ty {
-                                    BasicTypeEnum::PointerType(_) => {
-                                        BasicTypeEnum::IntType(self.context.i64_type())
-                                    }
-                                    ty => *ty,
-                                })
-                            })
-                            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
-                        _ => BasicTypeEnum::IntType(self.context.i64_type()),
+                        Expr::Ident(name) => self.resolve_deref_pointee_type(name, vars)?,
+                        other => {
+                            return Err(CompileError::Unsupported(format!(
+                                "dereference of {:?} is unsupported in codegen: pointee type must be derivable from a tracked variable",
+                                other
+                            )));
+                        }
                     };
                     Ok(self.build_load(pointee_ty, ptr, "deref")?)
                 } else {
@@ -178,6 +314,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Err(format!("dereference requires pointer type, got {}", ty_desc).into())
                 }
             }
+        }
+    }
+
+    /// Derive the pointee type for `*name` without guessing
+    /// (full-audit 2026-08-05 §7, fail-closed):
+    ///
+    /// 1. `var_types` — borrow parameters register the POINTED-TO type
+    ///    (func.rs inserts the Ref/RefMut inner for `&T`/`&mut T` params);
+    ///    annotated local refs may carry the `Type::Ref(_, inner)` wrapper
+    ///    itself, so unwrap it before lowering.
+    /// 2. The variable's storage type when it is not itself a pointer.
+    /// 3. Pointer-typed slots with no tracked pointee keep the legacy i64
+    ///    slot convention: the corpus only reaches this arm for let-bound
+    ///    borrows of i64-width slots (list elements, i64 locals — see
+    ///    tests/real_world/ownership_cfg.mimi). A true fix needs VM-style
+    ///    borrow-alias tracking at the let-bind site (block.rs), which is
+    ///    outside this group's ownership — Wave-2 follow-up.
+    fn resolve_deref_pointee_type(
+        &self,
+        name: &str,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicTypeEnum<'ctx>, CompileError> {
+        if let Some(ast_ty) = self.var_types.get(name) {
+            let pointee_ast = match ast_ty.unlocated() {
+                Type::Ref(_, inner) | Type::RefMut(_, inner) => (**inner).clone(),
+                _ => ast_ty.clone(),
+            };
+            if let Some(ty) = self.llvm_type_for(&pointee_ast) {
+                return match ty {
+                    BasicTypeEnum::PointerType(_) => Err(CompileError::Generic(format!(
+                        "cannot dereference '{}': pointee type is itself a pointer \
+                         (double indirection has no derivable referent in codegen)",
+                        name
+                    ))),
+                    other => Ok(other),
+                };
+            }
+        }
+        match vars.get(name).copied() {
+            Some((_, BasicTypeEnum::PointerType(_))) => {
+                Ok(BasicTypeEnum::IntType(self.context.i64_type()))
+            }
+            Some((_, ty)) => Ok(ty),
+            None => Err(CompileError::Generic(format!(
+                "cannot dereference '{}': pointee type is unknown and codegen never guesses",
+                name
+            ))),
         }
     }
 
@@ -744,18 +927,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     ///
     /// SD-9 (0.31.51b): finiteness invariant — result must not be NaN or Inf.
     /// Matches interpreter behavior (interp/ops.rs:27 traps on NaN/Inf, E0813).
-    /// `ieee_float { }` escape hatch deferred to post-0.31.51b.
+    /// The `**` operator routes through the same guard via `check_float_finite`
+    /// (full-audit 2026-08-05 §7).
     fn compile_float_binop(
         &mut self,
         op: BinOp,
         l: FloatValue<'ctx>,
         r: FloatValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let f64_ty = l.get_type();
-        let function = self
-            .current_function()
-            .ok_or_else(|| CompileError::LlvmError("no current function for float binop".into()))?;
-
         let res = match op {
             BinOp::Add => self.builder.build_float_add(l, r, "fadd"),
             BinOp::Sub => self.builder.build_float_sub(l, r, "fsub"),
@@ -766,11 +945,40 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result =
             res.map_err(|e| CompileError::LlvmError(format!("{} error: {}", op_name(op), e)))?;
 
-        // v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant
-        // is suspended — IEEE 754 NaN/Inf are legitimate there.
+        let op_label = match op {
+            BinOp::Add => "addition",
+            BinOp::Sub => "subtraction",
+            BinOp::Mul => "multiplication",
+            BinOp::Div => "division",
+            _ => "operation",
+        };
+        self.check_float_finite(result, op_label)?;
+        Ok(result.into())
+    }
+
+    /// SD-9 finiteness guard shared by all float result producers (basic
+    /// arithmetic and `**`). Traps E0813 when the result is NaN or Inf.
+    ///
+    /// v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant is
+    /// suspended — IEEE 754 NaN/Inf are legitimate there, so the value passes
+    /// through untouched (`check_float` in the bytecode VM honors the same
+    /// per-frame `ieee_depth`).
+    ///
+    /// full-audit 2026-08-05 §7 (HIGH): float `**` previously returned the
+    /// raw `llvm.pow.f64` result and bypassed this guard entirely
+    /// ((-1.0)**0.5 produced a silent NaN instead of E0813).
+    pub(in crate::codegen) fn check_float_finite(
+        &mut self,
+        result: FloatValue<'ctx>,
+        op_name_str: &str,
+    ) -> Result<(), CompileError> {
         if self.ieee_depth > 0 {
-            return Ok(result.into());
+            return Ok(());
         }
+        let f64_ty = result.get_type();
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for float finiteness check".into())
+        })?;
 
         // SD-9: Check for NaN (unordered comparison with self) and Inf.
         // NaN: fcmp uno x, x → true only for NaN.
@@ -821,13 +1029,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.emit_panic_fault_return("E0813")?;
         } else {
             let trap_fn = self.get_runtime_fn("mimi_trap_float_not_finite")?;
-            let op_name_str = match op {
-                BinOp::Add => "addition",
-                BinOp::Sub => "subtraction",
-                BinOp::Mul => "multiplication",
-                BinOp::Div => "division",
-                _ => "operation",
-            };
             let op_cstr = self
                 .builder
                 .build_global_string_ptr(op_name_str, "float_op_name")
@@ -848,7 +1049,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // OK block.
         self.builder.position_at_end(ok_bb);
-        Ok(result.into())
+        Ok(())
     }
 
     /// Integer remainder (`%`).
@@ -1075,7 +1276,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Power operator (`**`).
     fn compile_pow_binop(
-        &self,
+        &mut self,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
@@ -1122,11 +1323,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
-                let pow_fn = self.get_runtime_fn("llvm.pow.f64")?;
-                Ok(self
+                // Central fix 2026-08-05: `llvm.pow.f64` is an LLVM intrinsic,
+                // NOT a runtime symbol — get_runtime_fn() failed to resolve it
+                // ("llvm.pow.f64 not declared"). Use libc `pow` exactly like
+                // builtins/math.rs compile_pow does.
+                let f64_ty = self.context.f64_type();
+                let pow_fn = self.module.get_function("pow").unwrap_or_else(|| {
+                    let ty = f64_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::FloatType(f64_ty),
+                            BasicMetadataTypeEnum::FloatType(f64_ty),
+                        ],
+                        false,
+                    );
+                    self.module
+                        .add_function("pow", ty, Some(inkwell::module::Linkage::External))
+                });
+                let result = self
                     .build_call(pow_fn, &[l.into(), r.into()], "pow_f64")?
                     .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("pow returned void".into()))?)
+                    .ok_or_else(|| CompileError::LlvmError("pow returned void".into()))?
+                    .into_float_value();
+                // full-audit 2026-08-05 §7 (HIGH) / SD-9: `**` must honor the
+                // finiteness invariant like every other float result —
+                // (-1.0)**0.5 is NaN and must trap E0813 outside
+                // `ieee_float { }` (matches Op::PowFloat in the bytecode VM).
+                self.check_float_finite(result, "power")?;
+                Ok(result.into())
             }
             _ => Err("pow requires matching numeric types".into()),
         }

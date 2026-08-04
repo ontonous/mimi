@@ -485,6 +485,9 @@ impl<'a> ResolvedCfgLowerer<'a> {
             ResolvedExprKind::Match { scrutinee, arms } => {
                 self.lower_match(expression, scrutinee, arms, current, point_kind)
             }
+            ResolvedExprKind::Try { value, .. } => {
+                self.lower_try(expression, value, current, point_kind)
+            }
             ResolvedExprKind::Block(block)
             | ResolvedExprKind::Scope { body: block, .. }
             | ResolvedExprKind::Comptime(block)
@@ -578,7 +581,6 @@ impl<'a> ResolvedCfgLowerer<'a> {
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::TypeOf(operand)
             | ResolvedExprKind::Old(operand)
-            | ResolvedExprKind::Try { value: operand, .. }
             | ResolvedExprKind::Cast { value: operand, .. }
             | ResolvedExprKind::Spawn(operand)
             | ResolvedExprKind::Await(operand) => lower!(operand),
@@ -643,6 +645,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
             | ResolvedExprKind::Comptime(_)
             | ResolvedExprKind::If { .. }
             | ResolvedExprKind::Match { .. }
+            | ResolvedExprKind::Try { .. }
             | ResolvedExprKind::Quote(_) => {
                 unreachable!("control expressions are lowered before their child dispatcher")
             }
@@ -800,6 +803,71 @@ impl<'a> ResolvedCfgLowerer<'a> {
             PointAccesses::default(),
         );
         Some(join)
+    }
+
+    /// Audit 2026-08-05 (wave-1 fix 4): lower `?` as a two-edge construct.
+    /// Both backends implement `?`'s error path as a real early RETURN of the
+    /// error value, but `Try` used to lower as an ordinary expression point —
+    /// linear values still live at the `?` were invisible on the error path
+    /// and leaked silently (E0429 only guards transition bodies, and only at
+    /// the checker level). Mirror `lower_if`: evaluate the fallible value,
+    /// then fork. The ok-edge continues with the unwrapped value; the error
+    /// edge reaches a block terminated by an implicit Return so
+    /// `validate_return_resources` observes live linear facts and reports
+    /// E0256 instead of accepting the leak.
+    fn lower_try(
+        &mut self,
+        expression: &ResolvedExpr,
+        value: &ResolvedExpr,
+        current: BasicBlockId,
+        point_kind: CfgPointKind,
+    ) -> Option<BasicBlockId> {
+        let value_end = self.lower_expr(value, current, CfgPointKind::Expression)?;
+        // The `?` point itself, after which control forks.
+        self.point(
+            &value_end,
+            &expression.node_id,
+            &expression.origin,
+            point_kind,
+            PointAccesses::default(),
+        );
+        let ok_block = self.new_block(&expression.node_id, &expression.origin, "try-ok");
+        let err_block = self.new_block(&expression.node_id, &expression.origin, "try-err-return");
+        let ok_edge = self.edge(
+            &value_end,
+            &ok_block,
+            EdgeKind::Then,
+            &expression.node_id,
+            &expression.origin,
+            "try-ok",
+        );
+        let err_edge = self.edge(
+            &value_end,
+            &err_block,
+            EdgeKind::Else,
+            &expression.node_id,
+            &expression.origin,
+            "try-err",
+        );
+        self.terminate(
+            &value_end,
+            Terminator::Branch {
+                condition: value.node_id.clone(),
+                then_edge: ok_edge,
+                else_edge: err_edge,
+            },
+        );
+        // The backend-accurate error path: return the propagated error. The
+        // value node belongs to the enclosing function's raw AST, not to the
+        // resource facts, so `value: None` is the correct canonical shape.
+        self.terminate(
+            &err_block,
+            Terminator::Return {
+                value: None,
+                implicit: true,
+            },
+        );
+        Some(ok_block)
     }
 
     fn lower_conditional_loop(

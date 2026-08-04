@@ -23,6 +23,18 @@
 //! The `extern "C"` entry points have direct Rust-path callers in
 //! `interp/builtins/concurrency.rs` and `interp/builtins/session.rs`,
 //! re-exported from `mod.rs` via `pub use concurrency::*`.
+//!
+//! # Thread-confinement invariant for mutex guards (ABI contract)
+//!
+//! A guard handle returned by `mimi_mutex_lock` is stored in the CALLING
+//! thread's thread-local registry (`MIMI_MUTEX_GUARDS`) and is valid ONLY on
+//! that thread, until `mimi_mutex_unlock` consumes it. Passing a guard
+//! handle to `mimi_mutex_get`/`mimi_mutex_set`/`mimi_mutex_unlock` from a
+//! different thread — or reusing it after it was unlocked — aborts loudly
+//! via `mimi_runtime_abort` (2026-08-05 audit: the old code silently
+//! returned 0 / no-op'd, letting cross-thread misuse masquerade as a
+//! legitimate value). The mutex HANDLE (`mimi_mutex_new`), in contrast, is
+//! global and may be locked from any thread.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -303,6 +315,10 @@ pub extern "C" fn mimi_mutex_new(value: i64) -> i64 {
 /// must be passed to `mimi_mutex_get`/`set` to read/write the held value, and
 /// to `mimi_mutex_unlock` to release the lock. The lock is held continuously
 /// between lock/get/set/unlock, providing real mutual exclusion across threads.
+///
+/// THREAD CONFINEMENT: the returned guard handle lives in this thread's
+/// thread-local registry and may only be used by this thread (see module
+/// docs). Cross-thread or post-unlock use of the guard handle aborts loudly.
 #[no_mangle]
 pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
     let arc = {
@@ -338,29 +354,50 @@ pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_get(guard_handle: i64) -> i64 {
-    MIMI_MUTEX_GUARDS.with(|guards| {
-        guards
-            .borrow()
-            .get(&(guard_handle as u64))
-            .map(|held| *held.guard)
-            .unwrap_or(0)
+    // Audit fix (concurrency.rs:340-357): a guard handle missing from the
+    // calling thread's registry means cross-thread use (guards are
+    // thread-confined) or use after unlock. The old code silently returned 0;
+    // fail loud instead.
+    MIMI_MUTEX_GUARDS.with(|guards| match guards.borrow().get(&(guard_handle as u64)) {
+        Some(held) => *held.guard,
+        None => super::mimi_runtime_abort(
+            b"mimi_mutex_get: mutex guard used across threads or after unlock\0".as_ptr()
+                as *const std::ffi::c_char,
+        ),
     })
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_set(guard_handle: i64, value: i64) {
-    MIMI_MUTEX_GUARDS.with(|guards| {
-        if let Some(held) = guards.borrow_mut().get_mut(&(guard_handle as u64)) {
-            *held.guard = value;
-        }
-    });
+    // Audit fix (concurrency.rs:340-357): see mimi_mutex_get — the old code
+    // silently no-op'd for a missing guard handle; fail loud instead.
+    MIMI_MUTEX_GUARDS.with(
+        |guards| match guards.borrow_mut().get_mut(&(guard_handle as u64)) {
+            Some(held) => {
+                *held.guard = value;
+            }
+            None => super::mimi_runtime_abort(
+                b"mimi_mutex_set: mutex guard used across threads or after unlock\0".as_ptr()
+                    as *const std::ffi::c_char,
+            ),
+        },
+    );
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_unlock(guard_handle: i64) {
+    // Audit fix (concurrency.rs:340-357): see mimi_mutex_get — unlocking an
+    // unknown guard (other thread / already unlocked) used to silently
+    // no-op, leaving the mutex held forever; fail loud instead.
     MIMI_MUTEX_GUARDS.with(|guards| {
         // Removing the entry drops the `MutexGuard`, releasing the OS lock.
-        guards.borrow_mut().remove(&(guard_handle as u64));
+        match guards.borrow_mut().remove(&(guard_handle as u64)) {
+            Some(_guard) => {}
+            None => super::mimi_runtime_abort(
+                b"mimi_mutex_unlock: mutex guard used across threads or after unlock\0".as_ptr()
+                    as *const std::ffi::c_char,
+            ),
+        }
     });
 }
 

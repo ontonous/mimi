@@ -544,6 +544,17 @@ pub enum Op {
         ra: Reg,
         rb: Reg,
     },
+    /// rd = list(ra).pop() — IN-PLACE mutation of the caller's list binding
+    /// with write-back semantics (ruling (a), audit fix #14). Removes and
+    /// returns the last element; traps on empty (E0803-flavored message).
+    /// Mirrors Op::ListPush's register-mutating special case: the builtin
+    /// `pop` clones (value semantics) and cannot write back through a cloned
+    /// argument, so the compiler emits this op for `pop(var)` on a known
+    /// local variable (see compiler.rs compile_call special case).
+    ListPop {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = ra[rb] (list index; rb is Int)
     ListGet {
         rd: Reg,

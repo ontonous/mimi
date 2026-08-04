@@ -99,6 +99,16 @@ pub fn generate_c_header(ir: &ComponentIr) -> String {
     out.push_str("#include <stdbool.h>\n");
     out.push_str("#include <stddef.h>\n\n");
 
+    // Audit 2026-08-05 (full audit §12): opaque handle parameters render as
+    // `MimiHandle/* Name */` (types.rs `AbiTypeRef::Opaque::c_type_name`),
+    // but no `MimiHandle` typedef was ever emitted — generated headers did
+    // not compile. Emit the typedef once, in the preamble, before any
+    // declaration that can reference it.
+    out.push_str(
+        "/* Opaque handle representation used by all Opaque type refs.\n   Pointer-sized identity token; never dereference. */\n",
+    );
+    out.push_str("typedef uintptr_t MimiHandle;\n\n");
+
     out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
     // ── Type definitions ──
@@ -261,22 +271,30 @@ mod tests {
     }
 
     #[test]
-    fn c_header_contains_struct_defs() {
+    fn c_header_emits_mimi_handle_typedef() {
+        // Audit fix 2026-08-05: Opaque params render as `MimiHandle/* Name */`,
+        // so the header must define MimiHandle or it does not compile.
         let mut gen = AbiGenerator::new();
         register_core_runtime_abi(&mut gen);
         let ir = gen.build();
         let header = generate_c_header(&ir);
 
-        // MimiString struct
-        assert!(header.contains("typedef struct MimiString {"));
-        assert!(header.contains("uint8_t* data;"));
-        assert!(header.contains("uintptr_t len;"));
-        assert!(header.contains("uintptr_t capacity;"));
-        assert!(header.contains("} MimiString;"));
-
-        // MimiSlice struct
-        assert!(header.contains("typedef struct MimiSlice {"));
-        assert!(header.contains("} MimiSlice;"));
+        assert!(
+            header.contains("typedef uintptr_t MimiHandle;"),
+            "header must typedef MimiHandle"
+        );
+        // The typedef must precede the first declaration that uses it
+        // (mimi_list_push_i64 takes a ListHandle → MimiHandle).
+        let typedef_pos = header
+            .find("typedef uintptr_t MimiHandle;")
+            .expect("typedef present");
+        let use_pos = header
+            .find("MimiHandle/* ListHandle */")
+            .expect("opaque rendering present");
+        assert!(
+            typedef_pos < use_pos,
+            "MimiHandle typedef must precede its first use"
+        );
     }
 
     #[test]
@@ -288,10 +306,19 @@ mod tests {
 
         assert!(header.contains("typedef uintptr_t ListHandle;"));
         assert!(header.contains("typedef uintptr_t MapHandle;"));
-        assert!(header.contains("typedef uintptr_t SetHandle;"));
         assert!(header.contains("typedef uintptr_t ActorHandle;"));
         assert!(header.contains("typedef uintptr_t FutureHandle;"));
+        // Audit 2026-08-05: SetHandle is `i64` in the real runtime — no
+        // opaque typedef for it.
+        assert!(!header.contains("typedef uintptr_t SetHandle;"));
+        // Audit 2026-08-05: phantom MimiString/MimiSlice structs removed.
+        assert!(!header.contains("typedef struct MimiString"));
+        assert!(!header.contains("typedef struct MimiSlice"));
     }
+
+    #[test]
+
+    #[test]
 
     #[test]
     fn c_header_contains_function_decls() {
@@ -300,11 +327,32 @@ mod tests {
         let ir = gen.build();
         let header = generate_c_header(&ir);
 
-        assert!(header.contains("intptr_t mimi_rc_alloc(uintptr_t size);"));
-        assert!(header.contains("void mimi_rc_retain(intptr_t ptr);"));
-        // handle("ListHandle") → MimiHandle/* ListHandle */ in C
-        assert!(header.contains("MimiHandle/* ListHandle */ mimi_list_new(void);"));
-        assert!(header.contains("int64_t mimi_timestamp(void);"));
+        // real: intptr_t is wrong — mimi_rc_alloc returns *mut c_void
+        assert!(header.contains("uint8_t* mimi_rc_alloc(int64_t size);"));
+        assert!(header.contains("void mimi_rc_retain(uint8_t* ptr);"));
+        // handle("ListHandle") → MimiHandle/* ListHandle */ in C.
+        // Audit fix 2026-08-05: mimi_list_new was phantom and removed;
+        // mimi_list_push_i64 is real (list, element: i64).
+        // Multi-parameter decls render one param per line — pin head + params.
+        assert!(header.contains("void mimi_list_push_i64(MimiHandle/* ListHandle */ list,"));
+        assert!(header.contains("int64_t element"));
+        assert!(header.contains("int64_t mimi_now(void);"));
+        // Corrected real signature (capability.rs:34): (name) -> i64
+        assert!(header.contains("int64_t mimi_cap_register(uint8_t* name);"));
+        // Corrected real signature (capability.rs:69): (cap i64, name) -> bool
+        // Multi-parameter decls render one param per line.
+        assert!(header.contains("bool mimi_cap_check(int64_t cap,"));
+        assert!(header.contains("uint8_t* name);"));
+        // Corrected real signature (net.rs:192):
+        // (fd, buf_size i64, out_len *mut i64) -> *mut c_char
+        assert!(header.contains(
+            "uint8_t* mimi_recv(\n    int64_t fd,\n    int64_t buf_size,\n    int64_t* out_len\n);"
+        ));
+        // Phantom symbols must not appear as declarations.
+        assert!(!header.contains("mimi_list_new("));
+        assert!(!header.contains("mimi_print_line("));
+        assert!(!header.contains("mimi_sleep_ms("));
+        assert!(!header.contains("mimi_string_new("));
     }
 
     #[test]
@@ -374,7 +422,8 @@ mod tests {
         let ir = gen.build();
         let header = generate_c_header(&ir);
 
-        // mimi_str_format has 5 params → should be multi-line
+        // mimi_str_format has 10 params (real signature, crypto.rs:256)
+        // → multi-line rendering
         assert!(header.contains("uint8_t* mimi_str_format(\n"));
     }
 

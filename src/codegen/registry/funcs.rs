@@ -193,29 +193,32 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// G1b: Get or create a callback thunk for a given callback signature.
+    /// G1b: Create a callback thunk for one FFI callback call site.
     /// The thunk is a small LLVM function that:
-    ///     1. Reads fn_ptr and env_ptr from module-level globals
+    ///     1. Reads fn_ptr and env_ptr from module-level TLS globals
     ///     2. Calls fn_ptr(env_ptr, args...) with the correct C calling convention
     /// Returns the thunk function value and its two global slots.
+    ///
+    /// 0.34.36 (audit §6.10): a FRESH thunk + TLS slot pair is allocated for
+    /// EVERY call site — never cached by signature. The former per-signature
+    /// cache shared one fn_ptr/env_ptr TLS pair across all same-signature
+    /// closures: two closures passed as two callback args of one call
+    /// overwrote each other's slots, and a nested FFI call re-entering with
+    /// the same signature clobbered the outer call's live callback. TLS keeps
+    /// distinct threads apart; per-call-site globals keep same-thread call
+    /// sites apart (mirrors the read_lines_each pattern,
+    /// expr/call/simple.rs:7127). The fingerprint is retained as the map key
+    /// for observability only.
     pub(in crate::codegen) fn get_or_create_callback_thunk(
         &mut self,
         cb_params: &[crate::ast::Type],
         cb_ret: &crate::ast::Type,
     ) -> MimiResult<CallbackThunkEntry<'ctx>> {
-        // Build fingerprint from signature
+        // Build fingerprint from signature (bookkeeping key only — see above:
+        // no cache lookup, each call site gets unique TLS slots).
         let ret_str = format!("{:?}", cb_ret);
         let params_str: Vec<String> = cb_params.iter().map(|t| format!("{:?}", t)).collect();
         let fingerprint = format!("{}_{}", ret_str, params_str.join("_"));
-
-        // Check cache
-        if let Some(entry) = self.callback_thunks.get(&fingerprint) {
-            return Ok(CallbackThunkEntry {
-                thunk_fn: entry.thunk_fn,
-                fn_ptr_global: entry.fn_ptr_global,
-                env_ptr_global: entry.env_ptr_global,
-            });
-        }
 
         let _i8_type = self.context.i8_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());

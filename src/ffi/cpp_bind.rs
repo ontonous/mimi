@@ -40,6 +40,7 @@ impl CppBindGenerator {
         writeln!(out)?;
         writeln!(out, "#include <cstdint>")?;
         writeln!(out, "#include <cstring>")?;
+        writeln!(out, "#include <cstdlib>")?;
         writeln!(out, "#include <string>")?;
         writeln!(out, "#include <stdexcept>")?;
         writeln!(out, "#include <functional>")?;
@@ -52,13 +53,34 @@ impl CppBindGenerator {
         writeln!(out)?;
 
         // RAII string wrapper
-        writeln!(out, "/// RAII wrapper for Mimi heap-allocated C strings.")?;
-        writeln!(out, "class MimiString {{")?;
-        writeln!(out, "public:")?;
-        writeln!(out, "    explicit MimiString(char* raw) : data_(raw) {{}}")?;
+        //
+        // FFI contract (src/ffi/contract.rs): FfiRetContract::String is BORROWED
+        // from C — the wrapper must NOT free it. StringOwned (and Json returns)
+        // transfer ownership to the Mimi side — the wrapper frees via
+        // mimi_string_free. Reference behavior: interp/ffi_runtime.rs
+        // ffi_ret_to_value (String: copy, no free; StringOwned: copy + libc::free).
+        writeln!(out, "/// RAII wrapper for Mimi C strings.")?;
         writeln!(
             out,
-            "    ~MimiString() {{ if (data_) mimi_string_free(data_); }}"
+            "/// Owned strings (StringOwned contract) are freed via mimi_string_free;"
+        )?;
+        writeln!(
+            out,
+            "/// borrowed strings (String contract) are NOT freed — C retains ownership."
+        )?;
+        writeln!(out, "class MimiString {{")?;
+        writeln!(out, "public:")?;
+        writeln!(
+            out,
+            "    explicit MimiString(char* raw) : data_(raw), owned_(true) {{}}"
+        )?;
+        writeln!(
+            out,
+            "    MimiString(char* raw, bool owned) : data_(raw), owned_(owned) {{}}"
+        )?;
+        writeln!(
+            out,
+            "    ~MimiString() {{ if (data_ && owned_) mimi_string_free(data_); }}"
         )?;
         writeln!(out, "    MimiString(const MimiString&) = delete;")?;
         writeln!(
@@ -67,10 +89,10 @@ impl CppBindGenerator {
         )?;
         writeln!(
             out,
-            "    MimiString(MimiString&& o) noexcept : data_(o.data_) {{ o.data_ = nullptr; }}"
+            "    MimiString(MimiString&& o) noexcept : data_(o.data_), owned_(o.owned_) {{ o.data_ = nullptr; o.owned_ = false; }}"
         )?;
         writeln!(out, "    MimiString& operator=(MimiString&& o) noexcept {{")?;
-        writeln!(out, "        if (this != &o) {{ if (data_) mimi_string_free(data_); data_ = o.data_; o.data_ = nullptr; }}")?;
+        writeln!(out, "        if (this != &o) {{ if (data_ && owned_) mimi_string_free(data_); data_ = o.data_; owned_ = o.owned_; o.data_ = nullptr; o.owned_ = false; }}")?;
         writeln!(out, "        return *this;")?;
         writeln!(out, "    }}")?;
         writeln!(
@@ -85,8 +107,10 @@ impl CppBindGenerator {
             out,
             "    explicit operator bool() const {{ return data_ != nullptr; }}"
         )?;
+        writeln!(out, "    bool owned() const {{ return owned_; }}")?;
         writeln!(out, "private:")?;
         writeln!(out, "    char* data_;")?;
+        writeln!(out, "    bool owned_;")?;
         writeln!(out, "}};")?;
         writeln!(out)?;
 
@@ -201,13 +225,60 @@ impl CppBindGenerator {
                     )?;
                     c_args.push(format!("{}_cstr", p.name));
                 }
-                FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                FfiArgContract::StringTransfer => {
+                    // Contract: ownership of the buffer transfers to C (C must
+                    // free(3) it). Hand over a malloc'd copy — never pass the
+                    // std::string's temporary buffer (it dies when the wrapper
+                    // returns → C-side UAF) and never free it after the call.
+                    // Mirrors interp/ffi_runtime.rs StringTransfer marshalling
+                    // (libc::malloc copy, no free after the call).
+                    writeln!(
+                        conversions,
+                        "        // StringTransfer: ownership moves to C — pass a malloc'd copy, do NOT free it after the call.",
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        char* {}_cstr = static_cast<char*>(std::malloc({}.size() + 1));",
+                        p.name, p.name
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        if (!{}_cstr) throw std::runtime_error(\"mimi FFI: malloc failed for StringTransfer argument '{}'\");",
+                        p.name, p.name
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        std::memcpy({}_cstr, {}.c_str(), {}.size());",
+                        p.name, p.name, p.name
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        {}_cstr[{}.size()] = '\\0';",
+                        p.name, p.name
+                    )?;
+                    c_args.push(format!("{}_cstr", p.name));
+                }
+                FfiArgContract::Json => {
+                    // JSON is borrowed by C for the duration of the call only;
+                    // the std::string buffer stays alive throughout the call.
                     writeln!(
                         conversions,
                         "        auto {}_cstr = {}.c_str();",
                         p.name, p.name
                     )?;
                     c_args.push(format!("{}_cstr", p.name));
+                }
+                FfiArgContract::Unsupported(ref ty) => {
+                    // Fail closed: the checker rejects unsupported FFI argument
+                    // types; if one still reaches the generated binding, raise
+                    // an error instead of silently passing the value through.
+                    writeln!(
+                        conversions,
+                        "        throw std::runtime_error(\"mimi FFI: unsupported argument type '{}' for parameter '{}'\");",
+                        escape_c_string(ty),
+                        escape_c_string(&p.name)
+                    )?;
+                    c_args.push(format!("static_cast<void*>({})", p.name));
                 }
                 FfiArgContract::Callback { .. } => {
                     let slot = format!("{}_{}_cb", func.name, p.name);
@@ -236,17 +307,60 @@ impl CppBindGenerator {
 
         // Use :: prefix to call C functions (avoids recursion with same-named wrappers)
         match &contract.ret {
-            crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned => {
+            crate::ffi::contract::FfiRetContract::String => {
+                // FfiRetContract::String is BORROWED from C — Mimi must NOT free
+                // it (contract.rs). Freeing a borrowed pointer is heap corruption.
                 writeln!(
                     out,
-                    "        MimiString mimi_ret(::{}({}));",
+                    "        MimiString mimi_ret(::{}({}), false); // borrowed from C: do NOT free",
                     func.name,
                     c_args.join(", ")
                 )?;
             }
+            crate::ffi::contract::FfiRetContract::StringOwned => {
+                // Ownership transfers to the Mimi side — freed by ~MimiString().
+                writeln!(
+                    out,
+                    "        MimiString mimi_ret(::{}({})); // owned: freed by ~MimiString()",
+                    func.name,
+                    c_args.join(", ")
+                )?;
+            }
+            crate::ffi::contract::FfiRetContract::Json => {
+                // Json returns are owned: Mimi frees the C string after copying
+                // (mirrors interp/ffi_runtime.rs FfiRetContract::Json).
+                writeln!(
+                    out,
+                    "        char* mimi_json_raw = ::{}({});",
+                    func.name,
+                    c_args.join(", ")
+                )?;
+                writeln!(
+                    out,
+                    "        std::string mimi_ret(mimi_json_raw ? mimi_json_raw : \"\");"
+                )?;
+                writeln!(
+                    out,
+                    "        if (mimi_json_raw) mimi_string_free(mimi_json_raw); // Json contract: owned, Mimi frees"
+                )?;
+            }
             crate::ffi::contract::FfiRetContract::Unit => {
                 writeln!(out, "        ::{}({});", func.name, c_args.join(", "))?;
+            }
+            crate::ffi::contract::FfiRetContract::Unsupported(ty) => {
+                // Fail closed instead of pretending the call succeeded.
+                writeln!(
+                    out,
+                    "        throw std::runtime_error(\"mimi FFI: unsupported return type '{}'\");",
+                    escape_c_string(ty)
+                )?;
+                writeln!(
+                    out,
+                    "        {} mimi_ret = ::{}({}); // unreachable",
+                    ret_cpp,
+                    func.name,
+                    c_args.join(", ")
+                )?;
             }
             _ => {
                 writeln!(
@@ -285,11 +399,17 @@ impl CppBindGenerator {
                 crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
             },
             FfiArgContract::Float => "double".to_string(),
-            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
-                "const char*".to_string()
-            }
+            FfiArgContract::StringBorrow => "const char*".to_string(),
+            // C header declares raw_string parameters as `char*` (ownership
+            // transferred to C) — keep the cast type consistent.
+            FfiArgContract::StringTransfer => "char*".to_string(),
             FfiArgContract::Cap(_) => "int64_t".to_string(),
-            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
+            // Mirror the C header ABI (c_header.rs contract_arg_to_c_type):
+            // raw pointers cross as typed pointers, so the emitted static_cast
+            // targets the exact parameter type of the extern function.
+            FfiArgContract::RawPtr(inner) | FfiArgContract::RawPtrMut(inner) => {
+                self.c_ptr_type(inner)
+            }
             FfiArgContract::CShared(_)
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
@@ -403,7 +523,8 @@ impl CppBindGenerator {
 
     fn mimi_type_to_c_type(&self, ty: &Type) -> String {
         // Use the original Mimi scalar widths so generated C function-pointer
-        // types match the ABI of the compiled extern function.
+        // types match the ABI of the compiled extern function (mirrors
+        // c_header.rs mimi_type_to_c_type, including known record names).
         match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int32_t".to_string(),
@@ -411,11 +532,43 @@ impl CppBindGenerator {
                 "f64" => "double".to_string(),
                 "bool" => "bool".to_string(),
                 "unit" => "void".to_string(),
-                _ => "int64_t".to_string(),
+                other => {
+                    if self.type_defs.contains_key(other) {
+                        other.to_string()
+                    } else {
+                        "int64_t".to_string()
+                    }
+                }
             },
+            Type::RawPtr(inner) | Type::RawPtrMut(inner) => self.c_ptr_type(inner),
             _ => "int64_t".to_string(),
         }
     }
+
+    /// C type of a pointer to `inner` (mirrors c_header.rs RawPtr lowering).
+    fn c_ptr_type(&self, inner: &Type) -> String {
+        match inner.unlocated() {
+            Type::Name(name, _) if name == "unit" => "void*".to_string(),
+            _ => format!("{}*", self.mimi_type_to_c_type(inner)),
+        }
+    }
+}
+
+/// Escape a string for embedding in an emitted C/C++ string literal.
+fn escape_c_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn sanitize_cpp_ns(name: &str) -> String {

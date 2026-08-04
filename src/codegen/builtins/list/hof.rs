@@ -1,5 +1,6 @@
-use crate::codegen::CodeGenerator;
+use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::error::{CompileError, MimiResult};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -7,6 +8,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        // Audit fix 8 (full-audit-2026-08-05): the accumulation is CHECKED —
+        // SD-7 / VM parity: interp/bytecode/builtins/list.rs builtin_sum uses
+        // `checked_add` and errors with the exact message "sum overflow"
+        // (no silent wrap). The accumulator stays i64, matching the int path
+        // of the VM implementation.
+        //
+        // TODO(#audit-wave2): element-type dispatch for List<f64>. Codegen
+        // list slots are type-erased i64 (f64 rides in via bitcast) and this
+        // builtin receives no element-type channel — the call-site pending
+        // flags live in expr/call/simple.rs (push/len/to_string style),
+        // outside this fix's file ownership. Until such a channel exists,
+        // sum(List<f64>) still misreads f64 bit patterns here; the VM path
+        // is correct and covered by tests. Mirror then: float accumulator
+        // with the SD-9 finiteness gate (skipped under ieee_depth > 0) plus
+        // the VM's int+float promotion (float_sum + int_sum at the end).
         if args.len() != 1 {
             return Err(CompileError::WrongArgCount(
                 "sum expects 1 argument (list)".to_string(),
@@ -69,10 +85,84 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, sum_alloca, "sum")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
+        // SD-7 checked add: {i64, i1} @llvm.sadd.with.overflow.i64 — same
+        // intrinsic pattern as compile_int_binop (expr/operator.rs).
+        let saddle_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(self.context.bool_type()),
+            ],
+            false,
+        );
+        let saddle_fn = self
+            .module
+            .get_function("llvm.sadd.with.overflow.i64")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "llvm.sadd.with.overflow.i64",
+                    saddle_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let saddle_call = self
+            .builder
+            .build_call(
+                saddle_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(sum),
+                    BasicMetadataValueEnum::IntValue(elem),
+                ],
+                "sum_checked",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("sadd.with.overflow error: {}", e)))?;
+        let saddle_val = saddle_call
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("sadd.with.overflow returned void".to_string()))?
+            .into_struct_value();
         let new_sum = self
             .builder
-            .build_int_add(sum, elem, "new_sum")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+            .build_extract_value(saddle_val, 0, "sum_result")
+            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+            .into_int_value();
+        let overflow = self
+            .builder
+            .build_extract_value(saddle_val, 1, "sum_overflow")
+            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+            .into_int_value();
+        let sum_ok_bb = self.context.append_basic_block(function, "sum_ok");
+        let sum_ovf_bb = self
+            .context
+            .append_basic_block(function, "sum_overflow_trap");
+        self.builder
+            .build_conditional_branch(overflow, sum_ovf_bb, sum_ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        // Trap block: VM-exact message "sum overflow".
+        self.builder.position_at_end(sum_ovf_bb);
+        let ovf_msg = self
+            .builder
+            .build_global_string_ptr("sum overflow", "sum_ovf_msg")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        let abort_fn = self.get_or_declare_abort_fn();
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    ovf_msg.as_pointer_value(),
+                )],
+                "sum_ovf_abort",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        self.builder.position_at_end(sum_ok_bb);
         self.builder
             .build_store(sum_alloca, new_sum)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

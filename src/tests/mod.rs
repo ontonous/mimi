@@ -117,6 +117,34 @@ pub(crate) mod audit_regression;
 pub(crate) mod audit_round2;
 pub(crate) mod deep_audit;
 
+// === Wave-1 full-audit fix regressions (2026-08-05) ===
+pub(crate) mod audit_fix_bind_cpp;
+pub(crate) mod audit_fix_bind_go;
+pub(crate) mod audit_fix_bind_jni;
+pub(crate) mod audit_fix_bind_node;
+pub(crate) mod audit_fix_bind_py;
+pub(crate) mod audit_fix_bind_rust;
+pub(crate) mod audit_fix_checker;
+pub(crate) mod audit_fix_codegen_expr1;
+pub(crate) mod audit_fix_codegen_expr2;
+pub(crate) mod audit_fix_codegen_infra;
+pub(crate) mod audit_fix_component;
+pub(crate) mod audit_fix_fmt_lint;
+pub(crate) mod audit_fix_io;
+pub(crate) mod audit_fix_json_math;
+pub(crate) mod audit_fix_linearity;
+pub(crate) mod audit_fix_list_string;
+pub(crate) mod audit_fix_lowering;
+pub(crate) mod audit_fix_lsp;
+pub(crate) mod audit_fix_parser;
+pub(crate) mod audit_fix_paths;
+pub(crate) mod audit_fix_runtime_core;
+pub(crate) mod audit_fix_runtime_sub;
+pub(crate) mod audit_fix_scripts;
+pub(crate) mod audit_fix_stdlib;
+pub(crate) mod audit_fix_verifier;
+pub(crate) mod audit_fix_vm;
+
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;

@@ -81,12 +81,14 @@ echo ""
 echo "--- 极限编译: 大规模分支 ---"
 
 # 生成 10000 分支的 if-else 链 (太大, CI 用 2000)
-local BRANCH_COUNT=2000
+# 注意：以下为脚本顶层代码，不能用 local（local 仅限函数内，
+# 顶层使用会报错并在 set -e 下直接终止脚本）。
+BRANCH_COUNT=2000
 if ! $CI_MODE; then
     BRANCH_COUNT=10000
 fi
 
-local big_if_src="func main() -> i64 {\n    let x = $((RANDOM % BRANCH_COUNT));\n"
+big_if_src="func main() -> i64 {\n    let x = $((RANDOM % BRANCH_COUNT));\n"
 for ((i=0; i<BRANCH_COUNT; i++)); do
     big_if_src+="    if x == $i { $i } else "
 done
@@ -95,12 +97,12 @@ big_if_src+="{ -1 }\n}"
 run_stress_test "big-if-else-${BRANCH_COUNT}" "$(echo -e "$big_if_src")" "check"
 
 # ---------- 大 match ----------
-local MATCH_COUNT=5000
+MATCH_COUNT=5000
 if ! $CI_MODE; then
     MATCH_COUNT=20000
 fi
 
-local big_match_src="func main() -> i64 {\n    let x = $((RANDOM % MATCH_COUNT));\n    match x {\n"
+big_match_src="func main() -> i64 {\n    let x = $((RANDOM % MATCH_COUNT));\n    match x {\n"
 for ((i=0; i<MATCH_COUNT; i++)); do
     big_match_src+="        $i => $((i * 2)),\n"
 done
@@ -109,13 +111,13 @@ big_match_src+="        _ => -1\n    }\n}"
 run_stress_test "big-match-${MATCH_COUNT}" "$(echo -e "$big_match_src")" "check"
 
 # ---------- 深度嵌套 ----------
-local NEST_DEPTH=500
+NEST_DEPTH=500
 if ! $CI_MODE; then
     NEST_DEPTH=2000
 fi
 
-local deep_nest_src="func main() -> i64 {\n    let x = 1;\n"
-local indent=""
+deep_nest_src="func main() -> i64 {\n    let x = 1;\n"
+indent=""
 for ((i=0; i<NEST_DEPTH; i++)); do
     deep_nest_src+="${indent}if x > 0 {\n${indent}    let y = $i;\n"
     indent="${indent}    "
@@ -130,12 +132,12 @@ deep_nest_src+="}"
 run_stress_test "deep-nest-${NEST_DEPTH}" "$(echo -e "$deep_nest_src")" "check"
 
 # ---------- 海量 Actor (CI 模式用 10000, 本地用 100000) ----------
-local ACTOR_COUNT=10000
+ACTOR_COUNT=10000
 if ! $CI_MODE; then
     ACTOR_COUNT=100000
 fi
 
-local actor_src=""
+actor_src=""
 for ((i=0; i<ACTOR_COUNT; i++)); do
     actor_src+="actor Worker${i} {\n    fn work() -> i64 { ${i} }\n}\n\n"
 done
@@ -144,13 +146,13 @@ actor_src+="func main() -> i64 { 0 }"
 run_stress_test "massive-actor-${ACTOR_COUNT}" "$actor_src" "check"
 
 # ---------- 极限编译: 超大列表字面量 ----------
-local LIST_SIZE=50000
+LIST_SIZE=50000
 if $CI_MODE; then
     LIST_SIZE=10000
 fi
 
-local list_src="func main() -> i64 {\n    let xs = ["
-local first=true
+list_src="func main() -> i64 {\n    let xs = ["
+first=true
 for ((i=0; i<LIST_SIZE; i++)); do
     $first && first=false || list_src+=", "
     list_src+="$i"
@@ -161,18 +163,20 @@ run_stress_test "big-list-${LIST_SIZE}" "$(echo -e "$list_src")" "check"
 
 # ---------- 重复编译稳定性 ----------
 log_info "--- 重复编译稳定性 (10 次) ---"
-local fib_src="func fib(n: i64) -> i64 {
+fib_src="func fib(n: i64) -> i64 {
     if n <= 1 { n } else { fib(n-1) + fib(n-2) }
 }
 func main() -> i64 { fib(20) }"
 
 for ((i=0; i<10; i++)); do
     TOTAL=$((TOTAL + 1))
-    local tmp_file=$(mktemp /tmp/mimi_fib_stress.XXXXXX.mimi)
+    tmp_file=$(mktemp /tmp/mimi_fib_stress.XXXXXX.mimi)
     echo "$fib_src" > "$tmp_file"
 
-    local exit_code=0
-    local output=$("$MIMI_BIN" check "$tmp_file" 2>&1) || exit_code=$?
+    # 注意：此循环在脚本顶层（非函数内），不能用 local。
+    # 普通赋值不会掩盖命令替换的退出码，`|| exit_code=$?` 才能真正捕获失败。
+    exit_code=0
+    output=$("$MIMI_BIN" check "$tmp_file" 2>&1) || exit_code=$?
     rm -f "$tmp_file"
 
     if [ "$exit_code" -eq 0 ]; then

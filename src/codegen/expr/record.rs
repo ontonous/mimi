@@ -37,13 +37,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         for (i, field) in fields.iter().enumerate() {
             let val = self.compile_expr(&field.value, vars)?;
+            // AUDIT FIX (full-audit-2026-08-05 §7, record.rs:26-41): store each
+            // field at its DECLARED position, not its write-order position. The
+            // checker validates record literals by name (core/infer/record.rs)
+            // and Resolved IR canonicalizes fields to declaration order
+            // (core/ir/lower.rs:1839-1846); the legacy positional GEP swapped
+            // fields for out-of-order literals (`Point { y: 2, x: 1 }` stored
+            // y into x's slot). Mirror compile_field_expr's name-based lookup.
+            // When the record definition is unavailable (non-Record type_def),
+            // keep the historical write-order store — unknown types already
+            // fail above via type_llvm.
+            let field_idx = match declared_fields.as_ref() {
+                Some(fs) => fs
+                    .iter()
+                    .position(|(n, _)| n == &field.name)
+                    .ok_or_else(|| {
+                        CompileError::Generic(format!(
+                            "record '{}' has no field '{}'",
+                            type_name, field.name
+                        ))
+                    })?,
+                None => i,
+            };
             let gep = self
                 .gep()
-                .build_struct_gep(sty, alloca, i as u32, &field.name)
+                .build_struct_gep(sty, alloca, field_idx as u32, &field.name)
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let field_ty = sty
-                .get_field_type_at_index(i as u32)
-                .ok_or_else(|| CompileError::LlvmError(format!("field {} type", i)))?;
+                .get_field_type_at_index(field_idx as u32)
+                .ok_or_else(|| CompileError::LlvmError(format!("field {} type", field_idx)))?;
             let store_val = self.maybe_load_compound_field_value(val, field_ty, field, vars)?;
             // CG-C4: truncate/extend the stored value to match the field type.
             // #[repr(C)] records use extern field types (i32 for i32 fields), so
@@ -501,7 +523,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             field_vals.push(val);
         }
         let struct_ty = self.context.struct_type(&field_tys, false);
+        // AUDIT FIX (full-audit-2026-08-05 §7, record.rs:284 + method.rs:166):
+        // the push was never popped, leaving a stale layout on the stack that
+        // later pointer-form tuple consumers (.last() in access.rs / match.rs /
+        // func/pattern.rs) could misread — the top entry reflected the LAST
+        // tuple literal compiled, not the tuple being consumed. Make push/pop
+        // symmetric: pop when this literal's compilation completes (the pop is
+        // guaranteed even on error paths, so no leaked entries).
         self.tuple_type_stack.push(struct_ty);
+        let result = self.emit_tuple_value(struct_ty, field_vals);
+        self.tuple_type_stack.pop();
+        result
+    }
+
+    /// Materialize a tuple struct value: alloca + field stores + load by value.
+    fn emit_tuple_value(
+        &self,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        field_vals: Vec<BasicValueEnum<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let alloca = self.build_alloca(struct_ty, "tuple")?;
         for (i, val) in field_vals.iter().enumerate() {
             let gep = self

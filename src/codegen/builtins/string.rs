@@ -106,62 +106,357 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        // MEM-C6 (deep audit): bounds-check the index before indexing. An
-        // out-of-range or negative `index` would read arbitrary memory via
-        // `data_ptr[index]`. Clamp to [0, s_len-1]; for an empty string or an
-        // out-of-range index this yields index 0, which safely reads the
-        // string's NUL terminator (returns char code 0).
+        // Audit fix (full-audit-2026-08-05): the old code indexed RAW BYTES
+        // and clamped OOB to code 0 — silent wrongness. The VM reference is
+        // char-indexed (`s.chars().nth(i)`) and ERRORS out of bounds
+        // (interp/bytecode/builtins/string.rs builtin_char_code). Walk UTF-8
+        // leading bytes to the requested scalar index, decode the sequence,
+        // and trap on OOB with the VM-style message.
         let i64_ty = self.context.i64_type();
-        let s_len = match &args[0] {
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 1, "str_len")
-                .map_err(|e| CompileError::LlvmError(format!("extract str len: {}", e)))?
-                .into_int_value(),
-            _ => self.string_len(data_ptr)?,
-        };
+        let i8_ty = self.context.i8_type();
+        let i32_ty = self.context.i32_type();
         let zero = i64_ty.const_int(0, false);
+        // Normalize the index to i64 (i32 indices from literals/methods).
+        let index64 = if index.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(index, i64_ty, "cc_idx_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            index
+        };
+        // OOB gate: index < 0 || index >= char_count.
+        let n_chars = self.count_utf8_chars(data_ptr, None)?;
         let neg = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, index, zero, "idx_neg")
+            .build_int_compare(inkwell::IntPredicate::SLT, index64, zero, "cc_neg")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let lo_clamped = self
-            .builder
-            .build_select(neg, zero, index, "idx_lo")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
         let over = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SGE, lo_clamped, s_len, "idx_over")
+            .build_int_compare(inkwell::IntPredicate::SGE, index64, n_chars, "cc_over")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let safe_idx = self
+        let oob = self
             .builder
-            .build_select(over, zero, lo_clamped, "idx_safe")
+            .build_or(neg, over, "cc_oob")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function for char_code".to_string())?;
+        let trap_bb = self.context.append_basic_block(function, "cc_trap");
+        let walk_bb = self.context.append_basic_block(function, "cc_walk");
+        self.builder
+            .build_conditional_branch(oob, trap_bb, walk_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        // Trap block (VM-style message).
+        self.builder.position_at_end(trap_bb);
+        self.emit_trap_with_int_message("char_code: index %ld out of bounds", index64, "cc")?;
+
+        // Walk block: skip `index64` chars (leading byte + continuations).
+        self.builder.position_at_end(walk_bb);
+        let i_alloca = self.build_alloca(i64_ty, "cc_i")?;
+        let pos_alloca = self.build_alloca(i64_ty, "cc_pos")?;
+        self.build_store(i_alloca, zero)?;
+        self.build_store(pos_alloca, zero)?;
+        let loop_bb = self.context.append_basic_block(function, "cc_loop");
+        let step_bb = self.context.append_basic_block(function, "cc_step");
+        let decode_bb = self.context.append_basic_block(function, "cc_decode");
+        self.build_br(loop_bb)?;
+        self.builder.position_at_end(loop_bb);
+        let i = self
+            .build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "cc_i_val")?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, i, index64, "cc_cont")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.build_cond_br(cont, step_bb, decode_bb)?;
+        self.builder.position_at_end(step_bb);
+        let pos = self
+            .build_load(BasicTypeEnum::IntType(i64_ty), pos_alloca, "cc_pos_val")?
+            .into_int_value();
+        let b_ptr = self.build_in_bounds_gep(i8_ty, data_ptr, &[pos], "cc_byte_ptr")?;
+        let b_raw = self
+            .build_load(BasicTypeEnum::IntType(i8_ty), b_ptr, "cc_byte")?
+            .into_int_value();
+        let b = self
+            .builder
+            .build_int_z_extend(b_raw, i32_ty, "cc_byte_z")
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        // Char width from the leading byte (valid-UTF-8 invariant: a char
+        // head is never a continuation byte).
+        let w4 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                b,
+                i32_ty.const_int(0xF0, false),
+                "cc_w4",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let w3 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                b,
+                i32_ty.const_int(0xE0, false),
+                "cc_w3",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let w2 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                b,
+                i32_ty.const_int(0xC0, false),
+                "cc_w2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        // Char width from the leading byte: width = w4 ? 4 : (w3 ? 3 : (w2 ? 2 : 1)).
+        // (valid-UTF-8 invariant: a char head is never a continuation byte).
+        // Central fix 2026-08-05: the previous chain select(w3,3,4)→select(w2,2,·)
+        // →select(w4,4,·) yielded 4 for ASCII (all flags false) and 2 for 3-byte
+        // heads, corrupting every walk. Build the chain from the 1-byte base up.
+        let width_12 = self
+            .builder
+            .build_select(
+                w2,
+                i32_ty.const_int(2, false),
+                i32_ty.const_int(1, false),
+                "cc_w12",
+            )
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
-        // char = data_ptr[safe_idx]
-        let char_ptr = self
-            .gep()
-            .build_in_bounds_gep(
-                BasicTypeEnum::IntType(self.context.i8_type()),
-                data_ptr,
-                &[safe_idx],
-                "char_ptr",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let char_val = self
+        let width_123 = self
             .builder
-            .build_load(
-                BasicTypeEnum::IntType(self.context.i8_type()),
-                char_ptr,
-                "char_val",
+            .build_select(w3, i32_ty.const_int(3, false), width_12, "cc_w123")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let width = self
+            .builder
+            .build_select(w4, i32_ty.const_int(4, false), width_123, "cc_width")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let width64 = self
+            .builder
+            .build_int_z_extend(width, i64_ty, "cc_width_z")
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        let pos_next = self
+            .builder
+            .build_int_add(pos, width64, "cc_pos_next")
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        self.build_store(pos_alloca, pos_next)?;
+        let i_next = self
+            .builder
+            .build_int_add(i, i64_ty.const_int(1, false), "cc_i_next")
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        self.build_store(i_alloca, i_next)?;
+        self.build_br(loop_bb)?;
+
+        // Decode block: branch on the leading byte and load ONLY the
+        // continuation bytes the sequence actually has (never read past the
+        // string's NUL terminator).
+        self.builder.position_at_end(decode_bb);
+        let pos_d = self
+            .build_load(BasicTypeEnum::IntType(i64_ty), pos_alloca, "cc_pos_dec")?
+            .into_int_value();
+        let p0 = self.build_in_bounds_gep(i8_ty, data_ptr, &[pos_d], "cc_dec_ptr")?;
+        let b0 = self
+            .builder
+            .build_int_z_extend(
+                self.build_load(BasicTypeEnum::IntType(i8_ty), p0, "cc_b0")?
+                    .into_int_value(),
+                i32_ty,
+                "cc_b0_z",
             )
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        // Zero-extend i8 to i64 for return
-        let i64_ty = self.context.i64_type();
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        let d1_bb = self.context.append_basic_block(function, "cc_d1");
+        let chk2_bb = self.context.append_basic_block(function, "cc_chk2");
+        let d2_bb = self.context.append_basic_block(function, "cc_d2");
+        let chk3_bb = self.context.append_basic_block(function, "cc_chk3");
+        let d3_bb = self.context.append_basic_block(function, "cc_d3");
+        let d4_bb = self.context.append_basic_block(function, "cc_d4");
+        let merge_bb = self.context.append_basic_block(function, "cc_merge");
+        let lt_80 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                b0,
+                i32_ty.const_int(0x80, false),
+                "cc_lt80",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.build_cond_br(lt_80, d1_bb, chk2_bb)?;
+        self.builder.position_at_end(chk2_bb);
+        let lt_e0 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                b0,
+                i32_ty.const_int(0xE0, false),
+                "cc_ltE0",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.build_cond_br(lt_e0, d2_bb, chk3_bb)?;
+        self.builder.position_at_end(chk3_bb);
+        let lt_f0 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                b0,
+                i32_ty.const_int(0xF0, false),
+                "cc_ltF0",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.build_cond_br(lt_f0, d3_bb, d4_bb)?;
+        // 1-byte (ASCII): cp = b0
+        self.builder.position_at_end(d1_bb);
+        self.build_br(merge_bb)?;
+        // Continuation-byte loader: data_ptr[pos_d + off], zext to i32.
+        let load_cont = |off: u64, name: &str| -> MimiResult<inkwell::values::IntValue<'ctx>> {
+            let off_idx = self.context.i64_type().const_int(off, false);
+            let p_off = self
+                .builder
+                .build_int_add(pos_d, off_idx, &format!("{}_off", name))
+                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+            let p = self.build_in_bounds_gep(i8_ty, data_ptr, &[p_off], name)?;
+            let raw = self
+                .build_load(BasicTypeEnum::IntType(i8_ty), p, &format!("{}_val", name))?
+                .into_int_value();
+            self.builder
+                .build_int_z_extend(raw, i32_ty, &format!("{}_z", name))
+                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))
+        };
+        // 2-byte: cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+        self.builder.position_at_end(d2_bb);
+        let b1 = load_cont(1, "cc_b1")?;
+        let cp2_hi = self
+            .builder
+            .build_left_shift(
+                self.builder
+                    .build_and(b0, i32_ty.const_int(0x1F, false), "cc_b0_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                i32_ty.const_int(6, false),
+                "cc_cp2_hi",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("shl error: {}", e)))?;
+        let cp2 = self
+            .builder
+            .build_or(
+                cp2_hi,
+                self.builder
+                    .build_and(b1, i32_ty.const_int(0x3F, false), "cc_b1_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                "cc_cp2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        self.build_br(merge_bb)?;
+        // 3-byte: cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+        self.builder.position_at_end(d3_bb);
+        let b1 = load_cont(1, "cc_b1")?;
+        let b2 = load_cont(2, "cc_b2")?;
+        let cp3_hi = self
+            .builder
+            .build_left_shift(
+                self.builder
+                    .build_and(b0, i32_ty.const_int(0x0F, false), "cc_b0_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                i32_ty.const_int(12, false),
+                "cc_cp3_hi",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("shl error: {}", e)))?;
+        let cp3_mid = self
+            .builder
+            .build_left_shift(
+                self.builder
+                    .build_and(b1, i32_ty.const_int(0x3F, false), "cc_b1_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                i32_ty.const_int(6, false),
+                "cc_cp3_mid",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("shl error: {}", e)))?;
+        let cp3 = self
+            .builder
+            .build_or(
+                self.builder
+                    .build_or(cp3_hi, cp3_mid, "cc_cp3_hm")
+                    .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?,
+                self.builder
+                    .build_and(b2, i32_ty.const_int(0x3F, false), "cc_b2_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                "cc_cp3",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        self.build_br(merge_bb)?;
+        // 4-byte: cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12)
+        //              | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+        self.builder.position_at_end(d4_bb);
+        let b1 = load_cont(1, "cc_b1")?;
+        let b2 = load_cont(2, "cc_b2")?;
+        let b3 = load_cont(3, "cc_b3")?;
+        let cp4_hi = self
+            .builder
+            .build_left_shift(
+                self.builder
+                    .build_and(b0, i32_ty.const_int(0x07, false), "cc_b0_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                i32_ty.const_int(18, false),
+                "cc_cp4_hi",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("shl error: {}", e)))?;
+        let cp4_m1 = self
+            .builder
+            .build_left_shift(
+                self.builder
+                    .build_and(b1, i32_ty.const_int(0x3F, false), "cc_b1_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                i32_ty.const_int(12, false),
+                "cc_cp4_m1",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("shl error: {}", e)))?;
+        let cp4_m2 = self
+            .builder
+            .build_left_shift(
+                self.builder
+                    .build_and(b2, i32_ty.const_int(0x3F, false), "cc_b2_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                i32_ty.const_int(6, false),
+                "cc_cp4_m2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("shl error: {}", e)))?;
+        let cp4 = self
+            .builder
+            .build_or(
+                self.builder
+                    .build_or(
+                        self.builder
+                            .build_or(cp4_hi, cp4_m1, "cc_cp4_h1")
+                            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?,
+                        cp4_m2,
+                        "cc_cp4_h2",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?,
+                self.builder
+                    .build_and(b3, i32_ty.const_int(0x3F, false), "cc_b3_m")
+                    .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?,
+                "cc_cp4",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        self.build_br(merge_bb)?;
+        // Merge: phi over the four decode paths, then zext to i64.
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(i32_ty, "cc_cp")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        phi.add_incoming(&[
+            (&BasicValueEnum::IntValue(b0), d1_bb),
+            (&BasicValueEnum::IntValue(cp2), d2_bb),
+            (&BasicValueEnum::IntValue(cp3), d3_bb),
+            (&BasicValueEnum::IntValue(cp4), d4_bb),
+        ]);
+        let cp = phi.as_basic_value().into_int_value();
         let result = self
             .builder
-            .build_int_z_extend(char_val.into_int_value(), i64_ty, "char_code_ext")
+            .build_int_z_extend(cp, i64_ty, "char_code_ext")
             .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
         Ok(result.into())
     }
@@ -183,37 +478,307 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
+        // Audit fix (full-audit-2026-08-05): the old code truncated the code
+        // point to i8 (single byte) — silently corrupting every code point
+        // above 255. Full UTF-8 encoding now mirrors the VM reference
+        // (interp/bytecode/builtins/string.rs builtin_chr):
+        //   - validate 0..=0x10FFFF            → "chr: code point out of range: {}"
+        //   - reject surrogates (char::from_u32) → "chr: invalid code point {}"
+        //   - encode 1–4 bytes into a malloc'd string.
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Allocate 2 bytes: char + null terminator (B4: NULL-checked malloc).
-        let buf =
-            self.malloc_or_abort(self.context.i64_type().const_int(2, false), "chr_malloc")?;
-        // Truncate i64 to i8 for storage
+        let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
         let i8_ty = self.context.i8_type();
-        let char_byte = self
+        let zero = i64_ty.const_int(0, false);
+        // Normalize to i64 (callers may pass i32 literals).
+        let code64 = if code.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(code, i64_ty, "chr_code_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            code
+        };
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function for chr".to_string())?;
+
+        // 1) Range validation: 0..=0x10FFFF.
+        let is_neg = self
             .builder
-            .build_int_truncate(code, i8_ty, "chr_trunc")
-            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+            .build_int_compare(inkwell::IntPredicate::SLT, code64, zero, "chr_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let too_big = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                code64,
+                i64_ty.const_int(0x10FFFF, false),
+                "chr_big",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let bad_range = self
+            .builder
+            .build_or(is_neg, too_big, "chr_bad_range")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let range_trap_bb = self.context.append_basic_block(function, "chr_range_trap");
+        let surr_chk_bb = self.context.append_basic_block(function, "chr_surr_chk");
         self.builder
-            .build_store(buf, char_byte)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Store null terminator at buf+1
+            .build_conditional_branch(bad_range, range_trap_bb, surr_chk_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(range_trap_bb);
+        self.emit_trap_with_int_message("chr: code point out of range: %ld", code64, "chr_rng")?;
+
+        // 2) Surrogate rejection (char::from_u32 fails on U+D800..=U+DFFF).
+        self.builder.position_at_end(surr_chk_bb);
+        let ge_d800 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGE,
+                code64,
+                i64_ty.const_int(0xD800, false),
+                "chr_ge_d800",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let le_dfff = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLE,
+                code64,
+                i64_ty.const_int(0xDFFF, false),
+                "chr_le_dfff",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_surr = self
+            .builder
+            .build_and(ge_d800, le_dfff, "chr_is_surr")
+            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
+        let surr_trap_bb = self.context.append_basic_block(function, "chr_surr_trap");
+        let encode_bb = self.context.append_basic_block(function, "chr_encode");
+        self.builder
+            .build_conditional_branch(is_surr, surr_trap_bb, encode_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(surr_trap_bb);
+        self.emit_trap_with_int_message("chr: invalid code point %ld", code64, "chr_sur")?;
+
+        // 3) UTF-8 encode (mirrors Rust's char encoding, branched on ranges).
+        self.builder.position_at_end(encode_bb);
+        let cp = self
+            .builder
+            .build_int_truncate(code64, i32_ty, "chr_cp")
+            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+        // Encoded length: cp < 0x80 → 1; < 0x800 → 2; < 0x10000 → 3; else 4.
+        let lt_80 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                cp,
+                i32_ty.const_int(0x80, false),
+                "chr_lt80",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let lt_800 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                cp,
+                i32_ty.const_int(0x800, false),
+                "chr_lt800",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let lt_10000 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                cp,
+                i32_ty.const_int(0x10000, false),
+                "chr_lt10000",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let len_34 = self
+            .builder
+            .build_select(
+                lt_10000,
+                i32_ty.const_int(3, false),
+                i32_ty.const_int(4, false),
+                "chr_l34",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let len_234 = self
+            .builder
+            .build_select(lt_800, i32_ty.const_int(2, false), len_34, "chr_l234")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let len32 = self
+            .builder
+            .build_select(lt_80, i32_ty.const_int(1, false), len_234, "chr_len")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let len64 = self
+            .builder
+            .build_int_z_extend(len32, i64_ty, "chr_len_z")
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        let is_len2 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                len32,
+                i32_ty.const_int(2, false),
+                "chr_islen2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_len3 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                len32,
+                i32_ty.const_int(3, false),
+                "chr_islen3",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_len4 = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                len32,
+                i32_ty.const_int(4, false),
+                "chr_islen4",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        // Continuation-byte right shifts: len2 → 0, len3 → 6, len4 → 12.
+        let sh1_23 = self
+            .builder
+            .build_select(
+                is_len3,
+                i32_ty.const_int(6, false),
+                i32_ty.const_int(12, false),
+                "chr_sh1_23",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let sh1 = self
+            .builder
+            .build_select(is_len2, i32_ty.const_int(0, false), sh1_23, "chr_sh1")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let sh2 = self
+            .builder
+            .build_select(
+                is_len3,
+                i32_ty.const_int(0, false),
+                i32_ty.const_int(6, false),
+                "chr_sh2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // Leading byte per length: 1 → cp; 2 → 0xC0|(cp>>6);
+        // 3 → 0xE0|(cp>>12); 4 → 0xF0|(cp>>18).
+        let b0_2 = self
+            .builder
+            .build_or(
+                i32_ty.const_int(0xC0, false),
+                self.builder
+                    .build_right_shift(cp, i32_ty.const_int(6, false), false, "chr_cp_s6")
+                    .map_err(|e| CompileError::LlvmError(format!("shr error: {}", e)))?,
+                "chr_b0_2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let b0_3 = self
+            .builder
+            .build_or(
+                i32_ty.const_int(0xE0, false),
+                self.builder
+                    .build_right_shift(cp, i32_ty.const_int(12, false), false, "chr_cp_s12")
+                    .map_err(|e| CompileError::LlvmError(format!("shr error: {}", e)))?,
+                "chr_b0_3",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let b0_4 = self
+            .builder
+            .build_or(
+                i32_ty.const_int(0xF0, false),
+                self.builder
+                    .build_right_shift(cp, i32_ty.const_int(18, false), false, "chr_cp_s18")
+                    .map_err(|e| CompileError::LlvmError(format!("shr error: {}", e)))?,
+                "chr_b0_4",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        // len==1 stores the code point unchanged (ASCII); longer sequences
+        // use their tagged leading byte.
+        let b0_12 = self
+            .builder
+            .build_select(is_len2, b0_2, cp, "chr_b0_12")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let b0_123 = self
+            .builder
+            .build_select(is_len3, b0_3, b0_12, "chr_b0_123")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let b0 = self
+            .builder
+            .build_select(is_len4, b0_4, b0_123, "chr_b0")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // Continuation bytes: 0x80 | ((cp >> shift) & 0x3F).
+        let cont = |shift: inkwell::values::IntValue<'ctx>,
+                    name: &str|
+         -> MimiResult<inkwell::values::IntValue<'ctx>> {
+            let shifted = self
+                .builder
+                .build_right_shift(cp, shift, false, &format!("{}_sh", name))
+                .map_err(|e| CompileError::LlvmError(format!("shr error: {}", e)))?;
+            let masked = self
+                .builder
+                .build_and(
+                    shifted,
+                    i32_ty.const_int(0x3F, false),
+                    &format!("{}_m", name),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
+            self.builder
+                .build_or(i32_ty.const_int(0x80, false), masked, name)
+                .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))
+        };
+        let b1 = cont(sh1, "chr_b1")?;
+        let b2 = cont(sh2, "chr_b2")?;
+        let b3 = cont(i32_ty.const_int(0, false), "chr_b3")?;
+        // Allocate 5 bytes: max 4 encoded + NUL (B4: NULL-checked malloc).
+        let buf = self.malloc_or_abort(i64_ty.const_int(5, false), "chr_malloc")?;
+        // Store all four slots (unused slots hold inert values — the NUL
+        // below terminates the string at exactly `len` bytes).
+        let bytes = [b0, b1, b2, b3];
+        for (k, bv) in bytes.iter().enumerate() {
+            let slot = self
+                .gep()
+                .build_in_bounds_gep(
+                    BasicTypeEnum::IntType(i8_ty),
+                    buf,
+                    &[i64_ty.const_int(k as u64, false)],
+                    &format!("chr_slot{}", k),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            let byte = self
+                .builder
+                .build_int_truncate(*bv, i8_ty, &format!("chr_byte{}", k))
+                .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+            self.builder
+                .build_store(slot, byte)
+                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        }
+        // NUL terminator at buf[len] (len ∈ 1..=4, buf is 5 bytes).
         let null_gep = self
             .gep()
-            .build_in_bounds_gep(
-                BasicTypeEnum::IntType(i8_ty),
-                buf,
-                &[self.context.i64_type().const_int(1, false)],
-                "null_byte",
-            )
+            .build_in_bounds_gep(BasicTypeEnum::IntType(i8_ty), buf, &[len64], "chr_nul")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder
             .build_store(null_gep, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Build string struct { i8*, i64 }
+        // Build string struct { i8*, i64 } with the ENCODED byte length.
         let string_ty = self.context.struct_type(
             &[
                 BasicTypeEnum::PointerType(i8_ptr_ty),
-                BasicTypeEnum::IntType(self.context.i64_type()),
+                BasicTypeEnum::IntType(i64_ty),
             ],
             false,
         );
@@ -231,7 +796,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(string_ty, str_alloca, 1, "str_len")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder
-            .build_store(len_gep, self.context.i64_type().const_int(1, false))
+            .build_store(len_gep, len64)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         let result = self
             .builder
@@ -242,6 +807,80 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
         Ok(result)
+    }
+
+    /// Trap with a printf-formatted message carrying one integer value.
+    ///
+    /// Emits `snprintf(buf, 128, fmt, value)` into a stack scratch buffer and
+    /// calls `mimi_runtime_abort` (noreturn), then terminates the current
+    /// block with `unreachable`. Callers must position the builder at a
+    /// block that exists solely for this trap. VM-style messages (e.g.
+    /// "chr: code point out of range: %ld") keep codegen diagnostics aligned
+    /// with the Bytecode VM's error text.
+    fn emit_trap_with_int_message(
+        &self,
+        fmt: &str,
+        value: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> MimiResult<()> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        // 128-byte scratch message buffer (cold trap path — stack is fine).
+        let buf = self.build_alloca(i64_ty.array_type(16), &format!("{}_msg", name))?;
+        let fmt_global = self
+            .builder
+            .build_global_string_ptr(fmt, &format!("{}_fmt", name))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        // B3/CG-C3: snprintf returns i32 (not i8*); declare with the correct
+        // variadic signature if the module lacks it.
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let snprintf_ty = i32_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function(
+                "snprintf",
+                snprintf_ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let value64 = if value.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(value, i64_ty, &format!("{}_val_sext", name))
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            value
+        };
+        self.builder
+            .build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(128, false)),
+                    BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
+                    BasicMetadataValueEnum::IntValue(value64),
+                ],
+                &format!("{}_snprintf", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("snprintf error: {}", e)))?;
+        let abort_fn = self.get_or_declare_abort_fn();
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(buf)],
+                &format!("{}_abort", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("abort error: {}", e)))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        Ok(())
     }
 
     /// Parse a C string with strtol and return (ok, value).

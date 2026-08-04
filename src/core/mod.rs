@@ -19,6 +19,7 @@ mod ownership;
 pub mod resolved;
 
 pub(crate) use checker::Checker;
+pub(crate) use checker::PendingNestedRestore;
 pub use helpers::{fmt_type, is_type_param, subst_type_params};
 pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]

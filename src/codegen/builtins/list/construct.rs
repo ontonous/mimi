@@ -28,19 +28,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        // Extend i32 arguments to i64 (Mimi defaults to i32 for small integer literals)
+        // Extend i32 arguments to i64 (Mimi defaults to i32 for small integer
+        // literals). Audit fix (full-audit-2026-08-05 FIX 6): sign-extend,
+        // not zero-extend — zext turned negative bounds into ~4e9
+        // (range(-5, 5) yielded an empty list instead of 10 elements).
         let i64_ty = self.context.i64_type();
-        let start = if start_raw.get_type() == self.context.i32_type() {
+        let start = if start_raw.get_type().get_bit_width() < 64 {
             self.builder
-                .build_int_z_extend(start_raw, i64_ty, "start_ext")
-                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                .build_int_s_extend(start_raw, i64_ty, "start_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
         } else {
             start_raw
         };
-        let end = if end_raw.get_type() == self.context.i32_type() {
+        let end = if end_raw.get_type().get_bit_width() < 64 {
             self.builder
-                .build_int_z_extend(end_raw, i64_ty, "end_ext")
-                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                .build_int_s_extend(end_raw, i64_ty, "end_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
         } else {
             end_raw
         };

@@ -5,6 +5,12 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::{BTreeMap, HashMap};
 
+/// 0.34.36 (cross-agent contract, audit wave-1): future data region starts at
+/// offset 16 — header { completed: AtomicI32 @0, refs: AtomicI32 @4,
+/// data_capacity: u64 @8..16 }. Must stay in sync with
+/// src/runtime/future.rs and the async-fn layout in codegen/func.rs.
+const FUTURE_DATA_OFFSET: u64 = 16;
+
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_spawn_expr(
         &mut self,
@@ -72,13 +78,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 free_vars.values().map(|&(_, ty)| ty).collect();
             let env_struct_type = self.context.struct_type(&env_field_types, false);
 
-            // Load env_ptr from future+8 (data area holds the env pointer)
+            // Load env_ptr from the data region (data area holds the env pointer)
             let env_ptr_slot = self
                 .gep()
                 .build_gep(
                     i8_ty,
                     future_ptr_param,
-                    &[i64_ty.const_int(8, false)],
+                    &[i64_ty.const_int(FUTURE_DATA_OFFSET, false)],
                     "env_ptr_slot",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -128,13 +134,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result = self.compile_expr(expr, &poll_vars)?;
         let result_type = result.get_type();
 
-        // Store result at future+8 (this overwrites the env pointer slot at future+8)
+        // Store result at the data region start (this overwrites the env
+        // pointer slot stored there at spawn time).
         let result_ptr_i8 = self
             .gep()
             .build_gep(
                 i8_ty,
                 future_ptr_param,
-                &[i64_ty.const_int(8, false)],
+                &[i64_ty.const_int(FUTURE_DATA_OFFSET, false)],
                 "spawn_result_ptr",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -147,7 +154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Discard the poll function's heap scope instead of calling free_heap_allocs.
         // free_heap_allocs would emit free() calls that free the heap data embedded
-        // in the result struct (e.g., string/list data pointer at future+8).
+        // in the result struct (e.g., string/list data pointer in the data region).
         // That data is now owned by the caller via the future, so we must NOT free it.
         // The entries reference LLVM values in the poll function and must be removed
         // to prevent contaminating the parent's heap_allocs.
@@ -161,7 +168,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "spawn_set_completed",
         )?;
 
-        // Free env (if any) — use the env_ptr saved BEFORE result overwrote future+8
+        // Free env (if any) — use the env_ptr saved BEFORE the result store
+        // overwrote the data-region env slot
         if let Some(env_ptr) = env_ptr_opt {
             let free_fn = self.get_runtime_fn("free")?;
             self.build_call(
@@ -180,8 +188,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // ── At spawn site: allocate future + env, call mimi_spawn_future ──
         let alloc_fn = self.get_runtime_fn("mimi_future_alloc")?;
-        // Request at least 76 bytes (MimiFutureRepr size: 8+4+64 = 76, aligned to 8)
-        let future_total_size = 8u64 + 64u64; // 8 header + 64 data
+        // 0.34.36 (cross-agent contract): 16-byte header + data region sized
+        // for the actual result (min 8 — the spawn-time env pointer slot).
+        // The runtime honors the requested size (stored in data_capacity).
+        let result_bytes = self.llvm_type_size_bytes(result_type);
+        let future_total_size = FUTURE_DATA_OFFSET + result_bytes.max(8);
         let total_size_val = i64_ty.const_int(future_total_size, false);
         let future_ptr = self
             .build_call(
@@ -193,7 +204,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|v: BasicValueEnum<'ctx>| v.into_pointer_value())
             .ok_or_else(|| CompileError::LlvmError("future_alloc returned non-pointer".into()))?;
 
-        // Store free vars in a separate heap allocation, and store the pointer at future+8
+        // Store free vars in a separate heap allocation, and store the pointer
+        // at the data region start
         if !free_vars.is_empty() {
             let env_field_types: Vec<BasicTypeEnum<'ctx>> =
                 free_vars.values().map(|&(_, ty)| ty).collect();
@@ -217,13 +229,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store(field_gep, val)?;
             }
 
-            // Store env pointer at future+8
+            // Store env pointer at the data region start
             let env_ptr_slot = self
                 .gep()
                 .build_gep(
                     i8_ty,
                     future_ptr,
-                    &[i64_ty.const_int(8, false)],
+                    &[i64_ty.const_int(FUTURE_DATA_OFFSET, false)],
                     "env_ptr_slot",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -237,13 +249,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
             self.build_store(env_ptr_typed, BasicValueEnum::PointerValue(env_heap_ptr))?;
         } else {
-            // No free vars: store null at future+8
+            // No free vars: store null at the data region start
             let env_ptr_slot = self
                 .gep()
                 .build_gep(
                     i8_ty,
                     future_ptr,
-                    &[i64_ty.const_int(8, false)],
+                    &[i64_ty.const_int(FUTURE_DATA_OFFSET, false)],
                     "null_env_slot",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -372,13 +384,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ty = self.context.i8_type();
         let i64_ty = self.context.i64_type();
 
-        // Load result from future + 8
+        // Load result from the data region start (offset 16)
         let result_data_ptr = self
             .gep()
             .build_gep(
                 i8_ty,
                 future_ptr,
-                &[i64_ty.const_int(8, false)],
+                &[i64_ty.const_int(FUTURE_DATA_OFFSET, false)],
                 "result_data",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;

@@ -17,22 +17,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         match args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => {
                 if self.pending_len_is_string {
-                    // String: use strlen
-                    let strlen_fn = self
-                        .module
-                        .get_function("strlen")
-                        .ok_or_else(|| "strlen not declared".to_string())?;
-                    let len = self
-                        .builder
-                        .build_call(
-                            strlen_fn,
-                            &[BasicMetadataValueEnum::PointerValue(pv)],
-                            "strlen",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("strlen returned void")?;
-                    Ok(len)
+                    // String: char count, not byte count — VM reference is
+                    // `s.chars().count()` (interp/bytecode/builtins/list.rs
+                    // builtin_len). strlen counts BYTES and diverges on any
+                    // multi-byte UTF-8 (len("你好") == 2, not 6). Count UTF-8
+                    // leading bytes inline (valid-UTF-8 string invariant).
+                    let len = self.count_utf8_chars(pv, None)?;
+                    Ok(len.into())
                 } else {
                     // List struct { i64 len, i8* data }: read first field
                     let list_ty = self.list_struct_type();
@@ -56,10 +47,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if t.get_bit_width() == 64
                 );
                 if is_string_struct {
-                    // String struct {i8*, i64} — field 1 is the length directly
-                    self.builder
-                        .build_extract_value(sv, 1, "str_len")
-                        .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))
+                    // String struct {i8*, i64}: field 1 is the BYTE length —
+                    // wrong for len() semantics on multi-byte UTF-8. Count
+                    // chars over field 0 (data pointer) instead, matching the
+                    // VM's `s.chars().count()`.
+                    let data_ptr = self
+                        .builder
+                        .build_extract_value(sv, 0, "str_data_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+                        .into_pointer_value();
+                    let len = self.count_utf8_chars(data_ptr, None)?;
+                    Ok(len.into())
                 } else {
                     // List struct {i64, i8*} passed as StructValue (e.g. from nested indexing).
                     // Extract field 0 (len) directly.

@@ -188,15 +188,29 @@ pub extern "C" fn mimi_send(fd: i64, data: *const std::ffi::c_char, len: i64) ->
     }
 }
 
+/// Maximum `mimi_recv` buffer size. Mirrors `MAX_HTTP_RESPONSE` below:
+/// an uncapped `buf_size` (e.g. `i64::MAX`) made `vec![0u8; size + 1]`
+/// panic with a capacity overflow across the FFI boundary
+/// (2026-08-05 full audit, HIGH).
+const MAX_RECV_SIZE: usize = 100 * 1024 * 1024; // 100MB
+
 #[no_mangle]
 pub extern "C" fn mimi_recv(fd: i64, buf_size: i64, out_len: *mut i64) -> *mut std::ffi::c_char {
-    if fd < 0 || buf_size <= 0 {
+    // Audit fix: validate the size BEFORE any fd use so an absurd buf_size
+    // returns null gracefully (no capacity-overflow panic across FFI, and no
+    // fd is touched at all). Compared as i64 so it is correct on 32-bit too.
+    if buf_size <= 0 || buf_size > MAX_RECV_SIZE as i64 {
+        return std::ptr::null_mut();
+    }
+    if fd < 0 {
         return std::ptr::null_mut();
     }
     let fd_i32 = match fd_to_i32(fd) {
         Some(v) => v,
         None => return std::ptr::null_mut(),
     };
+    // SAFETY: buf_size is bounded to [1, MAX_RECV_SIZE] above, so this cast
+    // is lossless and `size + 1` cannot overflow.
     let size = buf_size as usize;
     let mut buf: Vec<u8> = vec![0u8; size + 1];
     // SAFETY: `buf` has `size + 1` allocated bytes; `fd_i32` is validated.
@@ -408,5 +422,36 @@ pub extern "C" fn mimi_http_post(
         // audit (MEDIUM): return null on error so callers can distinguish
         // failure from a legitimate empty response body.
         None => std::ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the 2026-08-05 audit fix (HIGH): `mimi_recv`
+    //! must cap `buf_size` instead of panicking with a capacity overflow
+    //! across the FFI boundary.
+
+    use super::*;
+
+    #[test]
+    fn recv_absurd_buf_size_returns_null_without_panic() {
+        // Size check is structurally first: `fd` is a plausible-but-unopened
+        // descriptor and must never be touched for an out-of-range size.
+        let mut out_len: i64 = 12345;
+        let p = mimi_recv(999_999, i64::MAX, &mut out_len);
+        assert!(p.is_null());
+        assert_eq!(out_len, 12345); // untouched by the early return
+
+        // One byte over the cap is rejected too.
+        let p = mimi_recv(999_999, MAX_RECV_SIZE as i64 + 1, &mut out_len);
+        assert!(p.is_null());
+        assert_eq!(out_len, 12345);
+    }
+
+    #[test]
+    fn recv_invalid_size_or_fd_returns_null() {
+        assert!(mimi_recv(999_999, 0, std::ptr::null_mut()).is_null());
+        assert!(mimi_recv(999_999, -1, std::ptr::null_mut()).is_null());
+        assert!(mimi_recv(-1, 64, std::ptr::null_mut()).is_null());
     }
 }

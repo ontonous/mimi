@@ -404,16 +404,20 @@ impl Parser {
                 // as expect_ident, else `type Rec { and: i32 }` misclassifies
                 // as enum.
                 let is_record = if super::helpers::is_ident_like_kind(&is_record) {
+                    // Full-audit 2026-08-05: keep the sketch twin consistent
+                    // with production lookahead_is_record — continue only over
+                    // newlines and ident-like tokens; stop at the first other
+                    // token (`{`/`(`/...), then require `:` for a record.
                     let mut pos = self.pos + 1;
                     while pos < self.tokens.len() {
                         match &self.tokens[pos].kind {
-                            TokenKind::Newline | TokenKind::Ident(_) => {}
                             TokenKind::Colon => break,
+                            TokenKind::Newline => pos += 1,
+                            kind if super::helpers::is_ident_like_kind(kind) => pos += 1,
                             _ => break,
                         }
-                        pos += 1;
                     }
-                    matches!(&self.tokens[pos].kind, TokenKind::Colon)
+                    pos < self.tokens.len() && matches!(&self.tokens[pos].kind, TokenKind::Colon)
                 } else {
                     false
                 };
@@ -498,13 +502,21 @@ impl Parser {
     fn lookahead_is_record(&self) -> bool {
         // M4 (audit-syntax 2026-08-03): ident-like set includes soft keywords
         // (see super::helpers::is_ident_like_kind).
+        //
+        // Full-audit 2026-08-05: the scan must STOP (false) at the first
+        // non-ident token such as `{`/`(`. The old fall-through scanned past
+        // `{`, so `type Shape { Circle { r: f64 }, Point }` found the `:`
+        // inside the variant payload and misclassified the enum as a record.
         if super::helpers::is_ident_like_kind(self.peek_kind()) {
             let mut pos = self.pos + 1;
             while pos < self.tokens.len() {
                 match &self.tokens[pos].kind {
                     TokenKind::Colon => return true,
-                    TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof => return false,
-                    _ => {}
+                    TokenKind::Newline => {}
+                    kind if super::helpers::is_ident_like_kind(kind) => {}
+                    // LBrace/LParen/Comma/BitOr/literal/anything else: this is
+                    // an enum (record payloads, tuple payloads, bare variants).
+                    _ => return false,
                 }
                 pos += 1;
             }

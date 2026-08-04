@@ -271,6 +271,23 @@ impl Parser {
                     .replace('_', "")
                     .parse::<f64>()
                     .map_err(|_| ParseError::new("invalid float", line, col))?;
+                // SD-9 finiteness invariant (full-audit 2026-08-05): literals
+                // like `1e999` overflowed parse::<f64> into ±Inf and slipped
+                // past the runtime E0813 trap, because the literal never goes
+                // through an operation. Reject at parse time; the integer path
+                // is already fail-closed. IEEE 754 escapes stay opt-in via
+                // `ieee_float { }` blocks.
+                if !v.is_finite() {
+                    return Err(ParseError::new(
+                        format!(
+                            "[E0813] float literal '{}' is not finite (SD-9 finiteness invariant) \
+                             | hint: use ieee_float {{ }} for IEEE 754 semantics",
+                            s
+                        ),
+                        line,
+                        col,
+                    ));
+                }
                 let literal = self.parsed_expr_from(start_pos, Expr::Literal(Lit::Float(v)));
                 return self.parse_postfix(literal, start_pos);
             }
@@ -897,12 +914,17 @@ impl Parser {
         }
         // Save depth state
         let saved_depth = self.recursion_depth.get();
+        // Full-audit 2026-08-05: speculative parses that push recovery
+        // diagnostics leave ghost entries in self.errors when the attempt
+        // rewinds. Snapshot the error count and truncate on every rewind.
+        let saved_errors = self.errors.len();
         // Try to parse a single expression
         let first_key = match self.parse_expr(0) {
             Ok(key) => key,
             Err(_) => {
                 self.pos = saved;
                 self.recursion_depth.set(saved_depth);
+                self.errors.truncate(saved_errors);
                 return None;
             }
         };
@@ -910,6 +932,7 @@ impl Parser {
         if !self.at(&TokenKind::Colon) {
             self.pos = saved;
             self.recursion_depth.set(saved_depth);
+            self.errors.truncate(saved_errors);
             return None;
         }
         self.advance(); // consume ':'
@@ -918,6 +941,7 @@ impl Parser {
             Err(_) => {
                 self.pos = saved;
                 self.recursion_depth.set(saved_depth);
+                self.errors.truncate(saved_errors);
                 return None;
             }
         };
@@ -936,12 +960,14 @@ impl Parser {
                     Err(_) => {
                         self.pos = saved;
                         self.recursion_depth.set(saved_depth);
+                        self.errors.truncate(saved_errors);
                         return None;
                     }
                 };
                 if !self.at(&TokenKind::Colon) {
                     self.pos = saved;
                     self.recursion_depth.set(saved_depth);
+                    self.errors.truncate(saved_errors);
                     return None;
                 }
                 self.advance();
@@ -950,6 +976,7 @@ impl Parser {
                     Err(_) => {
                         self.pos = saved;
                         self.recursion_depth.set(saved_depth);
+                        self.errors.truncate(saved_errors);
                         return None;
                     }
                 };
@@ -959,6 +986,7 @@ impl Parser {
             } else {
                 self.pos = saved;
                 self.recursion_depth.set(saved_depth);
+                self.errors.truncate(saved_errors);
                 return None;
             }
         }
@@ -972,6 +1000,9 @@ impl Parser {
     fn try_parse_set_literal(&mut self) -> Option<Vec<Expr>> {
         let saved = self.pos;
         let saved_depth = self.recursion_depth.get();
+        // Full-audit 2026-08-05: mirror try_parse_map_literal — truncate
+        // ghost recovery diagnostics on every speculative rewind.
+        let saved_errors = self.errors.len();
         // Quick check for stmt-start keyword or closing brace
         let first = self.peek_kind().clone();
         if is_stmt_start_keyword(&first) || matches!(first, TokenKind::RBrace) {
@@ -983,6 +1014,7 @@ impl Parser {
             Err(_) => {
                 self.pos = saved;
                 self.recursion_depth.set(saved_depth);
+                self.errors.truncate(saved_errors);
                 return None;
             }
         };
@@ -990,6 +1022,7 @@ impl Parser {
         if !self.at(&TokenKind::Comma) {
             self.pos = saved;
             self.recursion_depth.set(saved_depth);
+            self.errors.truncate(saved_errors);
             return None;
         }
         self.advance(); // consume ','
@@ -1005,6 +1038,7 @@ impl Parser {
                 Err(_) => {
                     self.pos = saved;
                     self.recursion_depth.set(saved_depth);
+                    self.errors.truncate(saved_errors);
                     return None;
                 }
             }
@@ -1016,6 +1050,7 @@ impl Parser {
             } else {
                 self.pos = saved;
                 self.recursion_depth.set(saved_depth);
+                self.errors.truncate(saved_errors);
                 return None;
             }
         }

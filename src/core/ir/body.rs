@@ -124,6 +124,15 @@ pub enum CheckedConversionKind {
     /// parameterized container (`Set<i32>` → `Set`). No codegen — Set/List
     /// are opaque i64 handles regardless of element type.
     ContainerErase,
+    /// Full audit 2026-08-05 (#7): shape-equal transparent containers whose
+    /// canonical ids differ because the payload representation diverges
+    /// (constructor-side `Option<_>` vs annotation-side nominal
+    /// `builtin:type:Option`, or aliased payloads that unwrap to the same
+    /// target). Content-identity at every backend level — layouts agree —
+    /// but `Identity` is refused because the canonical type id changes.
+    /// The validator enforces the shape equality independently (see
+    /// `visit_conversion`); codegen treats it as identity at the LLVM level.
+    ContainerAliasErase,
     AliasWrap,
     AliasUnwrap,
     NewtypeWrap,
@@ -1235,6 +1244,52 @@ impl BodyValidator<'_> {
         if conversion.kind == CheckedConversionKind::Identity && conversion.from != conversion.to {
             self.error(owner, "identity conversion changes the canonical type");
         }
+        if conversion.kind == CheckedConversionKind::ContainerAliasErase {
+            // Full audit 2026-08-05 (#7): the lowering may erase container
+            // identity only when BOTH sides are the same transparent container
+            // shape carrying the SAME canonical payload id. Representationally
+            // divergent spellings (structural Option vs nominal
+            // builtin:type:Option) are admitted; structurally divergent
+            // payloads are not — the lowering refuses those fail-closed.
+            fn transparent_container_payload(
+                ty: Option<&ResolvedType>,
+            ) -> Option<(&'static str, &ResolvedTypeId)> {
+                match ty {
+                    Some(ResolvedType::Option(inner)) => Some(("builtin:type:Option", inner)),
+                    Some(ResolvedType::Nominal {
+                        item, arguments, ..
+                    }) if item.as_str() == "builtin:type:Option" && arguments.len() == 1 => {
+                        Some(("builtin:type:Option", &arguments[0]))
+                    }
+                    Some(ResolvedType::Nominal {
+                        item, arguments, ..
+                    }) if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
+                        Some(("builtin:type:List", &arguments[0]))
+                    }
+                    Some(ResolvedType::Nominal {
+                        item, arguments, ..
+                    }) if item.as_str() == "builtin:type:Set" && arguments.len() == 1 => {
+                        Some(("builtin:type:Set", &arguments[0]))
+                    }
+                    _ => None,
+                }
+            }
+            let shape_equal = match (
+                transparent_container_payload(self.types.get(&conversion.from)),
+                transparent_container_payload(self.types.get(&conversion.to)),
+            ) {
+                (Some((from_container, from_payload)), Some((to_container, to_payload))) => {
+                    from_container == to_container && from_payload == to_payload
+                }
+                _ => false,
+            };
+            if !shape_equal {
+                self.error(
+                    owner,
+                    "container alias erasure requires shape-equal transparent containers with equal payload types",
+                );
+            }
+        }
         if conversion.kind == CheckedConversionKind::FlowStateInject {
             let valid = matches!(
                 (self.types.get(&conversion.from), self.types.get(&conversion.to)),
@@ -1525,5 +1580,78 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.message.contains("duplicate resolved parameter")));
+    }
+
+    #[test]
+    fn validator_accepts_container_alias_erase_for_shape_equal_containers() {
+        // Full audit 2026-08-05 (#7): representationally divergent containers
+        // (structural Option vs nominal builtin:type:Option) carrying the SAME
+        // canonical payload id are admitted through the dedicated conversion
+        // kind. An Identity conversion with from≠to would be rejected, which
+        // was the previous (validator-failing) shape.
+        let (mut types, i32_ty, unit_ty) = types();
+        let structural = types
+            .intern_resolved(ResolvedType::Option(i32_ty.clone()))
+            .unwrap();
+        let nominal = types
+            .intern_resolved(ResolvedType::Nominal {
+                item: NominalTypeId::new("builtin:type:Option").unwrap(),
+                arguments: vec![i32_ty.clone()],
+                is_linear: false,
+            })
+            .unwrap();
+        assert_ne!(
+            structural, nominal,
+            "the two representations must intern to distinct ids for this test"
+        );
+        let mut body = valid_body(&i32_ty, &unit_ty);
+        body.root.statements.push(ResolvedStmt {
+            node_id: node("stmt.container-erase"),
+            origin: origin(),
+            ty: unit_ty.clone(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedStmtKind::Return {
+                value: Some(literal("expr.container-value", &structural, 1)),
+                conversion: Some(CheckedConversion {
+                    kind: CheckedConversionKind::ContainerAliasErase,
+                    from: structural,
+                    to: nominal,
+                }),
+            },
+        });
+        body.validate(&types)
+            .expect("shape-equal container erasure is admitted");
+    }
+
+    #[test]
+    fn validator_rejects_container_alias_erase_with_divergent_payloads() {
+        // Full audit 2026-08-05 (#7): payload inequality defeats the erasure —
+        // the validator enforces the shape independently of lowering.
+        let (mut types, i32_ty, unit_ty) = types();
+        let option_i32 = types
+            .intern_resolved(ResolvedType::Option(i32_ty.clone()))
+            .unwrap();
+        let option_unit = types
+            .intern_resolved(ResolvedType::Option(unit_ty.clone()))
+            .unwrap();
+        let mut body = valid_body(&i32_ty, &unit_ty);
+        body.root.statements.push(ResolvedStmt {
+            node_id: node("stmt.bad-erase"),
+            origin: origin(),
+            ty: unit_ty.clone(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedStmtKind::Return {
+                value: Some(literal("expr.bad-value", &option_i32, 1)),
+                conversion: Some(CheckedConversion {
+                    kind: CheckedConversionKind::ContainerAliasErase,
+                    from: option_i32,
+                    to: option_unit,
+                }),
+            },
+        });
+        let errors = body.validate(&types).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("shape-equal")));
     }
 }

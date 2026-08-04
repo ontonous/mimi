@@ -66,6 +66,17 @@ impl Parser {
     }
 
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // Full-audit 2026-08-05: patterns recurse (nested tuple/constructor/
+        // list/record patterns) and had no depth guard — crafted input could
+        // overflow the parser stack. Mirror the parse_expr guard.
+        self.check_depth()?;
+        self.inc_depth();
+        let result = self.parse_pattern_inner();
+        self.dec_depth();
+        result
+    }
+
+    fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
         self.skip_newlines();
         let start_pos = self.pos;
         let tok = self.peek();

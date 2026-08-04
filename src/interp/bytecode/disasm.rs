@@ -69,6 +69,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::RetEarly { .. } => "RET_EARLY",
         Op::NewList { .. } => "NEW_LIST",
         Op::ListPush { .. } => "LIST_PUSH",
+        Op::ListPop { .. } => "LIST_POP",
         Op::ListGet { .. } => "LIST_GET",
         Op::ListSet { .. } => "LIST_SET",
         Op::Len { .. } => "LEN",
@@ -429,6 +430,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             format!("{:04}  {:<16} r{} = list(cap={})", pc, name, rd, capacity)
         }
         Op::ListPush { ra, rb } => format!("{:04}  {:<16} r{}.push(r{})", pc, name, ra, rb),
+        Op::ListPop { rd, ra } => format!("{:04}  {:<16} r{} = r{}.pop()", pc, name, rd, ra),
         Op::ListGet { rd, ra, rb } => format!("{:04}  {:<16} r{} = r{}[r{}]", pc, name, rd, ra, rb),
         Op::ListSet { ra, rb, rc } => format!("{:04}  {:<16} r{}[r{}] = r{}", pc, name, ra, rb, rc),
         Op::Len { rd, ra } => format!("{:04}  {:<16} r{} = len(r{})", pc, name, rd, ra),

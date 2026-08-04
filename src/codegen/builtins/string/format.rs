@@ -194,43 +194,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
-                let alloc_size = self.context.i64_type().const_int(32, false);
-                let buf = self.malloc_or_abort(alloc_size, "malloc_call")?;
-                let fmt_global = self
+                // Audit fix 9 (full-audit-2026-08-05): unify with
+                // mimi_to_string_f64 (Rust `f64::to_string` — shortest
+                // round-trip, src/runtime/crypto.rs) instead of snprintf
+                // "%.15g", which truncates to 15 significant digits and
+                // diverges from the VM's Value::Float Display. This is the
+                // same helper io.rs format()/println use (agent E unification),
+                // so to_string/format/println now agree on float rendering.
+                let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                let raw = self
                     .builder
-                    .build_global_string_ptr("%.15g", "float_fmt")
-                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-                // B3/CG-C3: snprintf returns i32, not i8*.
-                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
-                    let i32_ty = self.context.i32_type();
-                    let ty = i32_ty.fn_type(
-                        &[
-                            BasicMetadataTypeEnum::PointerType(i8_ptr),
-                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                            BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        ],
-                        true,
-                    );
-                    self.module.add_function(
-                        "snprintf",
-                        ty,
-                        Some(inkwell::module::Linkage::External),
-                    )
-                });
-                self.builder
                     .build_call(
-                        snprintf_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(buf),
-                            BasicMetadataValueEnum::IntValue(alloc_size),
-                            BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
-                            BasicMetadataValueEnum::FloatValue(fv),
-                        ],
-                        "snprintf_float",
+                        to_f64_fn,
+                        &[BasicMetadataValueEnum::FloatValue(fv)],
+                        "to_str_f64",
                     )
-                    .map_err(|e| CompileError::LlvmError(format!("snprintf error: {}", e)))?;
-                // Build {i8*, i64} struct from the buffer
+                    .map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_to_string_f64 returned void")?
+                    .into_pointer_value();
+                // Build {i8*, i64} struct from the runtime buffer
                 let str_ty = self.context.struct_type(
                     &[
                         BasicTypeEnum::PointerType(
@@ -246,7 +229,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_struct_gep(str_ty, alloca, 0, "str_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder
-                    .build_store(ptr_gep, buf)
+                    .build_store(ptr_gep, raw)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                 self.register_heap_slot(alloca, str_ty, 0);
                 let strlen_fn = self
@@ -257,7 +240,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_call(
                         strlen_fn,
-                        &[BasicMetadataValueEnum::PointerValue(buf)],
+                        &[BasicMetadataValueEnum::PointerValue(raw)],
                         "strlen_to_s",
                     )
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?

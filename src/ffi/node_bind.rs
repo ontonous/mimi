@@ -7,6 +7,13 @@
 //!
 //! Usage:
 //!   mimi emit-node-bindings path/to/pkg.mimi -o bindings.c --ts types.d.ts
+//!
+//! Contract (see `src/ffi/contract.rs`):
+//!   * `FfiRetContract::String`  — borrowed from C; the binding must NOT free.
+//!   * `FfiRetContract::StringOwned` / `Json` — owned; the binding frees after
+//!     copying the data out.
+//!   * `FfiArgContract::StringTransfer` — ownership of the buffer moves to C;
+//!     the binding must NOT free it post-call.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -42,6 +49,8 @@ impl NodeBindGenerator {
         writeln!(out, "#include <stdlib.h>")?;
         writeln!(out, "#include <string.h>")?;
         writeln!(out, "#include <stdint.h>")?;
+        // stdbool for the bare `bool` used in trampolines and struct fields.
+        writeln!(out, "#include <stdbool.h>")?;
         writeln!(out)?;
 
         // 0.31.24-9: Thread-local error flag for callback exception propagation
@@ -86,11 +95,35 @@ impl NodeBindGenerator {
         writeln!(out, "extern void mimi_string_free(char* s);")?;
         writeln!(out)?;
 
+        // Audit fix (full-audit-2026-08-05 §12): every N-API call in the
+        // marshalling path must have its napi_status checked.  On failure the
+        // wrapper throws a JS Error and returns NULL instead of marshalling
+        // uninitialised napi_value slots into the C call.
+        writeln!(
+            out,
+            "// Audit fix (full-audit-2026-08-05 §12): check every napi_status on the marshalling path."
+        )?;
+        writeln!(out, "#define MIMI_NAPI_CHECK(env, expr) \\")?;
+        writeln!(out, "    do {{ \\")?;
+        writeln!(out, "        napi_status mimi_st = (expr); \\")?;
+        writeln!(out, "        if (mimi_st != napi_ok) {{ \\")?;
+        writeln!(
+            out,
+            "            napi_throw_error((env), NULL, \"mimi: N-API call failed: \" #expr); \\"
+        )?;
+        writeln!(out, "            return NULL; \\")?;
+        writeln!(out, "        }} \\")?;
+        writeln!(out, "    }} while (0)")?;
+        writeln!(out)?;
+
         // C struct definitions for #[repr(C)] records
         self.write_c_struct_decls(&mut out)?;
 
         // C callback trampolines for func(...) parameters
         self.write_callback_support(&mut out, extern_funcs)?;
+
+        // Extern prototypes (must follow struct decls / trampoline defs).
+        self.write_c_extern_decls(&mut out, extern_funcs)?;
 
         for func in extern_funcs {
             let contract = self.build_contract(func);
@@ -184,6 +217,130 @@ impl NodeBindGenerator {
         Ok(())
     }
 
+    /// Extern C prototypes for every wrapped function.
+    ///
+    /// Audit fix (full-audit-2026-08-05 §12): the generated file previously
+    /// called the extern functions with no visible declaration, so the
+    /// compiler assumed `int` returns — silently truncating pointer returns.
+    fn write_c_extern_decls(
+        &self,
+        out: &mut String,
+        extern_funcs: &[ExternFunc],
+    ) -> Result<(), std::fmt::Error> {
+        if extern_funcs.is_empty() {
+            return Ok(());
+        }
+        writeln!(out, "// Extern function prototypes (Mimi C ABI).")?;
+        writeln!(
+            out,
+            "// Emitted so the compiler sees real signatures instead of assuming `int`."
+        )?;
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            let ret_c = self.extern_ret_c_type(&contract);
+            let params: Vec<String> = func
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    // Function-pointer parameters need the name embedded in the
+                    // declarator: `ret (*name)(args)`.
+                    if let FfiArgContract::Callback {
+                        param_types,
+                        ret_type,
+                    } = &contract.args[i]
+                    {
+                        let cb_ret = self.callback_c_type(ret_type);
+                        let cb_params: Vec<String> = param_types
+                            .iter()
+                            .map(|ty| self.callback_c_type(ty))
+                            .collect();
+                        let cb_params_str = if cb_params.is_empty() {
+                            "void".to_string()
+                        } else {
+                            cb_params.join(", ")
+                        };
+                        format!("{} (*{})({})", cb_ret, p.name, cb_params_str)
+                    } else {
+                        format!("{} {}", self.extern_arg_c_type(&contract, i), p.name)
+                    }
+                })
+                .collect();
+            let params_str = if params.is_empty() {
+                "void".to_string()
+            } else {
+                params.join(", ")
+            };
+            writeln!(out, "extern {} {}({});", ret_c, func.name, params_str)?;
+        }
+        writeln!(out)?;
+        Ok(())
+    }
+
+    /// C type for one extern parameter in the emitted prototype.
+    fn extern_arg_c_type(&self, contract: &FfiContract, index: usize) -> String {
+        match &contract.args[index] {
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32_t".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64_t".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
+            FfiArgContract::Float => "double".to_string(),
+            // Borrowed / JSON strings arrive as const char*; StringTransfer is
+            // a mutable buffer whose ownership moves to C.
+            FfiArgContract::StringBorrow | FfiArgContract::Json => "const char*".to_string(),
+            FfiArgContract::StringTransfer => "char*".to_string(),
+            FfiArgContract::Cap(_)
+            | FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
+            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
+            FfiArgContract::StructByValue(name) => format!("struct {}", name),
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => {
+                let ret_c = self.callback_c_type(ret_type);
+                let params: Vec<String> = param_types
+                    .iter()
+                    .map(|ty| self.callback_c_type(ty))
+                    .collect();
+                let params_str = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.join(", ")
+                };
+                format!("{} (*)({})", ret_c, params_str)
+            }
+            FfiArgContract::Unsupported(_) => "void*".to_string(),
+        }
+    }
+
+    /// C type for the extern return in the emitted prototype.
+    fn extern_ret_c_type(&self, contract: &FfiContract) -> String {
+        match &contract.ret {
+            crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32_t".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64_t".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
+            crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned
+            | crate::ffi::contract::FfiRetContract::Json => "char*".to_string(),
+            crate::ffi::contract::FfiRetContract::RawPtr(_)
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "void*".to_string(),
+            crate::ffi::contract::FfiRetContract::CShared(_)
+            | crate::ffi::contract::FfiRetContract::CBorrow(_)
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int64_t".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => {
+                format!("struct {}", name)
+            }
+            crate::ffi::contract::FfiRetContract::Unsupported(_) => "void*".to_string(),
+        }
+    }
+
     fn write_ts_interfaces(&self, out: &mut String) -> Result<(), std::fmt::Error> {
         let mut repr_c: Vec<(&String, &TypeDef)> = self
             .type_defs
@@ -234,55 +391,66 @@ impl NodeBindGenerator {
                         .collect();
                     writeln!(out, "static {} {}({}) {{", ret_c, tramp, c_args.join(", "))?;
                     writeln!(out, "    if (!{}.env || !{}.ref) {{", slot, slot)?;
-                    writeln!(
-                        out,
-                        "        return {};",
-                        self.callback_default_ret(ret_type)
-                    )?;
+                    self.write_trampoline_bail(out, ret_type)?;
                     writeln!(out, "    }}")?;
                     writeln!(out, "    napi_value fn;")?;
+                    // Audit fix §12: trampolines run from C and cannot throw;
+                    // every failing N-API call returns the sentinel instead.
                     writeln!(
                         out,
-                        "    napi_get_reference_value({}.env, {}.ref, &fn);",
+                        "    if (napi_get_reference_value({}.env, {}.ref, &fn) != napi_ok) {{",
                         slot, slot
                     )?;
-                    for (j, ty) in param_types.iter().enumerate() {
-                        writeln!(out, "    napi_value argv{};", j)?;
-                        match ty.unlocated() {
-                            Type::Name(name, _) if name == "f64" => {
-                                writeln!(
-                                    out,
-                                    "    napi_create_double({}.env, (double)arg{}, &argv{});",
-                                    slot, j, j
-                                )?;
-                            }
-                            Type::Name(name, _) if name == "bool" => {
-                                writeln!(
-                                    out,
-                                    "    napi_get_boolean({}.env, (bool)arg{}, &argv{});",
-                                    slot, j, j
-                                )?;
-                            }
-                            _ => {
-                                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
-                                writeln!(
-                                    out,
-                                    "    napi_create_bigint_int64({}.env, arg{}, &argv{});",
-                                    slot, j, j
-                                )?;
-                            }
-                        }
+                    self.write_trampoline_bail(out, ret_type)?;
+                    writeln!(out, "    }}")?;
+                    // Audit fix §12 (sweep): napi_call_function takes ONE
+                    // `const napi_value* argv` array — the old emitter passed
+                    // `&argv0, &argv1, ...` as separate arguments, which does
+                    // not compile against the real N-API headers for 2+ args.
+                    if !param_types.is_empty() {
+                        writeln!(out, "    napi_value argv[{}];", param_types.len())?;
                     }
-                    let argv_list: Vec<String> = (0..param_types.len())
-                        .map(|j| format!("&argv{}", j))
-                        .collect();
+                    for (j, ty) in param_types.iter().enumerate() {
+                        // Audit fix §12 (sweep): i32 arguments previously fell
+                        // into the BigInt arm; N-API then rejects them when the
+                        // JS side returns a plain number and the TS stubs type
+                        // i32 as `number`.  Keep BigInt only for i64.
+                        let create = match ty.unlocated() {
+                            Type::Name(name, _) if name == "i32" => {
+                                format!("napi_create_int32({}.env, arg{}, &argv[{}])", slot, j, j)
+                            }
+                            Type::Name(name, _) if name == "f64" => format!(
+                                "napi_create_double({}.env, (double)arg{}, &argv[{}])",
+                                slot, j, j
+                            ),
+                            Type::Name(name, _) if name == "bool" => format!(
+                                "napi_get_boolean({}.env, (bool)arg{}, &argv[{}])",
+                                slot, j, j
+                            ),
+                            _ => {
+                                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 以避免 >2^53 截断
+                                format!(
+                                    "napi_create_bigint_int64({}.env, arg{}, &argv[{}])",
+                                    slot, j, j
+                                )
+                            }
+                        };
+                        writeln!(out, "    if ({} != napi_ok) {{", create)?;
+                        self.write_trampoline_bail(out, ret_type)?;
+                        writeln!(out, "    }}")?;
+                    }
+                    let argv_expr = if param_types.is_empty() {
+                        "NULL".to_string()
+                    } else {
+                        "argv".to_string()
+                    };
                     writeln!(out, "    napi_value result;")?;
                     writeln!(
                         out,
                         "    if (napi_call_function({}.env, NULL, fn, {}, {}, &result) != napi_ok) {{",
                         slot,
                         param_types.len(),
-                        argv_list.join(", ")
+                        argv_expr
                     )?;
                     // 0.31.24-9: Check for pending JS exception vs other N-API errors
                     writeln!(out, "        bool pending = false;")?;
@@ -307,37 +475,59 @@ impl NodeBindGenerator {
                     )?;
                     writeln!(out, "    }}")?;
                     if !matches!(ret_type.unlocated(), Type::Name(name, _) if name == "unit") {
-                        writeln!(out, "    {} ret;", ret_c)?;
-                        match ret_type.unlocated() {
+                        // Audit fix §12: initialise ret and check the extraction.
+                        let init = match ret_type.unlocated() {
+                            Type::Name(name, _) if name == "f64" => "0.0",
+                            _ => "0",
+                        };
+                        writeln!(out, "    {} ret = {};", ret_c, init)?;
+                        // Audit fix §12 (sweep): i32 returns previously read a
+                        // BigInt into an int32_t — a width mismatch.
+                        let extract = match ret_type.unlocated() {
+                            Type::Name(name, _) if name == "i32" => {
+                                format!("napi_get_value_int32({}.env, result, &ret)", slot)
+                            }
                             Type::Name(name, _) if name == "f64" => {
-                                writeln!(
-                                    out,
-                                    "    napi_get_value_double({}.env, result, &ret);",
-                                    slot
-                                )?;
+                                format!("napi_get_value_double({}.env, result, &ret)", slot)
                             }
                             Type::Name(name, _) if name == "bool" => {
-                                writeln!(
-                                    out,
-                                    "    napi_get_value_bool({}.env, result, &ret);",
-                                    slot
-                                )?;
+                                format!("napi_get_value_bool({}.env, result, &ret)", slot)
                             }
                             _ => {
-                                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
-                                writeln!(
-                                    out,
-                                    "    napi_get_value_bigint_int64({}.env, result, &ret, NULL);",
+                                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 以避免 >2^53 截断
+                                format!(
+                                    "napi_get_value_bigint_int64({}.env, result, &ret, NULL)",
                                     slot
-                                )?;
+                                )
                             }
-                        }
+                        };
+                        writeln!(out, "    if ({} != napi_ok) {{", extract)?;
+                        self.write_trampoline_bail(out, ret_type)?;
+                        writeln!(out, "    }}")?;
                         writeln!(out, "    return ret;")?;
                     }
                     writeln!(out, "}}")?;
                     writeln!(out)?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Emit the trampoline early-return (`return;` for unit, sentinel otherwise).
+    fn write_trampoline_bail(
+        &self,
+        out: &mut String,
+        ret_type: &Type,
+    ) -> Result<(), std::fmt::Error> {
+        if matches!(ret_type.unlocated(), Type::Name(name, _) if name == "unit") {
+            writeln!(out, "        return;")?;
+        } else {
+            writeln!(
+                out,
+                "        return {};",
+                self.callback_default_ret(ret_type)
+            )?;
         }
         Ok(())
     }
@@ -350,20 +540,29 @@ impl NodeBindGenerator {
         arg_index: usize,
     ) -> Result<(), std::fmt::Error> {
         let slot = self.callback_slot_name(func_name, param_name);
+        // Audit fix §12: reject non-functions with a TypeError and check every
+        // napi_status (previously a non-function silently left the slot empty
+        // and the trampoline was passed to C anyway).
         writeln!(out, "    napi_valuetype {}_type;", param_name)?;
         writeln!(
             out,
-            "    napi_typeof(env, args[{}], &{}_type);",
+            "    MIMI_NAPI_CHECK(env, napi_typeof(env, args[{}], &{}_type));",
             arg_index, param_name
         )?;
-        writeln!(out, "    if ({}_type == napi_function) {{", param_name)?;
+        writeln!(out, "    if ({}_type != napi_function) {{", param_name)?;
         writeln!(
             out,
-            "        napi_create_reference(env, args[{}], 1, &{}.ref);",
+            "        napi_throw_type_error(env, NULL, \"mimi: callback argument {} must be a function\");",
+            param_name
+        )?;
+        writeln!(out, "        return NULL;")?;
+        writeln!(out, "    }}")?;
+        writeln!(
+            out,
+            "    MIMI_NAPI_CHECK(env, napi_create_reference(env, args[{}], 1, &{}.ref));",
             arg_index, slot
         )?;
-        writeln!(out, "        {}.env = env;", slot)?;
-        writeln!(out, "    }}")?;
+        writeln!(out, "    {}.env = env;", slot)?;
         Ok(())
     }
 
@@ -426,18 +625,41 @@ impl NodeBindGenerator {
         contract: &FfiContract,
     ) -> Result<(), std::fmt::Error> {
         let wrapper_name = format!("napi_{}", func.name);
+        let n_params = func.params.len();
 
         writeln!(
             out,
             "static napi_value {}(napi_env env, napi_callback_info info) {{",
             wrapper_name
         )?;
-        writeln!(out, "    size_t argc = {};", func.params.len())?;
-        writeln!(out, "    napi_value args[{}];", func.params.len().max(1))?;
+        // Audit fix (full-audit-2026-08-05 §12): use the ACTUAL argc written by
+        // napi_get_cb_info.  Omitted JS arguments previously read uninitialised
+        // napi_value slots and were marshalled unchecked into the C call; now a
+        // TypeError is thrown for missing arguments and every napi_status is
+        // checked via MIMI_NAPI_CHECK.
+        writeln!(out, "    size_t argc = {};", n_params)?;
+        writeln!(out, "    napi_value args[{}];", n_params.max(1))?;
         writeln!(
             out,
-            "    napi_get_cb_info(env, info, &argc, args, NULL, NULL);"
+            "    if (napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok) {{"
         )?;
+        writeln!(
+            out,
+            "        napi_throw_error(env, NULL, \"mimi: napi_get_cb_info failed in {}\");",
+            func.name
+        )?;
+        writeln!(out, "        return NULL;")?;
+        writeln!(out, "    }}")?;
+        if n_params > 0 {
+            writeln!(out, "    if (argc < {}) {{", n_params)?;
+            writeln!(
+                out,
+                "        napi_throw_type_error(env, NULL, \"mimi: {} expects {} argument(s)\");",
+                func.name, n_params
+            )?;
+            writeln!(out, "        return NULL;")?;
+            writeln!(out, "    }}")?;
+        }
         writeln!(out)?;
 
         // Extract arguments
@@ -448,16 +670,16 @@ impl NodeBindGenerator {
                         writeln!(out, "    int32_t {}_val;", p.name)?;
                         writeln!(
                             out,
-                            "    napi_get_value_int32(env, args[{}], &{}_val);",
+                            "    MIMI_NAPI_CHECK(env, napi_get_value_int32(env, args[{}], &{}_val));",
                             i, p.name
                         )?;
                     }
                     crate::ffi::contract::FfiScalarType::I64 => {
                         writeln!(out, "    int64_t {}_val;", p.name)?;
-                        // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
+                        // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 以避免 >2^53 截断
                         writeln!(
                             out,
-                            "    napi_get_value_bigint_int64(env, args[{}], &{}_val, NULL);",
+                            "    MIMI_NAPI_CHECK(env, napi_get_value_bigint_int64(env, args[{}], &{}_val, NULL));",
                             i, p.name
                         )?;
                     }
@@ -465,7 +687,7 @@ impl NodeBindGenerator {
                         writeln!(out, "    bool {}_val;", p.name)?;
                         writeln!(
                             out,
-                            "    napi_get_value_bool(env, args[{}], &{}_val);",
+                            "    MIMI_NAPI_CHECK(env, napi_get_value_bool(env, args[{}], &{}_val));",
                             i, p.name
                         )?;
                     }
@@ -477,7 +699,7 @@ impl NodeBindGenerator {
                     writeln!(out, "    int64_t {}_val;", p.name)?;
                     writeln!(
                         out,
-                        "    napi_get_value_int64(env, args[{}], &{}_val);",
+                        "    MIMI_NAPI_CHECK(env, napi_get_value_int64(env, args[{}], &{}_val));",
                         i, p.name
                     )?;
                 }
@@ -485,7 +707,7 @@ impl NodeBindGenerator {
                     writeln!(out, "    double {}_val;", p.name)?;
                     writeln!(
                         out,
-                        "    napi_get_value_double(env, args[{}], &{}_val);",
+                        "    MIMI_NAPI_CHECK(env, napi_get_value_double(env, args[{}], &{}_val));",
                         i, p.name
                     )?;
                 }
@@ -495,7 +717,7 @@ impl NodeBindGenerator {
                     writeln!(out, "    size_t {}_len;", p.name)?;
                     writeln!(
                         out,
-                        "    napi_get_value_string_utf8(env, args[{}], NULL, 0, &{}_len);",
+                        "    MIMI_NAPI_CHECK(env, napi_get_value_string_utf8(env, args[{}], NULL, 0, &{}_len));",
                         i, p.name
                     )?;
                     writeln!(
@@ -503,7 +725,55 @@ impl NodeBindGenerator {
                         "    char* {}_buf = (char*)malloc({}_len + 1);",
                         p.name, p.name
                     )?;
-                    writeln!(out, "    napi_get_value_string_utf8(env, args[{}], {}_buf, {}_len + 1, &{}_len);", i, p.name, p.name, p.name)?;
+                    writeln!(out, "    if ({}_buf == NULL) {{", p.name)?;
+                    writeln!(
+                        out,
+                        "        napi_throw_error(env, NULL, \"mimi: out of memory copying string argument\");"
+                    )?;
+                    writeln!(out, "        return NULL;")?;
+                    writeln!(out, "    }}")?;
+                    writeln!(
+                        out,
+                        "    MIMI_NAPI_CHECK(env, napi_get_value_string_utf8(env, args[{}], {}_buf, {}_len + 1, &{}_len));",
+                        i, p.name, p.name, p.name
+                    )?;
+                }
+                // Audit fix §12 (fix 3): marshal the actual JS pointer value
+                // (number or BigInt address) instead of discarding it as NULL.
+                FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => {
+                    writeln!(out, "    int64_t {}_addr;", p.name)?;
+                    writeln!(out, "    {{")?;
+                    writeln!(out, "        napi_valuetype {}_vt;", p.name)?;
+                    writeln!(
+                        out,
+                        "        MIMI_NAPI_CHECK(env, napi_typeof(env, args[{}], &{}_vt));",
+                        i, p.name
+                    )?;
+                    writeln!(out, "        if ({}_vt == napi_bigint) {{", p.name)?;
+                    writeln!(
+                        out,
+                        "            MIMI_NAPI_CHECK(env, napi_get_value_bigint_int64(env, args[{}], &{}_addr, NULL));",
+                        i, p.name
+                    )?;
+                    writeln!(out, "        }} else {{")?;
+                    writeln!(out, "            double {}_num;", p.name)?;
+                    writeln!(
+                        out,
+                        "            MIMI_NAPI_CHECK(env, napi_get_value_double(env, args[{}], &{}_num));",
+                        i, p.name
+                    )?;
+                    writeln!(
+                        out,
+                        "            {}_addr = (int64_t){}_num;",
+                        p.name, p.name
+                    )?;
+                    writeln!(out, "        }}")?;
+                    writeln!(out, "    }}")?;
+                    writeln!(
+                        out,
+                        "    void* {}_ptr = (void*)(intptr_t){}_addr;",
+                        p.name, p.name
+                    )?;
                 }
                 FfiArgContract::StructByValue(name) => {
                     self.write_struct_arg_extract(out, &p.name, name, i)?;
@@ -511,8 +781,15 @@ impl NodeBindGenerator {
                 FfiArgContract::Callback { .. } => {
                     self.write_callback_arg_extract(out, &func.name, &p.name, i)?;
                 }
-                _ => {
+                FfiArgContract::Unsupported(_) => {
+                    // Fail loudly instead of passing NULL garbage into C.
                     writeln!(out, "    // Unsupported arg type for {}", p.name)?;
+                    writeln!(
+                        out,
+                        "    napi_throw_type_error(env, NULL, \"mimi: unsupported FFI argument type for parameter {}\");",
+                        p.name
+                    )?;
+                    writeln!(out, "    return NULL;")?;
                 }
             }
         }
@@ -532,102 +809,165 @@ impl NodeBindGenerator {
                 FfiArgContract::StringBorrow
                 | FfiArgContract::StringTransfer
                 | FfiArgContract::Json => format!("{}_buf", p.name),
+                FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => {
+                    format!("{}_ptr", p.name)
+                }
                 FfiArgContract::StructByValue(_name) => format!("{}_struct", p.name),
                 FfiArgContract::Callback { .. } => {
                     self.callback_trampoline_name(&func.name, &p.name)
                 }
-                _ => format!("(intptr_t)NULL /* {} */", p.name),
+                // Unreachable: Unsupported args throw and return above.
+                FfiArgContract::Unsupported(_) => format!("(intptr_t)NULL /* {} */", p.name),
             })
             .collect();
+        let call = format!("{}({})", func.name, c_args.join(", "));
 
         writeln!(out)?;
 
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => {
-                writeln!(out, "    {}({});", func.name, c_args.join(", "))?;
+                writeln!(out, "    {};", call)?;
                 writeln!(out, "    napi_value result;")?;
-                writeln!(out, "    napi_get_undefined(env, &result);")?;
+                writeln!(
+                    out,
+                    "    MIMI_NAPI_CHECK(env, napi_get_undefined(env, &result));"
+                )?;
             }
             crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
                 crate::ffi::contract::FfiScalarType::I32 => {
+                    writeln!(out, "    int32_t ret = {};", call)?;
+                    writeln!(out, "    napi_value result;")?;
                     writeln!(
                         out,
-                        "    int32_t ret = {}({});",
-                        func.name,
-                        c_args.join(", ")
+                        "    MIMI_NAPI_CHECK(env, napi_create_int32(env, ret, &result));"
                     )?;
-                    writeln!(out, "    napi_value result;")?;
-                    writeln!(out, "    napi_create_int32(env, ret, &result);")?;
                 }
                 crate::ffi::contract::FfiScalarType::I64 => {
+                    writeln!(out, "    int64_t ret = {};", call)?;
+                    writeln!(out, "    napi_value result;")?;
+                    // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 以避免 >2^53 截断
                     writeln!(
                         out,
-                        "    int64_t ret = {}({});",
-                        func.name,
-                        c_args.join(", ")
+                        "    MIMI_NAPI_CHECK(env, napi_create_bigint_int64(env, ret, &result));"
                     )?;
-                    writeln!(out, "    napi_value result;")?;
-                    // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
-                    writeln!(out, "    napi_create_bigint_int64(env, ret, &result);")?;
                 }
                 crate::ffi::contract::FfiScalarType::Bool => {
-                    writeln!(out, "    bool ret = {}({});", func.name, c_args.join(", "))?;
+                    writeln!(out, "    bool ret = {};", call)?;
                     writeln!(out, "    napi_value result;")?;
-                    writeln!(out, "    napi_get_boolean(env, ret, &result);")?;
+                    writeln!(
+                        out,
+                        "    MIMI_NAPI_CHECK(env, napi_get_boolean(env, ret, &result));"
+                    )?;
                 }
             },
             crate::ffi::contract::FfiRetContract::Float => {
+                writeln!(out, "    double ret = {};", call)?;
+                writeln!(out, "    napi_value result;")?;
                 writeln!(
                     out,
-                    "    double ret = {}({});",
-                    func.name,
-                    c_args.join(", ")
+                    "    MIMI_NAPI_CHECK(env, napi_create_double(env, ret, &result));"
                 )?;
-                writeln!(out, "    napi_value result;")?;
-                writeln!(out, "    napi_create_double(env, ret, &result);")?;
             }
-            crate::ffi::contract::FfiRetContract::String
-            | crate::ffi::contract::FfiRetContract::StringOwned => {
-                writeln!(out, "    char* ret = {}({});", func.name, c_args.join(", "))?;
+            // Audit fix (full-audit-2026-08-05 §12, fix 2): contract split —
+            // `String` returns are BORROWED from C and must NOT be freed;
+            // `StringOwned` returns transfer ownership to Mimi and are freed
+            // after the value has been copied into the JS string.
+            crate::ffi::contract::FfiRetContract::String => {
+                writeln!(out, "    char* ret = {};", call)?;
                 writeln!(out, "    napi_value result;")?;
-                writeln!(out, "    if (ret) {{")?;
+                writeln!(out, "    if (ret == NULL) {{")?;
                 writeln!(
                     out,
-                    "        napi_create_string_utf8(env, ret, NAPI_AUTO_LENGTH, &result);"
+                    "        MIMI_NAPI_CHECK(env, napi_get_undefined(env, &result));"
                 )?;
-                writeln!(out, "        mimi_string_free(ret);")?;
                 writeln!(out, "    }} else {{")?;
-                writeln!(out, "        napi_get_undefined(env, &result);")?;
+                writeln!(
+                    out,
+                    "        MIMI_NAPI_CHECK(env, napi_create_string_utf8(env, ret, NAPI_AUTO_LENGTH, &result));"
+                )?;
+                writeln!(
+                    out,
+                    "        /* Contract FfiRetContract::String: borrowed from C — do NOT free. */"
+                )?;
                 writeln!(out, "    }}")?;
             }
-            crate::ffi::contract::FfiRetContract::StructByValue(name) => {
+            crate::ffi::contract::FfiRetContract::StringOwned => {
+                self.write_owned_string_ret(out, &call, "FfiRetContract::StringOwned")?;
+            }
+            crate::ffi::contract::FfiRetContract::Json => {
+                self.write_owned_string_ret(out, &call, "FfiRetContract::Json")?;
+            }
+            // Audit fix §12 (fix 3 companion): return the actual pointer as a
+            // BigInt address instead of JS `undefined`.
+            crate::ffi::contract::FfiRetContract::RawPtr(_)
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => {
+                writeln!(out, "    void* ret = {};", call)?;
+                writeln!(out, "    napi_value result;")?;
                 writeln!(
                     out,
-                    "    struct {} ret = {}({});",
-                    name,
-                    func.name,
-                    c_args.join(", ")
+                    "    MIMI_NAPI_CHECK(env, napi_create_bigint_int64(env, (int64_t)(intptr_t)ret, &result));"
                 )?;
+            }
+            crate::ffi::contract::FfiRetContract::CShared(_)
+            | crate::ffi::contract::FfiRetContract::CBorrow(_)
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => {
+                writeln!(out, "    int64_t ret = (int64_t){};", call)?;
+                writeln!(out, "    napi_value result;")?;
+                writeln!(
+                    out,
+                    "    MIMI_NAPI_CHECK(env, napi_create_bigint_int64(env, ret, &result));"
+                )?;
+            }
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => {
+                writeln!(out, "    struct {} ret = {};", name, call)?;
                 self.write_struct_return_build(out, "ret", name)?;
             }
-            _ => {
-                writeln!(out, "    // Unsupported return type")?;
+            crate::ffi::contract::FfiRetContract::Unsupported(_) => {
+                writeln!(
+                    out,
+                    "    /* Unsupported return type — surfaced, not silenced. */"
+                )?;
                 writeln!(out, "    napi_value result;")?;
-                writeln!(out, "    napi_get_undefined(env, &result);")?;
+                writeln!(
+                    out,
+                    "    MIMI_NAPI_CHECK(env, napi_get_undefined(env, &result));"
+                )?;
+                writeln!(
+                    out,
+                    "    napi_throw_type_error(env, NULL, \"mimi: unsupported FFI return type for {}\");",
+                    func.name
+                )?;
+                writeln!(out, "    return NULL;")?;
             }
         }
 
         // Free string arguments and release callback references
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow
-                | FfiArgContract::StringTransfer
-                | FfiArgContract::Json => {
+                // Borrowed / JSON buffers are Mimi-owned temporaries: free them.
+                FfiArgContract::StringBorrow | FfiArgContract::Json => {
                     writeln!(out, "    free({}_buf);", p.name)?;
+                }
+                // Audit fix §12 (fix 2): StringTransfer buffers are now owned
+                // by C — freeing them here would be a double-free/UAF.
+                FfiArgContract::StringTransfer => {
+                    writeln!(
+                        out,
+                        "    /* {}_buf: StringTransfer — ownership moved to C; do NOT free. */",
+                        p.name
+                    )?;
                 }
                 FfiArgContract::Callback { .. } => {
                     let slot = self.callback_slot_name(&func.name, &p.name);
-                    writeln!(out, "    if ({}.ref) {{ napi_delete_reference(env, {}.ref); {}.ref = NULL; {}.env = NULL; }}", slot, slot, slot, slot)?;
+                    writeln!(out, "    if ({}.ref) {{", slot)?;
+                    writeln!(
+                        out,
+                        "        MIMI_NAPI_CHECK(env, napi_delete_reference(env, {}.ref));",
+                        slot
+                    )?;
+                    writeln!(out, "        {}.ref = NULL;", slot)?;
+                    writeln!(out, "        {}.env = NULL;", slot)?;
+                    writeln!(out, "    }}")?;
                 }
                 _ => {}
             }
@@ -636,6 +976,36 @@ impl NodeBindGenerator {
         writeln!(out, "    return result;")?;
         writeln!(out, "}}")?;
         writeln!(out)
+    }
+
+    /// Owned-string return (StringOwned / Json): copy into a JS string, then
+    /// free the C buffer because ownership was transferred to Mimi.
+    fn write_owned_string_ret(
+        &self,
+        out: &mut String,
+        call: &str,
+        contract_name: &str,
+    ) -> Result<(), std::fmt::Error> {
+        writeln!(out, "    char* ret = {};", call)?;
+        writeln!(out, "    napi_value result;")?;
+        writeln!(out, "    if (ret == NULL) {{")?;
+        writeln!(
+            out,
+            "        MIMI_NAPI_CHECK(env, napi_get_undefined(env, &result));"
+        )?;
+        writeln!(out, "    }} else {{")?;
+        writeln!(
+            out,
+            "        MIMI_NAPI_CHECK(env, napi_create_string_utf8(env, ret, NAPI_AUTO_LENGTH, &result));"
+        )?;
+        writeln!(
+            out,
+            "        /* Contract {}: owned — free after copying. */",
+            contract_name
+        )?;
+        writeln!(out, "        mimi_string_free(ret);")?;
+        writeln!(out, "    }}")?;
+        Ok(())
     }
 
     fn write_struct_arg_extract(
@@ -652,15 +1022,27 @@ impl NodeBindGenerator {
                     writeln!(out, "    napi_value {}_{}_val;", param_name, field.name)?;
                     writeln!(
                         out,
-                        "    napi_get_named_property(env, args[{}], \"{}\", &{}_{}_val);",
+                        "    MIMI_NAPI_CHECK(env, napi_get_named_property(env, args[{}], \"{}\", &{}_{}_val));",
                         arg_index, field.name, param_name, field.name
                     )?;
-                    let extract = self.napi_extract_for_field(
+                    match self.napi_extract_for_field(
                         &field.ty,
                         &format!("{}_{}_val", param_name, field.name),
                         &format!("{}_struct.{}", param_name, field.name),
-                    );
-                    writeln!(out, "    {}", extract)?;
+                    ) {
+                        Some(extract) => {
+                            writeln!(out, "    MIMI_NAPI_CHECK(env, {});", extract)?;
+                        }
+                        None => {
+                            writeln!(
+                                out,
+                                "    // unsupported field type {} for {}.{}",
+                                crate::core::fmt_type(&field.ty),
+                                param_name,
+                                field.name
+                            )?;
+                        }
+                    }
                 }
             }
         }
@@ -674,56 +1056,96 @@ impl NodeBindGenerator {
         type_name: &str,
     ) -> Result<(), std::fmt::Error> {
         writeln!(out, "    napi_value result;")?;
-        writeln!(out, "    napi_create_object(env, &result);")?;
+        writeln!(
+            out,
+            "    MIMI_NAPI_CHECK(env, napi_create_object(env, &result));"
+        )?;
         if let Some(td) = self.type_defs.get(type_name) {
             if let TypeDefKind::Record(fields) = &td.kind {
                 for field in fields {
                     let c_field = format!("{}.{}", c_var, field.name);
-                    let create = self.napi_create_for_field(&field.ty, &c_field, &field.name);
                     writeln!(out, "    napi_value {}_prop;", field.name)?;
-                    writeln!(out, "    {}", create)?;
-                    writeln!(
-                        out,
-                        "    napi_set_named_property(env, result, \"{}\", {}_prop);",
-                        field.name, field.name
-                    )?;
+                    match self.napi_create_for_field(&field.ty, &c_field, &field.name) {
+                        Some(create) => {
+                            writeln!(out, "    MIMI_NAPI_CHECK(env, {});", create)?;
+                            writeln!(
+                                out,
+                                "    MIMI_NAPI_CHECK(env, napi_set_named_property(env, result, \"{}\", {}_prop));",
+                                field.name, field.name
+                            )?;
+                        }
+                        None => {
+                            writeln!(
+                                out,
+                                "    // unsupported field type {} for {}",
+                                crate::core::fmt_type(&field.ty),
+                                field.name
+                            )?;
+                            writeln!(
+                                out,
+                                "    MIMI_NAPI_CHECK(env, napi_get_undefined(env, &{}_prop));",
+                                field.name
+                            )?;
+                            writeln!(
+                                out,
+                                "    MIMI_NAPI_CHECK(env, napi_set_named_property(env, result, \"{}\", {}_prop));",
+                                field.name, field.name
+                            )?;
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn napi_extract_for_field(&self, ty: &Type, js_var: &str, c_var: &str) -> String {
+    /// N-API extraction call for one struct field (no trailing semicolon),
+    /// or None for unsupported field types.
+    fn napi_extract_for_field(&self, ty: &Type, js_var: &str, c_var: &str) -> Option<String> {
         match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
-                "i32" => format!("napi_get_value_int32(env, {}, &{});", js_var, c_var),
-                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
-                "i64" => format!(
-                    "napi_get_value_bigint_int64(env, {}, &{}, NULL);",
+                "i32" => Some(format!("napi_get_value_int32(env, {}, &{})", js_var, c_var)),
+                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 以避免 >2^53 截断
+                "i64" => Some(format!(
+                    "napi_get_value_bigint_int64(env, {}, &{}, NULL)",
                     js_var, c_var
-                ),
-                "f64" => format!("napi_get_value_double(env, {}, &{});", js_var, c_var),
-                "bool" => format!("napi_get_value_bool(env, {}, &{});", js_var, c_var),
-                _ => format!("// unsupported field type {}", name),
+                )),
+                "f64" => Some(format!(
+                    "napi_get_value_double(env, {}, &{})",
+                    js_var, c_var
+                )),
+                "bool" => Some(format!("napi_get_value_bool(env, {}, &{})", js_var, c_var)),
+                _ => None,
             },
-            _ => "// unsupported field type".to_string(),
+            _ => None,
         }
     }
 
-    fn napi_create_for_field(&self, ty: &Type, c_var: &str, prop_var: &str) -> String {
+    /// N-API creation call for one struct field (no trailing semicolon),
+    /// or None for unsupported field types.
+    fn napi_create_for_field(&self, ty: &Type, c_var: &str, prop_var: &str) -> Option<String> {
         match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
-                "i32" => format!("napi_create_int32(env, {}, &{}_prop);", c_var, prop_var),
-                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
-                "i64" => format!(
-                    "napi_create_bigint_int64(env, {}, &{}_prop);",
+                "i32" => Some(format!(
+                    "napi_create_int32(env, {}, &{}_prop)",
                     c_var, prop_var
-                ),
-                "f64" => format!("napi_create_double(env, {}, &{}_prop);", c_var, prop_var),
-                "bool" => format!("napi_get_boolean(env, {}, &{}_prop);", c_var, prop_var),
-                _ => format!("// unsupported field type {}", name),
+                )),
+                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 以避免 >2^53 截断
+                "i64" => Some(format!(
+                    "napi_create_bigint_int64(env, {}, &{}_prop)",
+                    c_var, prop_var
+                )),
+                "f64" => Some(format!(
+                    "napi_create_double(env, {}, &{}_prop)",
+                    c_var, prop_var
+                )),
+                "bool" => Some(format!(
+                    "napi_get_boolean(env, {}, &{}_prop)",
+                    c_var, prop_var
+                )),
+                _ => None,
             },
-            _ => "// unsupported field type".to_string(),
+            _ => None,
         }
     }
 
@@ -741,12 +1163,12 @@ impl NodeBindGenerator {
             writeln!(out, "        napi_value fn;")?;
             writeln!(
                 out,
-                "        napi_create_function(env, \"{}\", NAPI_AUTO_LENGTH, napi_{}, NULL, &fn);",
+                "        MIMI_NAPI_CHECK(env, napi_create_function(env, \"{}\", NAPI_AUTO_LENGTH, napi_{}, NULL, &fn));",
                 func.name, func.name
             )?;
             writeln!(
                 out,
-                "        napi_set_named_property(env, exports, \"{}\", fn);",
+                "        MIMI_NAPI_CHECK(env, napi_set_named_property(env, exports, \"{}\", fn));",
                 func.name
             )?;
             writeln!(out, "    }}")?;
@@ -769,7 +1191,10 @@ impl NodeBindGenerator {
             FfiArgContract::Float => "number".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "string".to_string(),
             FfiArgContract::Cap(_) => "number".to_string(),
-            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "number".to_string(),
+            // Audit fix §12 (fix 3): raw pointers accept number or BigInt addresses.
+            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => {
+                "number | bigint".to_string()
+            }
             FfiArgContract::CShared(_)
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "number".to_string(),
@@ -794,12 +1219,14 @@ impl NodeBindGenerator {
             crate::ffi::contract::FfiRetContract::Float => "number".to_string(),
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => "string".to_string(),
+            // Audit fix §12: pointers and 64-bit handles are emitted as BigInt.
             crate::ffi::contract::FfiRetContract::RawPtr(_)
-            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "number".to_string(),
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "bigint".to_string(),
             crate::ffi::contract::FfiRetContract::CShared(_)
             | crate::ffi::contract::FfiRetContract::CBorrow(_)
-            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "number".to_string(),
-            crate::ffi::contract::FfiRetContract::Json => "object".to_string(),
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "bigint".to_string(),
+            // JSON is returned as its string form; parse on the JS side.
+            crate::ffi::contract::FfiRetContract::Json => "string".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "any".to_string(),
         }

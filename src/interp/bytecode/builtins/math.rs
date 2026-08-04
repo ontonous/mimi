@@ -353,8 +353,17 @@ fn builtin_pow(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpE
                     "pow: negative exponent not allowed for integers",
                 ));
             }
+            // Audit fix #8: `*exp as u32` silently truncated exponents above
+            // u32::MAX (pow(2, 4294967326) computed 2**30). Mirror Op::PowInt
+            // (vm.rs): reject with try_from instead of wrapping the exponent.
+            let exp_u32 = u32::try_from(*exp).map_err(|_| {
+                InterpError::new(format!(
+                    "pow: exponent {} exceeds u32::MAX (integer power)",
+                    exp
+                ))
+            })?;
             let r = base
-                .checked_pow(*exp as u32)
+                .checked_pow(exp_u32)
                 .ok_or_else(|| InterpError::new("pow: integer overflow"))?;
             Ok(Value::Int(r))
         }

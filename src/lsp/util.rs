@@ -2,6 +2,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::ast::{FuncDef, Item};
 use crate::lsp::LspServer;
+use crate::source_scan::{Region, SourceScanner};
 
 /// Decode percent-encoded URI characters.
 /// Handles %XX (byte escape) and %uXXXX (Unicode escape).
@@ -104,16 +105,28 @@ pub(crate) fn hash_func_body(text: &str, func: &FuncDef) -> u64 {
 
 /// Find the closing brace line for a function starting at `start_line`.
 /// `start_line` is 1-indexed (from lexer span), returns 0-indexed line number.
+///
+/// AU-LSP-5 (full audit 2026-08-05): brace counting ignores braces inside
+/// string/char literals and comments. The scan runs over the whole document
+/// via [`SourceScanner`] so regions that span lines (block comments,
+/// multi-line strings) are tracked correctly; `let s = "}"` no longer ends
+/// the function early (which corrupted the enclosing-func lookup and the
+/// verification cache hash).
 pub(crate) fn find_func_end_line(text: &str, start_line: usize) -> usize {
-    let lines: Vec<&str> = text.lines().collect();
+    let line_count = text.lines().count();
     let start_idx = start_line.saturating_sub(1); // Convert 1-indexed to 0-indexed
-    if start_idx >= lines.len() {
+    if start_idx >= line_count {
         return start_line; // Return original 1-indexed value as fallback
     }
-    let mut depth = 0;
+    let mut depth = 0usize;
     let mut started = false;
-    for (i, line) in lines.iter().enumerate().skip(start_idx) {
-        for ch in line.chars() {
+    let mut current_line = 0usize; // 0-indexed line of the char being scanned
+    for (ch, region) in SourceScanner::new(text).scan() {
+        if ch == '\n' {
+            current_line += 1;
+            continue;
+        }
+        if current_line >= start_idx && region == Region::Code {
             match ch {
                 '{' => {
                     depth += 1;
@@ -121,18 +134,24 @@ pub(crate) fn find_func_end_line(text: &str, start_line: usize) -> usize {
                 }
                 '}' if depth > 0 => {
                     depth -= 1;
+                    if started && depth == 0 {
+                        return current_line; // Returns 0-indexed
+                    }
                 }
                 _ => {}
             }
         }
-        if started && depth == 0 {
-            return i; // Returns 0-indexed
-        }
     }
-    lines.len().saturating_sub(1)
+    line_count.saturating_sub(1)
 }
 
 /// Find the function containing the cursor line, searching recursively through modules.
+///
+/// AU-LSP-4 (full audit 2026-08-05): `cursor_line` is **1-indexed** — the
+/// caller (`compute_verification_diagnostics`) converts the 0-indexed LSP
+/// cursor to 1-indexed once at the boundary. All span math here stays
+/// 1-indexed: `find_func_end_line` returns a 0-indexed line, so it is
+/// converted back before comparison.
 pub(crate) fn find_enclosing_func_in_items<'a>(
     items: &'a [Item],
     text: &str,
@@ -141,7 +160,7 @@ pub(crate) fn find_enclosing_func_in_items<'a>(
     for item in items {
         match item {
             Item::Func(f) => {
-                let end = find_func_end_line(text, f.meta.span.start_line);
+                let end = find_func_end_line(text, f.meta.span.start_line).saturating_add(1);
                 if cursor_line >= f.meta.span.start_line && cursor_line <= end {
                     return Some(f);
                 }
@@ -155,6 +174,107 @@ pub(crate) fn find_enclosing_func_in_items<'a>(
         }
     }
     None
+}
+
+/// Find all whole-word occurrences of `word` in `line`, returning byte offsets.
+///
+/// AU-LSP-2 (full audit 2026-08-05): `str::find` returns byte offsets, so the
+/// scan advances by `word.len()` bytes (never by 1, which can land mid-char
+/// and panic when slicing for the next `find`) and probes word boundaries
+/// with byte-safe slices. The old code indexed chars by byte offset
+/// (`chars().nth(byte_offset)`), which is wrong for multi-byte identifiers.
+pub(crate) fn find_word_occurrences(line: &str, word: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    if word.is_empty() {
+        return out;
+    }
+    let mut start = 0usize;
+    while let Some(pos) = line.get(start..).and_then(|slice| slice.find(word)) {
+        let abs = start + pos;
+        // `abs` and `abs + word.len()` are guaranteed char boundaries: `find`
+        // matched a valid &str at exactly this span.
+        let before_ok = line[..abs]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !(c.is_alphanumeric() || c == '_'));
+        let after_ok = line[abs + word.len()..]
+            .chars()
+            .next()
+            .map_or(true, |c| !(c.is_alphanumeric() || c == '_'));
+        if before_ok && after_ok {
+            out.push(abs);
+        }
+        // Advance by the word's byte length. A boundary-respecting match can
+        // never overlap the span just examined (overlap would put a word char
+        // adjacent to a candidate, failing the boundary check), so advancing
+        // full-length skips nothing valid.
+        start = abs + word.len();
+    }
+    out
+}
+
+/// Convert a 0-indexed char column to a byte offset within `line`.
+/// Columns beyond the line map to the line length (defensive: the LSP must
+/// degrade gracefully on stale positions, not panic).
+pub(crate) fn char_col_to_byte(line: &str, char_col: usize) -> usize {
+    line.char_indices()
+        .nth(char_col)
+        .map(|(b, _)| b)
+        .unwrap_or(line.len())
+}
+
+/// Per-line byte ranges that are NOT code (string contents, char contents,
+/// line comments, block comments). Delimiter characters themselves count as
+/// code, matching [`SourceScanner`] region semantics. Ranges on each line are
+/// in scan order and non-overlapping.
+///
+/// AU-LSP-1 / AU-LSP-5 (full audit 2026-08-05): rename and brace counting
+/// must skip non-code regions. The scan runs over the whole document so
+/// regions that span lines (block comments, multi-line strings) are tracked
+/// correctly.
+pub(crate) fn non_code_byte_ranges(text: &str) -> Vec<Vec<(usize, usize)>> {
+    let mut ranges: Vec<Vec<(usize, usize)>> = vec![Vec::new()];
+    let mut line = 0usize;
+    let mut byte = 0usize;
+    let mut open: Option<(usize, usize)> = None;
+    for (ch, region) in SourceScanner::new(text).scan() {
+        if ch == '\n' {
+            if let Some(span) = open.take() {
+                ranges[line].push(span);
+            }
+            line += 1;
+            byte = 0;
+            ranges.push(Vec::new());
+            continue;
+        }
+        if region == Region::Code {
+            if let Some(span) = open.take() {
+                ranges[line].push(span);
+            }
+        } else {
+            let end = byte + ch.len_utf8();
+            // take() avoids borrowing `open` across the match (assigning to a
+            // scrutinee-borrowed Option in an arm is E0506).
+            let next = match open.take() {
+                Some((span_start, _)) => (span_start, end),
+                None => (byte, end),
+            };
+            open = Some(next);
+        }
+        byte += ch.len_utf8();
+    }
+    if let Some(span) = open {
+        ranges[line].push(span);
+    }
+    ranges
+}
+
+/// Whether `byte` (a byte offset within its line) falls inside any non-code
+/// range produced by [`non_code_byte_ranges`] for that line.
+pub(crate) fn byte_in_non_code(ranges: &[(usize, usize)], byte: usize) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| byte >= *start && byte < *end)
 }
 
 impl LspServer {

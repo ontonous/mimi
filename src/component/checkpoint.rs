@@ -4,9 +4,12 @@
 //!
 //! 1. **ABI fuzz / layout probes** — verify that every `.mimiabi` struct with
 //!    declared `size`/`align`/`offset` is internally consistent (offsets
-//!    monotonic, within size, aligned; last field + its size ≤ struct size)
-//!    and that `.mimiabi` round-trips (serialize → deserialize → re-serialize
-//!    is a fixpoint, and the BLAKE3 hash is stable).
+//!    monotonic, within size, aligned; each field's offset + its size ≤ the
+//!    struct size; per-field alignment respected) and that `.mimiabi`
+//!    round-trips (serialize → deserialize → re-serialize is a fixpoint, and
+//!    the BLAKE3 hash is stable). Audit 2026-08-05: the field-overflow and
+//!    per-field alignment checks were missing; `probe_layout` now rejects
+//!    those malformed layouts explicitly.
 //!
 //! 2. **Allocator provenance** — a small ledger that pairs cross-boundary
 //!    `alloc`/`free` and detects mismatched frees (freed by the wrong side,
@@ -17,7 +20,7 @@
 //! adds an additional multi-threaded stress that mixes acquire / lease /
 //! release / destroy with generation reuse under contention.
 
-use super::serialize::MimiAbi;
+use super::serialize::{MimiAbi, MimiAbiTypeRef};
 
 /// A structural problem discovered by the layout probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +31,23 @@ pub enum LayoutFault {
         field: String,
         offset: usize,
         size: usize,
+    },
+    /// A field extends past the end of the struct
+    /// (`offset + field_size > size`). Audit 2026-08-05.
+    FieldOverflowsStruct {
+        struct_name: String,
+        field: String,
+        offset: usize,
+        field_size: usize,
+        size: usize,
+    },
+    /// A field offset is not a multiple of the field's alignment.
+    /// Audit 2026-08-05.
+    FieldMisaligned {
+        struct_name: String,
+        field: String,
+        offset: usize,
+        align: usize,
     },
     /// Field offsets are not strictly increasing (overlap / reorder).
     OffsetsNotMonotonic { struct_name: String, field: String },
@@ -53,6 +73,26 @@ impl std::fmt::Display for LayoutFault {
                 f,
                 "{struct_name}.{field}: offset {offset} out of bounds (size {size})"
             ),
+            LayoutFault::FieldOverflowsStruct {
+                struct_name,
+                field,
+                offset,
+                field_size,
+                size,
+            } => write!(
+                f,
+                "{struct_name}.{field}: field occupies bytes {offset}..{} past struct size {size}",
+                offset + field_size
+            ),
+            LayoutFault::FieldMisaligned {
+                struct_name,
+                field,
+                offset,
+                align,
+            } => write!(
+                f,
+                "{struct_name}.{field}: offset {offset} not aligned to {align}"
+            ),
             LayoutFault::OffsetsNotMonotonic { struct_name, field } => {
                 write!(f, "{struct_name}.{field}: offsets not strictly increasing")
             }
@@ -71,9 +111,51 @@ impl std::fmt::Display for LayoutFault {
     }
 }
 
+/// Byte size of a serialized type reference, when statically known.
+///
+/// Used by the layout probe to check `offset + field_size <= size`.
+/// Pointers, opaque handles and named types are pointer-sized (8 bytes on
+/// the supported 64-bit targets); fat pointers carry { data, len, capacity }
+/// (24) or { data, len } (16); void fields are invalid but sized 0 so the
+/// offset arithmetic still works.
+fn type_size(ty: &MimiAbiTypeRef) -> Option<usize> {
+    match ty {
+        MimiAbiTypeRef::Primitive(name) => Some(match name.as_str() {
+            "I8" | "U8" | "Bool" => 1,
+            "I16" | "U16" => 2,
+            "I32" | "U32" | "F32" => 4,
+            "I64" | "U64" | "F64" | "IntPtr" | "UIntPtr" => 8,
+            _ => return None, // unknown primitive — validated deserialization rejects it
+        }),
+        MimiAbiTypeRef::Pointer(_) | MimiAbiTypeRef::Opaque(_) | MimiAbiTypeRef::Named(_) => {
+            Some(8)
+        }
+        MimiAbiTypeRef::Slice(_) => Some(16), // { data, len }
+        MimiAbiTypeRef::FatPointer { has_capacity, .. } => {
+            Some(if *has_capacity { 24 } else { 16 })
+        }
+        MimiAbiTypeRef::Void => Some(0),
+    }
+}
+
+/// Natural alignment of a field with the given size (power-of-two sizes
+/// align to themselves; anything else conservatively aligns to 8).
+fn field_align(field_size: usize) -> usize {
+    match field_size {
+        0 | 1 => 1,
+        2 => 2,
+        4 => 4,
+        8 | 16 | 24 => 8,
+        _ => 8,
+    }
+}
+
 /// Probe every struct type in a `.mimiabi` for layout consistency.
 ///
 /// Returns all discovered faults (empty = ABI internally consistent).
+/// Malformed layouts — a field overflowing the struct tail, or a field
+/// offset violating its natural alignment — are reported as explicit
+/// faults rather than silently accepted (audit fix 2026-08-05).
 pub fn probe_layout(abi: &MimiAbi) -> Vec<LayoutFault> {
     let mut faults = Vec::new();
     for ty in &abi.types {
@@ -104,6 +186,7 @@ pub fn probe_layout(abi: &MimiAbi) -> Vec<LayoutFault> {
             let mut prev: Option<usize> = None;
             for field in fields {
                 let Some(offset) = field.offset else { continue };
+                let field_size = type_size(&field.ty);
                 if let Some(size) = size {
                     if offset >= *size {
                         faults.push(LayoutFault::OffsetOutOfBounds {
@@ -111,6 +194,33 @@ pub fn probe_layout(abi: &MimiAbi) -> Vec<LayoutFault> {
                             field: field.name.clone(),
                             offset,
                             size: *size,
+                        });
+                    } else if let Some(fsize) = field_size {
+                        // Audit 2026-08-05: offset < size alone does not
+                        // catch a field that starts inside the struct but
+                        // extends past its tail.
+                        if offset + fsize > *size {
+                            faults.push(LayoutFault::FieldOverflowsStruct {
+                                struct_name: name.clone(),
+                                field: field.name.clone(),
+                                offset,
+                                field_size: fsize,
+                                size: *size,
+                            });
+                        }
+                    }
+                }
+                // Audit 2026-08-05: per-field alignment check. A repr(C)
+                // field of size N sits at an offset divisible by its
+                // natural alignment.
+                if let Some(fsize) = field_size {
+                    let falign = field_align(fsize).min(align.unwrap_or(8));
+                    if falign > 1 && offset % falign != 0 {
+                        faults.push(LayoutFault::FieldMisaligned {
+                            struct_name: name.clone(),
+                            field: field.name.clone(),
+                            offset,
+                            align: falign,
                         });
                     }
                 }
@@ -261,10 +371,97 @@ mod tests {
         register_core_runtime_abi(&mut gen);
         let ir = gen.build();
         let abi = MimiAbi::from_component_ir(&ir);
-        // MimiString + MimiSlice registered by the fat-pointer wiring.
-        assert!(struct_type_count(&abi) >= 2);
+        // Audit 2026-08-05: the phantom MimiString/MimiSlice struct layouts
+        // were removed from the core registry — it now registers opaque
+        // handle types only, so there are no struct layouts to probe.
+        assert_eq!(
+            struct_type_count(&abi),
+            0,
+            "core registry must not declare struct layouts"
+        );
         let faults = probe_layout(&abi);
         assert!(faults.is_empty(), "layout faults: {faults:?}");
+    }
+
+    #[test]
+    fn probe_catches_field_overflowing_struct_tail() {
+        // Audit fix 2026-08-05: offset < size is not enough — a field that
+        // starts inside the struct but extends past the tail must be
+        // rejected (offset + field_size > size).
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [], "imports": [],
+            "types": [{
+                "kind": "Struct", "name": "TailOverflow",
+                "fields": [
+                    { "name": "a", "ty": {"kind":"Primitive","value":"U64"}, "offset": 0 },
+                    { "name": "b", "ty": {"kind":"Primitive","value":"U64"}, "offset": 12 }
+                ],
+                "size": 16, "align": 8
+            }]
+        }"#;
+        let abi = MimiAbi::from_json(json).expect("parse");
+        let faults = probe_layout(&abi);
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, LayoutFault::FieldOverflowsStruct { .. })),
+            "expected FieldOverflowsStruct, got: {faults:?}"
+        );
+        // b starts at 12 (< 16) so it must NOT be reported as out-of-bounds
+        // by the old coarse check; the precise fault is the overflow one.
+        assert!(!faults
+            .iter()
+            .any(|f| matches!(f, LayoutFault::OffsetOutOfBounds { field, .. } if field == "b")));
+    }
+
+    #[test]
+    fn probe_catches_misaligned_field() {
+        // Audit fix 2026-08-05: per-field alignment is now checked.
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [], "imports": [],
+            "types": [{
+                "kind": "Struct", "name": "MisalignedField",
+                "fields": [
+                    { "name": "a", "ty": {"kind":"Primitive","value":"U8"}, "offset": 0 },
+                    { "name": "b", "ty": {"kind":"Primitive","value":"U64"}, "offset": 1 }
+                ],
+                "size": 16, "align": 8
+            }]
+        }"#;
+        let abi = MimiAbi::from_json(json).expect("parse");
+        let faults = probe_layout(&abi);
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, LayoutFault::FieldMisaligned { field, align, .. } if field == "b" && *align == 8)),
+            "expected FieldMisaligned(b, align 8), got: {faults:?}"
+        );
+    }
+
+    #[test]
+    fn probe_accepts_valid_layout_with_tail_padding() {
+        // A valid layout whose last field ends before the struct tail
+        // (trailing padding) must stay fault-free.
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [], "imports": [],
+            "types": [{
+                "kind": "Struct", "name": "Padded",
+                "fields": [
+                    { "name": "a", "ty": {"kind":"Primitive","value":"U8"}, "offset": 0 },
+                    { "name": "b", "ty": {"kind":"Primitive","value":"U32"}, "offset": 4 }
+                ],
+                "size": 16, "align": 8
+            }]
+        }"#;
+        let abi = MimiAbi::from_json(json).expect("parse");
+        let faults = probe_layout(&abi);
+        assert!(faults.is_empty(), "unexpected faults: {faults:?}");
     }
 
     #[test]

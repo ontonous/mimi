@@ -498,6 +498,10 @@ impl LspServer {
     /// Returns empty vec on timeout, parser failure, or when no function is at cursor.
     /// `uri` is included in the cache key to avoid collisions between identically
     /// named functions in different files (fixes P1.4).
+    ///
+    /// `cursor_line` arrives 0-indexed (LSP convention) and is converted to
+    /// 1-indexed once, here at the boundary; all internal span math
+    /// (`find_enclosing_func_in_items`, span start lines) stays 1-indexed.
     pub fn compute_verification_diagnostics(
         &mut self,
         text: &str,
@@ -506,9 +510,12 @@ impl LspServer {
     ) -> Vec<Value> {
         let mut diagnostics = Vec::new();
 
-        if cursor_line == 0 {
-            return diagnostics;
-        }
+        // AU-LSP-4 (full audit 2026-08-05): the old code compared the 0-indexed
+        // LSP cursor against the 1-indexed span start line (so the diagnostics
+        // never triggered when the cursor sat on the signature line) and
+        // rejected cursor_line == 0 outright (a signature on the very first
+        // line of the file was unreachable). Normalize one convention here.
+        let cursor_line = cursor_line.saturating_add(1);
 
         // Parse
         let tokens = match lexer::Lexer::new(text).tokenize() {

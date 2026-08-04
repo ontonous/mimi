@@ -316,11 +316,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(is_empty, empty_bb, nonempty_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
-        // Empty path: return 0
+        // Empty path: TRAP with the VM's message (full-audit-2026-08-05 fix 7;
+        // ruling: pop is in-place and traps on empty). The old code returned a
+        // silent sentinel 0 — indistinguishable from a legitimate element.
         self.builder.position_at_end(empty_bb);
+        let empty_msg = self
+            .builder
+            .build_global_string_ptr("pop from empty list", "pop_empty_msg")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        let abort_fn = self.get_or_declare_abort_fn();
         self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    empty_msg.as_pointer_value(),
+                )],
+                "pop_empty_abort",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
 
         // Non-empty path: get last element, decrement len
         self.builder.position_at_end(nonempty_bb);
@@ -422,19 +439,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
-        // Merge: phi node for the returned element
+        // Merge: the returned element. The empty path now aborts
+        // (unreachable), so the only predecessor is the shrink/free merge —
+        // phi predecessors must match CFG edges.
         self.builder.position_at_end(merge_bb);
         let phi = self
             .builder
             .build_phi(BasicTypeEnum::IntType(i64_ty), "pop_result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-        let zero = i64_ty.const_int(0, false);
-        // Non-empty path reaches merge via pop_realloc_merge (after free/realloc),
-        // not directly from pop_nonempty — phi predecessors must match CFG edges.
-        phi.add_incoming(&[
-            (&BasicValueEnum::IntValue(zero), empty_bb),
-            (&elem_val, realloc_merge_bb),
-        ]);
+        phi.add_incoming(&[(&elem_val, realloc_merge_bb)]);
         Ok(phi.as_basic_value())
     }
 
@@ -553,7 +566,41 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_ptr = self.require_list_pointer(args[0], "sort")?;
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
-        let data_ptr = self.load_list_data_i64(list_ptr)?;
+        // Audit fix 7 (full-audit-2026-08-05): sort is PURE — the VM clones
+        // the list and sorts the clone (interp/bytecode/builtins/list.rs
+        // builtin_sort_list), leaving the input untouched. The old code
+        // bubble-sorted the CALLER's buffer in place. Copy the data buffer
+        // and sort the copy instead.
+        let data_raw = self.load_list_data_raw(list_ptr)?;
+        let alloc_size = self
+            .builder
+            .build_int_mul(list_len, self.list_elem_size(), "sort_copy_size")
+            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        // B4: OOM-safe allocation for the sort copy.
+        let copy_raw = self.malloc_or_abort(alloc_size, "sort_copy")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(copy_raw),
+                    BasicMetadataValueEnum::PointerValue(data_raw),
+                    BasicMetadataValueEnum::IntValue(alloc_size),
+                ],
+                "sort_copy_memcpy",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
+        // Sort operates on the copy; `data_ptr` is rebound so the existing
+        // bubble-sort body below needs no changes.
+        let data_ptr = self
+            .builder
+            .build_bit_cast(
+                copy_raw,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "sort_copy_i64",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
         let function = self
             .current_function()
             .ok_or_else(|| "codegen: no current function for sort loop".to_string())?;
@@ -720,17 +767,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_unconditional_branch(outer_loop_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // Build result list (data is already sorted in-place via swaps)
+        // Build result list from the SORTED COPY — the caller's original
+        // list struct and data buffer are never written (pure sort, owns the
+        // copy). VM parity: builtin_sort_list returns a fresh list.
         self.builder.position_at_end(done_bb);
-        let data_void = self
-            .builder
-            .build_bit_cast(
-                data_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "sort_data_void",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
-        let result_alloca = self.alloc_list_result(list_len, data_void.into_pointer_value())?;
+        let result_alloca = self.alloc_list_result(list_len, copy_raw)?;
         Ok(result_alloca.into())
     }
 
@@ -738,7 +779,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // Delegate to runtime: mimi_sort_f64(data_ptr, count)
+        // Delegate to runtime: mimi_sort_f64_inplace(data_ptr, count) — but on
+        // a COPY: sort is PURE (full-audit-2026-08-05 fix 7; VM reference
+        // builtin_sort_list clones before sorting).
         if args.len() != 1 {
             return Err(CompileError::WrongArgCount(
                 "sort_f64 expects 1 argument (list)".to_string(),
@@ -746,8 +789,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let list_ptr = self.require_list_pointer(args[0], "sort_f64")?;
         let list_len = self.load_list_len(list_ptr)?;
-        let data_ptr = self.load_list_data_i64(list_ptr)?;
-        // Call mimi_sort_f64_inplace(data, count)
+        let data_raw = self.load_list_data_raw(list_ptr)?;
+        let alloc_size = self
+            .builder
+            .build_int_mul(list_len, self.list_elem_size(), "sort_f64_copy_size")
+            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        // B4: OOM-safe allocation for the sort copy.
+        let copy_raw = self.malloc_or_abort(alloc_size, "sort_f64_copy")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(copy_raw),
+                    BasicMetadataValueEnum::PointerValue(data_raw),
+                    BasicMetadataValueEnum::IntValue(alloc_size),
+                ],
+                "sort_f64_copy_memcpy",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
+        // Call mimi_sort_f64_inplace(copy, count)
         let func = self
             .module
             .get_function("mimi_sort_f64_inplace")
@@ -756,14 +817,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::PointerValue(copy_raw),
                     BasicMetadataValueEnum::IntValue(list_len),
                 ],
                 "sort_f64_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("sort_f64 call error: {}", e)))?;
-        // Return the same list (sorted in place)
-        Ok(list_ptr.into())
+        // Return a NEW list struct owning the sorted copy; input untouched.
+        let result_alloca = self.alloc_list_result(list_len, copy_raw)?;
+        Ok(result_alloca.into())
     }
 
     pub(in crate::codegen) fn compile_sort_str(
@@ -772,8 +834,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         // sort_str: delegate to runtime mimi_sort_str_inplace(data, count)
         // which reorders the *mut c_char slots in place using lexicographic
-        // comparison via CStr. The list's data buffer for List<string> is
-        // already `*mut *mut c_char`, matching the runtime signature.
+        // comparison via CStr. sort is PURE (full-audit-2026-08-05 fix 7), so
+        // reorder a COPY of the pointer-slot buffer; the string payloads are
+        // immutable C strings and are shared, matching the VM clone-then-sort.
         if args.len() != 1 {
             return Err(CompileError::WrongArgCount(
                 "sort_str expects 1 argument (list)".to_string(),
@@ -782,7 +845,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_ptr = self.require_list_pointer(args[0], "sort_str")?;
         let list_len = self.load_list_len(list_ptr)?;
         // For List<string>, data is *mut *mut c_char — load as i8* (raw).
-        let data_ptr = self.load_list_data_raw(list_ptr)?;
+        let data_raw = self.load_list_data_raw(list_ptr)?;
+        // Copy the pointer-slot buffer (each slot is i64-sized).
+        let alloc_size = self
+            .builder
+            .build_int_mul(list_len, self.list_elem_size(), "sort_str_copy_size")
+            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        // B4: OOM-safe allocation for the sort copy.
+        let copy_raw = self.malloc_or_abort(alloc_size, "sort_str_copy")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(copy_raw),
+                    BasicMetadataValueEnum::PointerValue(data_raw),
+                    BasicMetadataValueEnum::IntValue(alloc_size),
+                ],
+                "sort_str_copy_memcpy",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
         let func = self
             .module
             .get_function("mimi_sort_str_inplace")
@@ -791,13 +873,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::PointerValue(copy_raw),
                     BasicMetadataValueEnum::IntValue(list_len),
                 ],
                 "sort_str_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("sort_str call error: {}", e)))?;
-        // Return the same list (sorted in place)
-        Ok(list_ptr.into())
+        // Return a NEW list struct owning the sorted slot copy; input untouched.
+        let result_alloca = self.alloc_list_result(list_len, copy_raw)?;
+        Ok(result_alloca.into())
     }
 }

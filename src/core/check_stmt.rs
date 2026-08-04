@@ -654,6 +654,17 @@ impl<'a> Checker<'a> {
                 if let Some(declared_ty) = ty {
                     self.check_type_well_formed(declared_ty, "let binding");
                 }
+                // Audit 2026-08-05 fix 2 (E0820): `let x;` without an initializer
+                // was silently typed as unit here and only hard-rejected much later
+                // during resolved lowering ("binding without an initializer has no
+                // checker-persisted value type" — whole-program failure). Reject at
+                // check time with an actionable diagnostic instead.
+                if init.is_none() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0820,
+                        "let binding requires an initializer",
+                    );
+                }
 
                 let init_ty = init
                     .as_ref()
@@ -668,6 +679,26 @@ impl<'a> Checker<'a> {
                     })
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 let declared = ty.as_ref().map(|t| self.resolve_type(t));
+                // 0.31.13 追加 A + audit 2026-08-05 fix 3: linear resources cannot
+                // be borrowed via `ref` — borrowing implies the original remains
+                // usable, violating exactly-once consumption. The check is hoisted
+                // BEFORE the annotated/unannotated split: previously only the
+                // unannotated branch ran it, so `let ref x: T = <linear>` silently
+                // dropped the ref flag (checker/IR divergence, IR still marks
+                // by_reference=View).
+                if *ref_ && self.is_linear_surface_type(&init_ty) {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0427,
+                            format!(
+                                "linear resource '{}' of type {} cannot be borrowed with `ref`; \
+                                 linear resources must be moved, not borrowed",
+                                name,
+                                fmt_type(&init_ty),
+                            ),
+                        );
+                    }
+                }
                 let final_ty = match declared {
                     Some(d) => {
                         if matches!(d.unlocated(), Type::Infer) {
@@ -700,40 +731,14 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         if *ref_ {
-                            // 0.31.13 追加 A: linear resources cannot be borrowed
-                            // via `ref` — borrowing implies the original remains
-                            // usable, violating exactly-once consumption.
-                            if self.is_linear_surface_type(&init_ty) {
-                                if let PatternKind::Variable(name) = &pat.kind {
-                                    self.emit_code(
-                                        crate::diagnostic::codes::E0427,
-                                        format!(
-                                            "linear resource '{}' of type {} cannot be borrowed with `ref`; \
-                                             linear resources must be moved, not borrowed",
-                                            name,
-                                            fmt_type(&init_ty),
-                                        ),
-                                    );
-                                }
-                            }
+                            // E0427 linearity rejection is hoisted above the
+                            // annotated/unannotated split (audit fix 3).
                             // ref variables have reference type
                             Type::Ref(None, Box::new(init_ty))
                         } else {
                             init_ty
                         }
                     }
-                };
-                // CO-C1 / H16: let-polymorphism — generalize free TypeVars for
-                // immutable, non-ref bindings so `let id = fn(x: _) { x }` is ∀T.T→T.
-                // mut bindings stay monomorphic (value restriction).
-                let final_ty = if !*mut_ && !*ref_ {
-                    let env: HashMap<String, Type> = scopes
-                        .iter()
-                        .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
-                        .collect();
-                    self.generalize(&final_ty, &env)
-                } else {
-                    final_ty
                 };
                 // Track mutability
                 if let PatternKind::Variable(name) = &pat.kind {
@@ -746,7 +751,60 @@ impl<'a> Checker<'a> {
                     // CFG-based place tracking (0.31.16) will handle shadowing
                     // correctly; until then, conservative = no clear.
                 }
+                // Audit 2026-08-05 fix 1: check_pattern must run on the
+                // PRE-generalization type. generalize() wraps free TypeVars in
+                // ForAll, and the Tuple/Array/Slice arms of check_pattern only
+                // match concrete shapes, so `let (a, b) = (None, 1)` raised a
+                // false-positive E0251 ("cannot match tuple pattern against
+                // non-tuple type forall T0"). Record whether this let introduces
+                // a fresh plain-variable binding so the generalized scheme can be
+                // restored into the scope afterwards (let-polymorphism preserved).
+                let fresh_plain_binding: Option<String> = match &pat.kind {
+                    PatternKind::Variable(name) => {
+                        let preexists =
+                            scopes.last().map(|s| s.contains_key(name)).unwrap_or(false);
+                        if preexists {
+                            None
+                        } else {
+                            Some(name.clone())
+                        }
+                    }
+                    _ => None,
+                };
+                // CO-C1 / H16: let-polymorphism — generalize free TypeVars for
+                // immutable, non-ref bindings so `let id = fn(x: _) { x }` is ∀T.T→T.
+                // mut bindings stay monomorphic (value restriction). The
+                // generalization environment is captured BEFORE check_pattern
+                // binds the pattern's own variables: otherwise a fresh binding's
+                // own TypeVars would appear in the env and block generalization.
+                let generalize_env: Option<HashMap<String, Type>> = if !*mut_ && !*ref_ {
+                    Some(
+                        scopes
+                            .iter()
+                            .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
                 self.check_pattern(pat, &final_ty, scopes);
+                let final_ty = match generalize_env {
+                    Some(env) => self.generalize(&final_ty, &env),
+                    None => final_ty,
+                };
+                // Upgrade the just-introduced plain-variable binding from the
+                // monotype that check_pattern stored to the generalized scheme,
+                // so each later read re-instantiates fresh TypeVars (lookup_var
+                // already instantiates ForAll on read). Guarded by the
+                // contains_key check so constructor-matching patterns (`let Some
+                // = ...`) that bind nothing are never clobbered.
+                if let Some(name) = &fresh_plain_binding {
+                    if let Some(s) = scopes.last_mut() {
+                        if s.contains_key(name) {
+                            s.insert(name.clone(), final_ty.clone());
+                        }
+                    }
+                }
                 // v0.29.49: track multi-target transition results.
                 // If the init expression is a Flow::transition() call and
                 // the transition has >1 to_states, the variable must be
@@ -1139,9 +1197,16 @@ impl<'a> Checker<'a> {
                 scopes.pop();
             }
             Stmt::Block(block) => {
+                // Audit 2026-08-05 (full-audit §3): plain blocks pushed a type
+                // scope but NOT a var scope, so `{ let x = 2 }` after `let x = 1`
+                // raised E0403 while `if c { let x = 2 }` (which pushes a var
+                // scope per branch) did not. Align semantics: shadowing across a
+                // plain-block boundary is legal, same as branch blocks.
+                self.var_scopes.push(HashMap::new());
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);
                 scopes.pop();
+                self.var_scopes.pop();
             }
             Stmt::Arena(block) => {
                 // Arena block: track depth for escape detection
@@ -1687,6 +1752,24 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                // Audit 2026-08-05 fix 8 + wave-1 central fix: the bare-name
+                // insertion used to PERMANENTLY overwrite any top-level entry
+                // in the global funcs directory, so every subsequently checked
+                // item resolved the name against the stale nested signature.
+                // The registration must stay live through the WHOLE enclosing
+                // callable body — default values, named-arg reordering and
+                // generic instantiation all resolve through the directory
+                // path (infer/call/simple.rs named/default handling), and a
+                // scopes `Type::Func` binding would divert calls into the
+                // closure arm, which knows neither defaults nor generic
+                // binders (regressed nested_callable_body… and
+                // nested_generic_call… tests). Restores are deferred to the
+                // enclosing callable's exit (flush_pending_nested_restores in
+                // check_func / items.rs method paths), so nothing leaks to
+                // subsequently checked items.
+                let prior_funcs_entry = self.funcs.get(&func.name).cloned();
+                let prior_generics_entry = self.func_generics.get(&func.name).cloned();
+                let prior_nested_params_entry = self.nested_func_params.get(&func.name).cloned();
                 self.funcs
                     .insert(func.name.clone(), (params.clone(), nested_ret.clone()));
                 self.func_generics
@@ -1742,6 +1825,16 @@ impl<'a> Checker<'a> {
                 self.mutate_params = outer_mutate;
                 self.end_callable(previous_owner);
                 self.generic_scope.truncate(generic_scope_len);
+                // Audit 2026-08-05 fix 8 (wave-1 central): defer the bare-name
+                // directory restore to the enclosing callable's exit so the
+                // nested func remains callable (with defaults/named args/
+                // generics) for the rest of the owner body.
+                self.pending_nested_restores.push(crate::core::PendingNestedRestore {
+                    name: func.name.clone(),
+                    funcs_entry: prior_funcs_entry,
+                    generics_entry: prior_generics_entry,
+                    nested_params_entry: prior_nested_params_entry,
+                });
             }
             Stmt::Pinned {
                 expr, var, body, ..

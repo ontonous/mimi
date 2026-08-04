@@ -1437,6 +1437,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("mt union load: {}", e)))
     }
 
+    /// 0.34.36 (audit §6.9): resolve a flow STATE's LLVM layout for the
+    /// multi-target return wrap. Looks up the QUALIFIED key
+    /// `flow::{current_flow_name}::{state}` first — the key register_type_def
+    /// received in the first pass — and only falls back to the bare state name
+    /// (the legacy first-wins alias) when the qualified key is missing.
+    ///
+    /// The bare-name lookup was unsound across flows: two flows declaring
+    /// same-named states with different payloads share one alias slot
+    /// (first-wins), so the loser flow's return wrap loaded/dereferenced the
+    /// state pointer with the WRONG struct type (mis-sized load → garbage
+    /// payload bytes in the tagged union).
+    pub(super) fn flow_state_llvm_type(&self, state_name: &str) -> Option<BasicTypeEnum<'ctx>> {
+        if !self.current_flow_name.is_empty() {
+            let qualified = format!("flow::{}::{}", self.current_flow_name, state_name);
+            if let Some(&ty) = self.type_llvm.get(&qualified) {
+                return Some(ty);
+            }
+        }
+        self.type_llvm.get(state_name).copied()
+    }
+
     /// Build a `bitcast` instruction.
     pub(super) fn build_bit_cast(
         &self,
@@ -2879,7 +2900,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let bits = t.get_bit_width();
                 bits.div_ceil(8) as u64
             }
-            BasicTypeEnum::FloatType(_) => 8,
+            // 0.34.36 (audit §6.14): size by actual width — f32 is 4 bytes, not 8.
+            // The old constant-8 undersized/oversized blob and box computations
+            // for f32 payloads (actor mailbox result pack, async future slots).
+            BasicTypeEnum::FloatType(t) => t.get_bit_width().div_ceil(8) as u64,
             BasicTypeEnum::PointerType(_) => 8,
             BasicTypeEnum::StructType(t) => {
                 let field_types = t.get_field_types();
@@ -2912,7 +2936,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let bytes = bits.div_ceil(8) as u64;
                 bytes.next_power_of_two()
             }
-            BasicTypeEnum::FloatType(_) => 8,
+            // 0.34.36 (audit §6.14): f32 aligns to 4, not 8 — mirrors the
+            // width-based size computation above.
+            BasicTypeEnum::FloatType(t) => {
+                let bytes = t.get_bit_width().div_ceil(8) as u64;
+                bytes.next_power_of_two()
+            }
             BasicTypeEnum::PointerType(_) => 8,
             BasicTypeEnum::StructType(t) => t
                 .get_field_types()

@@ -37,9 +37,15 @@ impl<T> ListExt<T> for List<T> {
         if len(self) > 0 { Ok(self[len(self) - 1]) } else { Err("last_result: empty list") }
     }
     func take(n: i32) -> List<T> {
+        // Guard: n <= 0 returns the empty list instead of wrapping through
+        // slice semantics (take(xs, -1) used to mean all-but-last).
+        if n <= 0 { return [] }
         if n < len(self) { self[0..n] } else { self }
     }
     func drop_n(n: i32) -> List<T> {
+        // Guard: n <= 0 returns the full list instead of wrapping through
+        // slice semantics (drop_n(xs, -1) used to drop all-but-last).
+        if n <= 0 { return self }
         if n < len(self) { self[n..len(self)] } else { [] }
     }
     func find(target: T) -> (bool, i32) {
@@ -186,12 +192,12 @@ pub func last_result<T>(xs: List<T>) -> Result<T, string> {
     xs.last_result()
 }
 
-// take: Returns the first n elements of xs.
+// take: Returns the first n elements of xs ([] when n <= 0).
 pub func take<T>(xs: List<T>, n: i32) -> List<T> {
     xs.take(n)
 }
 
-// drop_n: Returns xs without the first n elements.
+// drop_n: Returns xs without the first n elements (full xs when n <= 0).
 pub func drop_n<T>(xs: List<T>, n: i32) -> List<T> {
     xs.drop_n(n)
 }

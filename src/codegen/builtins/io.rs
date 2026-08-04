@@ -6,6 +6,28 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 use inkwell::IntPredicate;
 
+/// Wave-1 audit fix (devdocs/full-audit-2026-08-05.md §8): one piece of a
+/// sized string assembly. The old display emitters concat'd pieces into
+/// fixed-size buffers (4096/8192/1024) with `strcat`/`snprintf("%s", …)` and
+/// no capacity tracking — silent truncation or heap overflow for long
+/// renderings. Sized assembly computes the exact total first, mallocs once,
+/// then memcpys each piece at a running offset.
+enum CatPart<'ctx> {
+    /// Compile-time literal fragment (byte length known at emit time).
+    Lit(&'static str),
+    /// Runtime NUL-terminated C string (length taken with strlen at runtime).
+    Dyn(inkwell::values::PointerValue<'ctx>),
+}
+
+/// Wave-1 audit fix (§8, FIX: list display i32 fallback): element kind of a
+/// scalar list rendered through the typed display path.
+#[derive(Clone, Copy)]
+enum ScalarListKind {
+    F64,
+    I64,
+    Bool,
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
     /// Q2 (rc-quality-gate-0.34.25b): malloc a display-formatter scratch
     /// buffer and register it for release at the consuming print call.
@@ -25,6 +47,434 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ptr = self.malloc_or_abort(size, name)?;
         self.register_display_alloc(ptr);
         Ok(ptr)
+    }
+
+    /// Wave-1 audit fix (§8, FIX: eprintln wrote stdout): get-or-declare the
+    /// libc stream global (`stdin`/`stderr` — glibc exports both as `FILE*`
+    /// symbols) and load the stream pointer. Same pattern the legacy
+    /// `compile_input` used for `stdin`.
+    fn get_stream_global(&self, name: &str) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let global = match self.module.get_global(name) {
+            Some(g) => g,
+            None => self.module.add_global(i8_ptr_ty, None, name),
+        };
+        global.set_linkage(inkwell::module::Linkage::External);
+        let stream = self
+            .builder
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                global.as_pointer_value(),
+                name,
+            )
+            .map_err(|e| CompileError::LlvmError(format!("load {} error: {}", name, e)))?
+            .into_pointer_value();
+        Ok(stream)
+    }
+
+    /// Wave-1 audit fix (§8, FIX: fixed-buffer strcat display emitters):
+    /// exact-size string assembly over a compile-time list of parts.
+    /// Pass 1 computes `total = 1 (NUL) + Σ len(part)` (strlen for `Dyn`
+    /// parts), pass 2 mallocs exactly `total` bytes and memcpys each part at
+    /// a running offset, then NUL-terminates. No fixed capacity, no strcat,
+    /// no truncation, no overflow.
+    ///
+    /// When `register_display` is true the result buffer is registered via
+    /// `malloc_display_buf` and released by the consuming print's
+    /// `flush_display_frees`; JSON producers pass `false` and keep the
+    /// existing lifetime discipline of their call sites.
+    fn sized_cat_parts(
+        &self,
+        parts: &[CatPart<'ctx>],
+        name: &str,
+        register_display: bool,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+
+        // Pass 1: total = 1 (trailing NUL) + Σ part lengths.
+        let total_alloca = self.build_alloca(
+            BasicTypeEnum::IntType(i64_ty),
+            &format!("{}_asz_total", name),
+        )?;
+        self.build_store(total_alloca, i64_ty.const_int(1, false))?;
+        for (pi, part) in parts.iter().enumerate() {
+            let add_len: inkwell::values::IntValue<'ctx> = match part {
+                CatPart::Lit(s) => i64_ty.const_int(s.len() as u64, false),
+                CatPart::Dyn(p) => self
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(*p)],
+                        &format!("{}_asz_len{}", name, pi),
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                    .into_int_value(),
+            };
+            let cur = self
+                .build_load(i64_ty, total_alloca, &format!("{}_asz_t{}", name, pi))?
+                .into_int_value();
+            let next = self
+                .builder
+                .build_int_add(cur, add_len, &format!("{}_asz_tadd{}", name, pi))
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_store(total_alloca, next)?;
+        }
+        let total = self
+            .build_load(i64_ty, total_alloca, &format!("{}_asz_total_ld", name))?
+            .into_int_value();
+        let buf = if register_display {
+            self.malloc_display_buf(total, &format!("{}_buf", name))?
+        } else {
+            self.malloc_or_abort(total, &format!("{}_buf", name))?
+        };
+
+        // Pass 2: copy each part at the running offset, then NUL-terminate.
+        let off_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("{}_asz_off", name))?;
+        self.build_store(off_alloca, i64_ty.const_int(0, false))?;
+        for (pi, part) in parts.iter().enumerate() {
+            let (src, copy_len) = match part {
+                CatPart::Lit(s) => {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    let g = self
+                        .builder
+                        .build_global_string_ptr(s, &format!("{}_asz_lit{}", name, pi))
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    (
+                        g.as_pointer_value(),
+                        i64_ty.const_int(s.len() as u64, false),
+                    )
+                }
+                CatPart::Dyn(p) => {
+                    let l = self
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(*p)],
+                            &format!("{}_asz_len2_{}", name, pi),
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                        .into_int_value();
+                    (*p, l)
+                }
+            };
+            let off = self
+                .build_load(i64_ty, off_alloca, &format!("{}_asz_o{}", name, pi))?
+                .into_int_value();
+            // SAFETY: byte-offset GEP into `buf` (total bytes allocated above);
+            // off + copy_len <= total by construction of pass 1.
+            let dst = self
+                .gep()
+                .build_gep(i8_ty, buf, &[off], &format!("{}_asz_dst{}", name, pi))
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_call(
+                memcpy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(dst),
+                    BasicMetadataValueEnum::PointerValue(src),
+                    BasicMetadataValueEnum::IntValue(copy_len),
+                ],
+                &format!("{}_asz_mcpy{}", name, pi),
+            )?;
+            let off2 = self
+                .builder
+                .build_int_add(off, copy_len, &format!("{}_asz_o2_{}", name, pi))
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_store(off_alloca, off2)?;
+        }
+        let off_end = self
+            .build_load(i64_ty, off_alloca, &format!("{}_asz_oend", name))?
+            .into_int_value();
+        // SAFETY: byte-offset GEP; off_end == total - 1 (NUL slot included in total).
+        let nul_dst = self
+            .gep()
+            .build_gep(i8_ty, buf, &[off_end], &format!("{}_asz_nul", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(nul_dst, i8_ty.const_int(0, false))?;
+        Ok(buf)
+    }
+
+    /// Wave-1 audit fix (§8, FIX: fixed-buffer strcat list display emitters):
+    /// two-pass exact-size assembly of `"[", e0, ", ", e1, …, "]"` where each
+    /// element piece is rendered by `render_elem(idx)` (called once per
+    /// element per pass — element renderers are pure display formatters).
+    ///
+    /// Pass 1 measures: `total = 3 ("[", "]", NUL) + Σ strlen(piece) + 2·(len-1)`
+    /// (pieces freed per iteration via `flush_display_since`).
+    /// Pass 2 allocates exactly `total`, re-renders each piece, memcpys it at
+    /// the running offset and frees it. The final buffer is registered as a
+    /// display buffer (freed by the consuming print).
+    fn emit_sized_list_of_pieces<F>(
+        &self,
+        len: inkwell::values::IntValue<'ctx>,
+        render_elem: F,
+        name: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>>
+    where
+        F: Fn(inkwell::values::IntValue<'ctx>) -> MimiResult<inkwell::values::PointerValue<'ctx>>,
+    {
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+
+        // ---- Pass 1: measure total length ----
+        let total_alloca = self.build_alloca(
+            BasicTypeEnum::IntType(i64_ty),
+            &format!("{}_sz_total", name),
+        )?;
+        // "[" + "]" + trailing NUL.
+        self.build_store(total_alloca, i64_ty.const_int(3, false))?;
+        let idx_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("{}_sz_i1", name))?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop1_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_loop1", name));
+        let body1_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_body1", name));
+        let done1_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_done1", name));
+        self.build_br(loop1_bb)?;
+        self.builder.position_at_end(loop1_bb);
+        let idx1 = self
+            .build_load(i64_ty, idx_alloca, &format!("{}_sz_idx1", name))?
+            .into_int_value();
+        let cont1 = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx1, len, &format!("{}_sz_cont1", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_cond_br(cont1, body1_bb, done1_bb)?;
+        self.builder.position_at_end(body1_bb);
+        let marker1 = self.display_marker();
+        let piece1 = render_elem(idx1)?;
+        let plen1 = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(piece1)],
+                &format!("{}_sz_plen1", name),
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+            .into_int_value();
+        let cur_total = self
+            .build_load(i64_ty, total_alloca, &format!("{}_sz_t1", name))?
+            .into_int_value();
+        let with_piece = self
+            .builder
+            .build_int_add(cur_total, plen1, &format!("{}_sz_tadd", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        // Separator ", " before every element except the first.
+        let zero = i64_ty.const_int(0, false);
+        let not_first = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx1, zero, &format!("{}_sz_nf1", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let sep_add = self
+            .builder
+            .build_select(
+                not_first,
+                i64_ty.const_int(2, false),
+                zero,
+                &format!("{}_sz_sep1", name),
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let new_total = self
+            .builder
+            .build_int_add(with_piece, sep_add, &format!("{}_sz_tsep", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(total_alloca, new_total)?;
+        // Free the measurement piece (same runtime block ⇒ executes per iteration).
+        self.flush_display_since(marker1)?;
+        let next1 = self
+            .builder
+            .build_int_add(
+                idx1,
+                i64_ty.const_int(1, false),
+                &format!("{}_sz_next1", name),
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next1)?;
+        self.build_br(loop1_bb)?;
+        self.builder.position_at_end(done1_bb);
+        let total = self
+            .build_load(i64_ty, total_alloca, &format!("{}_sz_total_ld", name))?
+            .into_int_value();
+
+        // ---- Pass 2: allocate exactly and assemble ----
+        let buf = self.malloc_display_buf(total, &format!("{}_buf", name))?;
+        let off_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("{}_sz_off", name))?;
+        self.build_store(off_alloca, i64_ty.const_int(0, false))?;
+        // Opening bracket.
+        let open_lit = self
+            .builder
+            .build_global_string_ptr("[", &format!("{}_sz_open", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open_lit.as_pointer_value()),
+                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
+            ],
+            &format!("{}_sz_mcpy_open", name),
+        )?;
+        self.build_store(off_alloca, i64_ty.const_int(1, false))?;
+
+        let idx2_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("{}_sz_i2", name))?;
+        self.build_store(idx2_alloca, i64_ty.const_int(0, false))?;
+        let loop2_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_loop2", name));
+        let body2_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_body2", name));
+        let done2_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_done2", name));
+        self.build_br(loop2_bb)?;
+        self.builder.position_at_end(loop2_bb);
+        let idx2 = self
+            .build_load(i64_ty, idx2_alloca, &format!("{}_sz_idx2", name))?
+            .into_int_value();
+        let cont2 = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx2, len, &format!("{}_sz_cont2", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_cond_br(cont2, body2_bb, done2_bb)?;
+        self.builder.position_at_end(body2_bb);
+        // Separator before every element except the first.
+        let not_first2 = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx2, zero, &format!("{}_sz_nf2", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let sep_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_sep2", name));
+        let piece2_bb = self
+            .context
+            .append_basic_block(parent, &format!("{}_sz_piece2", name));
+        self.build_cond_br(not_first2, sep_bb, piece2_bb)?;
+        self.builder.position_at_end(sep_bb);
+        let sep_lit = self
+            .builder
+            .build_global_string_ptr(", ", &format!("{}_sz_sep", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let off_sep = self
+            .build_load(i64_ty, off_alloca, &format!("{}_sz_osep", name))?
+            .into_int_value();
+        // SAFETY: byte-offset GEP into `buf`; off_sep + 2 <= total by pass 1.
+        let sep_dst = self
+            .gep()
+            .build_gep(i8_ty, buf, &[off_sep], &format!("{}_sz_sep_dst", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(sep_dst),
+                BasicMetadataValueEnum::PointerValue(sep_lit.as_pointer_value()),
+                BasicMetadataValueEnum::IntValue(i64_ty.const_int(2, false)),
+            ],
+            &format!("{}_sz_mcpy_sep", name),
+        )?;
+        let off_sep2 = self
+            .builder
+            .build_int_add(
+                off_sep,
+                i64_ty.const_int(2, false),
+                &format!("{}_sz_osep2", name),
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(off_alloca, off_sep2)?;
+        self.build_br(piece2_bb)?;
+        self.builder.position_at_end(piece2_bb);
+        let marker2 = self.display_marker();
+        let piece2 = render_elem(idx2)?;
+        let plen2 = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(piece2)],
+                &format!("{}_sz_plen2", name),
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+            .into_int_value();
+        let off_p = self
+            .build_load(i64_ty, off_alloca, &format!("{}_sz_op", name))?
+            .into_int_value();
+        // SAFETY: byte-offset GEP into `buf`; off_p + plen2 <= total by pass 1.
+        let p_dst = self
+            .gep()
+            .build_gep(i8_ty, buf, &[off_p], &format!("{}_sz_p_dst", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(p_dst),
+                BasicMetadataValueEnum::PointerValue(piece2),
+                BasicMetadataValueEnum::IntValue(plen2),
+            ],
+            &format!("{}_sz_mcpy_piece", name),
+        )?;
+        let off_p2 = self
+            .builder
+            .build_int_add(off_p, plen2, &format!("{}_sz_op2", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(off_alloca, off_p2)?;
+        // Free this iteration's piece (same runtime block as its allocation).
+        self.flush_display_since(marker2)?;
+        let next2 = self
+            .builder
+            .build_int_add(
+                idx2,
+                i64_ty.const_int(1, false),
+                &format!("{}_sz_next2", name),
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx2_alloca, next2)?;
+        self.build_br(loop2_bb)?;
+        self.builder.position_at_end(done2_bb);
+        // Closing bracket + NUL terminator.
+        let off_end = self
+            .build_load(i64_ty, off_alloca, &format!("{}_sz_oend", name))?
+            .into_int_value();
+        let close_lit = self
+            .builder
+            .build_global_string_ptr("]", &format!("{}_sz_close", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        // SAFETY: byte-offset GEP into `buf`; off_end + 2 == total by pass 1
+        // ("]" byte + trailing NUL are both included in `total`).
+        let close_dst = self
+            .gep()
+            .build_gep(i8_ty, buf, &[off_end], &format!("{}_sz_close_dst", name))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(close_dst),
+                BasicMetadataValueEnum::PointerValue(close_lit.as_pointer_value()),
+                BasicMetadataValueEnum::IntValue(i64_ty.const_int(2, false)),
+            ],
+            &format!("{}_sz_mcpy_close", name),
+        )?;
+        // `close_lit` is the global string constant "]\0": copying 2 bytes
+        // writes both the ']' and the trailing NUL in one memcpy.
+        Ok(buf)
     }
 
     pub(super) fn compile_println(
@@ -193,6 +643,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // List of List of product tuples.
                             self.emit_list_list_product_tuple_to_string(*sv, &elem)?
                         } else {
+                            // TODO(#audit-wave2): f64/i64 inner elements still
+                            // route through mimi_list_i32_to_string here (the
+                            // runtime exposes no f64/i64 list-display helper
+                            // to pass as a fn pointer; runtime is owned by
+                            // another agent). Single-level List<f64>/List<i64>
+                            // is fixed via emit_list_scalar_to_string.
                             let inner_fn = if elem == "string" {
                                 "mimi_list_to_string"
                             } else if elem.starts_with("Map") {
@@ -321,7 +777,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 inner.to_string()
                             };
                             self.emit_list_product_tuple_to_string(*sv, &elem)?
+                        } else if inner == "f64" || inner == "f32" {
+                            // Wave-1 audit fix (§8, FIX: i32 fallback read the
+                            // f64 slot bits as i32 → garbage): dispatch on the
+                            // actual element type.
+                            self.emit_list_scalar_to_string(*sv, ScalarListKind::F64)?
+                        } else if inner == "i64" {
+                            self.emit_list_scalar_to_string(*sv, ScalarListKind::I64)?
+                        } else if inner == "bool" {
+                            self.emit_list_scalar_to_string(*sv, ScalarListKind::Bool)?
                         } else {
+                            // TODO(#audit-wave2): remaining scalar element kinds
+                            // (i8/i16/i32 and anything unrecognized) still route
+                            // to the i32 helper; i32 is correct for these.
                             self.emit_list_i32_to_string(*sv)?
                         }
                     } else {
@@ -526,17 +994,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ));
                         }
                     }
-                    let fn_name = if arg_type.contains("Map<string, string>") {
-                        "mimi_map_to_json_string"
-                    } else if arg_type.contains("Map<string, bool>") {
-                        "mimi_map_to_json_bool"
-                    } else if arg_type.contains("Map<string, f64>")
-                        || arg_type.contains("Map<string, f32>")
-                    {
-                        "mimi_map_to_json_f64"
-                    } else {
-                        "mimi_map_to_json_i64"
-                    };
+                    // Wave-1 audit fix (§8): route on the parsed map value
+                    // type (full outer match), not substring `contains`.
+                    let fn_name = Self::map_json_fn_for_type(arg_type);
                     let func = self.get_runtime_fn(fn_name)?;
                     let raw = self
                         .build_call(
@@ -569,15 +1029,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ));
                         }
                     }
-                    let fn_name = if arg_type.contains("Set<string>") {
-                        "mimi_set_to_display_string"
-                    } else if arg_type.contains("Set<bool>") {
-                        "mimi_set_to_display_bool"
-                    } else if arg_type.contains("Set<f64>") || arg_type.contains("Set<f32>") {
-                        "mimi_set_to_display_f64"
-                    } else {
-                        "mimi_set_to_display"
-                    };
+                    // Wave-1 audit fix (§8): route on the parsed element type
+                    // (full outer match), not substring `contains`.
+                    let fn_name = Self::set_display_fn_for_type(arg_type);
                     let func = self.get_runtime_fn(fn_name)?;
                     let raw = self
                         .build_call(
@@ -633,10 +1087,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((BasicMetadataValueEnum::IntValue(ext_iv), "%ld".to_string()))
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
-                // P0-3: use %g (shortest round-trip) to match the
-                // interpreter's `{}` Display format. %f always prints 6
-                // decimals (e.g. "3.140000" for 3.14), %g prints "3.14".
-                Ok((BasicMetadataValueEnum::FloatValue(*fv), "%g".to_string()))
+                // Wave-1 audit fix (§8, FIX: `%g` prints only 6 significant
+                // digits — e.g. "1.23457e+08" for 123456789.123456789):
+                // route scalar float printing through `mimi_to_string_f64`
+                // (Rust `{}` shortest round-trip Display), exactly matching
+                // the VM's formatting. The heap string is registered so the
+                // consuming print's `flush_display_frees` releases it.
+                let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                let str_ptr = self
+                    .build_call(
+                        to_f64_fn,
+                        &[BasicMetadataValueEnum::FloatValue(*fv)],
+                        "print_f64_str",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_to_string_f64 returned void")?
+                    .into_pointer_value();
+                self.register_display_alloc(str_ptr);
+                Ok((
+                    BasicMetadataValueEnum::PointerValue(str_ptr),
+                    "%s".to_string(),
+                ))
             }
             _ => Ok((*arg, "%p".to_string())),
         }
@@ -654,6 +1125,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_map_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
+        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
+        // sized_cat_parts / emit_sized_list_of_pieces (Wave 1 converted the
+        // tuple/list-of-tuple family; Map/Set/Enum/Result/Option list
+        // emitters remain).
         let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_map_buf")?;
         let disp_marker = self.display_marker();
         let open = self
@@ -903,17 +1378,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value()
                 }
             } else {
-                let map_fn_name = if map_type.contains("Map<string, string>") {
-                    "mimi_map_to_json_string"
-                } else if map_type.contains("Map<string, bool>") {
-                    "mimi_map_to_json_bool"
-                } else if map_type.contains("Map<string, f64>")
-                    || map_type.contains("Map<string, f32>")
-                {
-                    "mimi_map_to_json_f64"
-                } else {
-                    "mimi_map_to_json_i64"
-                };
+                // Wave-1 audit fix (§8): route on the parsed value type, not
+                // substring `contains`.
+                let map_fn_name = Self::map_json_fn_for_type(map_type);
                 let map_fn = self.get_runtime_fn(map_fn_name)?;
                 self.build_call(
                     map_fn,
@@ -983,6 +1450,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_set_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
+        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
+        // sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_set_buf")?;
         let disp_marker = self.display_marker();
         let open = self
@@ -1227,15 +1696,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value()
                 }
             } else {
-                let set_fn_name = if set_type.contains("Set<string>") {
-                    "mimi_set_to_display_string"
-                } else if set_type.contains("Set<bool>") {
-                    "mimi_set_to_display_bool"
-                } else if set_type.contains("Set<f64>") || set_type.contains("Set<f32>") {
-                    "mimi_set_to_display_f64"
-                } else {
-                    "mimi_set_to_display"
-                };
+                // Wave-1 audit fix (§8): route on the parsed element type, not
+                // substring `contains`.
+                let set_fn_name = Self::set_display_fn_for_type(set_type);
                 let set_fn = self.get_runtime_fn(set_fn_name)?;
                 self.build_call(
                     set_fn,
@@ -1469,7 +1932,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
         let buf =
-            self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_opt_prod_json_buf")?;
+            self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_opt_prod_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_res_opt_prod_json_open")
@@ -1661,38 +2124,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?;
             tmp
         };
-        let some_inner =
-            self.malloc_or_abort(i64_ty.const_int(1024, false), "list_res_opt_prod_some_i")?;
-        let sfmt = self
-            .builder
-            .build_global_string_ptr("{\"Some\":[%s]}", "list_res_opt_prod_sfmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-        self.build_call(
-            snprintf_fn,
+        let some_inner = self.sized_cat_parts(
             &[
-                BasicMetadataValueEnum::PointerValue(some_inner),
-                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                BasicMetadataValueEnum::PointerValue(sfmt.as_pointer_value()),
-                BasicMetadataValueEnum::PointerValue(pay_json),
+                CatPart::Lit("{\"Some\":["),
+                CatPart::Dyn(pay_json),
+                CatPart::Lit("]}"),
             ],
-            "list_res_opt_prod_ssn",
+            "list_res_opt_prod_some_i",
+            false,
         )?;
-        let ok_wrap =
-            self.malloc_or_abort(i64_ty.const_int(1024, false), "list_res_opt_prod_ok_w")?;
-        let ofmt = self
-            .builder
-            .build_global_string_ptr("{\"Ok\":[%s]}", "list_res_opt_prod_ofmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            snprintf_fn,
+        let ok_wrap = self.sized_cat_parts(
             &[
-                BasicMetadataValueEnum::PointerValue(ok_wrap),
-                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
-                BasicMetadataValueEnum::PointerValue(some_inner),
+                CatPart::Lit("{\"Ok\":["),
+                CatPart::Dyn(some_inner),
+                CatPart::Lit("]}"),
             ],
-            "list_res_opt_prod_osn",
+            "list_res_opt_prod_ok_w",
+            false,
         )?;
         self.build_store(piece_slot, ok_wrap)?;
         self.builder
@@ -1824,7 +2272,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_prod_json_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_prod_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_res_prod_json_open")
@@ -1985,21 +2433,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 self.emit_product_tuple_to_json(ok_sv)?
             };
-            let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "list_res_prod_wrap")?;
-            let fmt = self
-                .builder
-                .build_global_string_ptr("{\"Ok\":[%s]}", "list_res_prod_ok_fmt")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            let snprintf_fn = self.get_runtime_fn("snprintf")?;
-            self.build_call(
-                snprintf_fn,
+            // Wave-1 audit fix (§8): sized wrap instead of fixed 1024 snprintf.
+            let wrap = self.sized_cat_parts(
                 &[
-                    BasicMetadataValueEnum::PointerValue(wrap),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::PointerValue(ok_json),
+                    CatPart::Lit("{\"Ok\":["),
+                    CatPart::Dyn(ok_json),
+                    CatPart::Lit("]}"),
                 ],
-                "list_res_prod_ok_sn",
+                "list_res_prod_wrap",
+                false,
             )?;
             wrap
         } else {
@@ -2127,7 +2569,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_opt_tup_json_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_opt_tup_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_opt_tup_json_open")
@@ -2310,20 +2752,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 self.emit_product_tuple_to_json(pay_sv)?
             };
-            let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "list_opt_tup_wrap")?;
-            let fmt = self
-                .builder
-                .build_global_string_ptr("{\"Some\":[%s]}", "list_opt_tup_some_fmt")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            self.build_call(
-                snprintf_fn,
+            // Wave-1 audit fix (§8): sized wrap instead of fixed 1024 snprintf.
+            let wrap = self.sized_cat_parts(
                 &[
-                    BasicMetadataValueEnum::PointerValue(wrap),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::PointerValue(pay_json),
+                    CatPart::Lit("{\"Some\":["),
+                    CatPart::Dyn(pay_json),
+                    CatPart::Lit("]}"),
                 ],
-                "list_opt_tup_some_sn",
+                "list_opt_tup_wrap",
+                false,
             )?;
             wrap
         } else if let BasicValueEnum::IntValue(iv) = pay {
@@ -2340,21 +2777,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_int_to_ptr(pay_i64, i8_ptr, "list_opt_list_ptr")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                 let pay_json = self.emit_list_payload_to_json_cstr(list_ptr, inner_name)?;
-                let wrap =
-                    self.malloc_or_abort(i64_ty.const_int(1024, false), "list_opt_list_wrap")?;
-                let fmt = self
-                    .builder
-                    .build_global_string_ptr("{\"Some\":[%s]}", "list_opt_list_some_fmt")
-                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                self.build_call(
-                    snprintf_fn,
+                // Wave-1 audit fix (§8): sized wrap instead of fixed 1024 snprintf.
+                let wrap = self.sized_cat_parts(
                     &[
-                        BasicMetadataValueEnum::PointerValue(wrap),
-                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                        BasicMetadataValueEnum::PointerValue(pay_json),
+                        CatPart::Lit("{\"Some\":["),
+                        CatPart::Dyn(pay_json),
+                        CatPart::Lit("]}"),
                     ],
-                    "list_opt_list_some_sn",
+                    "list_opt_list_wrap",
+                    false,
                 )?;
                 wrap
             } else {
@@ -2466,7 +2897,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_tup_json_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_tup_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_tup_json_open")
@@ -2629,139 +3060,41 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_tup_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_tup_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_tup_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_tup_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_tup_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_tup_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_tup_body");
-        let done_bb = self.context.append_basic_block(parent, "list_tup_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_tup_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_tup_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_tup_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_tup_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_tup_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_tup_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_tup_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_tup_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_tup_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_tup_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_tup_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let elem_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_tup_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let loaded = self
-            .builder
-            .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "list_tup_ld")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
-        let piece = self.emit_product_tuple_to_string(loaded)?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(piece),
-            ],
-            "list_tup_strcat_elem",
-        )?;
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_tup_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_tup_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_tup_close",
-        )?;
-        Ok(buf)
+        // Wave-1 audit fix (§8, FIX: fixed 4096-byte strcat assembly with no
+        // capacity tracking): exact-size two-pass assembly. The element
+        // renderer is pure, so the two passes render each tuple twice;
+        // measurement pieces are freed per iteration via the sized helper.
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_tup_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_tup_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_tup_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, "list_tup_elem")?
+                    .into_int_value();
+                let elem_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_tup_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let loaded = self
+                    .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "list_tup_ld")?
+                    .into_struct_value();
+                self.emit_product_tuple_to_string(loaded)
+            },
+            "list_tup",
+        )
     }
 
     /// Format `List<Enum>` as `[Red(), Blue(7), ...]`.
@@ -2776,6 +3109,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_enum_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
+        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
+        // sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_enum_buf")?;
         let disp_marker = self.display_marker();
         let open = self
@@ -2937,6 +3272,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_res_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
+        // TODO(#audit-wave2): fixed 4096-byte snprintf/strcat assembly —
+        // convert to sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_res_buf")?;
         let disp_marker = self.display_marker();
         let open = self
@@ -3122,6 +3459,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_opt_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
+        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
+        // sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_opt_buf")?;
         let disp_marker = self.display_marker();
         let open = self
@@ -3290,6 +3629,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
         // Heap buffer for final string (grow generously).
+        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
+        // sized assembly (see list_map_buf note).
         let buf_size = i64_ty.const_int(4096, false);
         let buf = self.malloc_display_buf(buf_size, "list_rec_buf")?;
         let disp_marker = self.display_marker();
@@ -3459,6 +3800,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             payload
         };
+        // TODO(#audit-wave2): fixed 128-byte snprintf assembly — convert to
+        // sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(i64_ty.const_int(128, false), "enum_disp_buf")?;
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -3788,16 +4131,54 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
+    /// Wave-1 audit fix (§8, FIX: Map/Set display routing by substring
+    /// `contains`): extract the value type of the FIRST `Map<string, V>`
+    /// occurrence in `type_name` with bracket-depth tracking (same scan the
+    /// existing `map_nested_product_mode` uses). Substring matching
+    /// false-positived on nested types — e.g. `Map<string, Map<string,
+    /// string>>` matched the INNER map's pattern and misrouted the outer
+    /// handle through `mimi_map_to_json_string`.
+    fn map_value_type_of(type_name: &str) -> Option<String> {
+        let idx = type_name.find("Map<string,")?;
+        let rest = &type_name[idx + "Map<string,".len()..];
+        let mut depth = 0i32;
+        for (j, ch) in rest.char_indices() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' if depth == 0 => return Some(rest[..j].trim().to_string()),
+                '>' | ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Wave-1 audit fix (§8): element-type extraction for `Set<…>` —
+    /// bracket-depth aware; see `map_value_type_of`.
+    fn set_elem_type_of(type_name: &str) -> Option<String> {
+        let idx = type_name.find("Set<")?;
+        let rest = &type_name[idx + "Set<".len()..];
+        let mut depth = 0i32;
+        for (j, ch) in rest.char_indices() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' if depth == 0 => return Some(rest[..j].trim().to_string()),
+                '>' | ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Pick map JSON runtime helper from a type string containing `Map<…>`.
+    /// Routes on the parsed map value type (full outer match of V), NOT on
+    /// substring `contains` (Wave-1 audit fix §8).
     fn map_json_fn_for_type(type_name: &str) -> &'static str {
-        if type_name.contains("Map<string, string>") {
-            "mimi_map_to_json_string"
-        } else if type_name.contains("Map<string, bool>") {
-            "mimi_map_to_json_bool"
-        } else if type_name.contains("Map<string, f64>") || type_name.contains("Map<string, f32>") {
-            "mimi_map_to_json_f64"
-        } else {
-            "mimi_map_to_json_i64"
+        match Self::map_value_type_of(type_name).as_deref() {
+            Some("string") => "mimi_map_to_json_string",
+            Some("bool") => "mimi_map_to_json_bool",
+            Some("f64") | Some("f32") => "mimi_map_to_json_f64",
+            _ => "mimi_map_to_json_i64",
         }
     }
 
@@ -3939,15 +4320,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Pick set Display runtime helper from a type string containing `Set<…>`.
+    /// Routes on the parsed element type (full outer match of E), NOT on
+    /// substring `contains` (Wave-1 audit fix §8).
     fn set_display_fn_for_type(type_name: &str) -> &'static str {
-        if type_name.contains("Set<string>") {
-            "mimi_set_to_display_string"
-        } else if type_name.contains("Set<bool>") {
-            "mimi_set_to_display_bool"
-        } else if type_name.contains("Set<f64>") || type_name.contains("Set<f32>") {
-            "mimi_set_to_display_f64"
-        } else {
-            "mimi_set_to_display"
+        match Self::set_elem_type_of(type_name).as_deref() {
+            Some("string") => "mimi_set_to_display_string",
+            Some("bool") => "mimi_set_to_display_bool",
+            Some("f64") | Some("f32") => "mimi_set_to_display_f64",
+            _ => "mimi_set_to_display",
         }
     }
 
@@ -4063,20 +4443,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .try_as_basic_value_opt()
                 .ok_or("mimi_json_escape_string void")?
                 .into_pointer_value();
-            let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "res_err_json_wrap")?;
-            let fmt = self
-                .builder
-                .build_global_string_ptr("{\"Err\":[%s]}", "res_err_str_fmt")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            self.build_call(
-                snprintf_fn,
+            // Wave-1 audit fix (§8): sized wrap instead of fixed 1024 snprintf
+            // (long Err strings truncated / would overflow). `escaped` is copied
+            // synchronously, so it stays freed right after as before.
+            let wrap = self.sized_cat_parts(
                 &[
-                    BasicMetadataValueEnum::PointerValue(wrap),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::PointerValue(escaped),
+                    CatPart::Lit("{\"Err\":["),
+                    CatPart::Dyn(escaped),
+                    CatPart::Lit("]}"),
                 ],
-                "res_err_str_sn",
+                "res_err_json_wrap",
+                false,
             )?;
             if let Ok(free_fn) = self.get_runtime_fn("free") {
                 self.build_call(
@@ -4268,21 +4645,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 tmp
             }
         };
-        let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "res_j_ok_wrap")?;
-        let ofmt = self
-            .builder
-            .build_global_string_ptr("{\"Ok\":[%s]}", "res_j_ofmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-        self.build_call(
-            snprintf_fn,
+        // Wave-1 audit fix (§8): sized wrap instead of fixed 1024 snprintf.
+        let wrap = self.sized_cat_parts(
             &[
-                BasicMetadataValueEnum::PointerValue(wrap),
-                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
-                BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
-                BasicMetadataValueEnum::PointerValue(ok_json),
+                CatPart::Lit("{\"Ok\":["),
+                CatPart::Dyn(ok_json),
+                CatPart::Lit("]}"),
             ],
-            "res_j_osn",
+            "res_j_ok_wrap",
+            false,
         )?;
         self.build_store(out_slot, wrap)?;
         self.builder
@@ -4336,6 +4707,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ok_val = self.build_extract_value(sv.into(), 1, "res_ok")?;
         let err_val = self.build_extract_value(sv.into(), 2, "res_err")?;
         let buf_size = i64_ty.const_int(256, false);
+        // TODO(#audit-wave2): fixed 256-byte snprintf("Ok(%s)"/"Err(%s)") assembly —
+        // long payloads truncate; convert to sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(buf_size, "res_print_buf")?;
         let disp_marker = self.display_marker();
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
@@ -5892,6 +6265,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("None()", "opt_none_str")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let buf_size = i64_ty.const_int(512, false);
+        // TODO(#audit-wave2): fixed 512-byte snprintf("Some(%s)") assembly —
+        // long payloads truncate; convert to sized assembly (see list_map_buf note).
         let buf = self.malloc_display_buf(buf_size, "opt_print_buf")?;
         let opt_disp_marker = self.display_marker();
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
@@ -6175,7 +6550,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_map_nest_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_map_nest_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_map_nest_open")
@@ -6360,7 +6735,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_map_prod_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_map_prod_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_map_prod_open")
@@ -6896,7 +7271,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_set_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_set_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_res_set_open")
@@ -7094,7 +7469,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_opt_set_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_opt_set_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_opt_set_open")
@@ -8311,43 +8686,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         sv: inkwell::values::StructValue<'ctx>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        // Wave-1 audit fix (§8, FIX: fixed 4096-byte strcat assembly):
+        // exact-size assembly — one piece per field, computed lengths, one
+        // malloc. Also removes the per-field 256-byte piece buffers that
+        // truncated long string fields.
         let fields = sv.get_type().get_field_types();
         let i64_ty = self.context.i64_type();
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "prod_tup_buf")?;
-        let open = self
-            .builder
-            .build_global_string_ptr("(", "prod_tup_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "prod_tup_open_cpy",
-        )?;
-        let buf_size = i64_ty.const_int(256, false);
+        let mut parts: Vec<CatPart<'ctx>> = Vec::with_capacity(fields.len() * 2 + 2);
+        parts.push(CatPart::Lit("("));
         for (i, ft) in fields.iter().enumerate() {
             if i > 0 {
-                let comma = self
-                    .builder
-                    .build_global_string_ptr(", ", "prod_tup_comma")
-                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                self.build_call(
-                    strcat_fn,
-                    &[
-                        BasicMetadataValueEnum::PointerValue(buf),
-                        BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-                    ],
-                    "prod_tup_strcat_comma",
-                )?;
+                parts.push(CatPart::Lit(", "));
             }
             let field_val =
                 self.build_extract_value(sv.into(), i as u32, &format!("prod_tup_{}", i))?;
-            let piece = self.malloc_display_buf(i64_ty.const_int(256, false), "prod_piece")?;
             match (ft, field_val) {
                 (BasicTypeEnum::IntType(it), BasicValueEnum::IntValue(iv)) => {
                     if it.get_bit_width() == 1 {
@@ -8373,14 +8725,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "prod_bool_s",
                             )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::PointerValue(sel.into_pointer_value()),
-                            ],
-                            "prod_bool_cpy",
-                        )?;
+                        // Static globals — no display-free registration.
+                        parts.push(CatPart::Dyn(sel.into_pointer_value()));
                     } else {
                         let as_i64 = if iv.get_type().get_bit_width() < 64 {
                             self.builder
@@ -8389,125 +8735,62 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else {
                             iv
                         };
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("%ld", "prod_ld")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::IntValue(buf_size),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::IntValue(as_i64),
-                            ],
-                            "prod_ld_sn",
-                        )?;
+                        let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
+                        let s = self
+                            .build_call(
+                                to_i64_fn,
+                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                "prod_i64_str",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_to_string_i64 returned void")?
+                            .into_pointer_value();
+                        self.register_display_alloc(s);
+                        parts.push(CatPart::Dyn(s));
                     }
                 }
                 (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
                     let ffields = sty.get_field_types();
                     if ffields.len() >= 1 && matches!(ffields[0], BasicTypeEnum::PointerType(_)) {
-                        // string {ptr,len}
+                        // string {ptr,len}: codegen strings are NUL-terminated
+                        // C strings, so the data pointer can feed strlen/memcpy
+                        // directly (no 256-byte truncation anymore).
                         let ptr = self
                             .build_extract_value(fsv.into(), 0, "prod_str_ptr")?
                             .into_pointer_value();
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("%s", "prod_s")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::IntValue(buf_size),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(ptr),
-                            ],
-                            "prod_str_sn",
-                        )?;
+                        parts.push(CatPart::Dyn(ptr));
                     } else {
                         // Nested product / list-like — recurse product formatter.
                         let nested = self.emit_product_tuple_to_string(fsv)?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::PointerValue(nested),
-                            ],
-                            "prod_nested_cpy",
-                        )?;
+                        parts.push(CatPart::Dyn(nested));
                     }
                 }
                 (BasicTypeEnum::PointerType(_), BasicValueEnum::PointerValue(pv)) => {
-                    let fmt = self
-                        .builder
-                        .build_global_string_ptr("%s", "prod_ptr_s")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    self.build_call(
-                        snprintf_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(piece),
-                            BasicMetadataValueEnum::IntValue(buf_size),
-                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::PointerValue(pv),
-                        ],
-                        "prod_ptr_sn",
-                    )?;
+                    parts.push(CatPart::Dyn(pv));
                 }
                 (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(fv)) => {
-                    let fmt = self
-                        .builder
-                        .build_global_string_ptr("%g", "prod_f")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    self.build_call(
-                        snprintf_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(piece),
-                            BasicMetadataValueEnum::IntValue(buf_size),
-                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::FloatValue(fv),
-                        ],
-                        "prod_f_sn",
-                    )?;
+                    // Shortest round-trip Display (VM parity) instead of %g's
+                    // 6 significant digits.
+                    let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                    let s = self
+                        .build_call(
+                            to_f64_fn,
+                            &[BasicMetadataValueEnum::FloatValue(fv)],
+                            "prod_f64_str",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_to_string_f64 returned void")?
+                        .into_pointer_value();
+                    self.register_display_alloc(s);
+                    parts.push(CatPart::Dyn(s));
                 }
                 _ => {
-                    let q = self
-                        .builder
-                        .build_global_string_ptr("?", "prod_unk")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    self.build_call(
-                        strcpy_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(piece),
-                            BasicMetadataValueEnum::PointerValue(q.as_pointer_value()),
-                        ],
-                        "prod_unk_cpy",
-                    )?;
+                    parts.push(CatPart::Lit("?"));
                 }
             }
-            self.build_call(
-                strcat_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(piece),
-                ],
-                "prod_strcat_piece",
-            )?;
         }
-        let close = self
-            .builder
-            .build_global_string_ptr(")", "prod_tup_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "prod_tup_close",
-        )?;
-        Ok(buf)
+        parts.push(CatPart::Lit(")"));
+        self.sized_cat_parts(&parts, "prod_tup", true)
     }
 
     /// Serialize a product-tuple struct to a JSON array C string (compact,
@@ -8518,6 +8801,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let fields = sv.get_type().get_field_types();
         let i64_ty = self.context.i64_type();
+        // TODO(#audit-wave2): fixed 4096-byte strcat assembly (JSON tuple) —
+        // convert to sized assembly (see list_map_buf note).
         let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "json_tup_buf")?;
         let open = self
             .builder
@@ -8838,6 +9123,116 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(raw)
     }
 
+    /// Wave-1 audit fix (§8, FIX: list display i32 fallback misread element
+    /// types): render `List<f64>` / `List<i64>` / `List<bool>` with
+    /// element-kind-correct formatting. Scalar list slots are i64-sized; f64
+    /// elements are stored there as bitcast bit patterns (see
+    /// `coerce_to_list_storage`), so we load the i64 slot and interpret it
+    /// per kind instead of truncating to i32. Sized two-pass assembly — no
+    /// fixed buffer.
+    fn emit_list_scalar_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        kind: ScalarListKind,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let len = self
+            .build_extract_value(sv.into(), 0, "list_scalar_len")?
+            .into_int_value();
+        let data_ptr = self
+            .build_extract_value(sv.into(), 1, "list_scalar_data")?
+            .into_pointer_value();
+        let name = match kind {
+            ScalarListKind::F64 => "list_f64",
+            ScalarListKind::I64 => "list_i64",
+            ScalarListKind::Bool => "list_bool",
+        };
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots); the two-pass loop guard `idx ULT len` gates this.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_scalar_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let raw = self
+                    .build_load(i64_ty, elem_slot, "list_scalar_elem")?
+                    .into_int_value();
+                match kind {
+                    ScalarListKind::F64 => {
+                        let f64_ty = self.context.f64_type();
+                        let fv = self
+                            .build_bit_cast(
+                                raw.into(),
+                                BasicTypeEnum::FloatType(f64_ty),
+                                "list_scalar_f64",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .into_float_value();
+                        let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                        let s = self
+                            .build_call(
+                                to_f64_fn,
+                                &[BasicMetadataValueEnum::FloatValue(fv)],
+                                "list_scalar_f64_str",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_to_string_f64 returned void")?
+                            .into_pointer_value();
+                        self.register_display_alloc(s);
+                        Ok(s)
+                    }
+                    ScalarListKind::I64 => {
+                        let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
+                        let s = self
+                            .build_call(
+                                to_i64_fn,
+                                &[BasicMetadataValueEnum::IntValue(raw)],
+                                "list_scalar_i64_str",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_to_string_i64 returned void")?
+                            .into_pointer_value();
+                        self.register_display_alloc(s);
+                        Ok(s)
+                    }
+                    ScalarListKind::Bool => {
+                        let true_g = self
+                            .builder
+                            .build_global_string_ptr("true", "list_scalar_true")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let false_g = self
+                            .builder
+                            .build_global_string_ptr("false", "list_scalar_false")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let is_true = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                raw,
+                                i64_ty.const_int(0, false),
+                                "list_scalar_bool",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        // Static globals — not registered for display free.
+                        let sel = self
+                            .builder
+                            .build_select(
+                                is_true,
+                                true_g.as_pointer_value(),
+                                false_g.as_pointer_value(),
+                                "list_scalar_bool_s",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        Ok(sel.into_pointer_value())
+                    }
+                }
+            },
+            name,
+        )
+    }
+
     /// Format `List<List<(…)>>` by reconstructing each inner list of product tuples.
     pub(in crate::codegen) fn emit_list_list_product_tuple_to_string(
         &self,
@@ -8851,153 +9246,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_list_tup_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_display_buf(i64_ty.const_int(8192, false), "list_list_tup_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_list_tup_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_list_tup_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_list_tup_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self
-            .context
-            .append_basic_block(parent, "list_list_tup_loop");
-        let body_bb = self
-            .context
-            .append_basic_block(parent, "list_list_tup_body");
-        let done_bb = self
-            .context
-            .append_basic_block(parent, "list_list_tup_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_list_tup_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_list_tup_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_list_tup_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self
-            .context
-            .append_basic_block(parent, "list_list_tup_comma_bb");
-        let elem_bb = self
-            .context
-            .append_basic_block(parent, "list_list_tup_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_list_tup_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_list_tup_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_list_tup_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_list_tup_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_list_tup_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_list_tup_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let inner_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_list_tup_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let inner_sv = self
-            .builder
-            .build_load(
-                BasicTypeEnum::StructType(list_ty),
-                inner_ptr,
-                "list_list_tup_ld",
-            )
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
-        let piece = self.emit_list_product_tuple_to_string(inner_sv, elem_type_str)?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(piece),
-            ],
-            "list_list_tup_strcat_elem",
-        )?;
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_list_tup_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_list_tup_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_list_tup_close",
-        )?;
-        Ok(buf)
+        // Wave-1 audit fix (§8, FIX: fixed 8192-byte strcat assembly — deeply
+        // nested list-of-list-of-tuples rendering beyond 8KB overflowed the
+        // display buffer): exact-size two-pass assembly via the sized helper.
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_list_tup_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_list_tup_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_list_tup_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, "list_list_tup_elem")?
+                    .into_int_value();
+                let inner_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_list_tup_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let inner_sv = self
+                    .build_load(
+                        BasicTypeEnum::StructType(list_ty),
+                        inner_ptr,
+                        "list_list_tup_ld",
+                    )?
+                    .into_struct_value();
+                self.emit_list_product_tuple_to_string(inner_sv, elem_type_str)
+            },
+            "list_list_tup",
+        )
     }
 
     /// Serialize `List<List<(…)>>` to nested JSON arrays of product tuples.
@@ -9010,7 +9296,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_json_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
         let open = self
             .builder
             .build_global_string_ptr("[", "list_list_tup_json_open")
@@ -9290,15 +9576,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(&fmt_spec, "efmt")
             .map_err(|e| CompileError::LlvmError(format!("efmt error: {}", e)))?;
-        let mut printf_args = vec![BasicMetadataValueEnum::PointerValue(
-            fmt_global.as_pointer_value(),
-        )];
-        printf_args.push(print_arg);
-        let printf = self
+        // Wave-1 audit fix (§8, FIX: eprintln wrote stdout): emit
+        // `fprintf(stderr, …)` instead of `printf(…)` so the message goes to
+        // the standard error stream. `fprintf` is declared in
+        // register_libc (builtins/mod.rs); the `stderr` FILE* global follows
+        // the same external-global pattern `compile_input` uses for `stdin`.
+        let stderr_stream = self.get_stream_global("stderr")?;
+        let fprintf = self
             .module
-            .get_function("printf")
-            .ok_or_else(|| "printf not declared".to_string())?;
-        self.build_call(printf, &printf_args, "eprintf_call")?;
+            .get_function("fprintf")
+            .ok_or_else(|| "fprintf not declared".to_string())?;
+        let mut fprintf_args = vec![
+            BasicMetadataValueEnum::PointerValue(stderr_stream),
+            BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
+        ];
+        fprintf_args.push(print_arg);
+        self.build_call(fprintf, &fprintf_args, "eprintf_call")?;
         // Q2: release display buffers consumed by this eprintf call.
         self.flush_display_frees()?;
         Ok(self.context.i64_type().const_int(0, false).into())
@@ -9340,9 +9633,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "assert message argument must be a string pointer".to_string(),
                 )
             })?;
+            // Wave-1 audit fix (§8, FIX: user message passed AS printf format
+            // string — format-string UB for messages containing '%' specs,
+            // e.g. `assert(false, "100% done")`). The message is DATA: print
+            // it through a literal "%s" format, same destination (stdout) as
+            // the legacy path.
+            let msg_fmt = self
+                .builder
+                .build_global_string_ptr("%s", "assert_msg_fmt")
+                .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
             self.build_call(
                 printf,
-                &[BasicMetadataValueEnum::PointerValue(msg_ptr)],
+                &[
+                    BasicMetadataValueEnum::PointerValue(msg_fmt.as_pointer_value()),
+                    BasicMetadataValueEnum::PointerValue(msg_ptr),
+                ],
                 "assert_printf",
             )?;
         } else {
@@ -9811,24 +10116,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "input expects 0 or 1 argument".to_string(),
             ));
         }
+        // TODO(#audit-wave2): the VM backend's `input()` returns
+        // `Result<string, string>` (`Ok(line)` / `Err(msg)`) while codegen
+        // returns a bare `string`. Full `Result` shape alignment with the VM
+        // is decided for Wave 2. Wave-1 scope: make the codegen read
+        // memory-safe and deterministic — check the fgets result and return
+        // an EMPTY string on EOF/error instead of strlen-ing an
+        // uninitialized 4096-byte buffer.
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         // Allocate buffer (4096 bytes)
-        let buf_size = self.context.i64_type().const_int(4096, false);
+        let buf_size = i64_ty.const_int(4096, false);
         // B4: use malloc_or_abort for NULL check.
         let buf = self.malloc_or_abort(buf_size, "input_buf")?;
-        // NOTE: not registered — returned value owns the allocation
+        // NOTE: not registered — returned value owns the allocation.
+        // Defensive NUL so the buffer is a valid C string before fgets runs.
+        self.build_store(buf, i8_ty.const_int(0, false))?;
         // fgets(buf, 4096, stdin)
-        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        let stdin_global = self.module.add_global(i8_ptr_ty, None, "stdin");
-        stdin_global.set_linkage(inkwell::module::Linkage::External);
-        let stdin_val = self
-            .builder
-            .build_load(
-                BasicTypeEnum::PointerType(i8_ptr_ty),
-                stdin_global.as_pointer_value(),
-                "stdin",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("load stdin error: {}", e)))?
-            .into_pointer_value();
+        let stdin_val = self.get_stream_global("stdin")?;
         let fgets_fn = self.module.get_function("fgets").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let ty = i8_ptr.fn_type(
@@ -9842,53 +10148,176 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fgets", ty, Some(inkwell::module::Linkage::External))
         });
-        self.build_call(
-            fgets_fn,
+        // Wave-1 audit fix (§8, FIX: fgets return value ignored): fgets
+        // returns NULL on EOF/error; the buffer contents are then
+        // indeterminate. Check the result and fall through to a
+        // deterministic empty string on NULL.
+        let fgets_ret = self
+            .build_call(
+                fgets_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(buf_size),
+                    BasicMetadataValueEnum::PointerValue(stdin_val),
+                ],
+                "fgets_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("fgets returned void".into()))?
+            .into_pointer_value();
+
+        // Build string struct { i8*, i64 } (result slot shared by both arms).
+        let string_ty = self.context.struct_type(
             &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::IntValue(buf_size),
-                BasicMetadataValueEnum::PointerValue(stdin_val),
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
             ],
-            "fgets_call",
-        )?;
-        // strlen(buf) for string struct length
+            false,
+        );
+        let str_alloca = self.build_alloca(string_ty, "input_str")?;
+        let ptr_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let len_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for input".into()))?;
+        let eof_bb = self.context.append_basic_block(function, "input_eof");
+        let ok_bb = self.context.append_basic_block(function, "input_ok");
+        let merge_bb = self.context.append_basic_block(function, "input_merge");
+        let fgets_null = self
+            .builder
+            .build_is_null(fgets_ret, "input_fgets_null")
+            .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
+        self.build_cond_br(fgets_null, eof_bb, ok_bb)?;
+
+        // EOF/error arm: deterministic empty string.
+        self.builder.position_at_end(eof_bb);
+        // The line buffer is useless on this arm — release it (the returned
+        // empty string is a static global, not the heap buffer).
+        if let Ok(free_fn) = self.get_runtime_fn("free") {
+            self.build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(buf)],
+                "input_eof_free",
+            )?;
+        }
+        let empty_lit = self
+            .builder
+            .build_global_string_ptr("", "input_empty")
+            .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+        self.build_store(ptr_gep, empty_lit.as_pointer_value())?;
+        self.build_store(len_gep, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+
+        // Success arm: strip trailing whitespace. The VM `input()` applies
+        // `trim_end`; mirror it for the ASCII whitespace set.
+        self.builder.position_at_end(ok_bb);
         let strlen_fn = self
             .module
             .get_function("strlen")
             .ok_or_else(|| "strlen not declared".to_string())?;
         let str_len = self
-            .builder
             .build_call(
                 strlen_fn,
                 &[BasicMetadataValueEnum::PointerValue(buf)],
                 "strlen_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?;
-        // Build string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr_ty),
-                BasicTypeEnum::IntType(self.context.i64_type()),
-            ],
-            false,
-        );
-        let str_alloca = self
+            .ok_or("strlen returned void")?
+            .into_int_value();
+        let len_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "input_len")?;
+        self.build_store(len_alloca, str_len)?;
+        let trim_bb = self.context.append_basic_block(function, "input_trim");
+        let trim_stop_bb = self.context.append_basic_block(function, "input_trim_stop");
+        self.build_br(trim_bb)?;
+        self.builder.position_at_end(trim_bb);
+        let cur_len = self
+            .build_load(i64_ty, len_alloca, "input_trim_len")?
+            .into_int_value();
+        let has_chars = self
             .builder
-            .build_alloca(string_ty, "input_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
+            .build_int_compare(
+                IntPredicate::UGT,
+                cur_len,
+                i64_ty.const_int(0, false),
+                "input_trim_has",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let trim_body_bb = self.context.append_basic_block(function, "input_trim_body");
+        self.build_cond_br(has_chars, trim_body_bb, trim_stop_bb)?;
+        self.builder.position_at_end(trim_body_bb);
+        let last_idx = self
+            .builder
+            .build_int_sub(cur_len, i64_ty.const_int(1, false), "input_last_idx")
+            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
+        // SAFETY: byte-offset GEP into `buf`; last_idx = cur_len - 1 and
+        // cur_len <= strlen(buf) < 4096 by construction (fgets bound).
+        let last_ptr = self
             .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+            .build_gep(i8_ty, buf, &[last_idx], "input_last_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let last_ch = self
+            .build_load(i8_ty, last_ptr, "input_last_ch")?
+            .into_int_value();
+        // is_ws = ch == '\n' || ch == '\r' || ch == '\t' || ch == ' '
+        let mut is_ws = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                last_ch,
+                i8_ty.const_int(10, false),
+                "input_ws_nl",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        for (ws_name, ws_byte) in [("cr", 13u64), ("tab", 9), ("sp", 32)] {
+            let eq = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    last_ch,
+                    i8_ty.const_int(ws_byte, false),
+                    &format!("input_ws_{}", ws_name),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+            is_ws = self
+                .builder
+                .build_or(is_ws, eq, &format!("input_ws_or_{}", ws_name))
+                .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        }
+        let trim_dec_bb = self.context.append_basic_block(function, "input_trim_dec");
+        self.build_cond_br(is_ws, trim_dec_bb, trim_stop_bb)?;
+        self.builder.position_at_end(trim_dec_bb);
+        self.build_store(len_alloca, last_idx)?;
+        self.build_br(trim_bb)?;
+        self.builder.position_at_end(trim_stop_bb);
+        let final_len = self
+            .build_load(i64_ty, len_alloca, "input_final_len")?
+            .into_int_value();
+        // Re-terminate the trimmed buffer (no-op when nothing was trimmed).
+        // SAFETY: byte-offset GEP; final_len <= strlen(buf) < 4096, so
+        // buf[final_len] is inside the 4096-byte allocation.
+        let term_ptr = self
+            .gep()
+            .build_gep(i8_ty, buf, &[final_len], "input_term_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(term_ptr, i8_ty.const_int(0, false))?;
         self.build_store(ptr_gep, buf)?;
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(len_gep, str_len)?;
-        Ok(str_alloca.into())
+        self.build_store(len_gep, final_len)?;
+        self.build_br(merge_bb)?;
+
+        self.builder.position_at_end(merge_bb);
+        // Central fix 2026-08-05: return the LOADED {ptr, i64} struct value.
+        // Returning the alloca pointer made the resolved emitter's
+        // wrap_builtin_string_result treat it as a raw char* and double-wrap
+        // it ({ptr: &struct, len: 0}) → garbage len/data.
+        let loaded = self.build_load(BasicTypeEnum::StructType(string_ty), str_alloca, "input_result")?;
+        Ok(loaded)
     }
 
     pub(super) fn compile_file_exists(
@@ -11113,13 +11542,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
-        // Convert all arguments to string pointers
-        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-        // First arg: number of format arguments
-        call_args.push(BasicMetadataValueEnum::IntValue(
-            i64_ty.const_int((args.len() - 1) as u64, false),
-        ));
-        // Second arg: template string
+        // Template string (second runtime arg).
         // Unwrap StructValue {i8*, i64} to PointerValue(i8*) if needed
         let template_val = match &args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => *pv,
@@ -11136,67 +11559,99 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        call_args.push(BasicMetadataValueEnum::PointerValue(template_val));
-        // Remaining args: convert to string pointers (up to 8)
-        for i in 1..args.len().min(9) {
-            match &args[i] {
-                BasicMetadataValueEnum::PointerValue(pv) => {
-                    call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
-                }
-                BasicMetadataValueEnum::StructValue(sv) => {
-                    let data_ptr = self
-                        .builder
-                        .build_extract_value(*sv, 0, "fmt_str_data")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("format extract str data: {}", e))
-                        })?
-                        .into_pointer_value();
-                    call_args.push(BasicMetadataValueEnum::PointerValue(data_ptr));
-                }
+        // Wave-1 audit fix (§8, FIX: format() hard-capped substitutions at 8
+        // while reporting the true count): convert ALL substitution args to
+        // C string pointers — no `.min(9)` cap. `mimi_str_format`'s ABI
+        // still takes 8 arg slots per call, so >8 args are applied by
+        // chaining calls: each call substitutes the next ≤8 `{}`
+        // placeholders left-to-right, preserving overall substitution order
+        // (the runtime always fills placeholders sequentially from the
+        // current string). Known edge vs the single-pass VM: when >8 args
+        // are used AND an earlier substituted value itself contains "{}",
+        // later passes may substitute inside that value.
+        let mut arg_ptrs: Vec<inkwell::values::PointerValue<'ctx>> = Vec::new();
+        for i in 1..args.len() {
+            let p = match &args[i] {
+                BasicMetadataValueEnum::PointerValue(pv) => *pv,
+                BasicMetadataValueEnum::StructValue(sv) => self
+                    .builder
+                    .build_extract_value(*sv, 0, "fmt_str_data")
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("format extract str data: {}", e))
+                    })?
+                    .into_pointer_value(),
                 BasicMetadataValueEnum::IntValue(iv) => {
                     let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
-                    let str_result = self
-                        .build_call(
-                            to_i64_fn,
-                            &[BasicMetadataValueEnum::IntValue(*iv)],
-                            "to_str_i64",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("mimi_to_string_i64 returned void")?
-                        .into_pointer_value();
-                    call_args.push(BasicMetadataValueEnum::PointerValue(str_result));
+                    // Defensive width normalization: mimi_to_string_i64
+                    // expects an i64 operand.
+                    let bw = iv.get_type().get_bit_width();
+                    let iv64 = if bw == 1 {
+                        self.builder
+                            .build_int_z_extend(*iv, i64_ty, "fmt_bool_zext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else if bw < 64 {
+                        self.builder
+                            .build_int_s_extend(*iv, i64_ty, "fmt_int_sext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        *iv
+                    };
+                    self.build_call(
+                        to_i64_fn,
+                        &[BasicMetadataValueEnum::IntValue(iv64)],
+                        "to_str_i64",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_to_string_i64 returned void")?
+                    .into_pointer_value()
                 }
                 BasicMetadataValueEnum::FloatValue(fv) => {
                     let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
-                    let str_result = self
-                        .build_call(
-                            to_f64_fn,
-                            &[BasicMetadataValueEnum::FloatValue(*fv)],
-                            "to_str_f64",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("mimi_to_string_f64 returned void")?
-                        .into_pointer_value();
-                    call_args.push(BasicMetadataValueEnum::PointerValue(str_result));
+                    self.build_call(
+                        to_f64_fn,
+                        &[BasicMetadataValueEnum::FloatValue(*fv)],
+                        "to_str_f64",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_to_string_f64 returned void")?
+                    .into_pointer_value()
                 }
-                _ => {
-                    call_args.push(BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()));
-                }
-            }
-        }
-        // Pad with null pointers if less than 8 args
-        while call_args.len() < 10 {
-            call_args.push(BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()));
+                _ => i8_ptr.const_null(),
+            };
+            arg_ptrs.push(p);
         }
         let format_fn = self.get_runtime_fn("mimi_str_format")?;
-        let result_ptr = self
-            .build_call(format_fn, &call_args, "format_call")
-            .map_err(|e| CompileError::LlvmError(format!("format error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("mimi_str_format returned void")?
-            .into_pointer_value();
+        let num_args = arg_ptrs.len();
+        let mut current = template_val;
+        let mut start = 0usize;
+        loop {
+            let chunk_n = (num_args - start).min(8);
+            let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(10);
+            // First arg: number of format arguments in THIS call.
+            call_args.push(BasicMetadataValueEnum::IntValue(
+                i64_ty.const_int(chunk_n as u64, false),
+            ));
+            call_args.push(BasicMetadataValueEnum::PointerValue(current));
+            for p in arg_ptrs.iter().skip(start).take(chunk_n) {
+                call_args.push(BasicMetadataValueEnum::PointerValue(*p));
+            }
+            // Pad to the fixed 8-slot ABI with null pointers.
+            while call_args.len() < 10 {
+                call_args.push(BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()));
+            }
+            current = self
+                .build_call(format_fn, &call_args, &format!("format_call_{}", start))?
+                .try_as_basic_value_opt()
+                .ok_or("mimi_str_format returned void")?
+                .into_pointer_value();
+            start += chunk_n;
+            // chunk_n == 0 covers the no-substitution template case
+            // (single call with count 0, matching the legacy emission).
+            if chunk_n == 0 || start >= num_args {
+                break;
+            }
+        }
+        let result_ptr = current;
         // Wrap into canonical string struct {i8*, i64}
         let strlen_fn = self.get_runtime_fn("strlen")?;
         let len = self

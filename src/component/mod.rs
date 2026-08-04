@@ -382,7 +382,7 @@ mod tests {
         let abi = crate::component::MimiAbi::from_component_ir(&ir);
         let json = abi.to_json().expect("serialize");
         assert!(json.contains("mimi_rc_alloc"));
-        assert!(json.contains("MimiString"));
+        assert!(json.contains("ListHandle"));
 
         // Step 4: Deserialize back
         let abi2 = crate::component::MimiAbi::from_json(&json).expect("deserialize");
@@ -403,7 +403,10 @@ mod tests {
         // Step 7: Layout probe (checkpoint)
         let faults = crate::component::probe_layout(&abi);
         assert!(faults.is_empty(), "layout faults: {:?}", faults);
-        assert!(crate::component::struct_type_count(&abi) >= 2);
+        // Phantom fat-pointer structs removed (audit 2026-08-05): the core
+        // registry now only carries opaque handle typedefs.
+        assert!(abi.types.len() >= 4);
+        assert_eq!(crate::component::struct_type_count(&abi), 0);
 
         // Step 8: ABI diff (identical → no changes)
         let diff = crate::component::diff_abi(&abi, &abi2);
@@ -413,14 +416,16 @@ mod tests {
         // Step 9: Generate C header
         let c_header = crate::component::generate_c_header(&ir);
         assert!(c_header.contains("#ifndef MIMI_RUNTIME_ABI_H"));
-        assert!(c_header.contains("typedef struct MimiString {"));
+        assert!(c_header.contains("typedef uintptr_t MimiHandle;"));
         assert!(c_header.contains("extern \"C\" {"));
         assert!(c_header.contains("mimi_rc_alloc"));
 
         // Step 10: Generate Rust bindings
         let rust_bind = crate::component::generate_rust_bindings(&ir);
-        assert!(rust_bind.contains("#[repr(C)]"));
-        assert!(rust_bind.contains("pub struct MimiString {"));
+        // Struct typedefs no longer exist (phantom fat-pointer surface removed,
+        // audit 2026-08-05) — opaque handles render as type aliases.
+        assert!(rust_bind.contains("pub fn mimi_list_free"));
+        assert!(rust_bind.contains("pub type ListHandle = usize;"));
         assert!(rust_bind.contains("extern \"C\" {"));
         assert!(rust_bind.contains("pub fn mimi_rc_alloc"));
 

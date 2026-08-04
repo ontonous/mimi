@@ -89,42 +89,128 @@ impl VerifierCtx {
         calls
     }
 
+    /// AU-V2 (full-audit-2026-08-05 §11, HIGH): unified recursive walker for
+    /// extern call-site discovery.
+    ///
+    /// The old walker matched `stmt.unlocated()` with a `_ => {}` catch-all
+    /// and silently skipped every unlisted form — If/While conditions, For
+    /// iterables, IfLet/WhileLet inits, Match scrutinees, Alloc bodies, Defer
+    /// bodies, IeeeFloat/OnFailure blocks, Pinned exprs, Assign targets,
+    /// Drop/Break values, contract clauses. An extern call in
+    /// `while dangerous(ptr) { ... }` was never checked — precisely what
+    /// `--verify-ffi` exists to catch.
+    ///
+    /// The walkers below are exhaustive over every Stmt/Expr variant with NO
+    /// catch-all arm: adding a new AST variant is a compile error here
+    /// instead of a silent verification hole. Fail-closed by construction.
     fn find_extern_calls_in_block(
         block: &[Stmt],
         extern_names: &HashSet<String>,
         calls: &mut Vec<(String, Vec<Expr>, Span)>,
     ) {
         for stmt in block {
-            match stmt.unlocated() {
-                Stmt::Expr(e) | Stmt::Return(Some(e)) => {
-                    Self::find_extern_calls_in_expr(e, extern_names, calls);
-                }
-                Stmt::If { then_, else_, .. } => {
-                    Self::find_extern_calls_in_block(then_, extern_names, calls);
-                    if let Some(else_block) = else_ {
-                        Self::find_extern_calls_in_block(else_block, extern_names, calls);
-                    }
-                }
-                Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop(body) => {
-                    Self::find_extern_calls_in_block(body, extern_names, calls);
-                }
-                Stmt::Block(inner)
-                | Stmt::Arena(inner)
-                | Stmt::Unsafe(inner)
-                | Stmt::Parasteps(inner) => {
-                    Self::find_extern_calls_in_block(inner, extern_names, calls);
-                }
-                Stmt::Let {
-                    init: Some(init), ..
-                }
-                | Stmt::Assign { value: init, .. } => {
-                    Self::find_extern_calls_in_expr(init, extern_names, calls);
-                }
-                Stmt::SharedLet { init, .. } => {
-                    Self::find_extern_calls_in_expr(init, extern_names, calls);
-                }
-                _ => {}
+            Self::find_extern_calls_in_stmt(stmt, extern_names, calls);
+        }
+    }
+
+    fn find_extern_calls_in_stmt(
+        stmt: &Stmt,
+        extern_names: &HashSet<String>,
+        calls: &mut Vec<(String, Vec<Expr>, Span)>,
+    ) {
+        match stmt {
+            Stmt::Located { stmt: inner, .. } => {
+                Self::find_extern_calls_in_stmt(inner, extern_names, calls);
             }
+            Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) | Stmt::Drop(e) => {
+                Self::find_extern_calls_in_expr(e, extern_names, calls);
+            }
+            Stmt::Return(None) | Stmt::Break(None) | Stmt::Continue | Stmt::Ellipsis => {}
+            Stmt::Let {
+                init: Some(init), ..
+            } => {
+                Self::find_extern_calls_in_expr(init, extern_names, calls);
+            }
+            Stmt::Let { init: None, .. } => {}
+            Stmt::SharedLet { init, .. } => {
+                Self::find_extern_calls_in_expr(init, extern_names, calls);
+            }
+            Stmt::If { cond, then_, else_ } => {
+                // AU-V2: the condition is an expression position too.
+                Self::find_extern_calls_in_expr(cond, extern_names, calls);
+                Self::find_extern_calls_in_block(then_, extern_names, calls);
+                if let Some(else_block) = else_ {
+                    Self::find_extern_calls_in_block(else_block, extern_names, calls);
+                }
+            }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                Self::find_extern_calls_in_expr(init, extern_names, calls);
+                Self::find_extern_calls_in_block(then_, extern_names, calls);
+                if let Some(else_block) = else_ {
+                    Self::find_extern_calls_in_block(else_block, extern_names, calls);
+                }
+            }
+            Stmt::While { cond, body } => {
+                // AU-V2: `while dangerous(ptr) { ... }` — the condition was
+                // the headline hole.
+                Self::find_extern_calls_in_expr(cond, extern_names, calls);
+                Self::find_extern_calls_in_block(body, extern_names, calls);
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                Self::find_extern_calls_in_expr(init, extern_names, calls);
+                Self::find_extern_calls_in_block(body, extern_names, calls);
+            }
+            Stmt::For { iterable, body, .. } => {
+                // AU-V2: the iterable was skipped (body was scanned).
+                Self::find_extern_calls_in_expr(iterable, extern_names, calls);
+                Self::find_extern_calls_in_block(body, extern_names, calls);
+            }
+            Stmt::Loop(body)
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
+            | Stmt::Defer(body)
+            | Stmt::OnFailure(body)
+            | Stmt::Parasteps(body) => {
+                Self::find_extern_calls_in_block(body, extern_names, calls);
+            }
+            Stmt::Alloc { body, .. } => {
+                // AU-V2: alloc block initializers/statements.
+                Self::find_extern_calls_in_block(body, extern_names, calls);
+            }
+            Stmt::Pinned { expr, body, .. } => {
+                Self::find_extern_calls_in_expr(expr, extern_names, calls);
+                Self::find_extern_calls_in_block(body, extern_names, calls);
+            }
+            Stmt::Assign { target, value } => {
+                // AU-V2: the target too — `arr[dangerous(ptr)] = 1`.
+                Self::find_extern_calls_in_expr(target, extern_names, calls);
+                Self::find_extern_calls_in_expr(value, extern_names, calls);
+            }
+            Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) | Stmt::Invariant(expr, _) => {
+                // Contract clauses execute (interpreter contract checking);
+                // an extern call inside them is a call site like any other.
+                Self::find_extern_calls_in_expr(expr, extern_names, calls);
+            }
+            Stmt::Math(exprs) => {
+                for expr in exprs {
+                    Self::find_extern_calls_in_expr(expr, extern_names, calls);
+                }
+            }
+            Stmt::Func(nested) => {
+                // Nested function definitions are reachable from the
+                // enclosing function. Scanned fail-closed: arguments that
+                // reference the nested function's own parameters are unknown
+                // to the caller's vars map and degrade to SolverUnknown in
+                // `check_extern_call` rather than being silently skipped.
+                Self::find_extern_calls_in_block(&nested.body, extern_names, calls);
+            }
+            // No expression positions: Desc/Rule are intent text, MmsBlock is
+            // a super-comment skipped by all tool paths (AGENTS.md §10).
+            Stmt::Desc(_, _) | Stmt::Rule(_, _) | Stmt::MmsBlock { .. } => {}
         }
     }
 
@@ -133,18 +219,35 @@ impl VerifierCtx {
         extern_names: &HashSet<String>,
         calls: &mut Vec<(String, Vec<Expr>, Span)>,
     ) {
-        match expr.unlocated() {
+        // Strip Located wrappers once, remembering the outermost span so a
+        // discovered call reports its source location.
+        let mut current = expr;
+        let mut span: Option<Span> = None;
+        while let Expr::Located { meta, expr: inner } = current {
+            if span.is_none() {
+                span = Some(meta.span);
+            }
+            current = inner;
+        }
+        let call_span = span.unwrap_or(Span::UNKNOWN);
+
+        match current {
+            // Defensive: unreachable after the strip loop, but kept explicit
+            // so the match stays exhaustive with no catch-all.
+            Expr::Located { expr: inner, .. } => {
+                Self::find_extern_calls_in_expr(inner, extern_names, calls);
+            }
             Expr::Call(callee, args) => {
                 if let Expr::Ident(name) = callee.unlocated() {
                     if extern_names.contains(name.as_str()) {
-                        calls.push((
-                            name.clone(),
-                            args.clone(),
-                            expr.meta().map(|meta| meta.span).unwrap_or(Span::UNKNOWN),
-                        ));
-                        return;
+                        calls.push((name.clone(), args.clone(), call_span));
+                        // AU-V2: do NOT stop here — the old walker returned
+                        // early, so `dangerous(other_dangerous(ptr))` never
+                        // discovered the nested call. Keep walking callee and
+                        // arguments below.
                     }
                 }
+                Self::find_extern_calls_in_expr(callee, extern_names, calls);
                 for arg in args {
                     Self::find_extern_calls_in_expr(arg, extern_names, calls);
                 }
@@ -153,8 +256,71 @@ impl VerifierCtx {
                 Self::find_extern_calls_in_expr(lhs, extern_names, calls);
                 Self::find_extern_calls_in_expr(rhs, extern_names, calls);
             }
-            Expr::Unary(_, inner) => {
+            Expr::Unary(_, inner)
+            | Expr::Field(inner, _)
+            | Expr::Try(inner)
+            | Expr::OptionalChain(inner, _)
+            | Expr::Spawn(inner)
+            | Expr::Await(inner)
+            | Expr::Old(inner)
+            | Expr::TypeOf(inner)
+            | Expr::QuoteInterpolate(inner)
+            | Expr::TupleIndex(inner, _)
+            | Expr::NamedArg(_, inner)
+            | Expr::Cast(inner, _) => {
                 Self::find_extern_calls_in_expr(inner, extern_names, calls);
+            }
+            Expr::Index(inner, index) => {
+                // AU-V2: the index expression too — `arr[dangerous(ptr)]`.
+                Self::find_extern_calls_in_expr(inner, extern_names, calls);
+                Self::find_extern_calls_in_expr(index, extern_names, calls);
+            }
+            Expr::SliceExpr { target, start, end } => {
+                Self::find_extern_calls_in_expr(target, extern_names, calls);
+                if let Some(start) = start {
+                    Self::find_extern_calls_in_expr(start, extern_names, calls);
+                }
+                if let Some(end) = end {
+                    Self::find_extern_calls_in_expr(end, extern_names, calls);
+                }
+            }
+            Expr::Tuple(items)
+            | Expr::List(items)
+            | Expr::SetLiteral(items)
+            | Expr::Turbofish(_, _, items) => {
+                for item in items {
+                    Self::find_extern_calls_in_expr(item, extern_names, calls);
+                }
+            }
+            Expr::MapLiteral { entries } => {
+                for (key, value) in entries {
+                    Self::find_extern_calls_in_expr(key, extern_names, calls);
+                    Self::find_extern_calls_in_expr(value, extern_names, calls);
+                }
+            }
+            Expr::Comprehension {
+                expr, iter, guard, ..
+            } => {
+                Self::find_extern_calls_in_expr(expr, extern_names, calls);
+                Self::find_extern_calls_in_expr(iter, extern_names, calls);
+                if let Some(guard) = guard {
+                    Self::find_extern_calls_in_expr(guard, extern_names, calls);
+                }
+            }
+            Expr::Match(scrutinee, arms) => {
+                // AU-V2: scrutinee, arm guards and arm bodies were skipped.
+                Self::find_extern_calls_in_expr(scrutinee, extern_names, calls);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        Self::find_extern_calls_in_expr(guard, extern_names, calls);
+                    }
+                    Self::find_extern_calls_in_expr(&arm.body, extern_names, calls);
+                }
+            }
+            Expr::Record { fields, .. } => {
+                for field in fields {
+                    Self::find_extern_calls_in_expr(&field.value, extern_names, calls);
+                }
             }
             Expr::If { cond, then_, else_ } => {
                 Self::find_extern_calls_in_expr(cond, extern_names, calls);
@@ -163,23 +329,30 @@ impl VerifierCtx {
                     Self::find_extern_calls_in_block(else_block, extern_names, calls);
                 }
             }
-            Expr::Field(inner, _)
-            | Expr::Index(inner, _)
-            | Expr::Try(inner)
-            | Expr::Spawn(inner)
-            | Expr::Await(inner)
-            | Expr::Old(inner) => {
-                Self::find_extern_calls_in_expr(inner, extern_names, calls);
+            Expr::Lambda { body, .. } => {
+                Self::find_extern_calls_in_block(body, extern_names, calls);
             }
-            Expr::Tuple(items) | Expr::List(items) => {
-                for item in items {
-                    Self::find_extern_calls_in_expr(item, extern_names, calls);
-                }
-            }
-            Expr::Block(block) => {
+            Expr::Block(block) | Expr::Arena(block) | Expr::Comptime(block) => {
                 Self::find_extern_calls_in_block(block, extern_names, calls);
             }
-            _ => {}
+            Expr::Literal(lit) => {
+                // f-string interpolations are expression positions.
+                if let Lit::FString(parts) = lit {
+                    for part in parts {
+                        if let FStringPart::Interp(interp) = part {
+                            Self::find_extern_calls_in_expr(interp, extern_names, calls);
+                        }
+                    }
+                }
+            }
+            // No expression positions: Ident resolves at the call check
+            // above; TypeInfo carries only a Type. Deliberately NOT scanning
+            // `Expr::Quote` bodies: quote! is an inert compile-time AST
+            // template (AGENTS.md §9 — codegen never compiles comptime;
+            // spliced code is runtime-generated and unreachable to any static
+            // walk). Flagging template text that may never materialize would
+            // produce spurious obligations rather than fail-closed coverage.
+            Expr::Ident(_) | Expr::TypeInfo(_) | Expr::Quote(_) => {}
         }
     }
 

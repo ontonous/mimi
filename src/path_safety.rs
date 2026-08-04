@@ -50,7 +50,11 @@ impl fmt::Display for PathError {
             PathError::AbsolutePath => write!(f, "path is absolute, expected relative"),
             PathError::Empty => write!(f, "path is empty"),
             PathError::ForbiddenProtocol => {
-                write!(f, "git URL uses a forbidden protocol (ext:: not allowed)")
+                write!(
+                    f,
+                    "git URL uses a forbidden or insecure protocol \
+                     (only https:// and git@ scp-style ssh are allowed)"
+                )
             }
             PathError::OptionInjection => {
                 write!(f, "value starts with '-' (possible option injection)")
@@ -58,7 +62,11 @@ impl fmt::Display for PathError {
             PathError::InvalidUtf8 => write!(f, "path contains invalid UTF-8"),
             PathError::SymlinkEscape => write!(f, "symlink would escape base directory"),
             PathError::InvalidName => {
-                write!(f, "invalid name: must not contain path separators or '..'")
+                write!(
+                    f,
+                    "invalid name: must not contain path separators or '..', \
+                     and must not consist solely of dots or whitespace"
+                )
             }
         }
     }
@@ -124,6 +132,9 @@ pub fn validate_safe_path(base: &Path, input: &str) -> Result<PathBuf, PathError
 /// - `/` or `\` (path separators)
 /// - NUL bytes
 /// - Empty strings
+/// - `.`, `..`, or any name consisting solely of dots and/or whitespace
+///   (full-audit 2026-08-05 §13: `deps_dir.join(".")` installs over the deps
+///   root itself; whitespace-only names are unusable directory names)
 pub fn validate_package_name(name: &str) -> Result<(), PathError> {
     if name.is_empty() {
         return Err(PathError::Empty);
@@ -134,17 +145,26 @@ pub fn validate_package_name(name: &str) -> Result<(), PathError> {
     if name.contains("..") || name.contains('/') || name.contains('\\') {
         return Err(PathError::InvalidName);
     }
+    // Reject "." and any name consisting solely of dots/whitespace: these
+    // resolve the join target to the deps root itself (or an unusable dir).
+    if name.chars().all(|c| c == '.' || c.is_whitespace()) {
+        return Err(PathError::InvalidName);
+    }
     Ok(())
 }
 
-/// Validate a git URL to prevent command injection and RCE.
+/// Validate a git URL to prevent command injection, RCE, and unsafe transports.
 ///
 /// Rejects:
 /// - URLs starting with `-` (git option injection)
 /// - `ext::` protocol (arbitrary command execution)
+/// - `http://` and `git://` (plaintext transports: dependency MITM surface)
+/// - `file://` (local-repo reference: exfiltration surface via crafted manifests)
+/// - `ssh://` (not on the allow-list; use the `git@` scp-style form or https)
 /// - URLs that don't start with a recognised safe scheme
 ///
-/// Allowed schemes: `https://`, `http://`, `ssh://`, `git@`, `git://`, `file://`.
+/// Allowed forms (full-audit 2026-08-05 §13): `https://` URLs and
+/// `git@host:path` (scp-style ssh). Everything else fails closed.
 pub fn validate_git_url(url: &str) -> Result<(), PathError> {
     if url.is_empty() {
         return Err(PathError::Empty);
@@ -158,12 +178,8 @@ pub fn validate_git_url(url: &str) -> Result<(), PathError> {
     if url.starts_with("ext::") {
         return Err(PathError::ForbiddenProtocol);
     }
-    let safe = url.starts_with("https://")
-        || url.starts_with("http://")
-        || url.starts_with("ssh://")
-        || url.starts_with("git@")
-        || url.starts_with("git://")
-        || url.starts_with("file://");
+    // Scheme allow-list (fail closed): https:// plus the git@ scp-style ssh form.
+    let safe = url.starts_with("https://") || url.starts_with("git@");
     if !safe {
         return Err(PathError::ForbiddenProtocol);
     }
@@ -348,6 +364,9 @@ mod tests {
     fn valid_package_name_accepted() {
         assert!(validate_package_name("my-pkg").is_ok());
         assert!(validate_package_name("my_pkg_123").is_ok());
+        // Internal dots are fine; only dot/whitespace-ONLY names are rejected.
+        assert!(validate_package_name("foo.bar").is_ok());
+        assert!(validate_package_name("v1.2.3").is_ok());
     }
 
     #[test]
@@ -363,11 +382,48 @@ mod tests {
     }
 
     #[test]
+    fn dot_and_blank_package_names_rejected() {
+        // full-audit 2026-08-05 §13: "." joined onto the deps dir installs
+        // over the deps root itself; reject dot/whitespace-only names.
+        assert_eq!(validate_package_name("."), Err(PathError::InvalidName));
+        assert_eq!(validate_package_name(".."), Err(PathError::InvalidName));
+        assert_eq!(validate_package_name("..."), Err(PathError::InvalidName));
+        assert_eq!(validate_package_name(" . "), Err(PathError::InvalidName));
+        assert_eq!(validate_package_name("   "), Err(PathError::InvalidName));
+        assert_eq!(validate_package_name("\t"), Err(PathError::InvalidName));
+    }
+
+    #[test]
     fn valid_git_url_accepted() {
         assert!(validate_git_url("https://github.com/user/repo.git").is_ok());
-        assert!(validate_git_url("ssh://git@github.com/user/repo.git").is_ok());
         assert!(validate_git_url("git@github.com:user/repo.git").is_ok());
-        assert!(validate_git_url("file:///tmp/repo").is_ok());
+    }
+
+    #[test]
+    fn insecure_git_url_schemes_rejected() {
+        // full-audit 2026-08-05 §13: https:// (+ git@ scp form) only.
+        assert_eq!(
+            validate_git_url("http://github.com/user/repo.git"),
+            Err(PathError::ForbiddenProtocol)
+        );
+        assert_eq!(
+            validate_git_url("file:///tmp/repo"),
+            Err(PathError::ForbiddenProtocol)
+        );
+        assert_eq!(
+            validate_git_url("git://host/repo"),
+            Err(PathError::ForbiddenProtocol)
+        );
+        assert_eq!(
+            validate_git_url("ssh://git@github.com/user/repo.git"),
+            Err(PathError::ForbiddenProtocol)
+        );
+        // Error message must state the allow-list, not just "forbidden".
+        let msg = PathError::ForbiddenProtocol.to_string();
+        assert!(
+            msg.contains("https://"),
+            "message should name allow-list: {msg}"
+        );
     }
 
     #[test]

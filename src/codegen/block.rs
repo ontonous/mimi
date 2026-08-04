@@ -42,7 +42,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.push_shared_scope();
         self.push_heap_scope();
         for stmt in block {
-            // Run compensations before exit()
+            // Run compensations before exit().
+            //
+            // 0.34.36 (cross-agent contract, audit §6/§9): `on failure`
+            // handlers are registered at their EXECUTION POINT — the moment
+            // the `Stmt::OnFailure` is compiled in statement order below — not
+            // via a block pre-scan (the bytecode VM previously emitted a
+            // block-entry SetFaultPc and is moving to a handler stack pushed
+            // at statement execution). Because registration happens in the
+            // same sequential pass, `compile_compensations` here can only see
+            // handlers whose `on failure` statement precedes this `exit` in
+            // source order — i.e. compensation fires only for faults AFTER the
+            // handler statement executed. Do not pre-scan `block` for
+            // OnFailure ahead of this loop.
             if let Stmt::Expr(expr) = stmt.unlocated() {
                 if let Expr::Call(callee, _) = expr.unlocated() {
                     if let Expr::Ident(name) = callee.unlocated() {
@@ -98,7 +110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.multi_target_states
                                 ))
                             })?;
-                        let state_ty = self.type_llvm.get(&state_name).copied();
+                        let state_ty = self.flow_state_llvm_type(&state_name);
                         val = self.wrap_multi_target_value(val, tag, state_ty)?;
                     }
                     if self.in_fails_transition {
@@ -1037,7 +1049,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_shared_let_stmt(kind, name, ty, init, vars)?;
                 }
                 Stmt::OnFailure(block) => {
-                    // Register compensation block for LIFO execution on error exit
+                    // Register compensation block for LIFO execution on error exit.
+                    //
+                    // 0.34.36 (cross-agent contract, audit §6/§9): registration
+                    // happens HERE — at the `on failure` statement's execution
+                    // point in the sequential pass — never via a block pre-scan.
+                    // Combined with the per-statement exit() hook above, this
+                    // guarantees compensation fires only for faults that occur
+                    // AFTER this statement executed (matching the VM's new
+                    // handler-stack model). Keep this inline; do not hoist it
+                    // into a pre-pass over `block`.
                     self.register_comp(block);
                 }
                 Stmt::Arena(block) => {
@@ -1281,43 +1302,70 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => 0,
         };
         let (then_val, else_val) = if then_bw > 0 && else_bw > 0 && then_bw != else_bw {
-            let target_ty = if then_bw > else_bw {
-                self.context.i64_type()
-            } else {
-                self.context.i32_type()
-            };
-            // Extend then_val if needed (in then_bb_end block, before terminator)
-            let then_val = if then_bw < else_bw && then_reaches {
+            // 0.34.36 (audit §6.8): the unified target width is the MAX of the
+            // two branch widths, and BOTH branches are extended to it. The old
+            // code chose an arbitrary i64/i32 target from the sign of the width
+            // comparison and only extended the branch the comparison happened to
+            // select, so e.g. `then: i8 / else: i16` picked target i32, left the
+            // i16 else value un-extended, and then discarded it (phi_type came
+            // from the then value, the mismatched else fell into the zero-fill
+            // below) — silently wrong results plus width-inconsistent phis.
+            let target_bw = then_bw.max(else_bw);
+            // target_bw > 0 here (both branch widths are > 0 by the guard
+            // above), so the NonZeroU32 construction cannot fail.
+            let target_ty = self
+                .context
+                .custom_width_int_type(std::num::NonZeroU32::new(target_bw as u32).unwrap())
+                .map_err(|e| CompileError::LlvmError(format!("if target width: {}", e)))?;
+            // Extend then_val to the target width inside its own predecessor
+            // block (before the terminator) so the phi stays type-uniform
+            // without SSA dominance violations. i1 (bool) uses z_extend so
+            // `true` widens to 1, not -1 (A1 convention).
+            let then_val = if then_bw < target_bw && then_reaches {
                 self.builder.position_at_end(then_bb_end);
                 if let Some(term) = then_bb_end.get_terminator() {
                     self.builder.position_before(&term);
                 }
-                let tv = then_val.ok_or_else(|| {
-                    CompileError::LlvmError("if-then s_ext: missing then value".into())
-                })?;
-                BasicValueEnum::IntValue(
+                let tv = then_val
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("if-then ext: missing then value".into())
+                    })?
+                    .into_int_value();
+                let widened = if tv.get_type().get_bit_width() == 1 {
                     self.builder
-                        .build_int_s_extend(tv.into_int_value(), target_ty, "if_then_sext")
-                        .map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?,
-                )
+                        .build_int_z_extend(tv, target_ty, "if_then_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("if then z_ext: {}", e)))?
+                } else {
+                    self.builder
+                        .build_int_s_extend(tv, target_ty, "if_then_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?
+                };
+                BasicValueEnum::IntValue(widened)
             } else {
                 then_val
                     .ok_or_else(|| CompileError::LlvmError("if-then: missing then value".into()))?
             };
-            // Extend else_val if needed (in else_bb_end block, before terminator)
-            let else_val = if else_bw < then_bw && else_reaches {
+            // Extend else_val to the target width, same reasoning.
+            let else_val = if else_bw < target_bw && else_reaches {
                 self.builder.position_at_end(else_bb_end);
                 if let Some(term) = else_bb_end.get_terminator() {
                     self.builder.position_before(&term);
                 }
-                let ev = else_val.ok_or_else(|| {
-                    CompileError::LlvmError("if-else s_ext: missing else value".into())
-                })?;
-                BasicValueEnum::IntValue(
+                let ev = else_val
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("if-else ext: missing else value".into())
+                    })?
+                    .into_int_value();
+                let widened = if ev.get_type().get_bit_width() == 1 {
                     self.builder
-                        .build_int_s_extend(ev.into_int_value(), target_ty, "if_else_sext")
-                        .map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?,
-                )
+                        .build_int_z_extend(ev, target_ty, "if_else_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("if else z_ext: {}", e)))?
+                } else {
+                    self.builder
+                        .build_int_s_extend(ev, target_ty, "if_else_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?
+                };
+                BasicValueEnum::IntValue(widened)
             } else {
                 else_val
                     .ok_or_else(|| CompileError::LlvmError("if-else: missing else value".into()))?
@@ -1330,8 +1378,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
         };
         self.builder.position_at_end(merge_bb);
-        // Determine the authoritative phi type from the unified values.
-        let phi_type = then_val.get_type();
+        // Determine the authoritative phi type from a branch that actually
+        // reaches the merge. Using then_val unconditionally was wrong when the
+        // then branch terminated (returned): its phantom width dictated phi_type
+        // and the live else value could be zero-filled below.
+        let phi_type = if then_reaches {
+            then_val.get_type()
+        } else if else_reaches {
+            else_val.get_type()
+        } else {
+            then_val.get_type()
+        };
         // If the else branch's value STILL has a different type (e.g. then is a struct
         // but else fell through with i64 0 because there was no else block),
         // promote the else value to a zero of the phi type to avoid LLVM
@@ -1475,13 +1532,40 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Compile a block and return the value of its last expression (for if-expressions)
+    ///
+    /// 0.34.36 (audit §6.7): scope bookkeeping parity with `compile_block`.
+    /// This function also serves as the generic-function BODY compiler
+    /// (`compile_generic_func`); previously `defer` / `on failure` / `shared
+    /// let` statements fell into the catch-all and were silently dropped (the
+    /// bytecode VM executes all of them), and value-position `return`s exited
+    /// without the shared-release / defer / compensation cleanup that
+    /// `compile_block`'s Return path emits (block.rs:136-140). The comp /
+    /// defer / shared frames are pushed here (NOT heap — callers rely on this
+    /// path not pushing a heap scope, see expr/match.rs:1947) and popped on
+    /// every exit path.
     pub(super) fn compile_block_last_val(
         &mut self,
         block: &Block,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.push_comp_scope();
+        self.push_defer_scope();
+        self.push_shared_scope();
         let mut last_val = self.context.i64_type().const_int(0, false).into();
         for stmt in block {
+            // Run compensations before exit() — same execution-point hook as
+            // compile_block (0.34.36, audit §6/§9). Without it, an `on failure`
+            // registered in this block would be discarded by pop_comp_scope
+            // instead of firing on a later `exit` in the same block.
+            if let Stmt::Expr(expr) = stmt.unlocated() {
+                if let Expr::Call(callee, _) = expr.unlocated() {
+                    if let Expr::Ident(name) = callee.unlocated() {
+                        if name == "exit" {
+                            self.compile_compensations(vars)?;
+                        }
+                    }
+                }
+            }
             match stmt.unlocated() {
                 Stmt::Expr(e) => {
                     last_val = self.compile_expr(e, vars)?;
@@ -1514,7 +1598,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.multi_target_states
                                 ))
                             })?;
-                        let state_ty = self.type_llvm.get(&state_name).copied();
+                        let state_ty = self.flow_state_llvm_type(&state_name);
                         val = self.wrap_multi_target_value(val, tag, state_ty)?;
                     }
                     let ret_type = self
@@ -1536,12 +1620,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.current_fn_ret_ty_ast.as_ref(),
                     )?;
                     val = self.load_return_value_if_needed(val)?;
+                    // 0.34.36 (audit §6.7): full return-path cleanup parity
+                    // with compile_block's Return (block.rs:128-140). The old
+                    // code only flushed heap scopes: registered shared
+                    // releases never ran and defer blocks were dropped on
+                    // value-position returns (the VM runs both).
+                    let ensures = self.ensures_stmts.clone();
+                    for ensures_expr in &ensures {
+                        self.compile_contract_assert(
+                            ensures_expr,
+                            vars,
+                            super::scope::ContractPhase::Ensures,
+                        )?;
+                    }
+                    self.emit_all_shared_releases()?;
+                    self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
+                    self.pop_defer_scope(vars)?;
+                    self.pop_comp_scope();
                     self.build_return(Some(&val))?;
                     return Ok(val);
                 }
                 Stmt::Return(None) => {
+                    // 0.34.36 (audit §6.7): same cleanup parity as the
+                    // valued-Return arm above (mirrors compile_block:144-159).
+                    let ensures = self.ensures_stmts.clone();
+                    for ensures_expr in &ensures {
+                        self.compile_contract_assert(
+                            ensures_expr,
+                            vars,
+                            super::scope::ContractPhase::Ensures,
+                        )?;
+                    }
+                    self.emit_all_shared_releases()?;
+                    self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
+                    self.pop_defer_scope(vars)?;
+                    self.pop_comp_scope();
                     self.build_return(None)?;
                     return Ok(self.context.i64_type().const_int(0, false).into());
                 }
@@ -1906,9 +2021,79 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Merge inner variable bindings back to outer scope
                     vars.extend(std::mem::take(inner_vars));
                 }
+                Stmt::Unsafe(block) => {
+                    // Mirror the Block arm: unwrap and compile for value.
+                    let inner_vars = &mut vars.clone();
+                    last_val = self.compile_block_last_val(block, inner_vars)?;
+                    vars.extend(std::mem::take(inner_vars));
+                }
+                // 0.34.36 (audit §6.7): these statements previously fell into
+                // the catch-all and were silently dropped in value position
+                // (if-expression arms and generic function bodies). The VM
+                // executes all of them, so they are now lowered explicitly.
+                Stmt::Defer(block) => {
+                    // Register defer block for LIFO execution at scope exit.
+                    self.register_defer(block);
+                }
+                Stmt::OnFailure(block) => {
+                    // Register compensation block for error-exit execution.
+                    self.register_comp(block);
+                }
+                Stmt::SharedLet {
+                    kind,
+                    name,
+                    ty,
+                    init,
+                } => {
+                    self.compile_shared_let_stmt(kind, name, ty, init, vars)?;
+                }
+                Stmt::Drop(expr) => {
+                    // Drop: evaluate and, for a capability variable, release the
+                    // runtime cap handle (mirrors compile_block's Drop, H4).
+                    if let Expr::Ident(name) = expr.unlocated() {
+                        if self.is_cap_var(name) {
+                            if let Some(drop_fn) = self.module.get_function("mimi_cap_drop") {
+                                if let Some((alloca, _)) = vars.get(name) {
+                                    let handle = self.build_load(
+                                        self.context.i64_type(),
+                                        *alloca,
+                                        "cap_drop_handle",
+                                    )?;
+                                    let _ = self.builder.build_call(
+                                        drop_fn,
+                                        &[handle.into()],
+                                        "cap_drop",
+                                    );
+                                }
+                            }
+                            self.consume_cap(name)?;
+                        }
+                    }
+                    self.compile_expr(expr, vars)?;
+                }
+                Stmt::MmsBlock { .. }
+                | Stmt::Desc(..)
+                | Stmt::Rule(..)
+                | Stmt::Requires(..)
+                | Stmt::Ensures(..)
+                | Stmt::Invariant(..)
+                | Stmt::Math(_)
+                | Stmt::Ellipsis
+                | Stmt::Located { .. }
+                | Stmt::Func(_) => {
+                    // Super-comments / contracts / declaration-level items carry
+                    // no runtime semantics in value position.
+                }
                 _ => {}
             }
         }
+        // 0.34.36 (audit §6.7): pop the frames pushed on entry, mirroring
+        // compile_block's block-end cleanup. Order matters: release this
+        // block's shared registrations, then run defers (always, LIFO), then
+        // discard compensations (normal exit does not run them).
+        self.pop_shared_scope()?;
+        self.pop_defer_scope(vars)?;
+        self.pop_comp_scope();
         Ok(last_val)
     }
 

@@ -717,7 +717,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             attributes: vec![],
                         };
                         self.register_type_def(&td)?;
-                        // Also register unqualified name (skip built-in names like "i32")
+                        // Also register unqualified name (skip built-in names like "i32").
+                        //
+                        // 0.34.36 (audit §6.9): the QUALIFIED key above
+                        // (`flow::{flow}::{state}`) is the authoritative layout
+                        // source — the multi-target return wrap resolves it via
+                        // `flow_state_llvm_type` (mod.rs). The bare alias below is
+                        // only a construction shim for bare-name record literals
+                        // (`Big { v }`). It is first-wins across flows, so it can
+                        // alias a same-named state of another flow; layout-sensitive
+                        // paths must therefore never read the bare alias.
                         if !Self::is_builtin_type_name(&s.name)
                             && !self.type_defs.contains_key(&s.name)
                         {

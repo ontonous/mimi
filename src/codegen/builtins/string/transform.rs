@@ -131,292 +131,131 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        // Audit fix 10 (full-audit-2026-08-05, coordination-b): delegate to
+        // the unicode-aware runtime helper `mimi_str_trim` (VM parity: Rust
+        // `str::trim()`, interp/bytecode/builtins/string.rs builtin_str_trim).
+        // The old inline scan only stripped ASCII space/tab/nl/cr.
         if args.len() != 1 {
             return Err(CompileError::WrongArgCount(
                 "str_trim expects 1 argument".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_trim")?;
-        let i8_ty = self.context.i8_type();
-        let i64_ty = self.context.i64_type();
-        let zero = i64_ty.const_int(0, false);
-        let s_len = self.string_len(s_ptr)?;
-
-        let function = self
-            .current_function()
-            .ok_or_else(|| "codegen: no current function for str_trim".to_string())?;
-
-        // Forward scan
-        let start = self.scan_whitespace(function, s_ptr, s_len, zero, true)?;
-        // Backward scan
-        let end = self.scan_whitespace(function, s_ptr, s_len, s_len, false)?;
-
-        let trimmed_len = self
-            .builder
-            .build_int_sub(end, start, "trimmed_len")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        let is_negative = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLE, trimmed_len, zero, "is_neg")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let safe_len = self
-            .builder
-            .build_select(is_negative, zero, trimmed_len, "safe_len")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-
-        let alloc_size = self
-            .builder
-            .build_int_add(safe_len, i64_ty.const_int(1, false), "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let buf = self.malloc_buffer(alloc_size)?;
-        let src = self.build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")?;
-
-        let should_copy = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGT, safe_len, zero, "should_copy")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let copy_bb = self.context.append_basic_block(function, "trim_copy");
-        let done_bb = self.context.append_basic_block(function, "trim_done");
-        self.build_cond_br(should_copy, copy_bb, done_bb)?;
-
-        self.builder.position_at_end(copy_bb);
-        self.memcpy_buffer(buf, src, safe_len, "memcpy_call")?;
-        self.build_br(done_bb)?;
-
-        self.builder.position_at_end(done_bb);
-        self.null_terminate(buf, safe_len)?;
-        Ok(buf.into())
+        self.compile_str_unary_rt_call(&args[0], "mimi_str_trim", "str_trim")
     }
 
-    /// Scan from `start` forward or backward skipping whitespace.
-    /// Returns the index of the first non-whitespace character (forward)
-    /// or the index after the last non-whitespace character (backward).
-    fn scan_whitespace(
+    /// Shared emitter for unicode-aware unary string transforms
+    /// (`mimi_str_trim` / `mimi_str_to_upper` / `mimi_str_to_lower`,
+    /// src/runtime/mod.rs audit-wave1 — ptr+len ABI, each returns a freshly
+    /// heap-allocated string). Full VM parity with Rust `str::trim` /
+    /// `to_uppercase` / `to_lowercase`; the old inline byte scans were
+    /// ASCII-only and diverged on every non-ASCII input.
+    fn compile_str_unary_rt_call(
         &self,
-        function: inkwell::values::FunctionValue<'ctx>,
-        s_ptr: PointerValue<'ctx>,
-        s_len: IntValue<'ctx>,
-        start: IntValue<'ctx>,
-        forward: bool,
-    ) -> MimiResult<IntValue<'ctx>> {
-        let i8_ty = self.context.i8_type();
-        let i64_ty = self.context.i64_type();
-        let zero = i64_ty.const_int(0, false);
-        let loop_bb = self.context.append_basic_block(function, "trim_loop");
-        let body_bb = self.context.append_basic_block(function, "trim_body");
-        let done_bb = self.context.append_basic_block(function, "trim_done");
-
-        let idx_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "idx")?;
-        // Extend start to i64 if it's i32 — the index alloca is always i64.
-        let start_i64 = if start.get_type().get_bit_width() < 64 {
-            self.builder
-                .build_int_s_extend(start, i64_ty, "start_sext")
-                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else {
-            start
-        };
-        self.build_store(idx_alloca, start_i64)?;
-        self.build_br(loop_bb)?;
-
-        self.builder.position_at_end(loop_bb);
-        let idx = self.build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "idx")?;
-        let idx_iv = idx.into_int_value();
-        let cmp = if forward {
-            self.builder
-                .build_int_compare(inkwell::IntPredicate::SLT, idx_iv, s_len, "trim_cmp")
-                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-        } else {
-            self.builder
-                .build_int_compare(inkwell::IntPredicate::SGT, idx_iv, zero, "trim_cmp")
-                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-        };
-        self.build_cond_br(cmp, body_bb, done_bb)?;
-
-        self.builder.position_at_end(body_bb);
-        let ch_idx = if forward {
-            idx_iv
-        } else {
-            self.builder
-                .build_int_sub(idx_iv, i64_ty.const_int(1, false), "prev")
-                .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?
-        };
-        let ch_ptr = self.build_in_bounds_gep(i8_ty, s_ptr, &[ch_idx], "ch")?;
-        let ch = self.build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")?;
-        let is_ws = self.is_whitespace(ch.into_int_value(), i8_ty)?;
-        let next = if forward {
-            self.builder
-                .build_int_add(idx_iv, i64_ty.const_int(1, false), "next")
-                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?
-        } else {
-            self.builder
-                .build_int_sub(idx_iv, i64_ty.const_int(1, false), "next")
-                .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?
-        };
-        self.build_store(idx_alloca, next)?;
-        self.build_cond_br(is_ws, loop_bb, done_bb)?;
-
-        self.builder.position_at_end(done_bb);
-        Ok(idx_iv)
+        arg: &BasicMetadataValueEnum<'ctx>,
+        rt_name: &str,
+        name: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(arg, name)?;
+        let rt_fn = self.get_or_declare_ptr_len_str_fn(rt_name, 0)?;
+        let raw_result = self
+            .build_call(
+                rt_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(byte_len),
+                ],
+                &format!("{}_call", name),
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| format!("{} returned void", rt_name))?
+            .into_pointer_value();
+        self.register_heap_alloc(raw_result);
+        self.wrap_c_string(raw_result)
     }
 
-    fn is_whitespace(
+    /// Extract `(data_ptr, byte_len)` from a string argument.
+    /// StructValue `{i8*, i64}` carries the byte length in field 1; a raw
+    /// PointerValue (string literal) is NUL-terminated, so strlen supplies it.
+    fn extract_string_arg_ptr_len(
         &self,
-        ch: IntValue<'ctx>,
-        i8_ty: inkwell::types::IntType<'ctx>,
-    ) -> MimiResult<IntValue<'ctx>> {
-        let space = i8_ty.const_int(b' ' as u64, false);
-        let tab = i8_ty.const_int(b'\t' as u64, false);
-        let nl = i8_ty.const_int(b'\n' as u64, false);
-        let cr = i8_ty.const_int(b'\r' as u64, false);
-        let is_space = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch, space, "is_space")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_tab = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch, tab, "is_tab")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_nl = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch, nl, "is_nl")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_cr = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch, cr, "is_cr")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_ws1 = self
-            .builder
-            .build_or(is_space, is_tab, "is_ws1")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        let is_ws2 = self
-            .builder
-            .build_or(is_nl, is_cr, "is_ws2")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        self.builder
-            .build_or(is_ws1, is_ws2, "is_ws")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))
+        arg: &BasicMetadataValueEnum<'ctx>,
+        context: &str,
+    ) -> MimiResult<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        match arg {
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                let len = self.string_len(*pv)?;
+                Ok((*pv, len))
+            }
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let ptr = self
+                    .build_extract_value((*sv).into(), 0, "str_ptr")
+                    .map(|v| v.into_pointer_value())
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?;
+                let len = self
+                    .build_extract_value((*sv).into(), 1, "str_len")
+                    .map(|v| v.into_int_value())
+                    .map_err(|e| CompileError::LlvmError(format!("extract str len: {}", e)))?;
+                Ok((ptr, len))
+            }
+            _ => Err(CompileError::TypeMismatch(format!(
+                "{}: string argument expected",
+                context
+            ))),
+        }
+    }
+
+    /// Get or declare a runtime string helper with the `(i8*, i64 [, i64...])
+    /// → i8*` ABI (ptr+len string contract). `extra_i64_args` appends i64
+    /// parameters beyond (ptr, len) — e.g. 2 for substring_clamp(start, end).
+    fn get_or_declare_ptr_len_str_fn(
+        &self,
+        name: &str,
+        extra_i64_args: usize,
+    ) -> MimiResult<inkwell::values::FunctionValue<'ctx>> {
+        if let Some(f) = self.module.get_function(name) {
+            return Ok(f);
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let mut params = vec![
+            inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
+            inkwell::types::BasicMetadataTypeEnum::IntType(i64_ty),
+        ];
+        for _ in 0..extra_i64_args {
+            params.push(inkwell::types::BasicMetadataTypeEnum::IntType(i64_ty));
+        }
+        let ty = i8_ptr.fn_type(&params, false);
+        Ok(self
+            .module
+            .add_function(name, ty, Some(inkwell::module::Linkage::External)))
     }
 
     pub(in crate::codegen) fn compile_str_to_upper(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        self.compile_str_case_transform(args, true, "str_to_upper")
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount(
+                "str_to_upper expects 1 argument".to_string(),
+            ));
+        }
+        // Audit fix 10 (coordination-b): unicode-aware runtime helper
+        // (VM parity: `s.to_uppercase()`).
+        self.compile_str_unary_rt_call(&args[0], "mimi_str_to_upper", "str_to_upper")
     }
 
     pub(in crate::codegen) fn compile_str_to_lower(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        self.compile_str_case_transform(args, false, "str_to_lower")
-    }
-
-    fn compile_str_case_transform(
-        &self,
-        args: &[BasicMetadataValueEnum<'ctx>],
-        to_upper: bool,
-        name: &str,
-    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount(format!(
-                "{} expects 1 argument",
-                name
-            )));
+            return Err(CompileError::WrongArgCount(
+                "str_to_lower expects 1 argument".to_string(),
+            ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], name)?;
-        let i8_ty = self.context.i8_type();
-        let i64_ty = self.context.i64_type();
-        let s_len = self.string_len(s_ptr)?;
-        let alloc_size = self
-            .builder
-            .build_int_add(s_len, i64_ty.const_int(1, false), "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let buf = self.malloc_buffer(alloc_size)?;
-        self.memcpy_buffer(buf, s_ptr, alloc_size, "memcpy_call")?;
-
-        let function = self
-            .current_function()
-            .ok_or_else(|| format!("codegen: no current function for {} loop", name))?;
-        let loop_bb = self.context.append_basic_block(function, "case_loop");
-        let body_bb = self.context.append_basic_block(function, "case_body");
-        let done_bb = self.context.append_basic_block(function, "case_done");
-
-        let i_alloca = self.build_alloca(i64_ty, "ci")?;
-        self.build_store(i_alloca, i64_ty.const_int(0, false))?;
-        self.build_br(loop_bb)?;
-
-        self.builder.position_at_end(loop_bb);
-        let i = self.build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")?;
-        let cmp = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::SLT,
-                i.into_int_value(),
-                s_len,
-                "case_cmp",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.build_cond_br(cmp, body_bb, done_bb)?;
-
-        self.builder.position_at_end(body_bb);
-        let ch_ptr = self.build_in_bounds_gep(i8_ty, buf, &[i.into_int_value()], "ch")?;
-        let ch = self
-            .build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")?
-            .into_int_value();
-        let transformed = if to_upper {
-            self.transform_case(ch, i8_ty, b'a', b'z', -32)?
-        } else {
-            self.transform_case(ch, i8_ty, b'A', b'Z', 32)?
-        };
-        self.build_store(ch_ptr, transformed)?;
-        let next = self
-            .builder
-            .build_int_add(i.into_int_value(), i64_ty.const_int(1, false), "next")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        self.build_store(i_alloca, next)?;
-        self.build_br(loop_bb)?;
-
-        self.builder.position_at_end(done_bb);
-        Ok(buf.into())
-    }
-
-    fn transform_case(
-        &self,
-        ch: IntValue<'ctx>,
-        i8_ty: inkwell::types::IntType<'ctx>,
-        lo: u8,
-        hi: u8,
-        delta: i8,
-    ) -> MimiResult<IntValue<'ctx>> {
-        let lo_val = i8_ty.const_int(lo as u64, false);
-        let hi_val = i8_ty.const_int(hi as u64, false);
-        let in_range1 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGE, ch, lo_val, "ge_lo")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let in_range2 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLE, ch, hi_val, "le_hi")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let in_range = self
-            .builder
-            .build_and(in_range1, in_range2, "in_range")
-            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
-        let delta_abs = delta.unsigned_abs() as u64;
-        let transformed = if delta < 0 {
-            self.builder
-                .build_int_sub(ch, i8_ty.const_int(delta_abs, false), "case_result")
-                .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?
-        } else {
-            self.builder
-                .build_int_add(ch, i8_ty.const_int(delta_abs, false), "case_result")
-                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?
-        };
-        self.builder
-            .build_select(in_range, transformed, ch, "result_ch")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))
-            .map(|v| v.into_int_value())
+        // Audit fix 10 (coordination-b): unicode-aware runtime helper
+        // (VM parity: `s.to_lowercase()`).
+        self.compile_str_unary_rt_call(&args[0], "mimi_str_to_lower", "str_to_lower")
     }
 
     pub(in crate::codegen) fn compile_str_substring(
@@ -428,7 +267,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_substring expects 3 arguments (s, start, end)".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_substring")?;
         let start = require_int_arg(&args[1], "str_substring: start must be integer")?;
         let end = require_int_arg(&args[2], "str_substring: end must be integer")?;
 
@@ -449,19 +287,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             end
         };
 
-        let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
+        // Audit fix 5 (full-audit-2026-08-05, coordination-a): the FUNCTION
+        // form `str_substring(s, start, end)` CLAMPS indices to the char
+        // count — VM reference interp/bytecode/builtins/string.rs
+        // builtin_str_substring (aborts only on `start > end` after
+        // clamping). Runtime helper `mimi_str_substring_clamp(ptr,len,start,end)`
+        // (src/runtime/mod.rs:2022, audit-wave1) implements exactly this.
+        //
+        // TODO(#audit-wave2): the `.substring()` METHOD form is strict in the
+        // VM (builtin_substring_method), but codegen's method dispatch
+        // funnels it into this same builtin via string_method_to_builtin
+        // (expr/call/method.rs:6498) — those dispatch files are outside this
+        // fix's ownership, so the method-form corner currently picks up
+        // clamping too (std::strings' trait wrapper already does: it calls
+        // str_substring, std/strings.mimi:41). Splitting the two forms needs
+        // a dispatch-name or pending-flag change in method.rs/builtins/mod.rs.
+        let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(&args[0], "str_substring")?;
+        let sub_fn = self.get_or_declare_ptr_len_str_fn("mimi_str_substring_clamp", 2)?;
         let raw_result = self
             .build_call(
                 sub_fn,
                 &[
-                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(byte_len),
                     BasicMetadataValueEnum::IntValue(start),
                     BasicMetadataValueEnum::IntValue(end),
                 ],
-                "str_substring_call",
+                "str_substring_clamp_call",
             )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_substring returned void")?
+            .ok_or("mimi_str_substring_clamp returned void")?
             .into_pointer_value();
         self.register_heap_alloc(raw_result);
         self.wrap_c_string(raw_result)
