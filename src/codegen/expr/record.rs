@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
+use crate::codegen::{types, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::types::BasicTypeEnum;
@@ -23,6 +23,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         let alloca = self.build_alloca(sty, type_name)?;
+        // N-2 (0.34.35): declared field AST types, needed to reconstruct the
+        // trampoline signature when a runtime fn pointer enters a func field.
+        let declared_fields: Option<Vec<(String, Type)>> =
+            self.type_defs.get(type_name).and_then(|td| match &td.kind {
+                TypeDefKind::Record(fields) => Some(
+                    fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            });
         for (i, field) in fields.iter().enumerate() {
             let val = self.compile_expr(&field.value, vars)?;
             let gep = self
@@ -37,9 +49,217 @@ impl<'ctx> CodeGenerator<'ctx> {
             // #[repr(C)] records use extern field types (i32 for i32 fields), so
             // an i64 value from the expression must be truncated to i32 before storing.
             let store_val = self.adjust_int_val(store_val, field_ty)?;
+            // N-2 (0.34.35): a plain function reference stored into a
+            // closure-typed field must be wrapped as {wrapper, null-env} —
+            // see wrap_fn_ref_as_closure_if_needed.
+            let declared_ty = declared_fields
+                .as_ref()
+                .and_then(|fs| fs.iter().find(|(n, _)| n == &field.name).map(|(_, t)| t));
+            let store_val =
+                self.wrap_fn_ref_as_closure_if_needed(field, store_val, field_ty, declared_ty)?;
             self.build_store(gep, store_val)?;
         }
         Ok(alloca.into())
+    }
+
+    /// N-2 (0.34.35, L1): a plain function reference stored into a
+    /// closure-typed record field (`func(...) -> ...`) must be wrapped as a
+    /// proper `{fn_ptr, env_ptr}` closure. Without this, the raw 8-byte fn
+    /// pointer is stored into the 16-byte slot leaving env uninitialized; the
+    /// call site then invokes `fn_ptr(env, args...)`, injecting the garbage
+    /// env as the first argument — silent miscompilation (VM executes this
+    /// correctly). Two shapes:
+    /// - statically known callee → `{static_wrapper(callee), null}` (the
+    ///   wrapper drops env and forwards to the callee);
+    /// - runtime fn pointer (e.g. held in a variable) →
+    ///   `{sig_trampoline, callee_ptr}` (the trampoline indirect-calls the
+    ///   callee carried in the env slot with the declared field signature).
+    /// Closure values that are already structs (lambdas, captured or not)
+    /// pass through untouched.
+    fn wrap_fn_ref_as_closure_if_needed(
+        &mut self,
+        field: &RecordFieldExpr,
+        val: BasicValueEnum<'ctx>,
+        field_ty: BasicTypeEnum<'ctx>,
+        declared_ty: Option<&Type>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let BasicTypeEnum::StructType(sty) = field_ty else {
+            return Ok(val);
+        };
+        if sty != types::closure_struct_type(self.context) {
+            return Ok(val);
+        }
+        let BasicValueEnum::PointerValue(pv) = val else {
+            return Ok(val);
+        };
+        // Shape 1: statically known callee. The literal names the function,
+        // or the pointer IS the function global itself.
+        let static_name = match field.value.unlocated() {
+            Expr::Ident(name) => {
+                if self.module.get_function(name).is_some() {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            _ => {
+                let n = pv.get_name().to_string_lossy().into_owned();
+                if !n.is_empty() && self.module.get_function(&n).is_some() {
+                    Some(n)
+                } else {
+                    None
+                }
+            }
+        };
+        let (fn_slot, env_slot) = if let Some(fn_name) = static_name {
+            // Same mechanism as func-typed call arguments
+            // (maybe_wrap_named_fn_args_to_closures).
+            let wrapper = self.get_or_create_closure_wrapper(&fn_name)?;
+            let null_ptr = self
+                .context
+                .ptr_type(inkwell::AddressSpace::default())
+                .const_null();
+            (wrapper, null_ptr)
+        } else {
+            // Shape 2: runtime fn pointer. The callee rides in the env slot;
+            // the trampoline is keyed by the declared field signature.
+            let Some(Type::Func(params, ret)) = declared_ty.map(|t| t.unlocated()) else {
+                return Ok(val);
+            };
+            let trampoline = self.get_or_create_fnptr_trampoline(params, ret)?;
+            (trampoline, pv)
+        };
+        let closure_ty = types::closure_struct_type(self.context);
+        let closure_alloca =
+            self.build_alloca(BasicTypeEnum::StructType(closure_ty), "fnref_closure")?;
+        let fn_gep = self
+            .gep()
+            .build_struct_gep(closure_ty, closure_alloca, 0, "fn_gep")
+            .map_err(|e| CompileError::LlvmError(format!("fn gep: {}", e)))?;
+        self.build_store(fn_gep, BasicValueEnum::PointerValue(fn_slot))?;
+        let env_gep = self
+            .gep()
+            .build_struct_gep(closure_ty, closure_alloca, 1, "env_gep")
+            .map_err(|e| CompileError::LlvmError(format!("env gep: {}", e)))?;
+        self.build_store(env_gep, BasicValueEnum::PointerValue(env_slot))?;
+        self.build_load(
+            BasicTypeEnum::StructType(closure_ty),
+            closure_alloca,
+            "fnref_closure_val",
+        )
+    }
+
+    /// N-2 (0.34.35): signature-keyed trampoline for RUNTIME function
+    /// pointers stored into closure-typed slots. Layout at the call site:
+    /// `closure.fn_ptr(env=actual_callee, args...)`. The trampoline
+    /// indirect-calls the callee held in its first (env) parameter with the
+    /// declared field signature, so no env is injected into the callee.
+    fn get_or_create_fnptr_trampoline(
+        &mut self,
+        params: &[Type],
+        ret: &Type,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        use inkwell::types::BasicMetadataTypeEnum;
+
+        let fingerprint = format!(
+            "{}->{}",
+            params
+                .iter()
+                .map(crate::core::fmt_type)
+                .collect::<Vec<_>>()
+                .join("_"),
+            crate::core::fmt_type(ret)
+        );
+        if let Some(cached) = self.fnptr_trampolines.get(&fingerprint) {
+            return Ok(*cached);
+        }
+
+        let mut param_tys: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(params.len());
+        for p in params {
+            let pt = self.llvm_type_for(p).ok_or_else(|| {
+                CompileError::Generic(format!(
+                    "fnptr trampoline: unsupported param type '{}'",
+                    crate::core::fmt_type(p)
+                ))
+            })?;
+            param_tys.push(pt);
+        }
+        let ret_ty = self.llvm_type_for(ret).ok_or_else(|| {
+            CompileError::Generic(format!(
+                "fnptr trampoline: unsupported return type '{}'",
+                crate::core::fmt_type(ret)
+            ))
+        })?;
+
+        // Callee signature (no env): what the plain function expects.
+        let callee_meta: Vec<BasicMetadataTypeEnum<'ctx>> =
+            param_tys.iter().map(|t| (*t).into()).collect();
+        let callee_fn_ty = match ret_ty {
+            BasicTypeEnum::IntType(t) => t.fn_type(&callee_meta, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&callee_meta, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&callee_meta, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&callee_meta, false),
+            _ => {
+                return Err(CompileError::Generic(
+                    "fnptr trampoline: unsupported return type class".to_string(),
+                ))
+            }
+        };
+
+        // Trampoline signature: (env=callee_ptr, params...).
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let mut tramp_meta: Vec<BasicMetadataTypeEnum<'ctx>> =
+            vec![BasicMetadataTypeEnum::PointerType(i8_ptr)];
+        tramp_meta.extend(param_tys.iter().map(|t| BasicMetadataTypeEnum::from(*t)));
+        let tramp_fn_ty = match ret_ty {
+            BasicTypeEnum::IntType(t) => t.fn_type(&tramp_meta, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&tramp_meta, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&tramp_meta, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&tramp_meta, false),
+            _ => unreachable!(),
+        };
+
+        let safe_fp = fingerprint.replace([' ', '(', ')', ',', '[', ']', '<', '>'], "_");
+        let tramp_name = format!("__mimi_fnptr_tramp_{}", safe_fp);
+        let tramp_fn = self.module.add_function(
+            &tramp_name,
+            tramp_fn_ty,
+            Some(inkwell::module::Linkage::Internal),
+        );
+
+        let saved_block = self.builder.get_insert_block();
+        let entry_bb = self.context.append_basic_block(tramp_fn, "entry");
+        self.builder.position_at_end(entry_bb);
+
+        let callee_ptr = tramp_fn
+            .get_nth_param(0)
+            .ok_or_else(|| CompileError::LlvmError("fnptr trampoline: env param".into()))?
+            .into_pointer_value();
+        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for i in 0..param_tys.len() {
+            let p = tramp_fn.get_nth_param((i + 1) as u32).ok_or_else(|| {
+                CompileError::LlvmError(format!("fnptr trampoline: param {}", i + 1))
+            })?;
+            call_args.push(types::basic_value_to_metadata_value(
+                &p,
+                self.context.i64_type(),
+            ));
+        }
+        let call = self
+            .builder
+            .build_indirect_call(callee_fn_ty, callee_ptr, &call_args, "fnptr_call")
+            .map_err(|e| CompileError::LlvmError(format!("fnptr indirect call: {}", e)))?;
+        let ret_val = crate::codegen::call_try_basic_value(&call)
+            .ok_or_else(|| CompileError::LlvmError("fnptr trampoline: void call".to_string()))?;
+        self.build_return(Some(&ret_val))?;
+
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
+
+        let ptr = tramp_fn.as_global_value().as_pointer_value();
+        self.fnptr_trampolines.insert(fingerprint, ptr);
+        Ok(ptr)
     }
 
     /// When a PointerValue is stored into a struct-typed field, check if the
