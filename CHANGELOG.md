@@ -2,7 +2,7 @@
 
 ## [Unreleased] — 0.1.4-dev
 
-### 0.34.24 审计战役（/tmp/opencode/audit-{codegen,flow,type,syntax}.md 四份报告驱动）
+### 0.34.24 审计战役（四份 audit-{codegen,flow,type,syntax} 报告驱动，原始报告存 /tmp 已被系统清理，以下条目为唯一留存记录）
 
 **CRITICAL 全部闭环**：
 - **audit-codegen C1**：multi-target turn 标签 + box 尺寸修复。
@@ -23,6 +23,17 @@
 - **audit-type H3**（文档）：0.34.19 切片 G 名实更正——测试契约改判而非 checker 变严，"CHECKER-GAP 归零"表述修正；0.34.21 容器放行判定标注推翻。
 
 **附带**：release 构建断链修复（`consumed_resources` cfg 门禁误加）。
+
+### 0.34.25 收尾战役（rc-quality-gate-0.34.25a.md 切片）
+
+**0.34.25a — L1 正确性切片（Q1/Q3/Q4）**：
+- **Q1**：`match Result<T, string> { Err(msg) }` 的 Err 字符串载荷绑定误编译修复——codegen 此前把 Err 载荷当 i64 重新解释，`p_mi`/`p_mf` 均 panic；Constructor 臂按 payload_idx==2 && 非 variant_owner 推导 `err_expected_ty`（string，兼容 `Type::Result` 与 `Name("Result",[ok,err])` 两 AST 形态），`decode_payload_struct` 两调用点接入，Err 字符串经 inttoptr+load 正确取回。
+- **Q3**：trait impl 方法返回 Result 的值在 let 绑定 / println 直调两条路径丢失类型（codegen 显示裸积元组 `(true, 1.5, 0)` 而 VM 显示 `Ok(1.5)`）——新增 `infer_impl_method_return_type`（type_impls 查 FuncDef.ret + fmt_type 渲染），compile_block / compile_block_last_val / compile_func_body 三处 let 绑定 type 追踪与 infer_object_type method-call 背配合接入。
+- **Q4**：`ast_eval(quote!{true})` 显示分歧——Value::Bool 折叠由 i64(0/1) 改为布尔显示，VM/codegen 一致。
+
+**0.34.25b — 泄漏切片（Q2）**：io.rs 显示缓冲（256B/次）系统性泄漏修复——marker 机制（`display_marker`/`flush_display_since`）：display 缓冲 codegen 期注册但运行期走分支/循环，顶层一次性 flush 会 free(undef)（Err 臂）并 double-free（Option Some 臂在 None 迭代）；marker 在自身无条件缓冲后取样、flush 发射在**同一运行期块**（臂尾/循环尾）使 frees 与 mallocs 同频。8 个 list 发射器 + emit_result_to_string_typed（ok/err 臂）+ emit_option_to_string 插桩。`dual_from_json` 143/0、`dual_list_option_list_tuple`/`dual_option_record_println` 转绿；p_leak 10000 循环 valgrind **0 errors**；p_dbl4 输出正确无 double-free。
+
+**0.34.25c — mutate place fail-closed（Q5/Q6）**：mutate 实参 place 文法校验——合法 place 为 `Ident` 与单层 `Ident.field`（含 `self.field`，与现有写回机制对齐）；拒绝嵌套 place（`o.inner.value`）、非 place 实参（字面量/计算值/`bump(42)`）、同调用内重复 mutate place（别名同时借用）。E0434（非 place）/ E0435（别名）新码登记；2 个 ignored 测试转负测试（flow_features.rs 4448/4476 对应）。嵌套写回与跨调用别名追踪登记 1.x。
 
 ## [0.1.3] — 2026-08-02
 
