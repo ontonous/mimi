@@ -238,6 +238,42 @@ pub enum Op {
         ra: Reg,
         rb: Reg,
     },
+    /// i32 width-fidelity guard (0.34.34, SD-7 / L1 alignment).
+    /// Trap (E0802) if the Int in `rd` is outside [i32::MIN, i32::MAX].
+    /// `kind` selects the codegen-matching message:
+    /// 0 = addition, 1 = subtraction, 2 = multiplication, 3 = generic.
+    /// Emitted after int arithmetic whose declared result type is i32
+    /// (the VM stores all ints as i64; codegen computes native i32 with
+    /// checked overflow — without this guard the VM silently wraps at i64).
+    CheckI32 {
+        rd: Reg,
+        kind: u8,
+    },
+    /// i32 division/remainder guard: trap if ra == i32::MIN && rb == -1.
+    /// In i64 arithmetic MIN_i32 / -1 does not overflow, but codegen's
+    /// native i32 checked sdiv/srem traps with
+    /// "integer division overflow (MIN / -1)" — this aligns the VM.
+    CheckI32DivRem {
+        ra: Reg,
+        rb: Reg,
+    },
+    /// Truncate the Int in `rd` to i32 with wrap-around (no trap).
+    /// Parity with codegen semantics where the result narrows to the
+    /// declared i32 width: integer `**` on i32 operands (runtime pow
+    /// computes i64 then narrows — observed: 2**31 wraps to i32::MIN),
+    /// and constant-folded values landing in i32 bindings.
+    WrapI32 {
+        rd: Reg,
+    },
+    /// Mask the shift-amount register in place: rb = (rb as u64 & mask) as i64.
+    /// Parity with codegen/hardware shift semantics (x86 SHL/SAR and
+    /// aarch64 LSL/ASR mask the amount modulo the operand width); also
+    /// prevents LLVM from folding unmasked out-of-range shifts to poison
+    /// at O1. mask is 31 (i32) or 63 (i64).
+    MaskShiftAmt {
+        rb: Reg,
+        mask: u8,
+    },
     /// rd = ra ** rb (integer power, checked overflow)
     PowInt {
         rd: Reg,

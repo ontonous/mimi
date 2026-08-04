@@ -590,9 +590,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_list_elem_type: None,
             pending_to_string_is_any: false,
             pending_to_number_is_any: false,
+            // 0.34.34: O1 is the default. 0.31.21 fixed the O1 codegen bugs
+            // (try_expr i32-vs-i1 mismatch, extern wrapper name collision);
+            // the previous opt-in default was deferred "pending fuzz testing".
+            // MIMI_OPT is now opt-OUT: MIMI_OPT=0 / MIMI_OPT=false disables
+            // optimization (debug fallback); unset or 1/true keeps O1.
             optimize: std::env::var("MIMI_OPT")
-                .map(|v| v == "1" || v == "true")
-                .unwrap_or(false),
+                .map(|v| !(v == "0" || v == "false"))
+                .unwrap_or(true),
             contract_bb_counter: 0,
             fn_ptr_var_names: std::collections::HashSet::new(),
             extern_func_defs: HashMap::new(),
@@ -1602,6 +1607,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if val_bw == slot_bw {
                     val
                 } else if val_bw > slot_bw {
+                    // SD-7 (0.34.34): narrowing store into an i32 slot is E0802
+                    // overflow when out of range — not a silent wrap. The VM
+                    // assign-guard traps identically. Casts already arrive at
+                    // target width and never reach this path.
+                    if slot_bw == 32 {
+                        self.emit_i32_range_guard(iv, "assign")?;
+                    }
                     self.builder
                         .build_int_truncate(iv, slot_it, &format!("{}_assign_trunc", name))
                         .map_err(|e| CompileError::LlvmError(format!("assign trunc: {}", e)))?
@@ -3317,10 +3329,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Allows callers to amortise TargetMachine construction across
     /// many compilations (the test harness creates one per thread).
     pub fn emit_object(&self, tm: &TargetMachine, output_path: &Path) -> Result<(), CompileError> {
-        // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var).
-        // 0.31.21: O1 codegen bugs fixed — try_expr i32-vs-i1 type mismatch and
-        // extern wrapper name collision (strlen → strlen.11) resolved. O2 passes
-        // are safe; O1 default enablement deferred to broader fuzz testing.
+        // Run LLVM optimization passes before codegen. 0.34.34: O1 is the
+        // DEFAULT (opt-out via MIMI_OPT=0/false). 0.31.21 fixed the O1 bugs
+        // (try_expr i32-vs-i1 type mismatch; extern wrapper name collision
+        // strlen → strlen.11). Confidence baseline: 0.34.34 full-suite +
+        // differential fuzz re-run with O1 default.
         if self.optimize {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module

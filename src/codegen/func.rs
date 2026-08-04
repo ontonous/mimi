@@ -1836,6 +1836,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
+                        // SD-7 (0.34.34): narrowing bind into an annotated i32
+                        // slot range-checks before the silent truncate — the VM
+                        // CheckI32 let-guard traps E0802 identically. This is
+                        // the TOP-LEVEL legacy body path (compile_func_body);
+                        // nested blocks are covered by compile_block.
+                        if Self::annotated_type_name(decl_ty) == Some("i32") {
+                            if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it)) =
+                                (val, target)
+                            {
+                                if iv.get_type().get_bit_width() > it.get_bit_width() {
+                                    self.emit_i32_range_guard(iv, "let-bind")?;
+                                }
+                            }
+                        }
                         val = self.adjust_int_val(val, target)?;
                     }
                     // Normalize string values: wrap raw pointers into canonical
@@ -2850,9 +2864,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        let last_val = self.adjust_int_val(last_val, ret_type)?;
-        let last_val = self.load_return_value_if_needed(last_val)?;
-        self.build_return(Some(&last_val))?;
+        // 0.34.34 (O1-default prerequisite): the trailing return must NOT be
+        // emitted when the body already terminated. Pre-fix this appended a
+        // second terminator to the already-terminated block. Single-target
+        // transitions survived because the stray ret was type-compatible
+        // (dead, removed by the backend); multi-target transitions return
+        // {i32 tag, i64 payload} while the stray value is an i64 — invalid
+        // IR that O0 tolerated by luck and O1 turns into an LLVM abort
+        // ("Cannot emit physreg copy instruction").
+        if !self.block_has_terminator() {
+            let last_val = self.adjust_int_val(last_val, ret_type)?;
+            let last_val = self.load_return_value_if_needed(last_val)?;
+            self.build_return(Some(&last_val))?;
+        }
         Ok(())
     }
 

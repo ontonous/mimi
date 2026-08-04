@@ -2,6 +2,47 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.34 — i32 算术语义钉死：SD-7 trap 对等 + O1 毒值修复（L1 双后端等价闭环）
+
+> 用户报告 i32 标注算术 L1 分歧（VM 以 i64 宽度静默 wrap / codegen E0802 trap），
+> 顺藤摸出两处 O1 毒值。本 sprint 将 i32 运算语义在双后端钉到同一裁决上：
+> **算术溢出 = trap（SD-7）；收窄绑定 = trap；显式 cast = wrap；界外移位 = 硬件掩码**。
+
+- **VM i32 宽度保真**：bytecode compiler 新增 `VarType::Int32`（let 声明的标量
+  标注**优先于**类型推断），新操作码 `CheckI32` / `CheckI32DivRem` / `WrapI32` /
+  `MaskShiftAmt`；binop/let/assign/neg 全部带 i32 守卫；`as i32` cast 走 trunc+sext
+  wrap 语义。trap 消息与 codegen 对齐（`integer division overflow (MIN / -1)`、
+  `integer overflow in power`）。此前 VM 把 i32 值当 i64 全程运算，`i32::MAX + 1`
+  静默返回 2147483648——现已按 E0802 trap；
+- **双后端 SD-7 trap 对等**：i32 add/sub/mul、div/mod（MIN ÷ -1）、一元负号
+  （`-i32::MIN`）在 VM 与 codegen 上均 E0802 trap、消息一致；
+- **收窄绑定守卫（narrowing bind/assign trap）**：向 `i32` 注解槽位绑定/赋值一个
+  越界宽值是 E0802 overflow，不再静默 trunc。五个编译点全覆盖——legacy 顶层函数体
+  `compile_func_body`、嵌套块 `compile_block` / 取值块 `compile_block_last_val`、
+  legacy 赋值 `assign_to_var`、resolved emitter `bind_pattern` + `Assign`
+  （NumericNarrowChecked before-trunc 守卫）。配套根因修复：`Type::Located` 包装
+  导致注解直接匹配 `Type::Name` **永远不命中**——新增 `annotated_type_name`
+  pierce helper（此 bug 意味着既有一切按注解名的 legacy 守卫均有同款盲区）；
+  显式 `as` cast 保持 wrap（不改语义）；
+- **O1 移位毒值修复（SD-7 附带裁决）**：LLVM 未掩码移位为 poison——O0 下硬件指令
+  自行掩码看似无害，O1 常量折叠 `1 << 65` → poison 毒值泄漏。裁决：**界外移位保持
+  O0 可观察的硬件掩码语义**（`1<<65`→2、`1<<-1`→i64::MIN），在全部优化级别确定一致：
+  codegen 移位前显式 AND 掩码（宽度-1），VM `Shl`/`Shr` 从 trap 改为 mod-64 掩码；
+  `v1_2_core_edge` 两个旧 trap 预期测试改写为掩码语义断言；
+- **O1 physreg crash 修复**：multi-target transition 函数在已终结块后被
+  `emit_implicit_return` 追加游离 `ret`（无效 IR → `LLVM ERROR: Cannot emit
+  physreg copy instruction`）——追加前检查 `block_has_terminator()`；
+- **诊断输出契约**：新增 `docs/diagnostics.md`（normative 文法：单行致密
+  `SEVERITY[CODE] LOCATION MESSAGE | field:...`，机器/AI 优先，caret/gutter 装饰
+  由坐标区间无损替代）；runtime `mimi_trap_overflow` / `mimi_trap_float_not_finite`
+  的 Hint 行并入单行 `| hint:` 字段；`docs/error-codes.md` 登记契约引用；
+- **测试**：`dual_backend.rs` 新增 12 个 i32/i64/cast 对等测试（trap 对等 +
+  shl 掩码 + pow wrap + const-fold 收窄 + cast wrap）；golden IR 4 件重生成
+  （recursive_fib/pipeline/mutual_recursion/try_operator——收窄守卫的 icmp/br
+  插入，合法程序守卫恒通过，无行为变化）。全量 4618 passed / 0 failed / 7 ignored，
+  CLI 冒烟矩阵（trap 对 / shl / cast / 收窄 / fib 不误杀）在 O0（MIMI_OPT=0）与
+  O1 默认下全部一致。
+
 ### 0.34.33 — 审计收尾：文档同步残留闭环 + 门禁加深（0.1.4 深度审计修复）
 
 > 依据 2026-08-04 0.1.4 全量深度审计（对照 pre-1.0/05 RC 门禁 + v0.34 验收标准，

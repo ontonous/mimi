@@ -44,6 +44,10 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::BitXor { .. } => "BIT_XOR",
         Op::Shl { .. } => "SHL",
         Op::Shr { .. } => "SHR",
+        Op::CheckI32 { .. } => "CHECK_I32",
+        Op::CheckI32DivRem { .. } => "CHECK_I32_DIVREM",
+        Op::WrapI32 { .. } => "WRAP_I32",
+        Op::MaskShiftAmt { .. } => "MASK_SHIFT_AMT",
         Op::PowInt { .. } => "POW_INT",
         Op::PowFloat { .. } => "POW_FLOAT",
         Op::BitNot { .. } => "BIT_NOT",
@@ -172,6 +176,16 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::LoadFalse { rd } => format!("{:04}  {:<16} r{} = false", pc, name, rd),
         Op::Mov { rd, rs } => format!("{:04}  {:<16} r{} = r{}", pc, name, rd, rs),
         Op::DerefValue { rd, ra } => format!("{:04}  {:<16} r{} = *r{}", pc, name, rd, ra),
+        Op::CheckI32 { rd, kind } => {
+            format!("{:04}  {:<16} check_i32 r{} (kind {})", pc, name, rd, kind)
+        }
+        Op::CheckI32DivRem { ra, rb } => {
+            format!("{:04}  {:<16} check_i32_divrem r{}, r{}", pc, name, ra, rb)
+        }
+        Op::WrapI32 { rd } => format!("{:04}  {:<16} r{} = wrap_i32 r{}", pc, name, rd, rd),
+        Op::MaskShiftAmt { rb, mask } => {
+            format!("{:04}  {:<16} r{} &= {}", pc, name, rb, mask)
+        }
         Op::AddInt { rd, ra, rb }
         | Op::SubInt { rd, ra, rb }
         | Op::MulInt { rd, ra, rb }

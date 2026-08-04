@@ -12,7 +12,8 @@ source_filename = "golden_test"
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
 @op_name = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
-@op_name.10 = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
+@op_name.10 = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
+@op_name.11 = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -778,6 +779,16 @@ trap_overflow:                                    ; preds = %else
   unreachable
 
 op_ok:                                            ; preds = %else
+  %i32_lt_min = icmp slt i64 %op_result, -2147483648
+  %i32_gt_max = icmp sgt i64 %op_result, 2147483647
+  %i32_oob = or i1 %i32_lt_min, %i32_gt_max
+  br i1 %i32_oob, label %trap_i32_ovf, label %i32_ok
+
+trap_i32_ovf:                                     ; preds = %op_ok
+  call void @mimi_trap_overflow(ptr @op_name.10)
+  unreachable
+
+i32_ok:                                           ; preds = %op_ok
   %trunc = trunc i64 %op_result to i32
   %call = call i32 @fact(i32 %trunc)
   %checked_op5 = call { i32, i1 } @llvm.smul.with.overflow.i32(i32 %n2, i32 %call)
@@ -785,11 +796,11 @@ op_ok:                                            ; preds = %else
   %op_overflow7 = extractvalue { i32, i1 } %checked_op5, 1
   br i1 %op_overflow7, label %trap_overflow8, label %op_ok9
 
-trap_overflow8:                                   ; preds = %op_ok
-  call void @mimi_trap_overflow(ptr @op_name.10)
+trap_overflow8:                                   ; preds = %i32_ok
+  call void @mimi_trap_overflow(ptr @op_name.11)
   unreachable
 
-op_ok9:                                           ; preds = %op_ok
+op_ok9:                                           ; preds = %i32_ok
   %func_if_else_sext = sext i32 %op_result6 to i64
   br label %ifcont
 }

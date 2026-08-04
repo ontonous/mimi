@@ -115,6 +115,10 @@ struct FuncCompiler {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VarType {
     Int,
+    /// Declared/inferred `i32`: arithmetic on these values must be
+    /// width-guarded at i32 range (the VM stores all ints as i64;
+    /// codegen computes native checked i32 — see CheckI32 op, 0.34.34).
+    Int32,
     Float,
     Bool,
     String,
@@ -924,7 +928,8 @@ impl BytecodeCompiler {
             // Track parameter types for int/float dispatch.
             let ty = match param.ty.unlocated() {
                 Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
-                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "i32" => VarType::Int32,
+                Type::Name(n, _) if n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
                 Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
@@ -1009,7 +1014,8 @@ impl BytecodeCompiler {
             fc.vars[0].insert(param.name.clone(), i as Reg);
             let ty = match param.ty.unlocated() {
                 Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
-                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "i32" => VarType::Int32,
+                Type::Name(n, _) if n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
                 _ => VarType::Unknown,
@@ -1049,7 +1055,8 @@ impl BytecodeCompiler {
             fc.set_var_mut(&param.name, param.mut_);
             let ty = match param.ty.unlocated() {
                 Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
-                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "i32" => VarType::Int32,
+                Type::Name(n, _) if n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
                 Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
@@ -1140,12 +1147,40 @@ impl BytecodeCompiler {
                                 decl_ty.unlocated(),
                                 Type::Name(n, _) if n == "f64" || n == "f32"
                             );
-                            if want_float && self.infer_expr_type(fc, init_expr) == VarType::Int {
+                            if want_float
+                                && matches!(
+                                    self.infer_expr_type(fc, init_expr),
+                                    VarType::Int | VarType::Int32
+                                )
+                            {
                                 let rd = fc.proto.alloc_reg();
                                 fc.emit(Op::IntToFloat { rd, ra: r });
                                 r = rd;
                                 coerced_to_float = true;
                             }
+                        }
+                        // 0.34.34 (SD-7 / L1): annotated i32 bindings must hold
+                        // in-range values. Arithmetic sources are width-guarded
+                        // at the op site; this let-level guard additionally
+                        // catches constant-folded literals (`let x: i32 =
+                        // 2147483646 + 2` folds to an out-of-range i64 in the
+                        // VM, while codegen's checked i32 addition traps).
+                        // kind mirrors the folded binop so the trap message
+                        // matches codegen ("integer overflow in <op>").
+                        if matches!(
+                            ty.as_ref().map(|t| t.unlocated()),
+                            Some(Type::Name(n, _)) if n == "i32"
+                        ) {
+                            let kind = match init_expr.unlocated() {
+                                Expr::Binary(op, _, _) => match op {
+                                    BinOp::Add => 0,
+                                    BinOp::Sub => 1,
+                                    BinOp::Mul => 2,
+                                    _ => 3,
+                                },
+                                _ => 3,
+                            };
+                            fc.emit(Op::CheckI32 { rd: r, kind });
                         }
                         // Track variable type for int/float dispatch.
                         if let PatternKind::Variable(name) = &pat.kind {
@@ -1167,6 +1202,21 @@ impl BytecodeCompiler {
                                 // by the receiver's concrete type at runtime.
                                 match decl_ty.unlocated() {
                                     Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
+                                    // 0.34.34: a declared scalar annotation is
+                                    // authoritative for width tracking (the
+                                    // checker guarantees the init conforms).
+                                    // Inference alone loses the i32 width —
+                                    // literals infer as generic i64, which
+                                    // silently disabled the i32 arithmetic
+                                    // guards (SD-7 / L1).
+                                    Type::Name(n, _)
+                                        if matches!(
+                                            n.as_str(),
+                                            "i32" | "i64" | "f64" | "f32" | "bool" | "string"
+                                        ) =>
+                                    {
+                                        surface_type_to_var_type(decl_ty)
+                                    }
                                     _ => self.infer_expr_type(fc, init_expr),
                                 }
                             } else {
@@ -1615,12 +1665,23 @@ impl BytecodeCompiler {
                     Type::Name(n, _) if n == "f64" || n == "f32" => {
                         fc.emit(Op::IntToFloat { rd, ra: r });
                     }
-                    Type::Name(n, _) if n == "i64" || n == "i32" || n == "int" => {
+                    Type::Name(n, _) if n == "i64" || n == "int" => {
                         // Cast to int: truncate Float → Int.
                         fc.emit(Op::Cast {
                             rd,
                             ra: r,
                             target: 0,
+                        });
+                    }
+                    Type::Name(n, _) if n == "i32" => {
+                        // Cast to i32: VALUE must additionally wrap to the i32
+                        // width (0.34.34 L1 parity: codegen truncates —
+                        // `3000000000 as i32` yields -1294967296, the VM
+                        // previously passed the i64 value through unchanged).
+                        fc.emit(Op::Cast {
+                            rd,
+                            ra: r,
+                            target: 2,
                         });
                     }
                     _ => {
@@ -2674,7 +2735,37 @@ impl BytecodeCompiler {
         if is_float {
             self.emit_float_binop(fc, op, rd, ra, rb)?;
         } else {
+            // 0.34.34 (SD-7 / L1): i32 width fidelity. The checker unifies
+            // binop operand types; if either operand is known i32 (and neither
+            // is float/string — excluded above), the op is i32-width and the
+            // VM must reproduce codegen's native checked-i32 semantics instead
+            // of silently computing in the i64 register domain.
+            let lw = self.infer_expr_type(fc, l);
+            let rw = self.infer_expr_type(fc, r);
+            let int_like = |t: &VarType| !matches!(t, VarType::Float | VarType::String);
+            let i32_ctx =
+                (lw == VarType::Int32 && int_like(&rw)) || (rw == VarType::Int32 && int_like(&lw));
+            if i32_ctx && matches!(op, BinOp::Div | BinOp::Mod) {
+                // i32::MIN / -1 overflows i32 but not i64 — pre-op operand
+                // guard with the codegen-matching message (also covers %).
+                fc.emit(Op::CheckI32DivRem { ra, rb });
+            }
+            if i32_ctx && matches!(op, BinOp::Shl | BinOp::Shr) {
+                // Hardware-mask parity: shift amount modulo the width.
+                fc.emit(Op::MaskShiftAmt { rb, mask: 31 });
+            }
             self.emit_int_binop(fc, op, rd, ra, rb)?;
+            if i32_ctx {
+                let _guard = match op {
+                    BinOp::Add => fc.emit(Op::CheckI32 { rd, kind: 0 }),
+                    BinOp::Sub => fc.emit(Op::CheckI32 { rd, kind: 1 }),
+                    BinOp::Mul => fc.emit(Op::CheckI32 { rd, kind: 2 }),
+                    // pow and shl narrow-wrap at the i32 width in codegen
+                    // (2**31 -> MIN, 7<<40 -> masked shift truncated) — no trap.
+                    BinOp::Pow | BinOp::Shl => fc.emit(Op::WrapI32 { rd }),
+                    _ => 0,
+                };
+            }
         }
         Ok(rd)
     }
@@ -2823,6 +2914,11 @@ impl BytecodeCompiler {
                     fc.emit(Op::NegFloat { rd, ra });
                 } else {
                     fc.emit(Op::NegInt { rd, ra });
+                    // 0.34.34: -MIN_i32 overflows i32 (codegen lowers unary
+                    // neg to 0 - x and traps with the subtraction message).
+                    if self.infer_expr_type(fc, e) == VarType::Int32 {
+                        fc.emit(Op::CheckI32 { rd, kind: 1 });
+                    }
                 }
             }
             UnOp::Not => {
@@ -3341,6 +3437,7 @@ impl BytecodeCompiler {
                     Some(VarType::String) => vec!["string".to_string()],
                     Some(VarType::User(t)) => vec![t.clone()],
                     Some(VarType::Int) => vec!["i64".to_string(), "i32".to_string()],
+                    Some(VarType::Int32) => vec!["i32".to_string(), "i64".to_string()],
                     Some(VarType::Float) => vec!["f64".to_string()],
                     _ => vec![], // Dyn/Unknown: keep existing dispatch order
                 },
@@ -4536,10 +4633,30 @@ impl BytecodeCompiler {
                 // C2 fix (audit 2026-08-03): value-layer numeric widening on
                 // assignment too — `x = 1` where x is an f64 binding must
                 // produce a Float value, mirroring the annotated-let fix.
-                if fc.reg_is_float(name) && self.infer_expr_type(fc, value) == VarType::Int {
+                if fc.reg_is_float(name)
+                    && matches!(
+                        self.infer_expr_type(fc, value),
+                        VarType::Int | VarType::Int32
+                    )
+                {
                     let rd = fc.proto.alloc_reg();
                     fc.emit(Op::IntToFloat { rd, ra: r_val });
                     r_val = rd;
+                }
+                // 0.34.34 (SD-7 / L1): assignment into a declared-i32 variable
+                // must stay in i32 range (folded-binop gap; op-site arithmetic
+                // is already guarded — a passing double-check is harmless).
+                if fc.var_types.get(name) == Some(&VarType::Int32) {
+                    let kind = match value.unlocated() {
+                        Expr::Binary(op, _, _) => match op {
+                            BinOp::Add => 0,
+                            BinOp::Sub => 1,
+                            BinOp::Mul => 2,
+                            _ => 3,
+                        },
+                        _ => 3,
+                    };
+                    fc.emit(Op::CheckI32 { rd: r_val, kind });
                 }
                 // Track type for int/float dispatch.
                 let ty = if fc.reg_is_float(name) {
@@ -5281,7 +5398,8 @@ impl BytecodeCompiler {
             Expr::Literal(Lit::String(_)) => VarType::String,
             Expr::Cast(_, ty) => match ty.unlocated() {
                 Type::Name(n, _) if n == "f64" => VarType::Float,
-                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "i32" => VarType::Int32,
+                Type::Name(n, _) if n == "i64" => VarType::Int,
                 Type::Name(n, _) => VarType::User(n.clone()),
                 _ => VarType::Unknown,
             },
@@ -5300,6 +5418,12 @@ impl BytecodeCompiler {
                         VarType::Float
                     } else if lt == VarType::Int && rt == VarType::Int {
                         VarType::Int
+                    } else if lt == VarType::Int32 || rt == VarType::Int32 {
+                        // 0.34.34: width propagation for i32 arithmetic. The
+                        // checker unifies binop operand types, so an Int32
+                        // operand means the whole op is i32-width (literals
+                        // infer as generic Int and are unified into i32).
+                        VarType::Int32
                     } else {
                         VarType::Unknown
                     }
@@ -5334,7 +5458,8 @@ impl FuncCompiler {
 fn surface_type_to_var_type(ty: &Type) -> VarType {
     match ty.unlocated() {
         Type::Name(n, _) => match n.as_str() {
-            "i32" | "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64" => VarType::Int,
+            "i32" => VarType::Int32,
+            "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64" => VarType::Int,
             "f32" | "f64" => VarType::Float,
             "bool" => VarType::Bool,
             "string" => VarType::String,

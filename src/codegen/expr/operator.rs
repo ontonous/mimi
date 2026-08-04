@@ -105,14 +105,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         match op {
             UnOp::Neg => {
                 if let BasicValueEnum::IntValue(iv) = v {
-                    // Use the operand's own type for the zero constant — i32 and i64
-                    // are both valid integer widths after the A1 type restoration.
+                    // SD-7 (0.34.34): negation is `0 - x` and MUST go through
+                    // compile_binop's checked path. A raw `sub` wraps silently:
+                    // -i32::MIN would not trap, and a promoted-width neg would
+                    // lose the i32 range guard. compile_binop also detects
+                    // i32 operand width from `iv` directly.
                     let zero = iv.get_type().const_int(0, true);
-                    Ok(self
-                        .builder
-                        .build_int_sub(zero, iv, "neg")
-                        .map_err(|e| CompileError::LlvmError(format!("neg error: {}", e)))?
-                        .into())
+                    return self.compile_binop(BinOp::Sub, zero.into(), iv.into());
                 } else if let BasicValueEnum::FloatValue(fv) = v {
                     let zero = self.context.f64_type().const_float(0.0);
                     Ok(self
@@ -188,22 +187,251 @@ impl<'ctx> CodeGenerator<'ctx> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // 0.34.34 (SD-7 / L1): i32 width context. promote_binop_operands
+        // widens mixed operands to i64, which silently loses the i32 range:
+        // `x: i32 + 1` (literal i64) became a checked i64 add that never
+        // traps at i32::MAX + 1, diverging from the bytecode VM and from
+        // native checked-i32 lowering. The declared width is recoverable
+        // from the PRE-promotion operands: if either operand is exactly
+        // i32, the expression is i32-width (the checker unifies binop
+        // operand types, so a genuine i64 runtime operand can never mix
+        // with i32 — the wide side is a literal/constant in well-typed
+        // programs).
+        let i32_ctx = matches!(lhs, BasicValueEnum::IntValue(l) if l.get_type().get_bit_width() == 32)
+            || matches!(rhs, BasicValueEnum::IntValue(r) if r.get_type().get_bit_width() == 32);
         let (lhs, rhs) = self.promote_binop_operands(lhs, rhs)?;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                self.compile_arithmetic_binop(op, lhs, rhs)
+                // i32::MIN / -1 overflows i32 but NOT the promoted i64
+                // division — guard the operand pair before the op (matches
+                // the native i32 path's MIN/-1 check and the VM's
+                // CheckI32DivRem guard).
+                if i32_ctx && matches!(op, BinOp::Div | BinOp::Mod) {
+                    if let (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) = (lhs, rhs) {
+                        self.emit_i32_min_neg1_guard(l, r)?;
+                    }
+                }
+                let result = self.compile_arithmetic_binop(op, lhs, rhs)?;
+                // Div results only overflow via MIN/-1 (guarded above);
+                // add/sub/mul need the post-op range check.
+                if i32_ctx && op != BinOp::Div {
+                    if let BasicValueEnum::IntValue(rv) = result {
+                        if rv.get_type().get_bit_width() > 32 {
+                            let name = match op {
+                                BinOp::Add => "addition",
+                                BinOp::Sub => "subtraction",
+                                BinOp::Mul => "multiplication",
+                                _ => "operation",
+                            };
+                            self.emit_i32_range_guard(rv, name)?;
+                        }
+                    }
+                }
+                Ok(result)
             }
-            BinOp::Mod => self.compile_mod_binop(lhs, rhs),
+            BinOp::Mod => {
+                if i32_ctx {
+                    if let (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) = (lhs, rhs) {
+                        self.emit_i32_min_neg1_guard(l, r)?;
+                    }
+                }
+                self.compile_mod_binop(lhs, rhs)
+            }
             BinOp::EqCmp | BinOp::NeCmp => self.compile_equality_binop(op, lhs, rhs),
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 self.compile_comparison_binop(op, lhs, rhs)
             }
             BinOp::And | BinOp::Or => self.compile_logical_binop(op, lhs, rhs),
             BinOp::Range => self.compile_range_binop(lhs, rhs),
-            BinOp::Pow => self.compile_pow_binop(lhs, rhs),
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+            BinOp::Pow => {
+                let result = self.compile_pow_binop(lhs, rhs)?;
+                // pow at i32 width computes in i64 then narrows with wrap
+                // (observed codegen semantics: 2 ** 31 -> i32::MIN, no trap).
+                if i32_ctx {
+                    if let BasicValueEnum::IntValue(rv) = result {
+                        if rv.get_type().get_bit_width() > 32 {
+                            let wrapped = self.wrap_i32_result(rv)?;
+                            return Ok(wrapped.into());
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            BinOp::Shl | BinOp::Shr => self.compile_shift_binop(op, lhs, rhs, i32_ctx),
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                 self.compile_bitwise_binop(op, lhs, rhs)
             }
+        }
+    }
+
+    /// Post-op i32 range guard for promoted-width arithmetic (0.34.34).
+    /// Traps with the same E0802 message text as the native checked-i32
+    /// path; in fallible multi-target transitions the overflow is absorbed
+    /// into the Fault variant (same as the intrinsic overflow path).
+    pub(in crate::codegen) fn emit_i32_range_guard(
+        &mut self,
+        val: IntValue<'ctx>,
+        op_name: &str,
+    ) -> Result<(), CompileError> {
+        let ty = val.get_type();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for i32 guard".into()))?;
+        let min32 = ty.const_int(i32::MIN as u64, false);
+        let max32 = ty.const_int(i32::MAX as u64, false);
+        let lt = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, val, min32, "i32_lt_min")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let gt = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, val, max32, "i32_gt_max")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let oob = self
+            .builder
+            .build_or(lt, gt, "i32_oob")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let trap_bb = self.context.append_basic_block(function, "trap_i32_ovf");
+        let ok_bb = self.context.append_basic_block(function, "i32_ok");
+        self.builder
+            .build_conditional_branch(oob, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+        self.builder.position_at_end(trap_bb);
+        if self.in_fallible_multi_target() {
+            self.emit_panic_fault_return("E0802")?;
+        } else {
+            let trap_fn = self.get_runtime_fn("mimi_trap_overflow")?;
+            let op_cstr = self
+                .builder
+                .build_global_string_ptr(op_name, "op_name")
+                .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+            self.builder
+                .build_call(
+                    trap_fn,
+                    &[BasicMetadataValueEnum::PointerValue(
+                        op_cstr.as_pointer_value(),
+                    )],
+                    "",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        }
+        self.builder.position_at_end(ok_bb);
+        Ok(())
+    }
+
+    /// i32 MIN / -1 operand guard for div/mod at promoted width (0.34.34).
+    fn emit_i32_min_neg1_guard(
+        &mut self,
+        l: IntValue<'ctx>,
+        r: IntValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let ty = l.get_type();
+        if ty.get_bit_width() <= 32 {
+            return Ok(()); // native i32 path already checks MIN/-1
+        }
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for i32 div guard".into())
+        })?;
+        let min32 = ty.const_int(i32::MIN as u64, false);
+        let neg1 = ty.const_all_ones();
+        let l_min = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, l, min32, "l_is_i32_min")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let r_neg1 = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, r, neg1, "r_is_neg1")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let both = self
+            .builder
+            .build_and(l_min, r_neg1, "i32_min_div_neg1")
+            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "trap_i32_div_ovf");
+        let ok_bb = self.context.append_basic_block(function, "i32_div_ok");
+        self.builder
+            .build_conditional_branch(both, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+        self.builder.position_at_end(trap_bb);
+        if self.in_fallible_multi_target() {
+            self.emit_panic_fault_return("E0802")?;
+        } else {
+            let trap_fn = self.get_runtime_fn("mimi_trap_div_overflow")?;
+            self.builder
+                .build_call(trap_fn, &[], "")
+                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        }
+        self.builder.position_at_end(ok_bb);
+        Ok(())
+    }
+
+    /// Truncate-and-sign-extend back to the pipeline's i64 convention,
+    /// giving the i32-wrapped value (0.34.34). SEXT (not ZEXT): the pipeline
+    /// stores narrow integers sign-extended in i64, so 0x80000000 must wrap
+    /// to -2147483648 (i32::MIN), matching native i32 value semantics.
+    fn wrap_i32_result(&mut self, v: IntValue<'ctx>) -> Result<IntValue<'ctx>, CompileError> {
+        let ty64 = v.get_type();
+        let i32_ty = self.context.i32_type();
+        let t = self
+            .builder
+            .build_int_truncate(v, i32_ty, "wrap_i32")
+            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+        let z = self
+            .builder
+            .build_int_s_extend(t, ty64, "wrap_i32_sext")
+            .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?;
+        Ok(z)
+    }
+
+    /// Shifts with hardware-mask semantics (0.34.34).
+    ///
+    /// The shift amount is masked modulo the operand width BEFORE shifting:
+    /// unmasked out-of-range shifts are poison in LLVM IR (O1 constant
+    /// folding leaks garbage, e.g. `1 << 65`), while x86 SHL/SAR and
+    /// aarch64 LSL/ASR mask the amount in hardware — O0 codegen already
+    /// observed the masked behavior. For promoted i32 contexts the amount
+    /// masks modulo 32 and the result wraps into the i32 width, matching
+    /// native checked-i32 lowering and the bytecode VM's MaskShiftAmt/WrapI32.
+    fn compile_shift_binop(
+        &mut self,
+        op: BinOp,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+        i32_ctx: bool,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match (lhs, rhs) {
+            (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
+                let ty = l.get_type();
+                let eff_width: u64 = if i32_ctx {
+                    32
+                } else {
+                    ty.get_bit_width() as u64
+                };
+                let mask = ty.const_int(eff_width - 1, false);
+                let r_masked = self
+                    .builder
+                    .build_and(r, mask, "shift_amt_masked")
+                    .map_err(|e| CompileError::LlvmError(format!("shift mask error: {}", e)))?;
+                let shifted = match op {
+                    BinOp::Shl => self.builder.build_left_shift(l, r_masked, "shl"),
+                    _ => self.builder.build_right_shift(l, r_masked, true, "shr"),
+                }
+                .map_err(|e| CompileError::LlvmError(format!("shift error: {}", e)))?;
+                if i32_ctx && ty.get_bit_width() > 32 {
+                    let wrapped = self.wrap_i32_result(shifted)?;
+                    Ok(wrapped.into())
+                } else {
+                    Ok(shifted.into())
+                }
+            }
+            _ => Err("shifts require matching integer types".into()),
         }
     }
 
@@ -917,16 +1145,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BinOp::BitAnd => self.builder.build_and(l, r, "bitand"),
                     BinOp::BitOr => self.builder.build_or(l, r, "bitor"),
                     BinOp::BitXor => self.builder.build_xor(l, r, "bitxor"),
-                    BinOp::Shl => self.builder.build_left_shift(l, r, "shl"),
-                    BinOp::Shr => self.builder.build_right_shift(l, r, true, "shr"),
+                    // Shl/Shr moved to compile_shift_binop (0.34.34):
+                    // hardware-mask semantics + i32 width context handling.
                     _ => return Err(format!("unsupported bitwise operator {:?}", op).into()),
                 };
                 let name = match op {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
                     BinOp::BitXor => "xor",
-                    BinOp::Shl => "shl",
-                    BinOp::Shr => "shr",
                     _ => "bitwise",
                 };
                 Ok(res

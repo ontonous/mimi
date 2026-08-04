@@ -642,7 +642,9 @@ impl<'a> BytecodeVM<'a> {
                                 return Err(InterpError::div_by_zero());
                             }
                             Value::Int(a.checked_div(*b).ok_or_else(|| {
-                                InterpError::integer_overflow("integer division overflow")
+                                InterpError::integer_overflow(
+                                    "integer division overflow (MIN / -1)",
+                                )
                             })?)
                         }
                         _ => {
@@ -670,7 +672,9 @@ impl<'a> BytecodeVM<'a> {
                                 return Err(InterpError::div_by_zero());
                             }
                             Value::Int(a.checked_rem(*b).ok_or_else(|| {
-                                InterpError::integer_overflow("integer remainder overflow")
+                                InterpError::integer_overflow(
+                                    "integer division overflow (MIN / -1)",
+                                )
                             })?)
                         }
                         _ => {
@@ -997,10 +1001,13 @@ impl<'a> BytecodeVM<'a> {
                             return Err(InterpError::new(format!("expected Int, got {}", other)))
                         }
                     };
-                    let r = u32::try_from(b)
-                        .ok()
-                        .and_then(|s| a.checked_shl(s))
-                        .ok_or_else(|| InterpError::integer_overflow("shift overflow in <<"))?;
+                    // 0.34.34 (L1 parity with codegen): hardware-mask semantics.
+                    // The shift amount is masked modulo 64 — exactly what x86
+                    // SHL and aarch64 LSL do, and what codegen observes at O0.
+                    // Pre-fix the VM trapped on amount >= 64 while codegen
+                    // masked, diverging (e.g. i64 `1 << 65`: codegen 2, VM trap).
+                    let s = (((b) as u64) & 63) as u32;
+                    let r = a << s;
                     frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::Shr { rd, ra, rb } => {
@@ -1017,11 +1024,86 @@ impl<'a> BytecodeVM<'a> {
                             return Err(InterpError::new(format!("expected Int, got {}", other)))
                         }
                     };
-                    let r = u32::try_from(b)
-                        .ok()
-                        .and_then(|s| a.checked_shr(s))
-                        .ok_or_else(|| InterpError::integer_overflow("shift overflow in >>"))?;
+                    // 0.34.34: masked arithmetic shift, same parity rationale as Shl.
+                    let s = (((b) as u64) & 63) as u32;
+                    let r = a >> s;
                     frame.regs[rd as usize] = Value::Int(r);
+                }
+                // ── i32 width-fidelity guards (0.34.34, SD-7 / L1) ──
+                Op::CheckI32 { rd, kind } => {
+                    let v = match &self.cur_frame().regs[rd as usize] {
+                        Value::Int(i) => *i,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "internal: CHECK_I32 applied to non-integer {}",
+                                other
+                            )))
+                        }
+                    };
+                    if v < i32::MIN as i64 || v > i32::MAX as i64 {
+                        // Message parity with codegen E0802 texts.
+                        let msg = match kind {
+                            0 => "integer overflow in addition",
+                            1 => "integer overflow in subtraction",
+                            2 => "integer overflow in multiplication",
+                            _ => "integer overflow",
+                        };
+                        return Err(InterpError::integer_overflow(msg));
+                    }
+                }
+                Op::CheckI32DivRem { ra, rb } => {
+                    let frame = self.cur_frame();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(i) => *i,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "internal: CHECK_I32_DIVREM on non-integer {}",
+                                other
+                            )))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(i) => *i,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "internal: CHECK_I32_DIVREM on non-integer {}",
+                                other
+                            )))
+                        }
+                    };
+                    // i32::MIN / -1 (and %) overflows i32 but NOT i64, so the
+                    // generic checked i64 arithmetic misses it; codegen traps.
+                    if a == i32::MIN as i64 && b == -1 {
+                        return Err(InterpError::integer_overflow(
+                            "integer division overflow (MIN / -1)",
+                        ));
+                    }
+                }
+                Op::WrapI32 { rd } => {
+                    let frame = self.cur_frame_mut();
+                    let v = match &frame.regs[rd as usize] {
+                        Value::Int(i) => *i,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "internal: WRAP_I32 applied to non-integer {}",
+                                other
+                            )))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Int((v as i32) as i64);
+                }
+                Op::MaskShiftAmt { rb, mask } => {
+                    let frame = self.cur_frame_mut();
+                    let v = match &frame.regs[rb as usize] {
+                        Value::Int(i) => *i,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "internal: MASK_SHIFT_AMT on non-integer {}",
+                                other
+                            )))
+                        }
+                    };
+                    frame.regs[rb as usize] = Value::Int(((v as u64) & (mask as u64)) as i64);
                 }
                 Op::PowInt { rd, ra, rb } => {
                     let frame = self.cur_frame_mut();
@@ -1040,9 +1122,9 @@ impl<'a> BytecodeVM<'a> {
                     let exp = u32::try_from(b).map_err(|_| {
                         InterpError::new(format!("negative exponent {} in integer power", b))
                     })?;
-                    let r = a
-                        .checked_pow(exp)
-                        .ok_or_else(|| InterpError::integer_overflow("integer power overflow"))?;
+                    let r = a.checked_pow(exp).ok_or_else(|| {
+                        InterpError::integer_overflow("integer overflow in power")
+                    })?;
                     frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::PowFloat { rd, ra, rb } => {
@@ -2384,7 +2466,7 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::Cast { rd, ra, target } => {
                     let v = self.get_reg(ra).clone();
-                    // target: 0 = i64, 1 = f64 (matching compiler convention)
+                    // target: 0 = i64, 1 = f64, 2 = i32 (truncating wrap, 0.34.34)
                     let result = match target {
                         0 => match v {
                             Value::Int(i) => Value::Int(i),
@@ -2403,6 +2485,21 @@ impl<'a> BytecodeVM<'a> {
                             other => {
                                 return Err(InterpError::new(format!(
                                     "cannot cast {} to f64",
+                                    other
+                                )))
+                            }
+                        },
+                        2 => match v {
+                            // 0.34.34 (L1 parity): `as i32` on a wider integer
+                            // TRUNCATES to the i32 width with wrap-around,
+                            // matching codegen (3000000000 as i32 -> -1294967296).
+                            // Pre-fix the VM passed the i64 value through.
+                            Value::Int(i) => Value::Int(i as i32 as i64),
+                            Value::Float(f) => Value::Int(f as i32 as i64),
+                            Value::Bool(b) => Value::Int(b as i32 as i64),
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "cannot cast {} to i32",
                                     other
                                 )))
                             }
