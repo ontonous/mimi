@@ -2,6 +2,42 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.33 — 审计收尾：文档同步残留闭环 + 门禁加深（0.1.4 深度审计修复）
+
+> 依据 2026-08-04 0.1.4 全量深度审计（对照 pre-1.0/05 RC 门禁 + v0.34 验收标准，
+> 全门禁实测：fmt/clippy/check_unsafe_safety/4598 lib + 13 real_world + 28 cli 全绿）。
+> 审计结论：工程侧与代码实现全部达标；0.34.28 同步战役残留 3 处 P0 + 多处 P1/P2，
+> 本 sprint 全部闭环，不留尾巴。
+
+- **P0 闭环（spec 同步闸违规项）**：
+  - spec §6.12：`math` 移出 Removed 清单（§5.6/§6.8 已标 `[stable]`，清单漏改）；
+    multi-target 与 math 升入 Stable 清单（multi-target 移出 Experimental 后未并入）；
+  - `docs/language-requirements.toml` FLOW-TURN-001：become/stay 现行时态描述
+    改为 `return State {}` 唯一终止符（ADR-001 0.34.11）——同步战役漏掉的规范索引文件；
+  - spec 头部差异登记表四条全部闭环（`|>` 条目补 ✅）。
+- **P1 闭环**：pre-1.0 源头九份文档残留（04 multi-target experimental 位置性矛盾×2、
+  04/03 math 移除正文 superseded 注、04 Removed 清单 ADR-003 保留项、AGENTS §0 注记 +
+  坐标漂移 850→883 修正——本地文档族）；support.toml 三条 evidence 刷新
+  （FLOW-PROGRESSIVE-001 implicit main 实测纠正、SYNTAX-REMOVED-001 刷新至 0.34.27、
+  FLOW-MULTI-001 partial 维度澄清）；`docs/syntax-reference.md` 从 golden 真正重新生成
+  （关键字 81→80、软关键字枚举补 and/or/not、§12.2 残留与自指差异表删除，
+  正文与 golden 逐字节一致）；golden §1.3 关键字 box 算术修正（补 and/or/not、删误列 i32）。
+- **P2 闭环**：裁决回写断链——await 删除裁决撤销标注回写（feature-decision-0.34.23、
+  golden §10 0.34.23 行、v0.34 README Phase F 行）；golden §10 记账修正
+  （0.34.1/0.34.18 盖章、0.34.9 计数 30→31、0.34.19 soft 计数 1→3）；
+  dx-backlog 补登记 #13（runs_flow E0221 三层集成）；测试卫生
+  （`multi_target_incompatible_payload_layout_rejected` 改名 `_accepted_adr002` 名实相符 +
+  `flow_turn_become_multi_target` 陈旧 E0226 TODO 删除并补 checker E0420 fail-closed 护栏）；
+  根部垃圾清理（13 个零字节 test_physreg_*.o + 零引用 scratch_lexer.mimi）；
+  0.1.5 zonk 迁移脚手架（`zonk_or_unknown`，dx-backlog #1）收纳提交。
+- **门禁加深（防同类回归）**：`scripts/check_language_docs.py` 新增语义新鲜度检查——
+  become/stay/do 现行时态引用、multi-target experimental 降级、math `[removed]` 标注
+  行级探针（同行裁决标记豁免历史引用）+ spec §6.12 结构引脚 + 关键字计数漂移引脚 +
+  FLOW-MULTI-001 target=stable 引脚。实测 5/5 历史违规复现触发、6/6 合法引用零误报。
+- **门禁结果**：fmt/clippy `-D warnings`/check_unsafe_safety（0 violations）/
+  check_language_docs（31/31 + 新鲜度）全绿；4598 lib（0 failed / 7 ignored）+
+  13 real_world + 28 cli 全绿。0.1.4 保持 `0.1.4-dev`（tag 按用户裁决暂缓）。
+
 ### 0.34.32 — 0.1.4 RC 复核 + 工具门禁（Phase F 收尾）
 
 - **unsafe SAFETY gate 清零（61 → 0）**，CI lint 门禁恢复全绿：
