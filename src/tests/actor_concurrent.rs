@@ -8,6 +8,8 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
+// SAFETY: FFI 回调必须保持 extern "C" ABI；runtime 以函数指针调用本回调，
+// 测试仅验证 actor 生命周期，不触碰共享状态，无内存安全风险。
 unsafe extern "C" fn actor_dispatch(
     _method_id: i32,
     _fields: *mut c_void,
@@ -16,6 +18,8 @@ unsafe extern "C" fn actor_dispatch(
     result: *mut c_void,
     result_size: *mut i64,
 ) {
+    // SAFETY: mimi_actor_spawn 契约保证 result 指向 ≥8 字节可写缓冲（i64 载荷），
+    // result_size 指向有效 i64；本回调仅写入两个标量，不越界。
     unsafe {
         *(result as *mut i64) = 42;
         *result_size = std::mem::size_of::<i64>() as i64;
@@ -90,6 +94,7 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
 
 #[test]
 fn actor_call_drop_l3_stress() {
+    // SAFETY: 同 actor_dispatch——result/result_size 由 spawn 契约保证有效。
     unsafe extern "C" fn dispatch(
         _method_id: i32,
         _fields: *mut c_void,
@@ -98,6 +103,7 @@ fn actor_call_drop_l3_stress() {
         result: *mut c_void,
         result_size: *mut i64,
     ) {
+        // SAFETY: 同 actor_dispatch——result 为 ≥8 字节缓冲，result_size 有效。
         unsafe {
             *(result as *mut i64) = 7;
             *result_size = std::mem::size_of::<i64>() as i64;
@@ -133,6 +139,8 @@ fn actor_call_drop_l3_stress() {
     }
 }
 
+// SAFETY: FFI 回调签名声明，runtime 仅以函数指针调用；测试 harness 专用，
+// 回调内 spawn 的 child actor 生命周期由 spawn_detached/join 契约管理。
 unsafe extern "C" fn lifecycle_dispatch(
     method_id: i32,
     _fields: *mut c_void,
@@ -141,6 +149,8 @@ unsafe extern "C" fn lifecycle_dispatch(
     result: *mut c_void,
     result_size: *mut i64,
 ) {
+    // SAFETY: result 缓冲 ≥8 字节（i64 载荷契约）；child handle 装箱为 i64
+    // 后由 runtime 持有，不在此处解引用，无悬垂风险。
     unsafe {
         let child_fields = 0u8;
         let child = if method_id == 1 {

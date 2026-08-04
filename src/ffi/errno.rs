@@ -456,6 +456,7 @@ impl Errno {
                 // which writes into a caller-provided buffer.
                 let mut buf = [0u8; 256];
                 let name = unsafe {
+                    // SAFETY: strerror_r 写至多 buflen 字节到栈上 buf(256B)，线程安全（XPG POSIX 变体）。
                     // SAFETY: `strerror_r` writes at most `buflen` bytes
                     // (including the NUL terminator) into `buf`.  The
                     // return value is 0 on success, or a positive errno

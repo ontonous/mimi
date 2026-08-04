@@ -7004,6 +7004,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_z_extend(disc_i8, i64_ty, "list_res_set_disc_i64")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let ok_slot = unsafe {
+            // SAFETY: build_gep 为 inkwell LLVM 构建 API；res_ptr 为已分配 {bool,i64,i64} 布局，索引在布局内。
             self.builder
                 .build_gep(
                     i64_ty,
@@ -7019,6 +7020,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_int_value();
         let err_slot = unsafe {
+            // SAFETY: build_gep 为 inkwell LLVM 构建 API；res_ptr 为已分配 {bool,i64,i64} 布局，索引在布局内。
             self.builder
                 .build_gep(
                     i64_ty,
@@ -7201,6 +7203,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_z_extend(disc_i8, i64_ty, "list_opt_set_disc_i64")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let pay_slot = unsafe {
+            // SAFETY: build_gep 为 inkwell LLVM 构建 API；res_ptr 为已分配 {bool,i64,i64} 布局，索引在布局内。
             self.builder
                 .build_gep(
                     i64_ty,

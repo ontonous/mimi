@@ -1296,7 +1296,7 @@ fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
         .as_int()
         .ok_or_else(|| InterpError::new("close_fd: fd must be i32"))? as i32;
     if fd >= 0 {
-        unsafe { libc::close(fd) };
+        unsafe { libc::close(fd) }; // SAFETY: fd>=0 已检查；close_fd builtin 契约要求 fd 为有效描述符。
     }
     Ok(Value::Unit)
 }
@@ -1515,10 +1515,10 @@ fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     if result_ptr.is_null() {
         return Ok(Value::String("[]".to_string()));
     }
-    let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
+    let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) } // SAFETY: result_ptr 非空（上方检查），为 C 侧 NUL 结尾字符串；CStr 借用不释放。
         .to_string_lossy()
         .into_owned();
-    unsafe { libc::free(result_ptr as *mut libc::c_void) };
+    unsafe { libc::free(result_ptr as *mut libc::c_void) }; // SAFETY: result_ptr 为 C 侧分配指针，与上方 CStr 读取配对，释放一次。
     Ok(Value::String(result))
 }
 
@@ -1534,10 +1534,10 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
             r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string(),
         ));
     }
-    let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
+    let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) } // SAFETY: result_ptr 非空（上方检查），为 C 侧 NUL 结尾字符串；CStr 借用不释放。
         .to_string_lossy()
         .into_owned();
-    unsafe { libc::free(result_ptr as *mut libc::c_void) };
+    unsafe { libc::free(result_ptr as *mut libc::c_void) }; // SAFETY: result_ptr 为 C 侧分配指针，与上方 CStr 读取配对，释放一次。
     Ok(Value::String(result))
 }
 

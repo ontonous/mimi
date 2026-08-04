@@ -74,6 +74,7 @@ fn builtin_socket(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     let protocol = args[2]
         .as_int()
         .ok_or_else(|| InterpError::new("socket: protocol must be i32"))? as i32;
+    // SAFETY: libc::socket 标准调用；domain/type_/protocol 已从 Value::as_int 校验为 i32。
     let fd = unsafe { libc::socket(domain, type_, protocol) };
     if fd < 0 {
         return Err(InterpError::new(format!(
@@ -85,6 +86,7 @@ fn builtin_socket(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
         )));
     }
     let reuse: libc::c_int = 1;
+    // SAFETY: fd 为 socket() 返回的有效描述符；&reuse 指向栈上有效 c_int。
     unsafe {
         libc::setsockopt(
             fd,
@@ -113,6 +115,7 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
     let mut so_type: libc::c_int = 0;
     let mut so_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: fd 为 socket() 返回的有效描述符；&mut so_type 指向栈上变量，so_len 携带缓冲区大小。
     let is_socket = unsafe {
         libc::getsockopt(
             fd,
@@ -139,6 +142,7 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
     let c_host = std::ffi::CString::new(host)
         .map_err(|e| InterpError::new(format!("connect: invalid host: {}", e)))?;
+    // SAFETY: zeroed 初始化 POD addrinfo，字段随后显式赋值。
     let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
     hints.ai_family = libc::AF_UNSPEC;
     hints.ai_socktype = libc::SOCK_STREAM;
@@ -146,6 +150,7 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     let c_port =
         std::ffi::CString::new(port_str).map_err(|_| InterpError::new("connect: invalid port"))?;
     let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    // SAFETY: CString::new 保证 NUL 结尾；res 由 getaddrinfo 分配，随后 freeaddrinfo 释放。
     let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
     if err != 0 || res.is_null() {
         return Err(InterpError::new(format!(
@@ -156,6 +161,7 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     let mut ret = -1i64;
     let mut ai = res;
     while !ai.is_null() && ret != 0 {
+        // SAFETY: ai 为 getaddrinfo 返回链表的有效节点；new_fd 来自 socket()，dup2/close 成对释放。
         unsafe {
             let new_fd = libc::socket((*ai).ai_family, (*ai).ai_socktype, (*ai).ai_protocol);
             if new_fd >= 0 {
@@ -178,6 +184,7 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
             ai = (*ai).ai_next;
         }
     }
+    // SAFETY: res 为 getaddrinfo 分配的有效指针，仅释放一次。
     unsafe { libc::freeaddrinfo(res) };
     if ret != 0 {
         return Err(InterpError::new(format!(
@@ -197,10 +204,12 @@ fn builtin_bind(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     let port = args[1]
         .as_int()
         .ok_or_else(|| InterpError::new("bind: port must be i32"))?;
+    // SAFETY: zeroed 初始化 POD sockaddr_in，字段随后显式赋值。
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     addr.sin_family = libc::AF_INET as libc::sa_family_t;
     addr.sin_port = (port as u16).to_be();
     addr.sin_addr.s_addr = libc::INADDR_ANY;
+    // SAFETY: fd 为 socket() 返回的有效描述符；&addr 指向栈上已初始化的 sockaddr_in。
     let ret = unsafe {
         libc::bind(
             fd,
@@ -226,6 +235,7 @@ fn builtin_listen(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     let backlog = args[1]
         .as_int()
         .ok_or_else(|| InterpError::new("listen: backlog must be i32"))? as i32;
+    // SAFETY: fd 为 socket() 返回的有效描述符；backlog 为已校验 i32。
     let ret = unsafe { libc::listen(fd, backlog) };
     if ret < 0 {
         return Err(InterpError::new(format!(
@@ -242,8 +252,10 @@ fn builtin_accept(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("accept: fd must be i32"))? as i32;
+    // SAFETY: zeroed 初始化 POD sockaddr_in；addr_len 携带缓冲区大小。
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     let mut addr_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_in>() as u32;
+    // SAFETY: fd 为 socket() 返回的有效描述符；&mut addr 指向栈上缓冲。
     let client_fd = unsafe {
         libc::accept(
             fd,
@@ -268,6 +280,7 @@ fn builtin_send(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     let data = args[1]
         .as_string()
         .ok_or_else(|| InterpError::new("send: data must be string"))?;
+    // SAFETY: data.as_ptr() 指向 Rust String 数据，len 为有效长度；libc 按 len 字节读。
     let sent = unsafe { libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), 0) };
     if sent < 0 {
         return Err(InterpError::new(format!(
@@ -291,6 +304,7 @@ fn builtin_recv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
         return Err(InterpError::new("recv: buf_size must be positive"));
     }
     let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
+    // SAFETY: buf 为 vec![0; buf_size]，as_mut_ptr 指向其堆缓冲，长度与容量匹配。
     let n = unsafe {
         libc::recv(
             fd,
@@ -318,12 +332,14 @@ fn builtin_recv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
 // === HTTP builtins ===
 
 fn http_connect(host: &str, port: i64) -> Result<i64, InterpError> {
+    // SAFETY: libc::socket 标准调用；常量参数均为合法 i32。
     let domain = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
     if domain < 0 {
         return Err(InterpError::new("http: failed to create socket"));
     }
     let c_host = std::ffi::CString::new(host)
         .map_err(|e| InterpError::new(format!("http: invalid host: {}", e)))?;
+    // SAFETY: zeroed 初始化 POD addrinfo，字段随后显式赋值。
     let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
     hints.ai_family = libc::AF_UNSPEC;
     hints.ai_socktype = libc::SOCK_STREAM;
@@ -331,17 +347,22 @@ fn http_connect(host: &str, port: i64) -> Result<i64, InterpError> {
     let c_port =
         std::ffi::CString::new(port_str).map_err(|_| InterpError::new("http: invalid port"))?;
     let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    // SAFETY: CString::new 保证 NUL 结尾；res 由 getaddrinfo 分配，随后 freeaddrinfo 释放。
     let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
     if err != 0 || res.is_null() {
+        // SAFETY: domain 为 socket() 返回的有效描述符，close 释放一次。
         unsafe { libc::close(domain) };
         return Err(InterpError::new(format!(
             "http: could not resolve host '{}'",
             host
         )));
     }
+    // SAFETY: (*res) 指向 getaddrinfo 返回链表的有效节点。
     let ret = unsafe { libc::connect(domain, (*res).ai_addr, (*res).ai_addrlen) };
+    // SAFETY: res 为 getaddrinfo 分配的有效指针，仅释放一次。
     unsafe { libc::freeaddrinfo(res) };
     if ret < 0 {
+        // SAFETY: 同上——domain 有效，close 释放一次。
         unsafe { libc::close(domain) };
         return Err(InterpError::new(format!(
             "http: connection refused to '{}:{}'",
@@ -354,6 +375,7 @@ fn http_connect(host: &str, port: i64) -> Result<i64, InterpError> {
 fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpError> {
     let mut sent: isize = 0;
     while (sent as usize) < len {
+        // SAFETY: buf 指向调用方提供的有效缓冲，len-sent 为剩余字节数；指针算术在分配内。
         let n = unsafe {
             libc::send(
                 fd,
@@ -368,6 +390,7 @@ fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpE
             ));
         }
         if n < 0 {
+            // SAFETY: libc::__errno_location 返回线程局部 errno 的有效非空指针。
             let err = unsafe { *libc::__errno_location() };
             if err == libc::EINTR {
                 continue;
@@ -382,8 +405,10 @@ fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpE
 fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
     let mut chunk = vec![0u8; 32768];
     loop {
+        // SAFETY: chunk 为 vec![0u8; 32768]，指针与长度匹配。
         let n = unsafe { libc::recv(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len(), 0) };
         if n < 0 {
+            // SAFETY: 同上——线程局部 errno。
             let err = unsafe { *libc::__errno_location() };
             if err == libc::EINTR {
                 continue;
@@ -408,6 +433,7 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
     )?;
     let mut buf = Vec::new();
     recv_all_into(fd as i32, &mut buf)?;
+    // SAFETY: fd 为 socket() 返回的有效描述符，close 释放一次。
     unsafe { libc::close(fd as i32) };
     if buf.is_empty() {
         return Err(InterpError::new("http: empty response"));

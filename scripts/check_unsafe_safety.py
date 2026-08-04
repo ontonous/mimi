@@ -35,9 +35,18 @@ BASELINE_NON_RUNTIME = 37
 OPENER = re.compile(r"\bunsafe\b\s*(\{|fn\b|extern\b|impl\b|trait\b|$)")
 SAFETY = re.compile(r"SAFETY", re.IGNORECASE)
 # Strip string-literal contents so prose like `"unsafe extern ..."` in an assert
-# message does not false-match. Handles escaped quotes; raw/multiline strings
-# are not fully modelled (acceptable for a baseline-lock heuristic).
+# message does not false-match. Handles escaped quotes and raw strings
+# (`r#"..."#`, `r##"..."##`) — mimi test sources embed `unsafe { }` blocks as
+# raw-string program text, which are not Rust unsafe and must not count.
+RAW_STRING = re.compile(r'r(#{0,255})"(?s:.*?)"\1')
 STRING_LIT = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def strip_strings(code: str) -> str:
+    # Remove raw strings first (their interior may contain plain quotes),
+    # then regular string literals.
+    code = RAW_STRING.sub('""', code)
+    return STRING_LIT.sub('""', code)
 
 
 def is_comment_line(s: str) -> bool:
@@ -59,6 +68,14 @@ def has_safety_above(lines, i):
     detected regardless of its height. Also accepts an inline `// SAFETY` on
     the opener line itself."""
     if "//" in lines[i] and SAFETY.search(lines[i].split("//", 1)[1]):
+        return True
+    # rustfmt moves an inline `unsafe { // SAFETY: ... }` note to the first
+    # line inside the block (`unsafe {` then `// SAFETY: ...`). Accept that
+    # layout too: the note must be the first non-blank line after the opener.
+    j = i + 1
+    while j < len(lines) and lines[j].strip() == "":
+        j += 1
+    if j < len(lines) and is_comment_line(lines[j]) and SAFETY.search(lines[j]):
         return True
     j = i - 1
     blanks = 0
@@ -84,7 +101,7 @@ def has_safety_above(lines, i):
         # A code line: if it is itself an unsafe opener, it belongs to the same
         # unsafe group (e.g. paired `unsafe impl Send`/`Sync`), so keep walking
         # back to the shared comment block. Any other code line ends the block.
-        code = STRING_LIT.sub('""', lines[j].split("//", 1)[0])
+        code = strip_strings(lines[j].split("//", 1)[0])
         if OPENER.search(code):
             if "//" in lines[j] and SAFETY.search(lines[j].split("//", 1)[1]):
                 return True
@@ -98,13 +115,17 @@ def has_safety_above(lines, i):
 def scan_file(path: str):
     """Return list of (lineno, line) violations in this file."""
     with open(path, encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
+        content = f.read()
+    # Strip raw strings across the whole file first — their bodies span many
+    # lines (mimi test sources embed `unsafe { }` as raw-string program text),
+    # so per-line stripping cannot see the opening `r#"`. Keep the newline
+    # count intact so reported line numbers match the original file.
+    lines = RAW_STRING.sub(lambda m: "\n" * (m.group(0).count("\n")), content).splitlines()
     out = []
     for i, line in enumerate(lines):
         if is_comment_line(line):
             continue
-        code = line.split("//", 1)[0]
-        code = STRING_LIT.sub('""', code)
+        code = STRING_LIT.sub('""', line.split("//", 1)[0])
         if not OPENER.search(code):
             continue
         if not has_safety_above(lines, i):

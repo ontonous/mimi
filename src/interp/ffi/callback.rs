@@ -479,7 +479,7 @@ unsafe fn callback_trampoline_inner(
                     // contains the transferred C string pointer allocated by malloc/strdup.
                     let owned_ptr = unsafe { *(arg_slot as *const *mut libc::c_void) };
                     if !owned_ptr.is_null() {
-                        unsafe { libc::free(owned_ptr) };
+                        unsafe { libc::free(owned_ptr) }; // SAFETY: owned_ptr 为 C 侧 malloc/strdup 分配（上方非空检查），libc::free 配对释放。
                     }
                 }
             }
@@ -496,7 +496,7 @@ unsafe fn callback_trampoline_inner(
         Some(p) => p,
         None => return,
     };
-    let runner = unsafe { &mut *runner_ptr };
+    let runner = unsafe { &mut *runner_ptr }; // SAFETY: runner_ptr 为 FFI_CALLBACK_CTX 当前线程指针（None 已提前返回），同步回调期间原栈帧存活。
     let closure_result = runner.apply_closure_ffi(&closure, mimi_args);
     // Restore the runner pointer after the callback completes
     FFI_CALLBACK_CTX.with(|c| {
@@ -546,7 +546,7 @@ unsafe fn callback_trampoline_inner(
                 // contains the transferred C string pointer allocated by malloc/strdup.
                 let owned_ptr = unsafe { *(arg_slot as *const *mut libc::c_void) };
                 if !owned_ptr.is_null() {
-                    unsafe { libc::free(owned_ptr) };
+                    unsafe { libc::free(owned_ptr) }; // SAFETY: owned_ptr 为 C 侧 malloc/strdup 分配（上方非空检查），libc::free 配对释放。
                 }
             }
         }
