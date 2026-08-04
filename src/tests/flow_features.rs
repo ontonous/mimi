@@ -4954,13 +4954,14 @@ func main() -> i32 {
 }
 
 #[test]
-fn multi_target_incompatible_payload_layout_rejected() {
+fn multi_target_incompatible_payload_layout_accepted_adr002() {
     // v0.34.15 (ADR-002, golden §1.2): payload layouts MAY differ across
     // multi-target states — the runtime dispatches on the state TAG, never on
     // layout. Pre-0.34.15 rejected differing layouts with E0419 (M6); that
-    // check was inverted. The transition type-checks, bytecode runs both
-    // branches to the correct tagged state, and codegen fails CLOSED
-    // (tagged-state-union ABI pending — never silently miscompiles).
+    // check was inverted, so this test asserts ACCEPTANCE (name updated
+    // 0.34.33 to match the post-inversion contract). The transition
+    // type-checks, bytecode runs both branches to the correct tagged state,
+    // and codegen dispatches via the tagged-state-union ABI.
     let src = r#"
 flow C {
     state A { v: i32 }
@@ -5987,9 +5988,12 @@ func main() -> i32 {
 fn flow_turn_become_multi_target() {
     // v0.34.11 (ADR-001): `become` removed — multi-target transition with
     // conditional uses `return Open { ... }` / `return Closed { ... }`.
-    // TODO: checker does not yet support flow states as match patterns
-    // (E0226 "undefined constructor"). Use unchecked run until multi-target
-    // match support is implemented in the checker.
+    // v0.34.33: this test intentionally exercises the BYTECODE-LEVEL ABI
+    // (direct field access on a tagged multi-target result) through the
+    // unchecked harness. In checked mode this form is fail-closed with E0420
+    // (asserted below; canonical test: `multi_target_direct_field_rejected`).
+    // Checked dual-backend dispatch via match-on-state-tag is covered by
+    // `multi_target_codegen_dual_backend_tag_dispatch`.
     let src = r#"
 flow Gate {
     state Idle { v: i32 }
@@ -6011,6 +6015,16 @@ func main() -> i32 {
 "#;
     let result = run_source_bytecode_result(src);
     assert_eq!(result, Ok(interp::Value::Int(10)));
+    // Contract: the same source is fail-closed (E0420) in checked mode, so
+    // this unchecked ABI probe does not silently weaken L2.
+    let errors = check_source(src).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.message.contains("E0420") || d.message.contains("multi-target")),
+        "expected E0420 for direct field access on multi-target, got: {:?}",
+        errors
+    );
 }
 
 #[test]
