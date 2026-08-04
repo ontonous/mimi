@@ -210,6 +210,15 @@ pub struct CodeGenerator<'ctx> {
     /// `free_heap_allocs` emits runtime guards so these envs survive scope
     /// exit (the caller owns them). Cleared on every `free_heap_allocs` call.
     claimed_returned_envs: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// Q2 (rc-quality-gate-0.34.25b): display-formatter scratch buffers
+    /// (Result/List/Tuple/Record print paths) that are consumed by exactly
+    /// one print-family call. Registered at malloc time, freed immediately
+    /// after the consuming printf/puts via `flush_display_frees`.
+    /// Kept separate from `heap_allocs` because the lifetime is
+    /// "this print call", not "this scope", and the pointers may be nested
+    /// (an inner formatter's buffer is snprintf'd into an outer one before
+    /// the single printf consumes both).
+    display_frees: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
     /// B9: heap-scope depth at each function-like entry (legacy function,
     /// generic instantiation, lambda body, actor method). Early-return
     /// flushes (`flush_heap_scopes_to_boundary`) pop scopes down to the
@@ -576,6 +585,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             tuple_type_stack: Vec::new(),
             pending_len_is_string: false,
             pending_print_arg_types: Vec::new(),
+            display_frees: std::cell::RefCell::new(Vec::new()),
             pending_push_elem_type: None,
             pending_list_elem_type: None,
             pending_to_string_is_any: false,
@@ -1640,6 +1650,82 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// implementation pushes the raw pointer to the stack; entry-block alloca
     /// + null-init is added by a future refactor (the existing Ptr→PtrSlot
     ///   transition is partially in place for the slot-load based consumers).
+    /// Q2 (rc-quality-gate-0.34.25b): register a display-formatter scratch
+    /// buffer for release at the consuming print call. These buffers are
+    /// produced by the io display emitters (Result/List/Tuple/Record/Enum/
+    /// Option formatting), consumed by exactly one printf/puts, and were
+    /// previously never freed (256B per printed Result, 4096B per printed
+    /// List, ...). Freed by `flush_display_frees` immediately after the
+    /// print call, so a loop printing a Result leaks zero bytes.
+    pub(super) fn register_display_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
+        self.display_frees.borrow_mut().push(ptr);
+    }
+
+    /// Q2: free every display-formatter buffer consumed by the print call
+    /// just emitted. Must run *after* the printf/puts build_call that uses
+    /// the pointers. Safe: display buffers are referenced only by that
+    /// call's arguments and are dead afterwards. Nested formatter buffers
+    /// (inner snprintf'd into an outer one) are all released here in one
+    /// pass, so no intermediate buffer leaks either.
+    pub(super) fn flush_display_frees(&self) -> Result<(), CompileError> {
+        // Take the buffer list first: build_call below may re-enter codegen
+        // paths (runtime fn resolution), and holding the RefCell borrow
+        // across it risked a re-entrant borrow panicking mid-emit.
+        let frees = std::mem::take(&mut *self.display_frees.borrow_mut());
+        if frees.is_empty() {
+            return Ok(());
+        }
+        if let Ok(free_fn) = self.get_runtime_fn("free") {
+            for ptr in frees.iter() {
+                self.build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::PointerValue(*ptr)],
+                    "display_free",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Q2 (0.34.25b): snapshot the display-frees list length. Sub-emitters
+    /// called from *inside* a runtime branch/loop (Result Ok arm, list element
+    /// formatter) register their buffers here, but the top-level
+    /// `flush_display_frees` runs after printf — for an unexecuted arm those
+    /// pointers are undef (free(garbage) → segfault) and for an N>1 loop all
+    /// but the last iteration leak. Callers in branched display emitters take
+    /// a marker after their own unconditional buffer, then call
+    /// `flush_display_since(marker)` at the end of each arm/iteration body:
+    /// the frees are emitted *inside* the same runtime block as the mallocs,
+    /// so they execute exactly as often as the allocations.
+    pub(super) fn display_marker(&self) -> usize {
+        self.display_frees.borrow().len()
+    }
+
+    /// Q2: free every display buffer registered since `marker` and drop them
+    /// from the pending list (so the end-of-print flush does not double-free).
+    /// Must be emitted where `marker`'s allocations are guaranteed live — a
+    /// branch arm (after the last use of that arm's sub-buffers) or a loop
+    /// body (after the element formatter was consumed).
+    pub(super) fn flush_display_since(&self, marker: usize) -> Result<(), CompileError> {
+        let tail: Vec<_> = {
+            let mut frees = self.display_frees.borrow_mut();
+            if frees.len() <= marker {
+                return Ok(());
+            }
+            frees.split_off(marker)
+        };
+        if let Ok(free_fn) = self.get_runtime_fn("free") {
+            for ptr in tail.iter() {
+                self.build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::PointerValue(*ptr)],
+                    "disp_arm_free",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
         // Materialize the pointer into an entry-block alloca: cleanup may be
         // emitted in a later basic block (merge block, function return), and

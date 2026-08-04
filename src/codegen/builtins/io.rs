@@ -7,6 +7,26 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 use inkwell::IntPredicate;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// Q2 (rc-quality-gate-0.34.25b): malloc a display-formatter scratch
+    /// buffer and register it for release at the consuming print call.
+    /// Display emitters (Result/List/Tuple/Record/Enum/Option/Map formatters)
+    /// must use this instead of raw `malloc_or_abort`: the returned buffer
+    /// is consumed by exactly one printf/puts and freed by
+    /// `flush_display_frees` immediately after that call — no more 256B-
+    /// per-printed-Result linear leaks.
+    ///
+    /// NOT for I/O buffers (input_line / read / exec argv), whose lifetime
+    /// is managed by the runtime and must NOT be freed here.
+    pub(super) fn malloc_display_buf(
+        &self,
+        size: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let ptr = self.malloc_or_abort(size, name)?;
+        self.register_display_alloc(ptr);
+        Ok(ptr)
+    }
+
     pub(super) fn compile_println(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -32,6 +52,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if !is_list && !is_record {
                     let puts = self.get_runtime_fn("puts")?;
                     self.build_call(puts, args, "puts_call")?;
+                    // Q2: the single %s arg may be a display buffer — release
+                    // it now that puts has consumed it.
+                    self.flush_display_frees()?;
                     return Ok(i64_ty.const_int(0, false).into());
                 }
             }
@@ -61,6 +84,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         printf_args.extend(print_args);
         let printf = self.get_runtime_fn("printf")?;
         self.build_call(printf, &printf_args, "printf_call")?;
+        // Q2: release display buffers consumed by this printf call.
+        self.flush_display_frees()?;
         Ok(i64_ty.const_int(0, false).into())
     }
 
@@ -629,7 +654,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_map_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_map_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_map_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_map_open")
@@ -917,6 +943,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_map_strcat_elem",
         )?;
+        // Q2 (0.34.25b): element formatters allocated their buffers inside
+        // this loop body — free them here, per iteration, so empty lists
+        // never free undef pointers and N-element lists free all N sets.
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_map_next")
@@ -953,7 +983,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_set_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_set_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_set_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_set_open")
@@ -1234,6 +1265,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_set_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_set_next")
@@ -2597,7 +2629,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_tup_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_tup_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_tup_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_tup_open")
@@ -2706,6 +2739,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_tup_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_tup_next")
@@ -2742,7 +2776,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_enum_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_enum_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_enum_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_enum_open")
@@ -2864,6 +2899,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_enum_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_enum_next")
@@ -2901,7 +2937,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_res_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_res_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_res_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_res_open")
@@ -3043,6 +3080,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_res_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_res_next")
@@ -3084,7 +3122,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_opt_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_opt_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_opt_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_opt_open")
@@ -3213,6 +3252,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_opt_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_opt_next")
@@ -3251,7 +3291,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let len = self.load_list_len(alloca)?;
         // Heap buffer for final string (grow generously).
         let buf_size = i64_ty.const_int(4096, false);
-        let buf = self.malloc_or_abort(buf_size, "list_rec_buf")?;
+        let buf = self.malloc_display_buf(buf_size, "list_rec_buf")?;
+        let disp_marker = self.display_marker();
         // Write '['
         let open = self
             .builder
@@ -3359,6 +3400,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_rec_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_rec_next")
@@ -3417,7 +3459,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             payload
         };
-        let buf = self.malloc_or_abort(i64_ty.const_int(128, false), "enum_disp_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(128, false), "enum_disp_buf")?;
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let i32_ty = self.context.i32_type();
@@ -3717,7 +3759,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         fmt.push_str(" }");
         let est = (fmt.len() + fields.len() * 64 + 64).max(128) as u64;
         let buf_size = i64_ty.const_int(est, false);
-        let buf = self.malloc_or_abort(buf_size, "rec_disp_buf")?;
+        let buf = self.malloc_display_buf(buf_size, "rec_disp_buf")?;
         let fmt_ptr = self
             .builder
             .build_global_string_ptr(&fmt, "rec_disp_fmt")
@@ -4294,7 +4336,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ok_val = self.build_extract_value(sv.into(), 1, "res_ok")?;
         let err_val = self.build_extract_value(sv.into(), 2, "res_err")?;
         let buf_size = i64_ty.const_int(256, false);
-        let buf = self.malloc_or_abort(buf_size, "res_print_buf")?;
+        let buf = self.malloc_display_buf(buf_size, "res_print_buf")?;
+        let disp_marker = self.display_marker();
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let i32_ty = self.context.i32_type();
@@ -4372,6 +4415,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ],
                         "res_ok_rec_snprintf",
                     )?;
+                    self.flush_display_since(disp_marker)?;
                     self.builder
                         .build_unconditional_branch(merge_bb)
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -4954,6 +4998,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ],
                             "res_ok_ms_snprintf",
                         )?;
+                        self.flush_display_since(disp_marker)?;
                         self.builder
                             .build_unconditional_branch(merge_bb)
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -5292,6 +5337,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )?;
                 }
             }
+            self.flush_display_since(disp_marker)?;
             self.builder
                 .build_unconditional_branch(merge_bb)
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -5846,7 +5892,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("None()", "opt_none_str")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let buf_size = i64_ty.const_int(512, false);
-        let buf = self.malloc_or_abort(buf_size, "opt_print_buf")?;
+        let buf = self.malloc_display_buf(buf_size, "opt_print_buf")?;
+        let opt_disp_marker = self.display_marker();
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let i32_ty = self.context.i32_type();
@@ -6096,6 +6143,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
             }
         }
+        self.flush_display_since(opt_disp_marker)?;
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -8262,7 +8310,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let fields = sv.get_type().get_field_types();
         let i64_ty = self.context.i64_type();
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "prod_tup_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "prod_tup_buf")?;
         let open = self
             .builder
             .build_global_string_ptr("(", "prod_tup_open")
@@ -8296,7 +8344,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             let field_val =
                 self.build_extract_value(sv.into(), i as u32, &format!("prod_tup_{}", i))?;
-            let piece = self.malloc_or_abort(i64_ty.const_int(256, false), "prod_piece")?;
+            let piece = self.malloc_display_buf(i64_ty.const_int(256, false), "prod_piece")?;
             match (ft, field_val) {
                 (BasicTypeEnum::IntType(it), BasicValueEnum::IntValue(iv)) => {
                     if it.get_bit_width() == 1 {
@@ -8722,7 +8770,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         fmt.push(')');
         let est = (fmt.len() + fields.len() * 24 + 64) as u64;
         let buf_size = i64_ty.const_int(est, false);
-        let buf = self.malloc_or_abort(buf_size, "tup_print_buf")?;
+        let buf = self.malloc_display_buf(buf_size, "tup_print_buf")?;
         let fmt_ptr = self
             .builder
             .build_global_string_ptr(&fmt, "tup_print_fmt")
@@ -8781,6 +8829,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_list_i32_to_string returned void")?
             .into_pointer_value();
+        // Q2: the runtime helper allocates a C string consumed by the
+        // print call — register it for release at flush_display_frees.
+        self.register_display_alloc(raw);
         Ok(raw)
     }
 
@@ -8797,7 +8848,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_list_tup_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_buf")?;
+        let buf = self.malloc_display_buf(i64_ty.const_int(8192, false), "list_list_tup_buf")?;
+        let disp_marker = self.display_marker();
         let open = self
             .builder
             .build_global_string_ptr("[", "list_list_tup_open")
@@ -8920,6 +8972,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_list_tup_strcat_elem",
         )?;
+        self.flush_display_since(disp_marker)?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), "list_list_tup_next")
@@ -9177,6 +9230,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_list_to_string returned void")?
             .into_pointer_value();
+        // Q2: register the runtime-allocated C string for display release.
+        self.register_display_alloc(raw);
         Ok(raw)
     }
 
@@ -9206,6 +9261,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         printf_args.push(print_arg);
         let printf = self.get_runtime_fn("printf")?;
         self.build_call(printf, &printf_args, "printf_call")?;
+        // Q2: release display buffers consumed by this printf call.
+        self.flush_display_frees()?;
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
@@ -9239,6 +9296,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_function("printf")
             .ok_or_else(|| "printf not declared".to_string())?;
         self.build_call(printf, &printf_args, "eprintf_call")?;
+        // Q2: release display buffers consumed by this eprintf call.
+        self.flush_display_frees()?;
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
