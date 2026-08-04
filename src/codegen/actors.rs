@@ -794,7 +794,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.claim_returned_enum_box(val, ret_type)?;
                 let ensures = self.ensures_stmts.clone();
                 for ensures_expr in &ensures {
-                    self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
+                    self.compile_contract_assert(
+                        ensures_expr,
+                        vars,
+                        super::scope::ContractPhase::Ensures,
+                    )?;
                 }
                 self.pop_shared_scope()?;
                 self.flush_heap_scopes_to_boundary()?;
@@ -807,7 +811,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             Stmt::Return(None) => {
                 let ensures = self.ensures_stmts.clone();
                 for ensures_expr in &ensures {
-                    self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
+                    self.compile_contract_assert(
+                        ensures_expr,
+                        vars,
+                        super::scope::ContractPhase::Ensures,
+                    )?;
                 }
                 self.pop_shared_scope()?;
                 self.flush_heap_scopes_to_boundary()?;
@@ -1191,7 +1199,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.block_has_terminator() {
             let ensures = self.ensures_stmts.clone();
             for ensures_expr in &ensures {
-                self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
+                self.compile_contract_assert(
+                    ensures_expr,
+                    vars,
+                    super::scope::ContractPhase::Ensures,
+                )?;
             }
             let last_val = self.adjust_int_val(last_val, ret_type)?;
             // Same string-struct detection as emit_implicit_return (func.rs:1777-1809).

@@ -19092,8 +19092,14 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     extern "C" {
         fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     }
-    const PREFIX: &[u8] = b"[FFI contract violation] ";
-    const HINT: &[u8] = b"\nHint: use --skip-verify-ffi to disable contract checking.\n";
+    // Neutral prefix: this abort path serves contract violations, list
+    // out-of-bounds, OOM, and string range checks alike. The category lives in
+    // the caller-baked message (contract messages carry their own `[E0808]`
+    // code, span, source line and disable-hint since 0.34.34). The old
+    // "[FFI contract violation]" label was wrong for every non-FFI caller, and
+    // the fixed `--skip-verify-ffi` hint was wrong for `--verify-contracts`
+    // binaries — both removed.
+    const PREFIX: &[u8] = b"[mimi] ";
     const DETAIL: &[u8] = b"(no details)\n";
     // RT-C3: must stay async-signal-safe — no allocation (no to_string_lossy).
     // SAFETY: writing static / C-string byte buffers to stderr (fd 2) is
@@ -19114,7 +19120,6 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
         } else {
             let _ = write(2, DETAIL.as_ptr() as *const std::ffi::c_void, DETAIL.len());
         }
-        let _ = write(2, HINT.as_ptr() as *const std::ffi::c_void, HINT.len());
     }
 
     let handler_ptr = ERROR_HANDLER.load(Ordering::Acquire);

@@ -112,14 +112,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
-                        let fn_name: String = self
-                            .current_function()
-                            .map(|f| f.get_name().to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "unknown".to_string());
                         self.compile_contract_assert(
                             ensures_expr,
                             vars,
-                            &format!("ensures violation in '{}'", fn_name),
+                            super::scope::ContractPhase::Ensures,
                         )?;
                     }
                     self.emit_all_shared_releases()?;
@@ -133,14 +129,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(None) => {
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
-                        let fn_name: String = self
-                            .current_function()
-                            .map(|f| f.get_name().to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "unknown".to_string());
                         self.compile_contract_assert(
                             ensures_expr,
                             vars,
-                            &format!("ensures violation in '{}'", fn_name),
+                            super::scope::ContractPhase::Ensures,
                         )?;
                     }
                     self.emit_all_shared_releases()?;
