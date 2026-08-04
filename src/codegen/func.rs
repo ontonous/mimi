@@ -2977,6 +2977,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // snapshot — deleting the first block repeatedly until no
                 // blocks remain.
                 unsafe {
+                    // SAFETY: inkwell delete() 要求可变函数上下文；count_basic_blocks()>0 保证至少一个块，删除后引用不再使用。
                     while function.count_basic_blocks() > 0 {
                         if let Some(bb) = function.get_first_basic_block() {
                             let _ = bb.delete();

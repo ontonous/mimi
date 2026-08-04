@@ -203,6 +203,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         .open(&lock_path)
         .map_err(|e| format!("create lock: {}", e))?;
     #[cfg(unix)]
+    // SAFETY: fd 是上方 OpenOptions 真实打开的锁文件，flock 参数满足 libc 前置条件。
     unsafe {
         libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
     }
@@ -210,6 +211,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     // Check again after acquiring lock (another thread may have compiled it)
     if lib_path.exists() {
         #[cfg(unix)]
+        // SAFETY: 同上——已持有锁的同一 fd 释放，无别名；参数有效。
         unsafe {
             libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN);
         }
@@ -239,6 +241,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         #[cfg(unix)]
+        // SAFETY: 同上——同一 fd 释放锁，参数有效。
         unsafe {
             libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN);
         }
@@ -273,6 +276,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     }
 
     #[cfg(unix)]
+    // SAFETY: 同上——正常路径释放锁。
     unsafe {
         libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN);
     }
@@ -297,6 +301,7 @@ impl FfiEnvLock {
 
         // Use file locking to ensure exclusive access
         #[cfg(unix)]
+        // SAFETY: fd 来自已打开的真实锁文件，flock 上锁参数有效。
         unsafe {
             use std::os::unix::io::AsRawFd;
             libc::flock(file.as_raw_fd(), libc::LOCK_EX);

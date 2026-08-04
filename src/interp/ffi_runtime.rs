@@ -594,6 +594,7 @@ impl FfiRuntime {
                 // SD-4: signal guard for scalar returns.
                 super::ffi::signal_guard::call_guarded(|| {
                     // SAFETY: call_ffi_raw is an unsafe fn; its contract is satisfied
+
                     // by the valid CIF, code pointer, and argument slice.
                     unsafe { Self::call_ffi_raw(&cif, code_ptr, &ffi_args, &contract.ret) }
                 })
@@ -718,6 +719,9 @@ impl FfiRuntime {
                     ))
                 }
             };
+            // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
+            // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
+            // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
             let runner = unsafe { &mut *runner };
             let result = runner.eval_contract_expr(requires_expr, None);
             match result {
@@ -758,6 +762,7 @@ impl FfiRuntime {
                     ))
                 }
             };
+            // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
             let runner = unsafe { &mut *runner };
             let result = runner.eval_contract_expr(ensures_expr, Some(return_value));
             match result {
@@ -1085,6 +1090,8 @@ impl FfiRuntime {
         }
     }
 
+    /// SAFETY: 本函数为 FFI 结构体返回路径的低层入口，调用方必须保证
+    /// rvalue 指向有效可写缓冲（大小 ≥ 结构体返回类型），code_ptr 非空（见下方检查）。
     /// Call a C function that returns a struct by value, writing into a
     /// caller-provided buffer. Uses the low-level `raw::ffi_call` API to
     /// supply a custom return-value buffer of the struct's size.
@@ -1101,6 +1108,7 @@ impl FfiRuntime {
         if code_ptr.as_ptr().is_null() {
             return;
         }
+        // SAFETY: code_ptr 已在上方拒绝 null；as_safe_fun 解引用指向有效函数指针。
         let fn_ptr = unsafe { *code_ptr.as_safe_fun() };
         // SAFETY: ffi_call is called with a valid CIF, function pointer, return
         // buffer, and argument array; all lifetimes exceed this call.
@@ -1123,6 +1131,7 @@ impl FfiRuntime {
         ret_contract: &FfiRetContract,
     ) -> Result<i64, String> {
         // SAFETY: call_ffi_raw is an unsafe fn; its contract is satisfied by the
+
         // valid CIF, code pointer, and argument slice passed by call_extern.
         unsafe { Ok(Self::call_ffi_raw(cif, code_ptr, ffi_args, ret_contract)) }
     }
@@ -1509,7 +1518,7 @@ impl FfiRuntime {
                     // The FfiRetContract::String contract asserts the C function returns
                     // a valid null-terminated C string (borrowed, Mimi does NOT free).
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) }
+                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) } // SAFETY: result 为 FFI 返回的非空指针（String/StringOwned 契约保证 NUL 结尾），CStr 仅借用不释放。
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid string pointer (address {:#x})", result
                     ))?;
@@ -1538,7 +1547,7 @@ impl FfiRuntime {
                     // a valid, null-terminated string that Mimi will free. catch_unwind
                     // only catches Rust panics, not SIGSEGV from an invalid pointer.
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) }
+                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) } // SAFETY: result 为 FFI 返回的非空指针（String/StringOwned 契约保证 NUL 结尾），CStr 仅借用不释放。
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid string pointer (address {:#x})", result
                     ))?;
@@ -1557,7 +1566,7 @@ impl FfiRuntime {
                     // valid, null-terminated string that Mimi will free. catch_unwind
                     // only catches Rust panics, not SIGSEGV from an invalid pointer.
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) }
+                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) } // SAFETY: result 为 FFI 返回的非空指针（String/StringOwned 契约保证 NUL 结尾），CStr 仅借用不释放。
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid JSON string pointer (address {:#x})", result
                     ))?;
@@ -1767,9 +1776,11 @@ impl FfiRuntime {
             None => {
                 return Err(Errno::Generic(
                     "FfiRuntime: no execution engine (runner) set for extern call".into(),
-                ))
+                ));
+                // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
             }
         };
+        // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
         let runner = unsafe { &mut *runner };
         super::ffi::callback::ensure_callback_file(runner.ffi_file());
         // 0.33 Phase D: register the VM's BytecodeProgram for cross-thread
@@ -1852,7 +1863,7 @@ impl FfiRuntime {
                 // SAFETY: reclaim userdata Box into keepalive alongside Closure.
                 let keepalive = super::ffi::callback::CallbackTrampolineKeepalive {
                     _closure: Box::new(ffi_closure),
-                    _userdata: unsafe { Box::from_raw(userdata_ptr) },
+                    _userdata: unsafe { Box::from_raw(userdata_ptr) }, // SAFETY: 上方 Box::into_raw 转移所有权至裸指针，此处 from_raw 收回，配对无双重释放。
                 };
 
                 if let Ok(mut store) = super::ffi::callback::global_callback_store().lock() {

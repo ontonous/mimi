@@ -175,6 +175,7 @@ fn run_watch(
     // stopped normally.
     WATCH_RUNNING.store(true, Ordering::SeqCst);
     unsafe {
+        // SAFETY: libc::signal 标准调用；watch_sigint_handler 为 extern "C" fn，SIGINT 仅置位原子标志。
         libc::signal(
             libc::SIGINT,
             watch_sigint_handler as *const () as libc::sighandler_t,

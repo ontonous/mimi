@@ -402,6 +402,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 _ => i64_ty.const_int(0, false),
                             };
                             let slot = unsafe {
+                                // SAFETY: build_gep 为 inkwell LLVM 构建 API；base 为已分配布局指针，索引在边界内。
                                 self.builder
                                     .build_gep(
                                         i64_ty,
