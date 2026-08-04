@@ -9,19 +9,25 @@ mod colors {
     pub const BLUE: &str = "\x1b[34m";
     pub const CYAN: &str = "\x1b[36m";
     pub const BOLD: &str = "\x1b[1m";
-    pub const DIM: &str = "\x1b[2m";
 }
 
-/// Format a diagnostic for terminal output with colors and source context.
-///
-/// # Arguments
-/// * `diagnostic` - The diagnostic to format
-/// * `source` - The source code (optional, for showing code snippets)
-/// * `filename` - The filename to show in the header
-pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename: &str) -> String {
-    let mut out = String::new();
+/// Maximum characters for an inline `src:` snippet — keeps the diagnostic
+/// line bounded on pathological lines.
+const MAX_SRC_SNIPPET_CHARS: usize = 200;
 
-    // Header: error[E0200]: message
+/// Format a diagnostic as a single dense line (machine-first, 0.34.34+).
+///
+/// Shape:
+/// ```text
+/// error[E0208] file.mimi:3:5-14 cannot assign to immutable variable 'x' | src: x = x + 1 | help: use 'let mut'
+/// ```
+/// One line per diagnostic, fields joined by `" | "`: severity+code, exact
+/// location whose column range replaces the old caret underline, message,
+/// source line (when available), notes, help. No gutter/arrow/caret
+/// decoration — the coordinates carry all positional information with higher
+/// density. Colors apply to the severity prefix only when the output is a
+/// terminal (see [`colors_enabled`]).
+pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename: &str) -> String {
     let severity_color = match diagnostic.severity {
         Severity::Error => colors::RED,
         Severity::Warning => colors::YELLOW,
@@ -29,166 +35,97 @@ pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename
         Severity::Help => colors::CYAN,
     };
 
-    out.push_str(&format!(
-        "{}{}{}[{}{}]{} ",
-        colors::BOLD,
-        severity_color,
-        diagnostic.severity,
-        colors::BOLD,
-        diagnostic.code.as_deref().unwrap_or(""),
-        colors::RESET,
-    ));
-    out.push_str(&format!(
-        "{}{}{}\n",
-        colors::BOLD,
-        diagnostic.message,
-        colors::RESET
-    ));
-
-    // Location: --> filename:line:col
-    if diagnostic.span.start_line > 0 {
-        out.push_str(&format!(
-            " {}{}-->{} {}:{}:{}\n",
-            colors::DIM,
+    let mut out = String::new();
+    // Prefix: severity + optional code, e.g. `error[E0208]` or plain `error`.
+    match diagnostic.code.as_deref() {
+        Some(code) => out.push_str(&format!(
+            "{}{}{}[{}]{} ",
             colors::BOLD,
-            colors::RESET,
-            filename,
-            diagnostic.span.start_line,
-            diagnostic.span.start_col
-        ));
+            severity_color,
+            diagnostic.severity,
+            code,
+            colors::RESET
+        )),
+        None => out.push_str(&format!(
+            "{}{}{}{} ",
+            colors::BOLD,
+            severity_color,
+            diagnostic.severity,
+            colors::RESET
+        )),
     }
 
-    // Source code snippet
-    if let Some(src) = source {
-        if diagnostic.span.start_line > 0 {
-            let lines: Vec<&str> = src.lines().collect();
-            let line_idx = diagnostic.span.start_line.saturating_sub(1);
-            let gutter_width = format!("{}", diagnostic.span.end_line).len();
+    // Exact location with column range (the range subsumes the caret).
+    if diagnostic.span.start_line > 0 {
+        out.push_str(&format!(
+            "{}:{}{} ",
+            filename,
+            diagnostic.span.start_line,
+            span_columns(&diagnostic.span)
+        ));
+    }
+    out.push_str(&diagnostic.message);
 
-            out.push_str(&format!(
-                " {}{}|{}\n",
-                colors::DIM,
-                colors::BOLD,
-                colors::RESET
-            ));
-
-            // Show the error line
-            if let Some(line_text) = lines.get(line_idx) {
-                // Line number gutter
-                out.push_str(&format!(
-                    " {}{: >width$}{} | {}\n",
-                    colors::DIM,
-                    diagnostic.span.start_line,
-                    colors::RESET,
-                    line_text,
-                    width = gutter_width
-                ));
-
-                // Underline the span
-                let start_col = diagnostic.span.start_col.saturating_sub(1);
-                let width = if diagnostic.span.end_line == diagnostic.span.start_line {
-                    diagnostic
-                        .span
-                        .end_col
-                        .saturating_sub(diagnostic.span.start_col)
-                        .max(1)
-                } else {
-                    line_text.len().saturating_sub(start_col)
-                };
-
-                let indicator_color = match diagnostic.severity {
-                    Severity::Error => colors::RED,
-                    Severity::Warning => colors::YELLOW,
-                    _ => colors::CYAN,
-                };
-
-                out.push_str(&format!(
-                    " {}{: >width$}{} | {}{}{}{}\n",
-                    colors::DIM,
-                    "",
-                    colors::RESET,
-                    " ".repeat(start_col),
-                    indicator_color,
-                    "^".repeat(width),
-                    colors::RESET,
-                ));
+    // Source-line context: information, not decoration — one trimmed line.
+    if diagnostic.span.start_line > 0 {
+        if let Some(src) = source {
+            if let Some(line_text) = src
+                .lines()
+                .nth(diagnostic.span.start_line.saturating_sub(1))
+            {
+                let trimmed = line_text.trim_end();
+                if !trimmed.is_empty() {
+                    let count = trimmed.chars().count();
+                    let snippet: String = trimmed.chars().take(MAX_SRC_SNIPPET_CHARS).collect();
+                    let suffix = if count > MAX_SRC_SNIPPET_CHARS {
+                        " ..."
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!(" | src: {}{}", snippet, suffix));
+                }
             }
         }
     }
 
-    // Notes
+    // Notes inline, each with its own coordinates when available.
     for note in &diagnostic.notes {
         if note.span.start_line > 0 {
             out.push_str(&format!(
-                "  {}{}note{}: {}\n",
-                colors::DIM,
-                colors::BOLD,
-                colors::RESET,
-                note.message
+                " | note: {} @ {}:{}{}",
+                note.message,
+                filename,
+                note.span.start_line,
+                span_columns(&note.span)
             ));
-            if let Some(src) = source {
-                let lines: Vec<&str> = src.lines().collect();
-                let line_idx = note.span.start_line.saturating_sub(1);
-                let gutter_width = format!("{}", note.span.end_line).len();
-                if let Some(line_text) = lines.get(line_idx) {
-                    out.push_str(&format!(
-                        " {}{}|{}\n",
-                        colors::DIM,
-                        colors::BOLD,
-                        colors::RESET
-                    ));
-                    out.push_str(&format!(
-                        " {}{: >width$}{} | {}\n",
-                        colors::DIM,
-                        note.span.start_line,
-                        colors::RESET,
-                        line_text,
-                        width = gutter_width
-                    ));
-                    let start_col = note.span.start_col.saturating_sub(1);
-                    let indicator_width = if note.span.end_line == note.span.start_line {
-                        note.span.end_col.saturating_sub(note.span.start_col).max(1)
-                    } else {
-                        line_text.len().saturating_sub(start_col)
-                    };
-                    let indicator = "-".repeat(indicator_width.max(1));
-                    out.push_str(&format!(
-                        " {}{: >width$}{} | {}{}{} {}{}\n",
-                        colors::DIM,
-                        "",
-                        colors::RESET,
-                        " ".repeat(start_col),
-                        colors::CYAN,
-                        indicator,
-                        note.message,
-                        colors::RESET,
-                        width = gutter_width,
-                    ));
-                }
-            }
         } else {
-            out.push_str(&format!(
-                "  {}{}note{}: {}\n",
-                colors::DIM,
-                colors::BOLD,
-                colors::RESET,
-                note.message
-            ));
+            out.push_str(&format!(" | note: {}", note.message));
         }
     }
 
-    // Help
+    // Help.
     if let Some(help) = &diagnostic.help {
-        out.push_str(&format!(
-            "  {}{}help{}: {}\n",
-            colors::CYAN,
-            colors::BOLD,
-            colors::RESET,
-            help
-        ));
+        out.push_str(&format!(" | help: {}", help));
     }
 
+    out.push('\n');
     out
+}
+
+/// Column part of a span location: `:5-14` for a single-line range,
+/// `:5-9:2` style (start col to end line:end col) for multi-line spans,
+/// bare `:5` when no end is known, empty when columns are absent.
+fn span_columns(span: &Span) -> String {
+    if span.start_col == 0 {
+        return String::new();
+    }
+    if span.end_line > span.start_line {
+        format!(":{}-{}:{}", span.start_col, span.end_line, span.end_col)
+    } else if span.end_col > span.start_col {
+        format!(":{}-{}", span.start_col, span.end_col)
+    } else {
+        format!(":{}", span.start_col)
+    }
 }
 
 /// Format a simple legacy error message (without full span/source info).

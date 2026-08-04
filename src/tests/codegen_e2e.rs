@@ -4499,7 +4499,9 @@ func main() -> i32 {
         err.contains(":3:") || err.contains("line"),
         "location coordinates missing, got: {err}"
     );
-    // Red line: no internal AST/Debug leakage, no stale FFI framing or hint.
+    // Red line: no internal AST/Debug leakage, no stale FFI framing or hint,
+    // and no terminal decoration (gutter/caret/arrow) — diagnostics are
+    // dense, machine-first single lines (0.34.34+).
     for banned in [
         "AstNodeMeta",
         "Located {",
@@ -4507,6 +4509,9 @@ func main() -> i32 {
         "NeCmp",
         "FFI contract violation",
         "--skip-verify-ffi",
+        " --> ",
+        "\n  |",
+        "^^^",
     ] {
         assert!(
             !err.contains(banned),
