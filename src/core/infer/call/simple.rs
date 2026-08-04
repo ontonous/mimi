@@ -2404,6 +2404,13 @@ impl<'a> Checker<'a> {
                 ),
             );
         } else {
+            // Q5/Q6 (0.34.25c): fail-closed mutate-place grammar. A `mutate`
+            // parameter borrows its place exclusively — the argument must be a
+            // variable (Ident) or a single-level field access (Ident.field,
+            // incl. self.field). Nested places, literals and computed values
+            // are rejected (E0434); two mutate args naming the same place are
+            // rejected as an aliasing exclusive-borrow violation (E0435).
+            self.check_mutate_place_grammar(name, args);
             // Generic calls instantiate one fresh variable per declared binder,
             // then feed every argument through the canonical unifier.
             let generics = self.func_generics.get(name).cloned().unwrap_or_default();
@@ -2610,6 +2617,82 @@ impl<'a> Checker<'a> {
             // is removed. Side-effect obligations are contracts + capability tokens.
         }
         ret
+    }
+
+    // ── 0.34.25c Q5/Q6: mutate-place grammar (fail-closed) ─────────────
+
+    /// Q5: the only place forms accepted for a `mutate` argument — a variable
+    /// (`x`) or a single-level field access (`obj.field`, incl. `self.field`).
+    /// Returns the canonical place key, or `None` for anything else (nested
+    /// places `a.b.c`, literals, computed values, indexing).
+    fn mutate_place_of(expr: &Expr) -> Option<String> {
+        match expr.unlocated() {
+            Expr::Ident(name) => Some(name.clone()),
+            Expr::Field(obj, field) => match obj.unlocated() {
+                Expr::Ident(base) => Some(format!("{}.{}", base, field)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Q5/Q6: validate every `mutate` argument of a user-function call.
+    /// Non-place arguments are rejected (E0434); two mutate arguments naming
+    /// the same place are rejected (E0435, exclusive-borrow aliasing).
+    fn check_mutate_place_grammar(&mut self, name: &str, args: &[Expr]) {
+        let func_params: Option<&Vec<Param>> = self.nested_func_params.get(name).or_else(|| {
+            self.file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Func(f) if f.name == name => Some(&f.params),
+                    _ => None,
+                })
+                .next()
+        });
+        let Some(func_params) = func_params else {
+            return;
+        };
+        let mut seen_places: Vec<String> = Vec::new();
+        for (i, p) in func_params.iter().enumerate() {
+            if !matches!(p.borrow, Some(ParamBorrow::Mutate)) {
+                continue;
+            }
+            let Some(arg) = args.get(i) else { continue };
+            match Self::mutate_place_of(arg) {
+                Some(place) => {
+                    if seen_places.contains(&place) {
+                        self.errors.push(Diagnostic::error_code(
+                            crate::diagnostic::codes::E0435,
+                            format!(
+                                "mutate argument {} of '{}' aliases place '{}' already borrowed \
+                                 mutably in the same call (exclusive borrow violation)",
+                                i + 1,
+                                name,
+                                place
+                            ),
+                            arg.meta()
+                                .map(|m| m.span)
+                                .unwrap_or_else(|| self.diagnostic_span()),
+                        ));
+                    } else {
+                        seen_places.push(place);
+                    }
+                }
+                None => {
+                    self.errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0434,
+                        format!(
+                            "argument {} of '{}' is a mutate place and must be a variable or \
+                             single-level field access (e.g. `x` or `obj.field`), found invalid place",
+                            i + 1,
+                            name
+                        ),
+                        arg.meta().map(|m| m.span).unwrap_or_else(|| self.diagnostic_span()),
+                    ));
+                }
+            }
+        }
     }
 
     // ── v0.29.19 Session Types order checking ─────────────────────────
