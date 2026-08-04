@@ -51,8 +51,10 @@ test-differential-ci:
 
 ci-check:
 	cargo check
-	cargo clippy -- -D warnings 2>/dev/null || true
-	cargo fmt -- --check 2>/dev/null || true
+	cargo clippy --all-targets -- -D warnings
+	cargo fmt -- --check
+	python3 scripts/check_language_docs.py
+	python3 scripts/check_unsafe_safety.py
 
 ci-test:
 	cargo test -- --test-threads=4
