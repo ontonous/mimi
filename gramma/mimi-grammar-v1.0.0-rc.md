@@ -1,13 +1,20 @@
 # Mimi 语法规范 v1.0.0-rc
 
+> ⚠ **文档状态（0.34.33 标注）**：本文档是 v1.0.0-rc 时代的语法快照，**不再权威**。
+> 0.1.4（0.34）语法冻结后的权威来源为 `docs/language-spec.md`（规范）+
+> `devdocs/v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF，渲染副本
+> `docs/syntax-reference.md`）。本文件含多处已废止内容：`do`/`become`/`stay` 已删除、
+> `steps`/`ui`/`binds` 已移出关键字表（tokenize 为 Ident）、`flow` 已是 Mimi 一等关键字、
+> 关键字总数现为 80。保留作历史参考，勿据其生成代码。
+
 **Mimi**（文件后缀 `.mimi`）是面向 Intent-as-Code 的系统编程语言。
 
-本文档定义 Mimi v1.0.0-rc 的完整**词法**与**语法**。它直接反映解析器实现（`mimi/src/parser/`、`mimi/src/lexer.rs`、`mimi/src/ast.rs`），是语法层面的权威参考。
+本文档定义 Mimi v1.0.0-rc 的完整**词法**与**语法**。它直接反映解析器实现（`mimi/src/parser/`、`mimi/src/lexer.rs`、`mimi/src/ast.rs`），是语法层面的权威参考。（⚠ 该权威性声明已被 0.34 金标准治理取代，见上方状态注。）
 
 ### 权威性与边界说明
 
-1. **Parser 为准**：lexer 仅做分词，它保留某个字符串为关键字不代表 Mimi parser 已支持该语法。本文档以 `src/parser/` 实际分支为最终权威。
-2. **Mimi vs MimiSpec**：`.mimi` 是 Mimi 生产代码；`.mms` 是 MimiSpec 草图。`flow`、`ui`、`steps`、`binds`、`and`、`or` 等字符串被 lexer 识别，但仅用于 `mms { ... }` 块内的 MimiSpec 语法，Mimi parser 本身不处理。
+1. **Parser 为准**：lexer 仅做分词，它保留某个字符串为关键字不代表 Mimi parser 已支持该语法。本文档以 `src/parser/` 实际分支为最终权威。（0.34 起该角色由 golden EBNF 承担。）
+2. **Mimi vs MimiSpec**：`.mimi` 是 Mimi 生产代码；`.mms` 是 MimiSpec 草图。~~`flow`、`ui`、`steps`、`binds`、`and`、`or` 等字符串被 lexer 识别，但仅用于 `mms { ... }` 块内的 MimiSpec 语法，Mimi parser 本身不处理。~~（**过期**：`flow`/`and`/`or` 现为 Mimi 关键字并参与解析；`ui`/`steps`/`binds` 已移出关键字表。现状以 keywords.rs:92-177 为准。）
 3. **文档更新**：本文档已清理旧版本中混入的 MimiSpec 或非 Mimi 关键字（如 `error`、`exit`、`done`、`mod`、`iflet`、`@import`）。
 
 > 设计哲学、类型系统、内存模型等高层规范见 [`mimi/docs/mimi.md`](../docs/mimi.md)。

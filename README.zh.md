@@ -94,8 +94,8 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 | `fails E` 可回滚路径——`?` 返回 `Err((source, error))`，source generation 归还 | ✅ |
 | Reset / Recover 系统动词（用户可覆盖） | ✅ |
 | SystemTrace 溯源（`last_state`、`unexpected_event`、快照） | ✅ |
-| 渐进模式——脚本 `main()` 通过 shell 注入（真 lowering：post-1.0） | ✅ |
-| 多目标转移（`-> A \| B`，保留 state tag） | 📋 0.1.4 (0.34.15-16) |
+| 渐进模式——脚本 `main()` 经隐式 `flow Main { state Single }` 注入（真正的语义脱糖，spec §3.13） | ✅ |
+| 多目标转移（`-> A \| B`，保留 state tag） | ✅（stable tagged-union ABI，0.34.15-16，ADR-002） |
 
 ### 线性安全与所有权
 
@@ -106,7 +106,7 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 | CFG 级线性——`is_linear()` 对 Flow 状态的 dataflow 分析 | ✅ |
 | Session 端点线性——scope exit（E0425）、use-after-alias（E0426） | ✅ |
 | 线性资源的 shared/weak 包装拒绝 | ✅ |
-| View/mutate 借用（纯函数参数传递） | 📋 0.1.4 (0.34.13-14) |
+| View/mutate 借用（纯函数参数传递） | ✅（0.34.13-14 闭合 + 0.34.25c place 文法 fail-closed，E0434/E0435） |
 | 跨 turn exactly-once 资源追踪 | ✅ |
 | Channel/Mutex/Atomic 类型级线性 | 📋（已知限制：builtin 整数 handle） |
 
@@ -172,13 +172,13 @@ flow Counter {
     state Positive { count: i32 }
 
     transition inc(Zero) -> Positive {
-        do { return Positive { count: self.count + 1 } }
+        return Positive { count: self.count + 1 }
     }
     transition inc(Positive) -> Positive {
-        do { return Positive { count: self.count + 1 } }
+        return Positive { count: self.count + 1 }
     }
     transition reset(Positive) -> Zero {
-        do { return Zero { count: 0 } }
+        return Zero { count: 0 }
     }
 }
 
@@ -440,7 +440,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 里程碑 |
 |------|--------|
-| **0.1.4-dev** | **当前**。语法冻结 + 语义裁决（黄金文档）：become/stay 删除（ADR-001）、multi-target（ADR-002）、`'a` 删除（ADR-004）、`desc:`/`rule:`/`mms{}` trivia 化。 |
+| **0.1.4-dev** | **当前**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-1.0/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。RC 门禁全绿（4598 lib），tag 按裁决暂缓，保持 -dev。 |
 | **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
 | **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |
 | **0.1.1** | 51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |

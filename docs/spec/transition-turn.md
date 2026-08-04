@@ -9,8 +9,10 @@
 
 ```text
 Turn = <instance, source_state, generation, payload, event, locals,
-        resource_ledger, effect_ledger, transaction_log>
+        resource_ledger, effect_ledger>
 ```
+
+（`transaction_log` 字段随 WAL 事务废止——架构修正案条款 3，`@transactional` 删除——移出配置。）
 
 进入 turn 时独占消费 source generation。payload 被移入不可发布的 draft；外部观察者在 terminal commit 前仍只能看到上一已提交 generation。
 
@@ -24,17 +26,20 @@ Turn = <instance, source_state, generation, payload, event, locals,
 
 ## 3. Terminal outcome
 
+> ADR-001（0.34.11）：`become`/`stay` 已删除，`return State {}` 是唯一显式终止符。
+> 提交到新状态与自循环（同名状态）统一为 Commit，由 target 的名义状态区分。
+
 ```text
-Become(target, payload) -> publish generation + 1 and target
-Stay(payload)           -> publish generation + 1 and same nominal state
-Fault(variant, payload) -> publish typed Fault generation
-Rejected(error)         -> discard draft and return original source generation
+Commit(target, payload)  -> publish generation + 1 and target
+                            （target 可为同名状态 = 自循环；唯一显式拼写 return Target {}）
+Fault(variant, payload)  -> publish typed Fault generation
+Rejected(error)          -> discard draft and return original source generation
 ```
 
 - `Rejected` 只能来自 transition 签名声明的 rollback error。
 - `?` 在 transition 中 lower 为 `Rejected`，在普通函数中 lower 为 callable return。
 - body 正常结束、执行两个 terminal、或存在 terminal 后可达语句均为静态错误。
-- multi-target 若启用，`Become` 的 target 必须携带 closed nominal tag。
+- multi-target（0.34.15-16 起 stable，tagged-union ABI）：`Commit` 的 target 必须携带 closed nominal tag，运行时按 state tag 分发、不按布局分发。
 
 ## 4. 原子性与 effect
 

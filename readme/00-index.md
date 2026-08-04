@@ -1,5 +1,13 @@
 # Mimi 语言文档
 
+> ⚠ **文档族状态（0.34.33 标注）**：本教程系列主体写于 MimiSpec 时代（v0.7 前后）。
+> 语言自 0.29 起演进为 **Flow-first typestate** 范式，并经 0.1.4（0.34）语法冻结：
+> `do`/`become`/`stay` 已删除、multi-target tagged-union 已 stable、`desc`/`rule`/`mms`
+> 仍为超注释语句。**本系列的关键字表（01-syntax §2、llmprompt §2.4）已同步冻结实况**；
+> 其余章节的 Flow/transition 覆盖与部分示例可能滞后，正在按既有计划降级/重写。
+> 权威语法入口：`docs/language-spec.md` + `docs/syntax-reference.md`（golden EBNF 渲染副本）；
+> 现行 Flow 语料示例见 `tests/real_world/` 与根 README "Hello, Flow"。
+
 > Mimi 是一门面向 **Intent-as-Code + Safe AI Collaboration** 的系统编程语言。
 > 它将"人类已锁定的决策"与"AI 可生成的未确定区域"之间的边界，变成编译器、IDE 和构建工具可以直接执行的一等语言构造。
 

@@ -55,7 +55,7 @@ def fail(errors: list[str], message: str) -> None:
 #   math is a STABLE verifier channel, multi-target is STABLE (0.34.15-16).
 
 REMOVED_MARKERS = re.compile(
-    r"removed|delete[d]?|executed|migrated|abolished|repealed|rescinded|superseded"
+    r"removed|removal|delete[d]?|executed|migrated|abolished|repealed|rescinded|superseded"
     r"|移除|删除|已删|废止|撤销|纠正|修正|取代"
     r"|0\.34\.11|0\.34\.27|ADR-001\b|✅|→|sole|唯一|was:",
     re.IGNORECASE,
@@ -74,6 +74,10 @@ def check_semantic_freshness(errors: list[str]) -> None:
     scanned: list[tuple[str, str]] = []
     doc_paths = [SPEC, REQUIREMENTS, SUPPORT, SYNTAX_REFERENCE, GOLDEN_SYNTAX]
     doc_paths.extend(sorted(PRE_1_0.glob("*.md")))
+    # Extended surface (0.34.33): flagship READMEs, normative spec profiles,
+    # implementation appendix.
+    doc_paths.extend([ROOT / "README.md", ROOT / "README.zh.md", ROOT / "docs/ast-appendix.md"])
+    doc_paths.extend(sorted((ROOT / "docs/spec").glob("*.md")))
     for path in doc_paths:
         if path.is_file():
             scanned.append((str(path.relative_to(ROOT)), path.read_text(encoding="utf-8")))
