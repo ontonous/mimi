@@ -21,7 +21,7 @@ target = "stable"
 spec = "3.4"
 profile = ["mimi-flow-turn-1", "mimi-semantic-trace-1"]
 gate = ["static", "trace"]
-summary = "A transition atomically ends in become, stay, typed fault, or rollback rejection."
+summary = "A transition atomically ends in a `return State {}` terminal, typed fault, or rollback rejection. (ADR-001 0.34.11: become/stay removed; `return State {}` is the sole explicit terminal.)"
 
 [[requirement]]
 id = "FLOW-SPARSE-001"

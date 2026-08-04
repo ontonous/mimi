@@ -71,7 +71,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
-evidence = "0.34.15-16 (ADR-002): stable tagged-union ABI — bytecode tag ABI (IsVariant on Record(name), Op::PatternField), codegen synthetic Enum flow::{F}::__MultiTarget with sorted-ordinal tags + boxed payload structs, match pattern-field extraction, multi_target_codegen_dual_backend_tag_dispatch (same/different payload layouts, 4 branches, bytecode==codegen). E0433 (fails+multi-target combination) and state-tag loss fail closed."
+evidence = "0.34.15-16 (ADR-002): stable tagged-union ABI — bytecode tag ABI (IsVariant on Record(name), Op::PatternField), codegen synthetic Enum flow::{F}::__MultiTarget with sorted-ordinal tags + boxed payload structs, match pattern-field extraction, multi_target_codegen_dual_backend_tag_dispatch (same/different payload layouts, 4 branches, bytecode==codegen). E0433 (fails+multi-target combination) and state-tag loss fail closed. 注：parse/check/resolved_ir/interp/codegen 五维 complete 且 stable ABI 已交付；overall implementation 保持 partial 仅因 lsp=partial（LSP 未识别多目标语法）与 runtime 维度保守标注，非语言侧缺口。"
 
 [[support]]
 requirement = "ACTOR-FLOW-001"
@@ -191,7 +191,7 @@ verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test progressive -- --test-threads=1"
-evidence = "An implicit shell Flow is injected, but Main is not fully lowered into its startup turn."
+evidence = "v0.34.28 实测纠正（0.34.28 前误判'未完全 lowering'）：apply_progressive_typestate（progressive.rs:17）注入 `flow Main { state Single }` shell，main 体进入 run transition；bytecode/compiler.rs:654 仅为无 main 时的 entry 兜底。implicit main 是已实现的语义脱糖（spec §3.13 登记 implemented，双后端 `mimi run` 实测输出正常）。"
 
 [[support]]
 requirement = "ERROR-PROP-001"
@@ -296,7 +296,7 @@ verify = "partial"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test parser_ -- --test-threads=1"
-evidence = "0.31.21: pinned timeout 废止（Parser 拒绝 pinned(expr, timeout=N)）。架构修正案条款 2: delegate 废止（view/mutate 借用保留为纯函数参数传递）。@sparse 翻转为默认（0.31.25）。Several removed statements and wrappers remain accepted in the execution AST."
+evidence = "0.31.21: pinned timeout 废止（Parser 拒绝 pinned(expr, timeout=N)）。架构修正案条款 2: delegate 废止（view/mutate 借用保留为纯函数参数传递）。@sparse 翻转为默认（0.31.25）。0.34.1: `|>`/`@transactional`/`metadata_shadow` 拒绝（条款诊断）；0.34.11: `become`/`stay` 删除（ADR-001，唯一终止符 `return S{}`）；0.34.18: `with` effect 子句拒绝（§4.2 裁决）；0.34.27: `do` 删除（关键字 81→80）。上述 removed 语法现均在 parser/checker 阶段带裁决诊断拒绝并配负测试（flow_features.rs / audit_regression.rs），不再进入执行 AST。残留：`desc`/`rule`/`mms` 仍为超注释语句，trivia 化登记 0.1.5（dx-backlog #10）。"
 
 [[support]]
 requirement = "LANG-FUNCTION-001"

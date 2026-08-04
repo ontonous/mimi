@@ -8,23 +8,13 @@
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
 > See `docs/language-support.toml` for 9-dimension capability matrix.
 >
-> Version: v0.1.4-dev (2026-08-03, regenerated from golden — 0.34.24 Phase C 收尾)
+> Version: v0.1.4-dev (2026-08-04, regenerated from golden — 0.34.33 文档同步收尾)
 > Implementation: v0.1.4-dev (internal sprint 0.34.X)
 > Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
+> 渲染例外（与 golden 的有意差异）：golden 的标题/引言元块与 §7 差异台账不进入本副本；
+> §7 台账见 golden 原文（0.34.33 起差异归零）。
 
 ---
-
-# Mimi 语法金标准（Parser 实况转录）
-
-> **版本**：0.1.4-dev（内部 sprint 0.34.X）
-> **依据**：`src/parser/`（parse_type.rs / parse_stmt.rs / parse_expr.rs / top_level.rs / pattern.rs）与 `src/lexer/keywords.rs` 的**实际产生式**，逐条手工转录。
-> **权威性**：本文档是 parser 实况的唯一权威描述。`docs/syntax-reference.md` 是本文档的渲染副本（0.34.5 起由 golden 重新生成）。
-> **标记约定**：`[事实]` = 坐标已验证；`[裁决]` = 修正案/SD/ADR 依据；`[建议]` = 待拍板；⚠DEAD = 已废止但仍被 parser 接受的语法（删除清单见 `golden-document.md` §1.1）。
-> **坐标约定**：`file:line` 相对仓库根 `mimi/`。
-> **同步规则**：parser 产生式变更后，本文件必须同步更新；`docs/syntax-reference.md` 以本文件为源重新生成。
-
----
-
 ## 1. 词法
 
 ### 1.1 注释
@@ -46,7 +36,7 @@
 | 布尔 | `true` / `false` | parse_expr.rs:278-287 |
 | 单元 | `()`（表达式与类型两处均归一化为 `unit`） | parse_expr.rs:288-292；parse_type.rs:139-140 |
 
-### 1.3 关键字（80 个硬关键字 → TokenKind，keywords.rs:102-194；v0.34.2 实测）
+### 1.3 关键字（80 个 `=> TokenKind` 映射：77 硬关键字 + and/or/not 软关键字，keywords.rs:92-177；0.34.33 实测）
 
 ```
 module type func fn actor newtype let const mut ref
@@ -56,8 +46,8 @@ if else for fault fails in while return reset recover break continue
 match use pub drop defer await async unsafe spawn parasteps
 quote comptime failure requires ensures invariant math desc rule old mms
 flow state transition protocol pinned persistent view mutate
-session dual end with loop as
-true false unit i32 nothing
+session dual end with and or not loop as
+true false unit nothing
 ```
 
 v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
@@ -65,7 +55,8 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 - **软关键字化**：`and`/`or`/`not` 仍 tokenize 为运算符 kind，但**不是硬关键字**（绑定位置可作标识符）。
 - `delegate` **已软化为标识符**（tokenize 为 Ident，keywords.rs:242 测试断言；`let delegate = 5` / `func delegate()` 合法）；仅语句起始位置保留条款 2 拒绝诊断（parse_stmt.rs:131，与 `on` 同模式，parse_stmt.rs:182）。
 - [建议] 再审查：`reset`/`recover`（仅系统注入 transition 名）、`nothing`。
-- **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。当前 81 个 `=> TokenKind` 映射（83−2，含 and/or/not 软关键字映射）。
+- **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。
+- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **80 个** `=> TokenKind` 映射（实测 keywords.rs:92-177，含 and/or/not 软关键字映射；其中 77 个硬关键字，`is_keyword_kind` 判定），达成 0.1.4 ≤80 目标（golden-document.md §1.4）。
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
@@ -139,7 +130,7 @@ Pattern := Ident                              (* Variable *)
          | Int | String | true | false        (* Literal，:120-152 *)
          | '(' { Pattern ',' } ')'            (* Tuple，:153-167 *)
          | '[' { Pattern ',' } [ '..' [ Ident ] ] ']'   (* Array/Slice+rest，:168-195 *)
-         | 软关键字 → Variable（old/view/mutate/persistent/session/dual/end）
+         | 软关键字 → Variable（old/view/mutate/persistent/and/or/not/session/dual/end）
 ```
 
 ---
@@ -169,7 +160,6 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
       | 'defer' '{' Block '}' ';'                                            (* :100-107 *)
       | 'parasteps' '{' Block '}' ';'                                        (* :108-115 *)
       | 'func' FuncDef ';'                                                   (* :116-120 *)
-      | 'do' '{' Block '}'  — **v0.34.27 已删除**（语言评估）
       | 'delegate' ... — **v0.34.1 已拒绝**（条款 2 诊断，parse_stmt.rs:139-160）
       | 'pinned' '(' Expr ')' [ '|' Ident '|' ] '{' Block '}'   (* :180-216；v0.34.3 timeout 字段删除 *)
       | 'if' 'let' Pattern '=' Expr '{' Block '}' [ 'else' ( 'if' ... | '{' Block '}' ) ]  (* v0.34.3 Stmt::IfLet *)
@@ -353,20 +343,12 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 [事实] 未知属性硬错误（top_level.rs:153-159）——PR-H2。
 
 ---
+## 7. 与 golden 的差异
 
-## 7. 与 docs/syntax-reference.md 的已知差异（golden 为准）
-
-| 主题 | syntax-reference.md | parser 实况 |
-|------|--------------------|-------------|
-| `pinned(timeout)` | :946 状态反转 | parser 已拒绝（条款 10） |
-| `actor runs Flow` | :849 [not-yet-implemented] | 已实现（top_level.rs:616-621） |
-| `fails E` | :803 [not-yet-implemented] | 已实现且有语料（top_level.rs:1358-1364） |
-| `do {}` | :797 [removed] | **v0.34.27 已删除**（语言评估；AST/关键字/语料全清） |
-| `stay` | :924 [not-yet-implemented] | **v0.34.11 已删除**（ADR-001，唯一终止符 `return S{}`） |
-| state-level `invariant` | :776 | 未实现（仅块内 invariant 子句 §4.2） |
+无差异（0.34.33 起由 golden 重新生成）。差异台账维护在
+`devdocs/v0.34/golden/syntax-reference.golden.md` §7。
 
 ---
-
 ## 附录 A：产生式坐标速查
 
 | 产生式 | 坐标 |
@@ -392,26 +374,4 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 | actor | top_level.rs:611-692 |
 | protocol | top_level.rs:1389-1468 |
 | session | top_level.rs:1476-1542 |
-| 关键字表 | keywords.rs:102-194 |
-
-### 12.2 Codegen 状态对照
-
-| 功能 | Interpreter | Codegen | 说明 |
-|------|-------------|---------|------|
-| from_json | ✅ | ✅ | 支持基本类型 + List + Record |
-| Set 操作 | ✅ | ✅ | 支持 `new/size/contains/insert/remove/to_list` |
-| sort_f64 / sort_str | ✅ | ✅ | 内排序实现 |
-| const 代码生成 | ✅ | ✅ | `const_values` 缓存 + compile_expr |
-| Actor 用户函数调用 | ✅ | ✅ | worker 共享 program 上下文 |
-| from_json::<List<T>> | ✅ | ✅ | 返回 owned 可变 List |
-| Actor 字段 mutate | ✅ | ✅ | self.field 写回 |
-| closure (fn) | ✅ | ✅ | no-capture/capture/multi |
-| shared/weak 引用计数 | ✅ | ✅ | Rc/Arc 语义 |
-| Mutex / Atomic / Channel | ✅ | ✅ | 并发原语双后端 |
-| Map 操作 | ✅ | ✅ | `new/set/get/remove` |
-| lexer(source) / parse(source) | ✅ | ✅ | 元编程 |
-| ast_eval(ast) | ✅ | ❌ | 仅在 interp 路径实现 |
-| comptime func / quote! | ✅ | ❌ | 仅解释器求值；codegen 静默跳过 |
-```
-
-
+| 关键字表 | keywords.rs:92-177 |

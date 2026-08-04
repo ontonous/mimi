@@ -8,15 +8,16 @@
 >
 > **Version**: v1.0-spec-draft (2026-07-17)
 
-> **⚠ 实现差异登记（2026-08-01）**：本文件为 1.0 规范草案，正文保留不改为设计意图；
-> 以下条目与当前 parser/checker 实况**矛盾或未落地**，规范评审时需裁决（详细证据见
-> `devdocs/v0.34/golden-document.md` 与 `devdocs/v0.34/golden/syntax-reference.golden.md`）：
+> **⚠ 实现差异登记（2026-08-01 立账，0.34.33 全部闭环）**：本文件为 1.0 规范草案；
+> 以下条目曾与 parser/checker 实况矛盾，现**全部裁决并闭环**（保留为历史台账，
+> 详细证据见 `devdocs/v0.34/golden-document.md` 与
+> `devdocs/v0.34/golden/syntax-reference.golden.md`）：
 >
 > | 规范位置 | 规范主张 | 实现实况 | 处置 |
 > |---------|---------|---------|------|
 > | §6.1 `LANG-FUNCTION-001` | `func(T)->U` **removed**，迁移到 `fn(T)->U` | `func(T)->U` 仍解析（parse_type.rs:213-237）；`fn` 仅限闭包表达式与 `extern "C" fn(...)` 类型（parse_type.rs:242） | ✅ ADR-003 裁决：保留现状，spec 修正（0.34.4） |
 > | §3.12 `FLOW-FAULT-001` | fault 变体块 `fault F { A \| B }` + `fault Variant(...)` terminal + `reset`/`recover` 语句 | 仅 `fault ErrorType`（top_level.rs:1216-1222）；变体块语法全仓零匹配；reset/recover 仅系统注入 transition 名 | ✅ 0.34.17 收缩到现实：spec §3.12 改由实现驱动（per-flow `fault ErrorType` + 系统 Fault payload 文档化 + recover=业务转移）；变体块 fault-set 排 0.2（golden §3.2） |
-> | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | 0.34.1 删除（golden §1.1） |
+> | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | ✅ 0.34.1 删除：`\|>` 现为专用拒绝诊断（top_level.rs:1357-1368），`-> A \| B` 为唯一多目标分隔符（golden §1.1） |
 > | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | ✅ ADR-001 实施（0.34.11）：`become`/`stay` 均删除，唯一终止符 `return S{}`（golden §1.2） |
 
 Normative requirements use stable IDs defined in `docs/language-requirements.toml`. Design rationale lives in `devdocs/pre-1.0/`; implementation structure and progress live in `docs/ast-appendix.md` and `docs/language-support.toml`. Parser acceptance and an existing implementation do not grant stable status.
@@ -1243,6 +1244,8 @@ Quote/AST generation remains experimental until:
 - Typed Fault/PeerFault;
 - Function-exclusive contracts;
 - Restricted pure comptime;
+- Multi-target transition `-> A | B`（tagged-union ABI，0.34.15-16，ADR-002；从 Experimental 升入 Stable，0.34.28 裁决同步战役补齐）;
+- `math` verifier ghost channel（§5.6/§6.8，verifier 通道，非执行 AST）;
 - Effect/capability is not a stable target in this profile; its proposed minimum model remains experimental under `EFFECT-CAP-001`.
 
 #### Experimental
@@ -1271,8 +1274,10 @@ Quote/AST generation remains experimental until:
 - `?` process exit;
 - User-visible bare Session `i64` handle;
 - Actor arbitrary mutable business fields;
-- Unknown attribute silent ignore;
-- `math { Expr... }` general statement.
+- Unknown attribute silent ignore.
+
+> **v0.34.28 修正**：`math { Expr... }` 不在此清单——它是 **stable** verifier 通道
+> （§5.6/§6.8），此前误列 Removed，同步战役纠正。
 
 > **v0.34.6 修正（ADR-003）**：`func(T) -> U` 函数类型与 `extern "C" func(...)`
 > **保留**（非 removed）——`func` = 声明、`fn` = 闭包、extern 两者皆可。
