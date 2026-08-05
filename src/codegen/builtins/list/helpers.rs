@@ -142,13 +142,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Check that `idx` is within bounds `[0, len)` for a list operation.
-    /// On OOB, calls `mimi_runtime_abort` with a descriptive message.
+    /// Returns the effective index to use for the GEP/store.
+    ///
+    /// §7-#74 (audit-2026-08-05): legacy parity with the VM and the resolved
+    /// emitter — reads wrap negative indices (`len + idx`), writes trap on
+    /// them; OOB (still negative after wrap, or `>= len`) aborts with
+    /// E0803. The legacy check used a bare UGE compare, so a negative index
+    /// (huge unsigned) ALWAYS aborted, diverging from the wrap semantics.
     pub(in crate::codegen) fn check_list_bounds(
         &self,
         list_ptr: PointerValue<'ctx>,
         idx: IntValue<'ctx>,
+        read: bool,
         operation: &str,
-    ) -> MimiResult<()> {
+    ) -> MimiResult<IntValue<'ctx>> {
         let len = self.load_list_len(list_ptr)?;
         let function = self
             .builder
@@ -156,12 +163,60 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| "check_list_bounds: no insert block".to_string())?
             .get_parent()
             .ok_or_else(|| "check_list_bounds: no parent function".to_string())?;
+        let i64_ty = self.context.i64_type();
+        let zero = i64_ty.const_int(0, false);
+        // Widen narrow index values (i32 literals/locals/params) to the i64
+        // width of `len` so the compares and the wrap add are well-formed
+        // (mirrors resolved emit_checked_list_index). Without the sext an
+        // i32 index produced a mixed-width icmp → LLVM "Cannot emit physreg
+        // copy instruction" (SIGABRT in the compiler).
+        let idx = match idx.get_type().get_bit_width() {
+            64 => idx,
+            width if width < 64 => self
+                .builder
+                .build_int_s_extend(idx, i64_ty, "idx_sext")
+                .map_err(|e| CompileError::LlvmError(format!("index sext: {}", e)))?,
+            _ => {
+                return Err(CompileError::Unsupported(format!(
+                    "list index width {} is not supported",
+                    idx.get_type().get_bit_width()
+                )))
+            }
+        };
+        // READ: wrap negative indices (VM ListGet parity). WRITE: negative
+        // indexes are a hard bounds error (VM ListSet parity).
+        let effective = if read {
+            let is_neg = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::SLT, idx, zero, "idx_neg")
+                .map_err(|e| CompileError::LlvmError(format!("idx neg compare: {}", e)))?;
+            let wrapped = self
+                .builder
+                .build_int_add(idx, len, "idx_wrap")
+                .map_err(|e| CompileError::LlvmError(format!("idx wrap: {}", e)))?;
+            self.builder
+                .build_select(is_neg, wrapped, idx, "idx_effective")
+                .map_err(|e| CompileError::LlvmError(format!("idx select: {}", e)))?
+                .into_int_value()
+        } else {
+            idx
+        };
         let pass_bb = self.context.append_basic_block(function, "bounds_ok");
         let fail_bb = self.context.append_basic_block(function, "bounds_fail");
+        // OOB: still negative (negative read wrapped past the front, or a
+        // negative write) or >= len.
+        let neg = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, effective, zero, "oob_neg")
+            .map_err(|e| CompileError::LlvmError(format!("oob neg compare: {}", e)))?;
+        let ge_len = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGE, effective, len, "oob")
+            .map_err(|e| CompileError::LlvmError(format!("oob compare: {}", e)))?;
         let oob = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::UGE, idx, len, "oob")
-            .map_err(|e| CompileError::LlvmError(format!("oob compare: {}", e)))?;
+            .build_or(neg, ge_len, "oob_any")
+            .map_err(|e| CompileError::LlvmError(format!("oob or: {}", e)))?;
         self.builder
             .build_conditional_branch(oob, fail_bb, pass_bb)
             .map_err(|e| CompileError::LlvmError(format!("oob branch: {}", e)))?;
@@ -187,6 +242,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("oob branch: {}", e)))?;
         // Continue at pass block
         self.builder.position_at_end(pass_bb);
-        Ok(())
+        Ok(effective)
     }
 }

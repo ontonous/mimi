@@ -606,8 +606,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             false,
         );
-        // Bounds check before access
-        self.check_list_bounds(list_ptr, idx_iv, "index assign")?;
+        // Bounds check before access — §7-#74: writes trap on negative
+        // indexes (VM ListSet parity); only reads wrap.
+        let idx_iv = self.check_list_bounds(list_ptr, idx_iv, false, "index assign")?;
         let data_gep = self
             .gep()
             .build_struct_gep(list_ty, list_ptr, 1, "list.data")

@@ -39,12 +39,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // shared registry (authoritative: inserted at `shared let`/`weak`
         // declaration) plus the Option<shared …> type shape; anything else
         // falls through to normal trait/method dispatch.
+        //
+        // Receivers whose type infer_object_type could NOT resolve (it fell
+        // back to the variable name — e.g. a let-bound `w.upgrade()` result,
+        // whose {i1,i64} Option shape is deliberately not mapped) defer to
+        // compile_shared_deref, whose own var_type_names gate rejects every
+        // declared struct/param type and only unwraps Option<shared/weak>.
         if method_name == "deref" {
             if let Expr::Ident(name) = obj.unlocated() {
-                let is_deref_target = self.shared_var_names.contains(name.as_str())
-                    || obj_type.starts_with("Option<shared ")
-                    || obj_type.starts_with("Option<weak ");
-                if is_deref_target {
+                let known_non_shared = obj_type != *name
+                    && !self.shared_var_names.contains(name.as_str())
+                    && !obj_type.starts_with("Option<shared ")
+                    && !obj_type.starts_with("Option<weak ");
+                if !known_non_shared {
                     if let Some(val) = self.compile_shared_deref(name, vars)? {
                         return Ok(val);
                     }
