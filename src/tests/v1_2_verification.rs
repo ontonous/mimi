@@ -504,6 +504,29 @@ func wrong(x: i32) -> i32 {
 }
 
 #[test]
+fn verify_audit37_field_access_no_longer_aliases_same_named_param() {
+    // #37 (full-audit-2026-08-05 §11): field accesses were flattened with
+    // underscore joins (`p.x` → Z3 name "p_x"), aliasing a parameter literally
+    // named `p_x`. Cross-object proof: `ensures: p.a == p_a` became the
+    // tautology `p_a == p_a` and verified vacuously. Field names now use a
+    // `.`; tuple indices `[i]` — both outside the identifier charset, so the
+    // generated Z3 name can never collide with a user parameter.
+    let src = r#"
+type Pair {
+    a: i32,
+    b: i32,
+}
+
+func f(p: Pair, p_a: i32) -> i32 {
+    requires: p.a == 5
+    ensures: p.a == p_a
+    p.a
+}
+"#;
+    assert_failed(src);
+}
+
+#[test]
 fn verify_audit40_tail_if_let_without_value_is_not_fake_proven() {
     // #40 (full-audit-2026-08-05 §11): a tail `if let` whose branches yield
     // no extractable value used to fall through to `result = 0` in func.rs,
