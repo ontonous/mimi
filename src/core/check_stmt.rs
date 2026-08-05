@@ -1829,12 +1829,13 @@ impl<'a> Checker<'a> {
                 // directory restore to the enclosing callable's exit so the
                 // nested func remains callable (with defaults/named args/
                 // generics) for the rest of the owner body.
-                self.pending_nested_restores.push(crate::core::PendingNestedRestore {
-                    name: func.name.clone(),
-                    funcs_entry: prior_funcs_entry,
-                    generics_entry: prior_generics_entry,
-                    nested_params_entry: prior_nested_params_entry,
-                });
+                self.pending_nested_restores
+                    .push(crate::core::PendingNestedRestore {
+                        name: func.name.clone(),
+                        funcs_entry: prior_funcs_entry,
+                        generics_entry: prior_generics_entry,
+                        nested_params_entry: prior_nested_params_entry,
+                    });
             }
             Stmt::Pinned {
                 expr, var, body, ..

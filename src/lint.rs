@@ -660,78 +660,47 @@ fn detect_eq_bool_in_expr(expr: &Expr, diagnostics: &mut Vec<Diagnostic>, func_p
 
 /// Scan source for `((` patterns that indicate redundant double parentheses.
 /// Uses source-level scan (not AST) since the parser strips parentheses.
+///
+/// X-9 (full audit 2026-08-05 §3.10): A7 — region tracking is delegated to
+/// the shared [`crate::source_scan::SourceScanner`]. The old ad-hoc state
+/// machine had two defects: (a) it judged string escapes via
+/// `prev_char != '\\'`, which is wrong for `"a\\"` — there the backslash is
+/// ITSELF escaped, the closing quote closes, but the machine stayed "in
+/// string" and suppressed every W007 for the rest of the file; (b) a
+/// desynced `in_string` never recovered at line boundaries. The scanner
+/// consumes escape pairs structurally, tracks both comment kinds, and
+/// resets string state on newlines; only genuinely code-region adjacent
+/// `((` pairs are reported.
 fn detect_redundant_parens(source: &str, diagnostics: &mut Vec<Diagnostic>) {
-    let mut in_string = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    let mut prev_char = ' ';
-    let mut prev_col = 0usize;
+    let scanned = crate::source_scan::SourceScanner::new(source).scan();
     let mut line = 1usize;
     let mut col = 1usize;
-    let chars: Vec<char> = source.chars().collect();
-    let mut i = 0;
+    // Position of the previous CODE char when it was '(' — strict textual
+    // adjacency: any non-code char (string/char/comment content) or any other
+    // code char breaks the run. Delimiters are code chars, so `("(" (` does
+    // not report, matching the pre-X-9 semantics minus the escape bug.
+    let mut prev_open_paren: Option<(usize, usize)> = None;
 
-    while i < chars.len() {
-        let ch = chars[i];
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-                line += 1;
-                col = 0;
-                prev_char = ' ';
-            }
-            i += 1;
-            if ch != '\n' {
-                col += 1;
-            }
-            continue;
-        }
-        if in_block_comment {
-            if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                in_block_comment = false;
-                i += 2;
-                col += 2;
-            } else {
-                if ch == '\n' {
-                    line += 1;
-                    col = 0;
-                }
-                i += 1;
-                col += 1;
-            }
-            continue;
-        }
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            in_line_comment = true;
-            i += 2;
-            col += 2;
-            continue;
-        }
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            in_block_comment = true;
-            i += 2;
-            col += 2;
-            continue;
-        }
-        if ch == '"' && prev_char != '\\' {
-            in_string = !in_string;
-        } else if ch == '\n' {
+    for (ch, region) in scanned {
+        if ch == '\n' {
             line += 1;
-            col = 0;
-            prev_char = ' ';
-            i += 1;
+            col = 1;
+            prev_open_paren = None;
             continue;
-        } else if !in_string && ch == '(' && prev_char == '(' {
-            diagnostics.push(Diagnostic::warning_code(
-                W007,
-                "redundant double parentheses `((`",
-                Span::single(line, prev_col),
-            ));
         }
-        prev_char = ch;
-        prev_col = col;
+        if region == crate::source_scan::Region::Code && ch == '(' {
+            if let Some((paren_line, paren_col)) = prev_open_paren {
+                diagnostics.push(Diagnostic::warning_code(
+                    W007,
+                    "redundant double parentheses `((`",
+                    Span::single(paren_line, paren_col),
+                ));
+            }
+            prev_open_paren = Some((line, col));
+        } else {
+            prev_open_paren = None;
+        }
         col += 1;
-        i += 1;
     }
 }
 

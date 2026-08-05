@@ -663,14 +663,27 @@ fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
 // ── Lowering: FuncDef → VFunction ──────────────────────────────────────
 
 /// Lowering context: maps source names to canonical VarIds.
+///
+/// C-7 (full-audit-2026-08-05-0656 §1): the name map is SCOPED. The checker
+/// permits block-level shadowing (`if c { let x = x + 1; x } else { x }`),
+/// and a flat name→VarId map silently aliased the shadowed local to the
+/// PARAMETER's Z3 variable — `ensures: result == x` was a fake Proven even
+/// though the runtime returns `x + 1` when `c` holds. `bind_local` now
+/// allocates a fresh VarId in the innermost scope, shadowing outer bindings.
 #[allow(dead_code)] // returns_f64/returns_bool/fresh_local: infrastructure for f64 opaque sort + local let lowering
 struct LoweringCtx {
     /// Next canonical variable index.
     next_var: usize,
-    /// Source name → canonical VarId.
-    name_map: HashMap<String, VarId>,
-    /// Parameter types for type resolution.
+    /// Scoped source name → canonical VarId map. Index 0 is the parameter
+    /// scope; each if-branch block pushes its own scope so branch-local
+    /// bindings (including shadows) get fresh VarIds.
+    scopes: Vec<HashMap<String, VarId>>,
+    /// Parameter types for type resolution (by parameter name).
     param_types: HashMap<String, VType>,
+    /// Declared type of every canonical variable (parameters and lets).
+    /// Authoritative for definedness obligations: a `let y = x` whose init is
+    /// an i32 parameter must carry i32, not the legacy I64 fallback.
+    var_types: HashMap<VarId, VType>,
     /// Whether the return type is f64.
     returns_f64: bool,
     /// Whether the return type is bool.
@@ -686,8 +699,9 @@ impl LoweringCtx {
         let return_vtype = func.ret.as_ref().map(surface_type_to_vtype);
         let mut ctx = LoweringCtx {
             next_var: 0,
-            name_map: HashMap::new(),
+            scopes: vec![HashMap::new()],
             param_types: HashMap::new(),
+            var_types: HashMap::new(),
             returns_f64: func
                 .ret
                 .as_ref()
@@ -701,27 +715,63 @@ impl LoweringCtx {
         for param in &func.params {
             let var = VarId(ctx.next_var);
             ctx.next_var += 1;
-            ctx.name_map.insert(param.name.clone(), var);
+            ctx.scopes[0].insert(param.name.clone(), var);
             let vty = surface_type_to_vtype(&param.ty);
             ctx.param_types.insert(param.name.clone(), vty);
+            ctx.var_types.insert(var, vty);
         }
         ctx
     }
 
-    /// Get or create a canonical VarId for a source name.
+    /// Get or create a canonical VarId for a source name (read position).
+    /// Innermost scope wins (C-7 shadowing). Unknown names allocate into the
+    /// ROOT scope so repeated reads of a never-bound name (e.g. inlined
+    /// callee-ensures variables) resolve to one stable VarId.
     fn resolve(&mut self, name: &str) -> VarId {
-        if let Some(&var) = self.name_map.get(name) {
-            var
-        } else {
-            let var = VarId(self.next_var);
-            self.next_var += 1;
-            self.name_map.insert(name.to_string(), var);
-            var
+        for scope in self.scopes.iter().rev() {
+            if let Some(&var) = scope.get(name) {
+                return var;
+            }
+        }
+        let var = VarId(self.next_var);
+        self.next_var += 1;
+        self.scopes[0].insert(name.to_string(), var);
+        var
+    }
+
+    /// Bind a let-introduced name in the innermost scope (C-7): ALWAYS a
+    /// fresh VarId, even when an outer binding of the same name exists.
+    fn bind_local(&mut self, name: &str, vty: VType) -> VarId {
+        let var = VarId(self.next_var);
+        self.next_var += 1;
+        let scope = self
+            .scopes
+            .last_mut()
+            .expect("LoweringCtx must have a root scope");
+        scope.insert(name.to_string(), var);
+        self.var_types.insert(var, vty);
+        var
+    }
+
+    /// Push a scope (branch block entry).
+    fn enter_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    /// Pop a scope (branch block exit). Shadowed bindings vanish with it.
+    fn exit_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
         }
     }
 
-    /// Get the VType for a source name (parameter or local).
+    /// Get the VType for a source name (parameter or local, innermost wins).
     fn type_of(&self, name: &str) -> Option<VType> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(&var) = scope.get(name) {
+                return self.var_types.get(&var).copied();
+            }
+        }
         self.param_types.get(name).copied()
     }
 
@@ -819,7 +869,12 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
         .params
         .iter()
         .map(|p| {
-            let var = ctx.name_map[&p.name];
+            let var = ctx
+                .scopes
+                .first()
+                .and_then(|scope| scope.get(&p.name))
+                .copied()
+                .expect("parameter registered in root scope");
             let vty = surface_type_to_vtype(&p.ty);
             (var, vty, p.name.clone())
         })
@@ -901,7 +956,13 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                 crate::ast::PatternKind::Variable(n) => n.clone(),
                                 _ => format!("_let{}", stmt_index),
                             };
-                            let var = ctx.resolve(&name);
+                            // C-7: bind_local allocates a FRESH VarId so a
+                            // shadowing `let x = …` never aliases an outer
+                            // binding's Z3 variable. The init's type is
+                            // recorded so later reads keep the correct
+                            // definedness model (i32 vs i64).
+                            let vty = vexpr.ty().unwrap_or_else(|| ctx.infer_expr_type(init));
+                            let var = ctx.bind_local(&name, vty);
                             body_stmts.push(VStmt::Let(var, vexpr));
                             span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
                             stmt_index += 1;
@@ -975,30 +1036,37 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
             // Stmt::If at the top level: handle in tail position, reject otherwise.
             // 0.31.29 audit P0-1: previously fell through to _ => {} and was
             // silently discarded, causing gate-lowering desync.
+            //
+            // C-7 (full-audit-2026-08-05-0656 §1): lower the WHOLE branch
+            // blocks, not just their tail expressions. The old code took
+            // `block_tail_expr(then_)` and discarded in-branch lets — a
+            // shadowing `let x = x + 1` inside a branch silently aliased the
+            // parameter's Z3 variable, producing fake Proven for
+            // `ensures: result == x` while the runtime returns `x + 1`.
             crate::ast::Stmt::If { cond, then_, else_ } => {
                 if is_last {
-                    let cond_vir = lower_expr_to_vir(cond, &mut ctx);
-                    let then_tail = crate::verifier::helpers::block_tail_expr(then_);
-                    let else_tail = else_
-                        .as_ref()
-                        .and_then(|e| crate::verifier::helpers::block_tail_expr(e));
-                    if let (Some(c), Some(t)) = (cond_vir, then_tail) {
-                        let then_vir = lower_expr_to_vir(&t, &mut ctx);
-                        let else_vir = else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
-                        if let (Some(tv), Some(ev)) = (then_vir, else_vir) {
-                            body_stmts.push(VStmt::Return(VExpr::Select(
-                                Box::new(c),
-                                Box::new(tv),
-                                Box::new(ev),
-                            )));
-                            span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                            stmt_index += 1;
-                        } else {
-                            return Err("if-else branch cannot be lowered to VIR".to_string());
-                        }
-                    } else {
+                    let Some(c) = lower_expr_to_vir(cond, &mut ctx) else {
                         return Err("if condition/then cannot be lowered to VIR".to_string());
-                    }
+                    };
+                    let Some(tv) = lower_branch_block(then_, &mut ctx) else {
+                        return Err("if condition/then cannot be lowered to VIR".to_string());
+                    };
+                    let Some(else_block) = else_ else {
+                        // Else-less if in tail position falls through with
+                        // unit; no i32/i64/bool function can type-check that,
+                        // and VIR has no unit result. Fail-closed as before.
+                        return Err("if-else branch cannot be lowered to VIR".to_string());
+                    };
+                    let Some(ev) = lower_branch_block(else_block, &mut ctx) else {
+                        return Err("if-else branch cannot be lowered to VIR".to_string());
+                    };
+                    body_stmts.push(VStmt::Return(VExpr::Select(
+                        Box::new(c),
+                        Box::new(tv),
+                        Box::new(ev),
+                    )));
+                    span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                    stmt_index += 1;
                 } else {
                     return Err(
                         "non-tail if statement is not in the trusted subset (v1: flat body only)"
@@ -1160,18 +1228,17 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
             Some(VExpr::Not(Box::new(v)))
         }
         Expr::If { cond, then_, else_ } => {
+            // C-7: lower whole branch blocks (in-branch lets included) —
+            // `block_tail_expr` alone discards shadowing bindings.
             let c = lower_expr_to_vir(cond, ctx)?;
-            let t = crate::verifier::helpers::block_tail_expr(then_)
-                .and_then(|e| lower_expr_to_vir(&e, ctx))?;
-            let e = else_
-                .as_ref()
-                .and_then(|b| crate::verifier::helpers::block_tail_expr(b))
-                .and_then(|e| lower_expr_to_vir(&e, ctx))?;
+            let t = lower_branch_block(then_, ctx)?;
+            let e = lower_branch_block(else_.as_ref()?, ctx)?;
             Some(VExpr::Select(Box::new(c), Box::new(t), Box::new(e)))
         }
         Expr::Block(stmts) => {
-            let tail = crate::verifier::helpers::block_tail_expr(stmts)?;
-            lower_expr_to_vir(&tail, ctx)
+            // C-7: same reasoning as Expr::If — in-block lets must not be
+            // dropped (their checked arithmetic still executes).
+            lower_branch_block(stmts, ctx)
         }
         Expr::Match(scrutinee, arms) => {
             // Lower match as nested Select (ite chain)
@@ -1245,6 +1312,236 @@ fn lower_match_arms_to_vir(
         });
     }
     result
+}
+
+/// Lower a branch block (the then/else of a tail `if`, an `Expr::If` branch,
+/// or an `Expr::Block`) into a single `VExpr`.
+///
+/// C-7 (full-audit-2026-08-05-0656 §1): branch blocks live inside ONE
+/// expression position (a `Select` arm), so their let-bindings cannot become
+/// flat `VStmt::Let`s. Instead each binding gets a fresh SCOPED VarId
+/// (shadowing outer names, including parameters) and is recursively
+/// SUBSTITUTED into the branch value. The substitution keeps definedness
+/// obligations attached to the value tree, where `collect_definedness`
+/// guards them by the branch condition.
+///
+/// Fail-closed (`None` → whole function falls back to the AST path or
+/// NotInTrustedSubset): any non-lowerable init/expression, nested statement
+/// forms not in the trusted flat shape, and unused lets that carry checked
+/// arithmetic (their division still executes at runtime even when the bound
+/// name is never read — dropping them would silently skip E0801 traps).
+fn lower_branch_block(stmts: &[crate::ast::Stmt], ctx: &mut LoweringCtx) -> Option<VExpr> {
+    use crate::ast::{PatternKind, Stmt};
+
+    ctx.enter_scope();
+    let mut lets: Vec<(VarId, VExpr)> = Vec::new();
+    let mut value: Option<VExpr> = None;
+    let mut failed = false;
+    let last_index = stmts.len().saturating_sub(1);
+
+    for (pos, stmt) in stmts.iter().enumerate() {
+        match stmt.unlocated() {
+            // Contracts/super-comments carry no runtime value.
+            Stmt::Requires(..)
+            | Stmt::Ensures(..)
+            | Stmt::Invariant(..)
+            | Stmt::Math(..)
+            | Stmt::MmsBlock { .. }
+            | Stmt::Desc(..)
+            | Stmt::Rule(..)
+            | Stmt::Ellipsis => {}
+            Stmt::Let { pat, init, .. } => {
+                if let Some(init) = init {
+                    let Some(vexpr) = lower_expr_to_vir(init, ctx) else {
+                        failed = true;
+                        break;
+                    };
+                    let name = match &pat.kind {
+                        PatternKind::Variable(n) => n.clone(),
+                        _ => {
+                            // Unnamed binding: it cannot be referenced, so it
+                            // survives only as a definedness obligation.
+                            if vexpr.contains_checked_arith() {
+                                failed = true;
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    let vty = vexpr.ty().unwrap_or_else(|| ctx.infer_expr_type(init));
+                    let var = ctx.bind_local(&name, vty);
+                    lets.push((var, vexpr));
+                }
+            }
+            Stmt::Expr(e) => {
+                let Some(vexpr) = lower_expr_to_vir(e, ctx) else {
+                    failed = true;
+                    break;
+                };
+                value = Some(vexpr);
+            }
+            Stmt::Return(Some(e)) => {
+                let Some(vexpr) = lower_expr_to_vir(e, ctx) else {
+                    failed = true;
+                    break;
+                };
+                value = Some(vexpr);
+                break; // later statements are dead code
+            }
+            // Nested if: only as the final value producer (its value survives);
+            // a non-tail nested if is a statement whose branch expressions are
+            // discarded — their definedness obligations would be lost here.
+            Stmt::If { cond, then_, else_ } if pos == last_index => {
+                let Some(c) = lower_expr_to_vir(cond, ctx) else {
+                    failed = true;
+                    break;
+                };
+                let Some(t) = lower_branch_block(then_, ctx) else {
+                    failed = true;
+                    break;
+                };
+                let Some(else_block) = else_ else {
+                    failed = true;
+                    break;
+                };
+                let Some(e) = lower_branch_block(else_block, ctx) else {
+                    failed = true;
+                    break;
+                };
+                value = Some(VExpr::Select(Box::new(c), Box::new(t), Box::new(e)));
+            }
+            // Everything else (early unit return, non-tail nested if,
+            // blocks/loops/Defer — the gate already rejects most) is
+            // fail-closed.
+            _ => {
+                failed = true;
+                break;
+            }
+        }
+    }
+
+    let value = match (failed, value) {
+        (true, _) => None,
+        (false, v) => v,
+    };
+    ctx.exit_scope();
+    let Some(value) = value else {
+        return None;
+    };
+
+    // Inline the branch-local lets into the value (recursively — chained lets
+    // form a definition DAG, so substitution terminates).
+    let substituted = substitute_lets(&value, &lets);
+
+    // C-5-in-branch / fail-closed: a let carrying checked arithmetic still
+    // executes at runtime even when its bound name is never read. If such a
+    // let is unreachable from the branch value, substitution would silently
+    // drop its definedness obligations (div-zero / overflow). Detect genuine
+    // UNUSEDNESS via reachability from the value through the let-dependency
+    // graph (NOT by searching the substituted tree — substitution removes the
+    // very VarIds we are looking for, so that always reads "unused").
+    let mut reachable: std::collections::HashSet<VarId> = collect_var_refs(&value);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (var, init) in &lets {
+            if reachable.contains(var) {
+                for referenced in collect_var_refs(init) {
+                    if reachable.insert(referenced) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    for (var, init) in &lets {
+        if init.contains_checked_arith() && !reachable.contains(var) {
+            return None;
+        }
+    }
+
+    Some(substituted)
+}
+
+/// Collect every `Var` reference in a VIR expression (used for branch-let
+/// reachability). Parameters and locals alike.
+fn collect_var_refs(expr: &VExpr) -> std::collections::HashSet<VarId> {
+    let mut out = std::collections::HashSet::new();
+    collect_var_refs_into(expr, &mut out);
+    out
+}
+
+fn collect_var_refs_into(expr: &VExpr, out: &mut std::collections::HashSet<VarId>) {
+    match expr {
+        VExpr::Var(id) | VExpr::Old(id) | VExpr::OpaqueF64(id) => {
+            out.insert(*id);
+        }
+        VExpr::CheckedArith(_, l, r, _) | VExpr::Compare(_, l, r) | VExpr::F64Compare(_, l, r) => {
+            collect_var_refs_into(l, out);
+            collect_var_refs_into(r, out);
+        }
+        VExpr::CheckedNeg(inner, _) | VExpr::Not(inner) => collect_var_refs_into(inner, out),
+        VExpr::Boolean(_, es) => {
+            for e in es {
+                collect_var_refs_into(e, out);
+            }
+        }
+        VExpr::Select(c, t, e) => {
+            collect_var_refs_into(c, out);
+            collect_var_refs_into(t, out);
+            collect_var_refs_into(e, out);
+        }
+        VExpr::IntConst(_) | VExpr::BoolConst(_) | VExpr::F64Const(_) | VExpr::Result => {}
+    }
+}
+
+/// Recursively replace let-bound `Var(id)`s with their (substituted) init
+/// expressions. Bindings are defined-before-use, so the let list is acyclic.
+fn substitute_lets(expr: &VExpr, lets: &[(VarId, VExpr)]) -> VExpr {
+    match expr {
+        VExpr::Var(id) => {
+            if let Some((_, init)) = lets.iter().find(|(v, _)| v == id) {
+                substitute_lets(init, lets)
+            } else {
+                expr.clone()
+            }
+        }
+        VExpr::CheckedArith(op, l, r, ty) => VExpr::CheckedArith(
+            *op,
+            Box::new(substitute_lets(l, lets)),
+            Box::new(substitute_lets(r, lets)),
+            *ty,
+        ),
+        VExpr::CheckedNeg(inner, ty) => {
+            VExpr::CheckedNeg(Box::new(substitute_lets(inner, lets)), *ty)
+        }
+        VExpr::Compare(op, l, r) => VExpr::Compare(
+            *op,
+            Box::new(substitute_lets(l, lets)),
+            Box::new(substitute_lets(r, lets)),
+        ),
+        VExpr::F64Compare(op, l, r) => VExpr::F64Compare(
+            *op,
+            Box::new(substitute_lets(l, lets)),
+            Box::new(substitute_lets(r, lets)),
+        ),
+        VExpr::Boolean(op, es) => {
+            VExpr::Boolean(*op, es.iter().map(|e| substitute_lets(e, lets)).collect())
+        }
+        VExpr::Not(inner) => VExpr::Not(Box::new(substitute_lets(inner, lets))),
+        VExpr::Select(c, t, e) => VExpr::Select(
+            Box::new(substitute_lets(c, lets)),
+            Box::new(substitute_lets(t, lets)),
+            Box::new(substitute_lets(e, lets)),
+        ),
+        // Leaves without bindable variables.
+        VExpr::IntConst(_)
+        | VExpr::BoolConst(_)
+        | VExpr::F64Const(_)
+        | VExpr::Old(_)
+        | VExpr::Result
+        | VExpr::OpaqueF64(_) => expr.clone(),
+    }
 }
 
 /// Extract the span from a statement.
@@ -1327,6 +1624,12 @@ pub(crate) struct VirZ3Ctx {
     pub(crate) f64_vars: HashMap<VarId, z3::ast::Int>,
     /// Old snapshot variables for postconditions: `old(param)`.
     pub(crate) old_int_vars: HashMap<VarId, z3::ast::Int>,
+    /// Old snapshot variables for bool params: `old(param)`.
+    /// V-2 (full-audit-2026-08-05-0656 §3.8): previously only int params
+    /// got old snapshots, so `ensures: old(b) == b` on a bool param was
+    /// unencodable (NotInTrustedSubset) in the VIR path while the Resolved
+    /// engine completed it — engine inconsistency.
+    pub(crate) old_bool_vars: HashMap<VarId, z3::ast::Bool>,
     /// The `result` variable (Int or Bool depending on return type).
     pub(crate) result_int: Option<z3::ast::Int>,
     pub(crate) result_bool: Option<z3::ast::Bool>,
@@ -1349,6 +1652,7 @@ impl VirZ3Ctx {
             bool_vars: HashMap::new(),
             f64_vars: HashMap::new(),
             old_int_vars: HashMap::new(),
+            old_bool_vars: HashMap::new(),
             result_int: None,
             result_bool: None,
             result_f64: None,
@@ -1365,6 +1669,10 @@ impl VirZ3Ctx {
                 VType::Bool => {
                     ctx.bool_vars
                         .insert(var, z3::ast::Bool::new_const(name.as_str()));
+                    // V-2: bool params get old snapshots too (engine parity).
+                    let old_name = format!("old_{}", var);
+                    ctx.old_bool_vars
+                        .insert(var, z3::ast::Bool::new_const(old_name.as_str()));
                 }
                 VType::I32 | VType::I64 => {
                     ctx.int_vars
@@ -1487,6 +1795,10 @@ impl VirZ3Ctx {
                     .map(|v| v.ne(&z3::ast::Int::from_i64(0)))
             }
             VExpr::Old(id) => {
+                // V-2: bool params use dedicated old Bool snapshots.
+                if let Some(b) = self.old_bool_vars.get(id) {
+                    return Some(b.clone());
+                }
                 // old(param) in bool context: old_int != 0
                 self.old_int_vars
                     .get(id)
@@ -1501,6 +1813,20 @@ impl VirZ3Ctx {
                     .map(|v| v.ne(&z3::ast::Int::from_i64(0)))
             }
             VExpr::Compare(op, lhs, rhs) => {
+                // V-2: bool operands (including old(bool) snapshots) compare
+                // as Z3 Bools. encode_int has no bool view, so without this
+                // arm `ensures: old(b) == b` was unencodable in VIR.
+                let l_bool = self.encode_bool_operand(lhs);
+                let r_bool = self.encode_bool_operand(rhs);
+                if let (Some(l), Some(r)) = (l_bool, r_bool) {
+                    return match op {
+                        VCmpOp::Eq => Some(l.eq(&r)),
+                        VCmpOp::Ne => Some(l.eq(&r).not()),
+                        // Ordering on bools is not in the trusted subset;
+                        // fall through to the Int path (which fails closed).
+                        VCmpOp::Lt | VCmpOp::Gt | VCmpOp::Le | VCmpOp::Ge => None,
+                    };
+                }
                 let l = self.encode_int(lhs)?;
                 let r = self.encode_int(rhs)?;
                 match op {
@@ -1545,6 +1871,18 @@ impl VirZ3Ctx {
                 let e = self.encode_bool(else_)?;
                 Some(c.ite(&t, &e))
             }
+            _ => None,
+        }
+    }
+
+    /// V-2: resolve a bool-typed variable (or its old snapshot) to its Z3
+    /// Bool so bool equality/inequality can be encoded directly. Returns
+    /// `None` for non-bool operands; callers fall through to the Int path.
+    fn encode_bool_operand(&self, expr: &VExpr) -> Option<z3::ast::Bool> {
+        match expr {
+            VExpr::Var(id) => self.bool_vars.get(id).cloned(),
+            VExpr::Old(id) => self.old_bool_vars.get(id).cloned(),
+            VExpr::BoolConst(b) => Some(z3::ast::Bool::from_bool(*b)),
             _ => None,
         }
     }
@@ -1594,15 +1932,22 @@ impl VirZ3Ctx {
                 self.collect_definedness(lhs, obligations);
                 self.collect_definedness(rhs, obligations);
 
-                // Only generate obligations for i32 (checked).
-                // P2-10: i64 is modeled as unbounded (no overflow/div-zero
-                // definedness checks). This is a documented soundness gap:
-                // i64 operations can overflow silently in verification.
-                // Fixing this requires adding i64 range constraints similar
-                // to i32, but with i64::MIN/MAX bounds.
-                if *ty != VType::I32 {
-                    return;
-                }
+                // V-6 (full-audit-2026-08-05-0656 §3.8): i64 was modeled as
+                // unbounded Int with NO definedness, contradicting the
+                // SD-7/SD-8 trap semantics (Trap ≠ Fault): `let y = x / z`
+                // with a possible z == 0 traps E0801 at runtime yet verified
+                // Proven. Minimal fail-closed fix mirroring the i32
+                // machinery: i64 div/mod now generate zero-divisor + MIN÷-1
+                // obligations. i64 add/sub/mul OVERFLOW obligations still
+                // need operand range axioms to be meaningful and remain a
+                // documented gap (i32 overflow obligations are unchanged).
+                // Coordinated with V-1 (AST/Resolved engine parity).
+                let min_bound: i64 = match ty {
+                    VType::I32 => i32::MIN as i64,
+                    VType::I64 => i64::MIN,
+                    // f64 arithmetic is rejected at lowering; bool has no arithmetic.
+                    VType::F64Opaque | VType::Bool => return,
+                };
 
                 // Fail-closed: if operand encoding fails, push an always-false
                 // obligation so verification rejects rather than silently skipping.
@@ -1619,6 +1964,13 @@ impl VirZ3Ctx {
                 {
                     match op {
                         VArithOp::Add | VArithOp::Sub | VArithOp::Mul => {
+                            // V-6 scope: overflow obligations for i32 only.
+                            // i64 add/sub/mul stay unbounded (documented gap,
+                            // see the V-6 note above — the Proven message
+                            // discloses the assumption).
+                            if *ty != VType::I32 {
+                                return;
+                            }
                             let result = match op {
                                 VArithOp::Add => z3::ast::Int::add(&[&l, &r]),
                                 VArithOp::Sub => z3::ast::Int::sub(&[&l, &r]),
@@ -1634,7 +1986,7 @@ impl VirZ3Ctx {
                         }
                         VArithOp::Div | VArithOp::Mod => {
                             let zero = z3::ast::Int::from_i64(0);
-                            let min = z3::ast::Int::from_i64(i32::MIN as i64);
+                            let min = z3::ast::Int::from_i64(min_bound);
                             let neg_one = z3::ast::Int::from_i64(-1);
                             let min_overflow = z3::ast::Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
                             obligations.push((
@@ -1647,22 +1999,26 @@ impl VirZ3Ctx {
             }
             VExpr::CheckedNeg(inner, ty) => {
                 self.collect_definedness(inner, obligations);
-                if *ty == VType::I32 {
-                    // Fail-closed: if encoding fails, push always-false obligation
-                    match self.encode_int(inner) {
-                        Some(v) => {
-                            let min = z3::ast::Int::from_i64(i32::MIN as i64);
-                            obligations.push((
-                                v.ne(&min),
-                                "integer overflow is not excluded by preconditions",
-                            ));
-                        }
-                        None => {
-                            obligations.push((
-                                z3::ast::Bool::from_bool(false),
-                                "integer negation has unencodable operand (internal error)",
-                            ));
-                        }
+                // V-6: negation of MIN traps for both checked widths.
+                let min_bound: i64 = match ty {
+                    VType::I32 => i32::MIN as i64,
+                    VType::I64 => i64::MIN,
+                    VType::F64Opaque | VType::Bool => return,
+                };
+                // Fail-closed: if encoding fails, push always-false obligation
+                match self.encode_int(inner) {
+                    Some(v) => {
+                        let min = z3::ast::Int::from_i64(min_bound);
+                        obligations.push((
+                            v.ne(&min),
+                            "integer overflow is not excluded by preconditions",
+                        ));
+                    }
+                    None => {
+                        obligations.push((
+                            z3::ast::Bool::from_bool(false),
+                            "integer negation has unencodable operand (internal error)",
+                        ));
                     }
                 }
             }

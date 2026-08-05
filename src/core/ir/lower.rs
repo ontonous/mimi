@@ -190,7 +190,7 @@ fn lower_function_body_with_captures(
         default_values: lowerer.default_values,
         root,
     };
-    body.validate(input.types)?;
+    body.validate(input.types, input.type_targets)?;
     Ok(LoweredFunctionBody {
         body,
         nested_environments: lowerer.nested_environments,
@@ -4433,7 +4433,28 @@ impl BodyLowerer<'_> {
             },
             _ => return self.unsupported(node_id, "field projection on non-nominal type"),
         };
-        let owner = NodeId(nominal.as_str().to_string());
+        let mut owner = NodeId(nominal.as_str().to_string());
+        // R-4 (audit 2026-08-05 wave-2): `type Pt = Point` — a plain alias to
+        // a record. The base type's nominal is the ALIAS (Pt), whose
+        // ResolvedTypeDef.kind is Alias with no field catalog; the record
+        // fields live on the TARGET (Point). Pierce the alias via
+        // type_targets before resolving the field, mirroring how
+        // instantiate_member_type/newtype lowering already pierces.
+        while let Some(definition) = self.type_defs.get(&owner) {
+            if !matches!(
+                definition.kind,
+                ResolvedTypeKind::Alias | ResolvedTypeKind::Newtype
+            ) {
+                break;
+            }
+            let Some(target) = self.type_targets.get(&owner) else {
+                break;
+            };
+            let Some(ResolvedType::Nominal { item, .. }) = self.types.get(target) else {
+                break;
+            };
+            owner = NodeId(item.as_str().to_string());
+        }
         let field_id = if let Some(definition) = self.type_defs.get(&owner) {
             if !matches!(
                 definition.kind,
@@ -4750,6 +4771,15 @@ impl BodyLowerer<'_> {
             };
         }
         if template == actual {
+            // Identity match: the actual type is the callable's OWN generic
+            // instantiation (e.g. `self.is_ok()` inside `impl ResultExt for
+            // Result<T, E>` — the receiver's type is literally the member's
+            // declared receiver type, so unification learns nothing new).
+            // Still bind any generic parameters the template contains to
+            // THEMSELVES: substitute_member_type refuses to leave a binder
+            // unresolved, and here the correct instantiation is the binder
+            // itself (identity).
+            self.bind_identity_generic_parameters(template, substitutions);
             return true;
         }
         let Some(actual_ty) = self.types.get(actual) else {
@@ -4897,6 +4927,85 @@ impl BodyLowerer<'_> {
         }
     }
 
+    /// Bind every generic parameter contained in `ty` to itself (identity),
+    /// unless a prior binding already exists (a more specific instantiation
+    /// learned from an earlier argument wins).
+    ///
+    /// Used by `collect_instantiation` when template == actual: the type is
+    /// the callable's own generic instantiation, so unification yields no new
+    /// bindings, yet `substitute_member_type` still needs every referenced
+    /// binder resolvable (inherited impl binders like `T`/`E` in
+    /// `impl ResultExt for Result<T, E>`).
+    fn bind_identity_generic_parameters(
+        &self,
+        ty: &ResolvedTypeId,
+        substitutions: &mut BTreeMap<NodeId, ResolvedTypeId>,
+    ) {
+        let Some(declaration) = self.types.get(ty) else {
+            return;
+        };
+        match declaration {
+            ResolvedType::GenericParameter(parameter) => {
+                substitutions
+                    .entry(parameter.clone())
+                    .or_insert_with(|| ty.clone());
+            }
+            ResolvedType::Nominal { arguments, .. } => {
+                for argument in arguments {
+                    self.bind_identity_generic_parameters(argument, substitutions);
+                }
+            }
+            ResolvedType::Reference { target, .. } => {
+                self.bind_identity_generic_parameters(target, substitutions);
+            }
+            ResolvedType::Option(inner) => {
+                self.bind_identity_generic_parameters(inner, substitutions);
+            }
+            ResolvedType::Result { ok, error } => {
+                self.bind_identity_generic_parameters(ok, substitutions);
+                self.bind_identity_generic_parameters(error, substitutions);
+            }
+            ResolvedType::Tuple(elements) => {
+                for element in elements {
+                    self.bind_identity_generic_parameters(element, substitutions);
+                }
+            }
+            ResolvedType::Function {
+                parameters, result, ..
+            } => {
+                for parameter in parameters {
+                    self.bind_identity_generic_parameters(parameter, substitutions);
+                }
+                self.bind_identity_generic_parameters(result, substitutions);
+            }
+            ResolvedType::CBuffer(inner)
+            | ResolvedType::Slice(inner)
+            | ResolvedType::CShared(inner) => {
+                self.bind_identity_generic_parameters(inner, substitutions);
+            }
+            ResolvedType::Ownership { target, .. } => {
+                self.bind_identity_generic_parameters(target, substitutions);
+            }
+            ResolvedType::Newtype { inner, .. } => {
+                self.bind_identity_generic_parameters(inner, substitutions);
+            }
+            ResolvedType::Array { element, .. } => {
+                self.bind_identity_generic_parameters(element, substitutions);
+            }
+            ResolvedType::RawPointer { target, .. } | ResolvedType::CBorrow { target, .. } => {
+                self.bind_identity_generic_parameters(target, substitutions);
+            }
+            ResolvedType::Primitive(_)
+            | ResolvedType::Capability(_)
+            | ResolvedType::FlowStateSet { .. }
+            | ResolvedType::Nothing
+            | ResolvedType::Allocator
+            | ResolvedType::Trait { .. }
+            | ResolvedType::RawString
+            | ResolvedType::DynamicAny { .. } => {}
+        }
+    }
+
     fn reference_binding_type(
         &self,
         node_id: &NodeId,
@@ -4915,9 +5024,14 @@ impl BodyLowerer<'_> {
             })
             .collect::<Vec<_>>();
         let [reference] = matches.as_slice() else {
+            // V-1 (audit 2026-08-05, Wave-3): a bare `let ref` outside arena
+            // has no checker-finalized canonical Reference in the type table.
+            // Fail closed rather than fabricate a table-less id (BodyValidator
+            // requires every referenced type to be interned). Wave-3 work item:
+            // materialize canonical Reference at lowering time.
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
-                "reference binding has no unique checker-finalized canonical reference type",
+                "reference binding has no unique checker-finalized canonical reference type (V-1, Wave-3)",
             )]);
         };
         Ok(reference.clone())
@@ -5202,8 +5316,14 @@ impl BodyLowerer<'_> {
             // conversion with from≠to (and a second, tautological disjunct
             // comparing interned values — with a canonical interner, equal
             // values imply equal ids, so it never fired beyond id equality).
-            // The body validator cannot see through aliases, so erasure here
-            // would fail validation anyway; fail closed explicitly instead.
+            // The body validator cannot see through aliases, so a bare
+            // Identity would fail validation. ContainerAliasErase records
+            // the shape equality and is admitted there (body.rs
+            // visit_conversion) — the correct bridge for alias-equivalent
+            // payloads (`type Pair = (i32, i32)`: `Some(p)` vs
+            // `Option<Pair>` — dual_option_list_pair_alias regression,
+            // audit 2026-08-05 wave-2). Only fail closed when the effective
+            // payloads genuinely differ.
             let from_eff = self
                 .instantiated_type_target(node_id, from_inner)?
                 .map(|(_, target)| target)
@@ -5213,14 +5333,11 @@ impl BodyLowerer<'_> {
                 .map(|(_, target)| target)
                 .unwrap_or_else(|| to_inner.clone());
             if from_eff == to_eff {
-                return Err(vec![ResolvedBodyError::new(
-                    node_id.clone(),
-                    format!(
-                        "[E0830] container payloads '{}' and '{}' are alias-equivalent but not canonical-id-equal; resolved lowering fails closed",
-                        from_inner.as_str(),
-                        to_inner.as_str()
-                    ),
-                )]);
+                return Ok(CheckedConversion {
+                    kind: CheckedConversionKind::ContainerAliasErase,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
             }
         }
         if matches!(
@@ -5755,7 +5872,9 @@ mod tests {
         assert_eq!(body.locals.len(), 3);
         assert_eq!(body.root.statements.len(), 2);
         assert!(body.root.result.is_some());
-        assert!(body.validate(program.resolved_types()).is_ok());
+        assert!(body
+            .validate(program.resolved_types(), program.resolved_type_targets())
+            .is_ok());
         assert!(body
             .locals
             .keys()
@@ -5848,7 +5967,7 @@ mod tests {
                 ..
             }]
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("place input is a body node");
     }
 
@@ -5896,7 +6015,7 @@ mod tests {
         };
         assert_eq!(conversion.to, target.projections[0].ty().clone());
         assert_ne!(conversion.to, body.locals[&target.base].ty);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("indexed assignment validates");
     }
 
@@ -6042,7 +6161,7 @@ mod tests {
             } if callable == &NodeId("function:add".into())
                 && parameter == default_parameter
         ));
-        add.validate(program.resolved_types())
+        add.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid declaration default");
     }
 
@@ -6134,7 +6253,7 @@ mod tests {
             panic!("arm body must load binding");
         };
         assert_eq!(&place.base, local);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid match body");
     }
 
@@ -6176,7 +6295,7 @@ mod tests {
             panic!("tuple pattern expected");
         };
         assert_ne!(elements[0].ty, elements[1].ty);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid tuple bind");
     }
 
@@ -6212,7 +6331,7 @@ mod tests {
             arms[2].pattern.kind,
             ResolvedPatternKind::Constructor { ref fields, .. } if fields.is_empty()
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid enum patterns");
     }
 
@@ -6239,7 +6358,7 @@ mod tests {
             arms[1].pattern.kind,
             ResolvedPatternKind::Constructor { ref fields, .. } if fields.is_empty()
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid builtin patterns");
     }
 
@@ -6287,7 +6406,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(values, vec![1, 2]);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid record");
     }
 
@@ -6321,7 +6440,7 @@ mod tests {
             Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
         ));
         assert_ne!(declaration_type, &fields[0].conversion.to);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid instantiated generic record");
     }
 
@@ -6351,7 +6470,7 @@ mod tests {
             Some(ResolvedType::GenericParameter(_))
         ));
         assert_ne!(declaration_type, &fields[0].1.ty);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid instantiated generic pattern");
     }
 
@@ -6449,7 +6568,7 @@ mod tests {
         assert_eq!(function_body.locals[local].ty, pattern.ty);
         assert_eq!(body.statements.len(), 1);
         function_body
-            .validate(program.resolved_types())
+            .validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid for body");
     }
 
@@ -6483,7 +6602,7 @@ mod tests {
             panic!("assignment must load while-let binding");
         };
         assert_eq!(&place.base, local);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid while-let");
     }
 
@@ -6517,7 +6636,7 @@ mod tests {
             .backend_requirements
             .iter()
             .any(|requirement| requirement.capability == "ffi.pinned"));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid pinned scope");
     }
 
@@ -6541,7 +6660,7 @@ mod tests {
             .backend_requirements
             .iter()
             .any(|requirement| requirement.capability == "verification.math"));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid math block");
     }
 
@@ -6582,7 +6701,7 @@ mod tests {
         };
         assert_eq!(&value_place.base, local);
         assert_eq!(&guard_place.base, local);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid comprehension");
     }
 
@@ -6605,7 +6724,7 @@ mod tests {
         assert!(matches!(receiver.kind, ResolvedExprKind::Load(_)));
         assert!(field.0.starts_with("type:Point/node:decl.field@"));
         assert_eq!(program.resolved_field_type(field), Some(field_type));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid optional chain");
     }
 
@@ -6628,7 +6747,7 @@ mod tests {
             program.resolved_types().get(field_type),
             Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid generic optional chain");
     }
 
@@ -6651,7 +6770,7 @@ mod tests {
                 })
             ] if text == "value="
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid formatted string");
     }
 
@@ -6711,7 +6830,7 @@ mod tests {
             .iter()
             .any(|requirement| requirement.capability == "contract.old_snapshot"));
         preserve
-            .validate(program.resolved_types())
+            .validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid old expression");
     }
 
@@ -6756,7 +6875,7 @@ mod tests {
             .iter()
             .any(|requirement| requirement.capability == "comptime.evaluate"));
         bodies[&NodeId("function:static_value".into())]
-            .validate(program.resolved_types())
+            .validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid comptime body");
     }
 
@@ -6795,7 +6914,7 @@ mod tests {
             &right.kind,
             ResolvedExprKind::Load(place) if place.base == lambda.captures[0]
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid typed lambda");
     }
 
@@ -6817,7 +6936,7 @@ mod tests {
         assert_eq!(body.locals[local].display_name, "apply");
         assert_eq!(call.arguments.len(), 1);
         assert!(call.arguments[0].parameter.0 .0.starts_with(&local.0 .0));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid local closure call");
     }
 
@@ -6854,7 +6973,7 @@ mod tests {
         assert_eq!(call.arguments.len(), 2);
         assert_eq!(call.arguments[0].parameter, signature.parameters[0].id);
         assert_eq!(call.arguments[1].parameter, signature.parameters[1].id);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid transition call");
     }
 
@@ -6901,7 +7020,7 @@ mod tests {
                 if projected == result_field
                     && Some(ty) == program.resolved_field_type(result_field)
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid typed flow state records");
     }
 
@@ -6939,7 +7058,7 @@ mod tests {
             fields[0].value.kind,
             ResolvedExprKind::Binary { .. }
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid typed transition body");
         let callables = lower_checked_callable_bodies(&file, &program)
             .expect("transactional callable lowering");
@@ -7124,7 +7243,7 @@ mod tests {
         };
         assert_eq!(conversion.kind, CheckedConversionKind::OwnershipWrap);
         assert_eq!(conversion.to, pattern.ty);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid shared body");
     }
 
@@ -7254,7 +7373,7 @@ mod tests {
         ));
         assert!(call.arguments[1].parameter.0 .0.contains("decl.parameter"));
         bodies[&NodeId("function:Counter::next".into())]
-            .validate(program.resolved_types())
+            .validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid actor method call");
     }
 
@@ -7282,7 +7401,7 @@ mod tests {
             call.arguments[0].value.kind,
             ResolvedExprKind::Load(_)
         ));
-        main.validate(program.resolved_types())
+        main.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid protocol method call");
     }
 
@@ -7305,7 +7424,7 @@ mod tests {
                 .resolved_body(&owner)
                 .unwrap_or_else(|| panic!("missing owned body '{}'", owner.0));
             assert_eq!(body.owner, owner);
-            body.validate(program.resolved_types())
+            body.validate(program.resolved_types(), program.resolved_type_targets())
                 .expect("persisted body remains valid");
         }
     }
@@ -7335,7 +7454,7 @@ mod tests {
             panic!("typed call expected");
         };
         assert_eq!(call.arguments[0].conversion.to, pattern.ty);
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid widening body");
     }
 
@@ -7396,7 +7515,7 @@ mod tests {
             ResolvedExprKind::Callable(ResolvedCallee::Function(owner))
                 if owner == &NodeId("function:identity".into())
         ));
-        body.validate(program.resolved_types())
+        body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid closed callable body");
     }
 
@@ -7496,7 +7615,7 @@ func main() -> i32 { 0 }
                 if callable == nested_owner
         ));
         nested
-            .validate(program.resolved_types())
+            .validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid captured nested body");
     }
 

@@ -1,5 +1,6 @@
-use mimi::{lockfile, manifest, pkg_registry, pkg_resolve};
+use mimi::{lockfile, manifest, path_safety, pkg_registry, pkg_resolve};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Install all dependencies declared in `mimi.toml`.
 ///
@@ -32,11 +33,26 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
     let mut lock = lockfile::Lockfile::load(&dir)?.unwrap_or_else(lockfile::Lockfile::new);
     // P-H3: track first-seen version constraint; warn on conflicting re-visits.
     let mut visited: HashMap<String, Option<String>> = HashMap::new();
-    let mut queue: Vec<manifest::Dependency> = direct_deps;
+    // X-1 (full-audit 2026-08-05 §3.10): each queued dep carries the base
+    // directory its `path = "…"` entries resolve against: the project
+    // manifest directory for direct deps, the OWNING package's install
+    // directory for transitive deps (previously every transitive path dep
+    // resolved against the top-level project directory and was almost
+    // always "not found").
+    let mut queue: Vec<(manifest::Dependency, PathBuf)> =
+        direct_deps.into_iter().map(|d| (d, dir.clone())).collect();
     let mut installed = 0;
     let mut skipped = 0;
 
-    while let Some(dep) = queue.pop() {
+    while let Some((dep, base)) = queue.pop() {
+        // H-30 (full-audit 2026-08-05 §2.9): validate the dependency name
+        // before computing the install destination or touching any path —
+        // transitive manifests are attacker-controlled and `name = "../pwned"`
+        // must never reach `deps_dir.join(&dep.name)`. Rejected before any
+        // filesystem write (also re-validated inside `resolve_single_dep_in`).
+        path_safety::validate_package_name(&dep.name)
+            .map_err(|e| format!("invalid dependency name '{}': {}", dep.name, e))?;
+
         if let Some(prev) = visited.get(&dep.name) {
             let cur = dep.version.clone();
             if prev != &cur {
@@ -60,7 +76,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                 let sub_deps =
                     pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
-                    queue.push(sub_dep);
+                    queue.push((sub_dep, dst.clone()));
                 }
                 continue;
             }
@@ -87,7 +103,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                 let sub_deps =
                     pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
-                    queue.push(sub_dep);
+                    queue.push((sub_dep, dst.clone()));
                 }
                 continue;
             }
@@ -113,7 +129,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                     let sub_deps =
                         pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                     for sub_dep in sub_deps {
-                        queue.push(sub_dep);
+                        queue.push((sub_dep, dst.clone()));
                     }
                     continue;
                 }
@@ -124,7 +140,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
             ));
         }
 
-        let resolved = pkg_resolve::resolve_single_dep_in(&dep, &dst, &reg, Some(&dir))?;
+        let resolved = pkg_resolve::resolve_single_dep_in(&dep, &dst, &reg, Some(&base))?;
         println!("  ✓ {} (v{})", resolved.name, resolved.version);
         lock.add_package_with_constraint(
             &resolved.name,
@@ -138,7 +154,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
         let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
         for sub_dep in sub_deps {
             println!("    → {} (dependency of {})", sub_dep.name, dep.name);
-            queue.push(sub_dep);
+            queue.push((sub_dep, dst.clone()));
         }
     }
 

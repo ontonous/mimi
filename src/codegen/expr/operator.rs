@@ -764,7 +764,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.position_at_end(cont_bb);
 
             // SD-8: MIN/-1 check. MIN / -1 overflows (result = MIN, not MAX+1).
-            let min_val = int_ty.const_int(1 << (bit_width - 1), false); // e.g. i32::MIN
+            // K-1 (full-audit 2026-08-05 §3.6): build the MIN constant with a
+            // shift computed in LLVM's constant domain at the TARGET width.
+            // The old `int_ty.const_int(1 << (bit_width - 1), false)` computed
+            // the shift in Rust u64: for widths > 64 (i128) `1u64 << 127`
+            // overflows (debug: panic/ICE; release: wraps to `1 << 63`),
+            // seeding the wrong constant and silently defeating the MIN/-1
+            // guard (`sdiv i128 MIN, -1` → poison). const_shl on a width-bw
+            // type yields the sign-bit pattern for any width 1..=128.
+            let min_val = int_ty
+                .const_int(1, false)
+                .const_shl(int_ty.const_int((bit_width - 1) as u64, false)); // e.g. i32::MIN
             let neg_one = int_ty.const_all_ones(); // -1 in two's complement
             let l_is_min = self
                 .builder

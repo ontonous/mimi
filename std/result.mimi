@@ -19,13 +19,17 @@ impl<T, E> ResultExt<T, E> for Result<T, E> {
     func unwrap_or(default: T) -> T { if self.is_ok() { self.unwrap() } else { default } }
     func expect(msg: string) -> T { self.expect(msg) }
     func map<U>(f: func(T) -> U) -> Result<U, E> {
-        // Rebuild the Err variant at the target type Result<U, E>: returning
-        // `self` here would produce a Result<T, E> where Result<U, E> is
-        // declared (typing hole).
-        match self {
-            Ok(v) => Ok(f(v))
-            Err(e) => Err(e)
-        }
+        // Delegate to the builtin variant map (same shape as map_err below):
+        // on Err the builtin passes the receiver through unchanged, so the
+        // Err payload is preserved at the target type Result<U, E> — no
+        // Result<T, E> typing hole. A `match self { Ok(v) => Ok(f(v)),
+        // Err(e) => Err(e) }` body would compile fine on the VM but breaks
+        // legacy codegen: the eagerly-compiled generic impl method (identity
+        // type map) binds the Err payload through a synthetic {i32, i64}
+        // struct where payload index 2 (built-in Result Err slot) is out of
+        // range ("Aggregate extract index out of range", codegen/expr/match.rs
+        // constructor-pattern extraction). Wave-2 STD-CK report.
+        self.map(f)
     }
     func map_err<F>(f: func(E) -> F) -> Result<T, F> { self.map_err(f) }
 }
@@ -57,12 +61,15 @@ pub func expect_result<T, E>(result: Result<T, E>, msg: string) -> T {
 
 // map_result: Applies f to the Ok value, preserving Err.
 pub func map_result<T, E, U>(result: Result<T, E>, f: func(T) -> U) -> Result<U, E> {
-    // Rebuild the Err variant at the target type Result<U, E>: returning
-    // `result` in the Err branch would be a Result<T, E>, not Result<U, E>.
-    match result {
-        Ok(v) => Ok(f(v))
-        Err(e) => Err(e)
-    }
+    // Delegate to the builtin variant map (same shape as map_err_result):
+    // the Err payload is passed through unchanged, so no Result<T, E> typing
+    // hole at the target type Result<U, E>. A `match result { Ok(v) =>
+    // Ok(f(v)), Err(e) => Err(e) }` body fails legacy monomorphization: the
+    // Ok arm and the Err arm build incompatible LLVM struct layouts
+    // ({i1, i64, i64} vs {i1, {ptr, i64}, i64}) for Result<string, string>
+    // ("cannot unify" in codegen func monomorphization). Wave-2 STD-CK
+    // report; VM semantics identical on both shapes.
+    result.map(f)
 }
 
 // map_err_result: Applies f to the Err value, preserving Ok.

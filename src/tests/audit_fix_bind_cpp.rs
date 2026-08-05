@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use crate::ast::{AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Type};
 use crate::ffi::cpp_bind;
 
-
 // ---------------------------------------------------------------------------
 // Fixtures (harness style mirrors src/ffi/bindgen_tests.rs)
 // ---------------------------------------------------------------------------

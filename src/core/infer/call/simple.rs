@@ -2378,13 +2378,34 @@ impl<'a> Checker<'a> {
                     let mut reordered: Vec<&Expr> = vec![&Expr::Literal(Lit::Unit); params.len()];
                     let mut seen = vec![false; params.len()];
                     let mut pos_idx = 0;
+                    // H-2 (audit 2026-08-05): mixed named/positional placement
+                    // errors. Previously a positional arg past the last free
+                    // slot was silently DROPPED (bypassing the arity check) and
+                    // a named arg could overwrite an occupied slot — E0257 never
+                    // fired and the lowered call disagreed with the checker.
+                    // Every placement collision/overflow/missing slot is now a
+                    // hard E0257 and the call is not re-checked with a
+                    // corrupted argument vector.
+                    let mut placement_error = false;
                     for arg in args {
                         match arg.unlocated() {
                             Expr::NamedArg(n, val) => {
                                 if let Some(pos) = func_params.iter().position(|p| p.name == *n) {
-                                    reordered[pos] = val;
-                                    seen[pos] = true;
+                                    if seen[pos] {
+                                        placement_error = true;
+                                        self.emit_code(
+                                            crate::diagnostic::codes::E0257,
+                                            format!(
+                                                "duplicate argument for parameter '{}' of function '{}' (slot already filled in mixed named/positional call)",
+                                                n, name
+                                            ),
+                                        );
+                                    } else {
+                                        reordered[pos] = val;
+                                        seen[pos] = true;
+                                    }
                                 } else {
+                                    placement_error = true;
                                     self.emit_code(
                                         crate::diagnostic::codes::E0401,
                                         format!(
@@ -2402,13 +2423,19 @@ impl<'a> Checker<'a> {
                                     reordered[pos_idx] = arg;
                                     seen[pos_idx] = true;
                                     pos_idx += 1;
+                                } else {
+                                    placement_error = true;
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0257,
+                                        format!(
+                                            "function '{}' expects {} arguments, got more (extra positional argument has no free slot)",
+                                            name,
+                                            params.len()
+                                        ),
+                                    );
                                 }
                             }
                         }
-                    }
-                    // Check for extra positional args that were dropped
-                    if !has_named_args && pos_idx < args.len() {
-                        // Some positional args were dropped — let normal arg count check handle it
                     }
                     // Fill in default values for parameters that have them
                     let mut has_missing_defaults = false;
@@ -2419,6 +2446,25 @@ impl<'a> Checker<'a> {
                                 has_missing_defaults = true;
                             }
                         }
+                    }
+                    // Enforce arity on the UNION of named + positional args:
+                    // every slot must be filled by an argument or a default.
+                    if has_named_args {
+                        for (slot_seen, p) in seen.iter().zip(func_params.iter()) {
+                            if !slot_seen && p.default_value.is_none() {
+                                placement_error = true;
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0257,
+                                    format!(
+                                        "function '{}' missing argument for parameter '{}'",
+                                        name, p.name
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    if placement_error {
+                        return Type::Name("unknown".into(), vec![]);
                     }
                     // Only recurse if we actually reordered or filled defaults
                     if has_named_args || (has_missing_defaults && args.len() < params.len()) {
@@ -2464,11 +2510,13 @@ impl<'a> Checker<'a> {
                 // state) cannot be passed as generic arguments — generic
                 // parameters are not linearly tracked (GenericParameter
                 // is_linear() = false), so a linear value flowing through a
-                // generic call would escape exactly-once enforcement. Only the
-                // instantiation position (a linear ARGUMENT) is rejected:
-                // containers such as List<cap>/Option<cap> stay legal — their
-                // linearity is tracked by the container's own CFG facts, and
-                // the container itself is not a linear surface type.
+                // generic call would escape exactly-once enforcement. The
+                // rejection is DEEP: `is_linear_surface_type` recurses through
+                // type arguments, so containers carrying linear elements
+                // (`List<cap>`/`Option<cap>`/`Map<K, cap>`) are rejected too.
+                // AGENTS.md §0 H2 ruling (audit-type 2026-08-03): the earlier
+                // "container pass-through is legal" exemption was proven to be
+                // an exactly-once escape and is abolished.
                 for (index, argument_ty) in arg_tys.iter().enumerate() {
                     if self.is_linear_surface_type(argument_ty) {
                         self.emit_code(
@@ -2488,7 +2536,30 @@ impl<'a> Checker<'a> {
                     arg_tys.iter().zip(instantiated_params.iter()).enumerate()
                 {
                     let coerced = is_numeric_coercion(expected, actual);
-                    if !coerced && self.unification.constrain(expected, actual).is_err() {
+                    let unify_result = if coerced {
+                        Ok(())
+                    } else {
+                        self.unification.constrain(expected, actual)
+                    };
+                    // C-1 (audit 2026-08-05): a bare-container parameter
+                    // (`List`/`Set`/`Map` without args) must not accept a
+                    // linear element; the unifier fails closed and we surface
+                    // E0432 instead of the generic E0211.
+                    if let Err(crate::core::unification::UnifyError::LinearContainerEscape(msg)) =
+                        &unify_result
+                    {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0432,
+                            format!(
+                                "argument {} of '{}' carries a linear value into a bare container: {}",
+                                i + 1,
+                                name,
+                                msg
+                            ),
+                        );
+                        continue;
+                    }
+                    if unify_result.is_err() {
                         let expected = self
                             .unification
                             .resolve_infer(expected)
@@ -2601,7 +2672,31 @@ impl<'a> Checker<'a> {
                     }
                     // IF-C1: strict unify at call sites rejects Any/_/Infer escapes.
                     let coerced = is_numeric_coercion(param, &at);
-                    if !coerced && self.unification.unify(param, &at).is_err() {
+                    let unify_result = if coerced {
+                        Ok(())
+                    } else {
+                        self.unification.unify(param, &at)
+                    };
+                    // C-1 (audit 2026-08-05): non-generic callees with bare
+                    // `List`/`Set`/`Map` parameters must not accept linear
+                    // elements (the callee judges bare containers non-linear,
+                    // dropping the capability). The unifier fails closed;
+                    // surface E0432 instead of the generic E0211.
+                    if let Err(crate::core::unification::UnifyError::LinearContainerEscape(msg)) =
+                        &unify_result
+                    {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0432,
+                            format!(
+                                "argument {} of '{}' carries a linear value into a bare container: {}",
+                                i + 1,
+                                name,
+                                msg
+                            ),
+                        );
+                        continue;
+                    }
+                    if unify_result.is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0211,

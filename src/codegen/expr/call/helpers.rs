@@ -1492,6 +1492,404 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => false,
         }
     }
+
+    // ========================================================================
+    // Audit H-18 / D-3 (full-audit-2026-08-05 §2.6 / §3.7): exact-size JSON
+    // string assembly. No fixed 512/1024-byte snprintf buffers (silent
+    // truncation into invalid JSON — VM emits complete output), no unbounded
+    // strcat. Mirrors the sized-assembly discipline of builtins/io.rs.
+    // ========================================================================
+
+    /// Runtime JSON list formatter for a scalar-ish element type.
+    /// AUDIT FIX (H-18): `to_json(List<List<T>>)` hardcoded the i64 formatter,
+    /// serializing f64 bit patterns / string pointers as integers. The runtime
+    /// HAS f64/str variants (runtime/mod.rs `mimi_list_f64_to_json` /
+    /// `mimi_list_str_to_json`); dispatch on the element type.
+    pub(in crate::codegen) fn json_list_formatter_for(elem_ty_name: &str) -> &'static str {
+        match elem_ty_name {
+            "string" => "mimi_list_str_to_json",
+            "f64" | "f32" => "mimi_list_f64_to_json",
+            _ => "mimi_list_i64_to_json",
+        }
+    }
+
+    /// AUDIT FIX (H-18): to_json for a nested list with element-type-aware
+    /// formatting. `list_ptr` points to the outer list's `{i64 len, i8* data}`
+    /// struct; `elem_ty_name` is its element type (may itself be `List<...>`).
+    ///
+    /// - scalar element → typed leaf formatter (str/f64/i64);
+    /// - `List<scalar>` element → `mimi_list_list_to_json` with the TYPED leaf
+    ///   formatter callback (this is the audited fix: the formatter was
+    ///   hardcoded to `mimi_list_i64_to_json`, serializing f64 bit patterns /
+    ///   string pointers as integers);
+    /// - deeper nesting → codegen loop formatting each element recursively
+    ///   into an exact-size realloc-grown buffer (no fixed-buffer strcat).
+    pub(in crate::codegen) fn emit_list_to_json_cstr(
+        &self,
+        list_ptr: inkwell::values::PointerValue<'ctx>,
+        elem_ty_name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let sub = elem_ty_name
+            .strip_prefix("List<")
+            .and_then(|s| s.strip_suffix('>'))
+            .map(|s| s.trim().to_string());
+        match sub {
+            None => {
+                // This list holds scalar elements: single typed formatter call.
+                let fname = Self::json_list_formatter_for(elem_ty_name);
+                let raw = self
+                    .build_call(
+                        self.get_list_json_formatter_fn(fname)?,
+                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                        "to_json_list_scalar",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError(format!("{} void", fname)))?
+                    .into_pointer_value();
+                Ok(raw)
+            }
+            Some(inner_elem) if inner_elem.starts_with("List<") => {
+                // Elements are nested lists (depth >= 3 overall): recurse per
+                // element in a codegen loop.
+                self.emit_nested_list_loop_to_json(list_ptr, &inner_elem)
+            }
+            Some(inner_elem) => {
+                // Elements are List<scalar>: runtime two-level formatter with
+                // the TYPED leaf callback (audit H-18 core fix).
+                let leaf_name = Self::json_list_formatter_for(&inner_elem);
+                let leaf_fn = self.get_list_json_formatter_fn(leaf_name)?;
+                let leaf_cb = leaf_fn.as_global_value().as_pointer_value();
+                let callee = self.get_list_list_json_fn()?;
+                let raw = self
+                    .build_call(
+                        callee,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(list_ptr),
+                            BasicMetadataValueEnum::PointerValue(leaf_cb),
+                        ],
+                        "to_json_list_list",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_list_list_to_json void")?
+                    .into_pointer_value();
+                Ok(raw)
+            }
+        }
+    }
+
+    /// Get-or-declare a leaf list formatter `fn(*MimiList) -> char*`.
+    fn get_list_json_formatter_fn(
+        &self,
+        fname: &str,
+    ) -> Result<inkwell::values::FunctionValue<'ctx>, CompileError> {
+        if let Some(f) = self.module.get_function(fname) {
+            return Ok(f);
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+        Ok(self
+            .module
+            .add_function(fname, fn_ty, Some(inkwell::module::Linkage::External)))
+    }
+
+    /// Get-or-declare `mimi_list_list_to_json(list, elem_formatter) -> char*`.
+    fn get_list_list_json_fn(&self) -> Result<inkwell::values::FunctionValue<'ctx>, CompileError> {
+        if let Some(f) = self.module.get_function("mimi_list_list_to_json") {
+            return Ok(f);
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        );
+        Ok(self.module.add_function(
+            "mimi_list_list_to_json",
+            fn_ty,
+            Some(inkwell::module::Linkage::External),
+        ))
+    }
+
+    /// Depth >= 3 nested-list JSON: loop over the outer list's element slots
+    /// (each an i64 carrying a ptrtoint inner-list pointer), format each
+    /// element recursively, and join with "," into a realloc-grown buffer.
+    fn emit_nested_list_loop_to_json(
+        &self,
+        list_ptr: inkwell::values::PointerValue<'ctx>,
+        elem_ty_name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let free_fn = self.get_runtime_fn("free")?;
+
+        let len = self.load_list_len(list_ptr)?;
+        let data = self.load_list_data_raw(list_ptr)?;
+
+        // Growable buffer state: (buf, cap, off) in allocas.
+        let buf_alloca = self.build_alloca(BasicTypeEnum::PointerType(i8_ptr), "nlj_buf")?;
+        let cap_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "nlj_cap")?;
+        let off_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "nlj_off")?;
+        let init_cap = i64_ty.const_int(64, false);
+        let init_buf = self.malloc_or_abort(init_cap, "nlj_init_buf")?;
+        self.build_store(buf_alloca, init_buf)?;
+        self.build_store(cap_alloca, init_cap)?;
+        self.build_store(off_alloca, i64_ty.const_int(0, false))?;
+
+        // Append "[".
+        self.emit_nlj_append_lit(buf_alloca, cap_alloca, off_alloca, "[")?;
+
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "nlj_i")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop_bb = self.context.append_basic_block(parent, "nlj_loop");
+        let body_bb = self.context.append_basic_block(parent, "nlj_body");
+        let done_bb = self.context.append_basic_block(parent, "nlj_done");
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .build_load(i64_ty, idx_alloca, "nlj_idx")?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, len, "nlj_cont")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(cont, body_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(body_bb);
+        // Comma before every element except the first.
+        let need_comma = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                idx,
+                i64_ty.const_int(0, false),
+                "nlj_need_comma",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let comma_bb = self.context.append_basic_block(parent, "nlj_comma");
+        let elem_bb = self.context.append_basic_block(parent, "nlj_elem");
+        self.builder
+            .build_conditional_branch(need_comma, comma_bb, elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(comma_bb);
+        self.emit_nlj_append_lit(buf_alloca, cap_alloca, off_alloca, ",")?;
+        self.builder
+            .build_unconditional_branch(elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(elem_bb);
+        // SAFETY: `data` is the outer list's i64 element-slot array; the loop
+        // guard `idx SLT len` gates this block so `data[idx]` is in bounds.
+        // Each slot carries a ptrtoint pointer to the inner MimiList struct.
+        let slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, data, &[idx], "nlj_slot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let elem_i64 = self
+            .build_load(i64_ty, slot, "nlj_elem_i64")?
+            .into_int_value();
+        let inner_ptr = self
+            .builder
+            .build_int_to_ptr(elem_i64, i8_ptr, "nlj_inner_ptr")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let piece = self.emit_list_to_json_cstr(inner_ptr, elem_ty_name)?;
+        self.emit_nlj_append_dyn(
+            buf_alloca, cap_alloca, off_alloca, piece, strlen_fn, memcpy_fn,
+        )?;
+        // The piece string was copied; release it (JSON cstrs are
+        // free-compatible — see register_heap_alloc discipline).
+        self.build_call(
+            free_fn,
+            &[BasicMetadataValueEnum::PointerValue(piece)],
+            "nlj_piece_free",
+        )?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "nlj_next")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next)?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(done_bb);
+        // Append "]" and NUL-terminate (append reserves +1 in the cap check).
+        self.emit_nlj_append_lit(buf_alloca, cap_alloca, off_alloca, "]")?;
+        let off_end = self
+            .build_load(i64_ty, off_alloca, "nlj_off_end")?
+            .into_int_value();
+        let buf_end = self
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr),
+                buf_alloca,
+                "nlj_buf_end",
+            )?
+            .into_pointer_value();
+        // SAFETY: byte-offset GEP; the append helper keeps cap >= off + 1.
+        let nul_dst = self
+            .gep()
+            .build_gep(i8_ty, buf_end, &[off_end], "nlj_nul")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(nul_dst, i8_ty.const_int(0, false))?;
+        Ok(buf_end)
+    }
+
+    /// Append a literal fragment to the growable (buf, cap, off) buffer.
+    fn emit_nlj_append_lit(
+        &self,
+        buf_alloca: inkwell::values::PointerValue<'ctx>,
+        cap_alloca: inkwell::values::PointerValue<'ctx>,
+        off_alloca: inkwell::values::PointerValue<'ctx>,
+        lit: &'static str,
+    ) -> Result<(), CompileError> {
+        let g = self
+            .builder
+            .build_global_string_ptr(lit, "nlj_lit")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let len = self.context.i64_type().const_int(lit.len() as u64, false);
+        self.emit_nlj_append(
+            buf_alloca,
+            cap_alloca,
+            off_alloca,
+            g.as_pointer_value(),
+            len,
+            memcpy_fn,
+        )
+    }
+
+    /// Append a runtime C string (measured with strlen) to the growable buffer.
+    fn emit_nlj_append_dyn(
+        &self,
+        buf_alloca: inkwell::values::PointerValue<'ctx>,
+        cap_alloca: inkwell::values::PointerValue<'ctx>,
+        off_alloca: inkwell::values::PointerValue<'ctx>,
+        piece: inkwell::values::PointerValue<'ctx>,
+        strlen_fn: inkwell::values::FunctionValue<'ctx>,
+        memcpy_fn: inkwell::values::FunctionValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let plen = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(piece)],
+                "nlj_piece_len",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+            .into_int_value();
+        self.emit_nlj_append(buf_alloca, cap_alloca, off_alloca, piece, plen, memcpy_fn)
+    }
+
+    /// Core grow-and-copy: ensure `off + add_len + 1 (NUL) <= cap` (else
+    /// realloc to `max(need, cap*2)`), memcpy at `off`, advance `off`.
+    fn emit_nlj_append(
+        &self,
+        buf_alloca: inkwell::values::PointerValue<'ctx>,
+        cap_alloca: inkwell::values::PointerValue<'ctx>,
+        off_alloca: inkwell::values::PointerValue<'ctx>,
+        src: inkwell::values::PointerValue<'ctx>,
+        add_len: inkwell::values::IntValue<'ctx>,
+        memcpy_fn: inkwell::values::FunctionValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let off = self
+            .build_load(i64_ty, off_alloca, "nlj_app_off")?
+            .into_int_value();
+        let cap = self
+            .build_load(i64_ty, cap_alloca, "nlj_app_cap")?
+            .into_int_value();
+        // need = off + add_len + 1 (reserve the NUL slot up front).
+        let off_plus = self
+            .builder
+            .build_int_add(off, add_len, "nlj_app_off_plus")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let need = self
+            .builder
+            .build_int_add(off_plus, i64_ty.const_int(1, false), "nlj_app_need")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let fits = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLE, need, cap, "nlj_app_fits")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let grow_bb = self.context.append_basic_block(parent, "nlj_grow");
+        let cont_bb = self.context.append_basic_block(parent, "nlj_grow_cont");
+        self.builder
+            .build_conditional_branch(fits, cont_bb, grow_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(grow_bb);
+        // new_cap = max(need, cap*2)
+        let cap2 = self
+            .builder
+            .build_int_nsw_mul(cap, i64_ty.const_int(2, false), "nlj_cap2")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let use_cap2 = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, cap2, need, "nlj_use_cap2")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let new_cap = self
+            .builder
+            .build_select(use_cap2, cap2, need, "nlj_new_cap")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let old_buf = self
+            .build_load(
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                buf_alloca,
+                "nlj_app_buf",
+            )?
+            .into_pointer_value();
+        let new_buf = self.realloc_or_abort(old_buf, new_cap, "nlj_app")?;
+        self.build_store(buf_alloca, new_buf)?;
+        self.build_store(cap_alloca, new_cap)?;
+        self.builder
+            .build_unconditional_branch(cont_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(cont_bb);
+        let buf = self
+            .build_load(
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                buf_alloca,
+                "nlj_app_buf2",
+            )?
+            .into_pointer_value();
+        // SAFETY: byte-offset GEP into a buffer with cap >= off + add_len + 1.
+        let dst = self
+            .gep()
+            .build_gep(i8_ty, buf, &[off], "nlj_app_dst")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(dst),
+                BasicMetadataValueEnum::PointerValue(src),
+                BasicMetadataValueEnum::IntValue(add_len),
+            ],
+            "nlj_app_mcpy",
+        )?;
+        self.build_store(off_alloca, off_plus)?;
+        Ok(())
+    }
 }
 
 // ============================================================

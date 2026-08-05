@@ -19,6 +19,18 @@ pub(crate) struct DiagnosticBatch {
     pub(crate) diagnostics: Vec<Value>,
 }
 
+/// X-4 (full audit 2026-08-05 §3.10): dynamic Z3 verification timeout.
+///
+/// The complexity proxy is the function's **line span**
+/// (`end_line - start_line`). The old formula subtracted the start LINE from
+/// the start COLUMN (`start_col - start_line`) — a nonsense quantity that
+/// saturating-subtracts to ~0 for any function declared below line ~10, so
+/// nearly every function got the minimum timeout and complex-contract
+/// functions fake-Timed-out en masse.
+pub(crate) fn verification_timeout_ms(func_span_lines: usize, param_count: usize) -> u64 {
+    (func_span_lines * 50 + param_count * 100).clamp(200, 5000) as u64
+}
+
 fn owned_diagnostic_origin(origin: &crate::core::Origin) -> DiagnosticOrigin {
     match origin {
         crate::core::Origin::User(_) => DiagnosticOrigin::user(),
@@ -368,9 +380,12 @@ impl LspServer {
                     format!("source registration failed: {error}"),
                     Span::UNKNOWN,
                 );
+                // X-11: text IS available here — feed it through so the range
+                // goes through the char→UTF-16 walk (AU-LSP-3) instead of the
+                // lossy no-text fallback in `position::span_to_range`.
                 let mut batches = vec![DiagnosticBatch {
                     uri: None,
-                    diagnostics: vec![diagnostic::diagnostic_to_lsp(&diagnostic, None)],
+                    diagnostics: vec![diagnostic::diagnostic_to_lsp(&diagnostic, Some(text))],
                 }];
                 if let Some(uri) = uri {
                     // Clear stale diagnostics for the active document while
@@ -590,15 +605,17 @@ impl LspServer {
             }
         }
 
-        // Dynamic timeout based on function complexity
+        // Dynamic timeout based on function complexity.
+        // X-4: complexity = the function's line span (end_line - start_line),
+        // clamped inside `verification_timeout_ms`.
         let func_body_lines = func
             .meta
             .span
-            .start_col
+            .end_line
             .saturating_sub(func.meta.span.start_line)
             .max(1);
         let param_count = func.params.len();
-        let dynamic_timeout = (func_body_lines * 50 + param_count * 100).clamp(200, 5000) as u64;
+        let dynamic_timeout = verification_timeout_ms(func_body_lines, param_count);
 
         // AU-H3: if a prior Z3 crash poisoned the session, drop it so
         // get_or_insert creates a fresh solver (otherwise verify forever Unknown).

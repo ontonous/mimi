@@ -471,10 +471,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError(format!("body fn '{}' not found", body_name)))?;
         let mut poll_call_args = Vec::new();
         let mut current_arg_offset = args_offset;
-        for (param_idx, _param) in func.params.iter().enumerate() {
-            if param_idx < param_types.len() {
-                let ty = param_types[param_idx];
-                let size = param_sizes[param_idx];
+        // K-3: param_types skips un-lowerable params (unit/nothing/Infer), so
+        // index it with a counter that skips the same params — the source
+        // index desyncs after any skipped param.
+        let mut llvm_param_idx: usize = 0;
+        for param in func.params.iter() {
+            if self.llvm_type_for(&param.ty).is_none() {
+                continue;
+            }
+            if llvm_param_idx < param_types.len() {
+                let ty = param_types[llvm_param_idx];
+                let size = param_sizes[llvm_param_idx];
                 // GEP to load arg: future + current_arg_offset
                 let arg_ptr_i8 = self
                     .gep()
@@ -482,7 +489,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         i8_ty,
                         poll_future_ptr,
                         &[i64_ty.const_int(current_arg_offset, false)],
-                        &format!("poll_arg_{}", param_idx),
+                        &format!("poll_arg_{}", llvm_param_idx),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("poll arg gep: {}", e)))?;
                 let arg_typed_ptr = self
@@ -490,11 +497,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_pointer_cast(
                         arg_ptr_i8,
                         self.context.ptr_type(inkwell::AddressSpace::default()),
-                        &format!("poll_arg_typed_{}", param_idx),
+                        &format!("poll_arg_typed_{}", llvm_param_idx),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("poll arg cast: {}", e)))?;
-                let arg_val =
-                    self.build_load(ty, arg_typed_ptr, &format!("poll_arg_val_{}", param_idx))?;
+                let arg_val = self.build_load(
+                    ty,
+                    arg_typed_ptr,
+                    &format!("poll_arg_val_{}", llvm_param_idx),
+                )?;
                 poll_call_args.push(match arg_val {
                     BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(iv),
                     BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(fv),
@@ -507,6 +517,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 });
                 current_arg_offset += size;
+                llvm_param_idx += 1;
             }
         }
 
@@ -577,13 +588,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.push_heap_scope();
 
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
-        for (i, param) in func.params.iter().enumerate() {
-            if i < param_types.len() {
-                let ty = param_types[i];
+        // K-3: skip-aware LLVM param index (see bind_func_params).
+        let mut llvm_param_idx: usize = 0;
+        for param in func.params.iter() {
+            if self.llvm_type_for(&param.ty).is_none() {
+                continue;
+            }
+            if llvm_param_idx < param_types.len() {
+                let ty = param_types[llvm_param_idx];
                 let alloca = self.build_alloca(ty, &param.name)?;
                 let param_val = function
-                    .get_nth_param(i as u32)
-                    .ok_or_else(|| CompileError::LlvmError(format!("param {} not found", i)))?;
+                    .get_nth_param(llvm_param_idx as u32)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!("param {} not found", llvm_param_idx))
+                    })?;
                 self.build_store(alloca, param_val)?;
                 vars.insert(param.name.clone(), (alloca, ty));
                 if let Type::Name(tn, args) = param.ty.unlocated() {
@@ -597,6 +615,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Register list element type for List<T> params where T is a struct
                 self.register_list_elem_type(&param.name, &param.ty);
+                llvm_param_idx += 1;
             }
         }
 
@@ -617,11 +636,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("future_alloc returned non-pointer".into()))?;
 
         // Store args in future at args_offset
+        // K-3: skip-aware LLVM param index (see bind_func_params).
         let mut current_arg_store_offset = args_offset;
-        for (param_idx, param) in func.params.iter().enumerate() {
-            if param_idx < param_types.len() {
-                let ty = param_types[param_idx];
-                let size = param_sizes[param_idx];
+        let mut llvm_param_idx: usize = 0;
+        for param in func.params.iter() {
+            if self.llvm_type_for(&param.ty).is_none() {
+                continue;
+            }
+            if llvm_param_idx < param_types.len() {
+                let ty = param_types[llvm_param_idx];
+                let size = param_sizes[llvm_param_idx];
                 let alloca = vars.get(&param.name).ok_or_else(|| {
                     CompileError::LlvmError(format!("var '{}' not found", param.name))
                 })?;
@@ -632,7 +656,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         i8_ty,
                         future_ptr,
                         &[i64_ty.const_int(current_arg_store_offset, false)],
-                        &format!("arg_slot_{}", param_idx),
+                        &format!("arg_slot_{}", llvm_param_idx),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("arg slot gep: {}", e)))?;
                 let arg_slot_typed = self
@@ -640,11 +664,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_pointer_cast(
                         arg_slot_i8,
                         self.context.ptr_type(inkwell::AddressSpace::default()),
-                        &format!("arg_slot_typed_{}", param_idx),
+                        &format!("arg_slot_typed_{}", llvm_param_idx),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("arg slot cast: {}", e)))?;
                 self.build_store(arg_slot_typed, val)?;
                 current_arg_store_offset += size;
+                llvm_param_idx += 1;
             }
         }
 
@@ -1394,17 +1419,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         function: FunctionValue<'ctx>,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
-        for (i, param) in func.params.iter().enumerate() {
+        // K-3 (full-audit 2026-08-05 §3.6): parameters without an LLVM type
+        // (unit/nothing/Infer → llvm_type_for = None) are skipped BOTH in the
+        // signature construction (declare_func / generic instantiation) and in
+        // this binding loop. The LLVM parameter index therefore advances
+        // independently of the source parameter index. Indexing
+        // get_nth_param by the source index (old code) made every parameter
+        // after a skipped one bind the WRONG LLVM parameter, or error with an
+        // out-of-range index once skipped params outnumbered the remainder.
+        let mut llvm_param_idx: u32 = 0;
+        for param in func.params.iter() {
             let resolved = self.resolve_type(&param.ty);
             if let Some(ty) = self.llvm_type_for(&resolved) {
-                let mut param_val = function.get_nth_param(i as u32).ok_or_else(|| {
+                let mut param_val = function.get_nth_param(llvm_param_idx).ok_or_else(|| {
                     CompileError::LlvmError(format!(
                         "param index {} out of range for function '{}' with {} params",
-                        i,
+                        llvm_param_idx,
                         func.name,
                         function.count_params()
                     ))
                 })?;
+                llvm_param_idx += 1;
                 // view/mutate parameters use the caller's storage directly.
                 // This is the reference ABI promised by ParamBorrow: mutations
                 // to a List header (len/data after realloc) become visible to
@@ -2431,6 +2466,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let cond_val = self.compile_expr(cond, vars)?;
                     let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
                         // Normalize i64 booleans (builtin predicates) to i1.
+                        // H-22: zero constant at the condition's own width
+                        // (icmp operands must match; hard-coded i64 zero vs a
+                        // narrower int is invalid IR).
                         if iv.get_type().get_bit_width() == 1 {
                             iv
                         } else {
@@ -2438,7 +2476,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .build_int_compare(
                                     inkwell::IntPredicate::NE,
                                     iv,
-                                    self.context.i64_type().const_int(0, false),
+                                    iv.get_type().const_int(0, false),
                                     "cond_bool",
                                 )
                                 .map_err(|e| {

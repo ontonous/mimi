@@ -2,6 +2,7 @@ use crate::{lockfile, manifest, pkg_registry};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
 pub struct ResolvedDep {
     pub name: String,
     pub version: String,
@@ -20,13 +21,24 @@ pub fn resolve_single_dep(
 
 /// Resolve a dependency with an optional base directory for relative path deps.
 /// When `base_dir` is set (manifest directory), path deps resolve relative to it
-/// rather than the process cwd (P-H10).
+/// rather than the process cwd (P-H10). For transitive deps it must be the
+/// OWNING package's install directory, not the top-level project directory
+/// (X-1, full-audit 2026-08-05 §3.10).
 pub fn resolve_single_dep_in(
     dep: &manifest::Dependency,
     dst: &Path,
     reg: &Path,
     base_dir: Option<&Path>,
 ) -> Result<ResolvedDep, String> {
+    // H-30 (full-audit 2026-08-05 §2.9): every branch installs into
+    // `deps_dir.join(&dep.name)`, so the name must be validated for ALL
+    // resolution branches (registry/git/path) before any filesystem access.
+    // A malicious manifest `name = "../pwned"` previously traversed out of
+    // the deps directory in the git/path branches (only the registry branch
+    // validated, audit finding AU-C3).
+    crate::path_safety::validate_package_name(&dep.name)
+        .map_err(|e| format!("invalid package name '{}': {}", dep.name, e))?;
+
     if let Some(git_url) = &dep.git {
         resolve_git_dep(dep, git_url, dst)
     } else {
@@ -114,9 +126,9 @@ fn resolve_registry_dep(
     dst: &Path,
     reg: &Path,
 ) -> Result<ResolvedDep, String> {
-    // AU-C3: reject path-traversal package names before joining into the registry.
-    crate::path_safety::validate_package_name(&dep.name)
-        .map_err(|e| format!("invalid package name '{}': {}", dep.name, e))?;
+    // AU-C3: path-traversal package names are rejected in
+    // `resolve_single_dep_in` (H-30 choke point) before this branch runs;
+    // `dep.name` is guaranteed to validate as a single safe path component.
     let pkg_dir = reg.join(&dep.name);
     if !pkg_dir.exists() {
         return Err(format!(

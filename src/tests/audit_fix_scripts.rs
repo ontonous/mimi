@@ -3,7 +3,6 @@
 //! Discipline: each fix must carry a regression test here; L1 divergences
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
 
-
 // ---------------------------------------------------------------------------
 // Full audit §13: CI/test script control-flow fixes (vacuous pass checks).
 // The tests below assert *syntactic* validity of each edited script

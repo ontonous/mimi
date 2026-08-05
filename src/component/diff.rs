@@ -276,12 +276,13 @@ mod tests {
     /// build their own struct ABI.
     fn make_abi_with_struct() -> MimiAbi {
         let mut abi = make_abi();
-        abi.types.push(crate::component::serialize::MimiAbiType::Struct {
-            name: "AuditStruct".to_string(),
-            fields: vec![],
-            size: Some(24),
-            align: Some(8),
-        });
+        abi.types
+            .push(crate::component::serialize::MimiAbiType::Struct {
+                name: "AuditStruct".to_string(),
+                fields: vec![],
+                size: Some(24),
+                align: Some(8),
+            });
         abi
     }
 
@@ -342,9 +343,10 @@ mod tests {
 
         let diff = diff_abi(&old, &new);
         assert!(diff.has_breaking_changes());
-        assert!(diff.changes.iter().any(
-            |c| matches!(c, AbiChange::ChangedExport { name, .. } if name == "mimi_now")
-        ));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| matches!(c, AbiChange::ChangedExport { name, .. } if name == "mimi_now")));
     }
 
     #[test]

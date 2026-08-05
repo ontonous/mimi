@@ -59,33 +59,144 @@ pub fn dual(s: &SessionType) -> SessionType {
 }
 
 /// Resolve named session references and expand `dual(...)` using `env`.
-/// Returns `None` if a name is unknown (caller emits a diagnostic).
+/// Returns `None` if a name is unknown **or** if a circular session
+/// definition is encountered (caller emits a diagnostic).
+///
+/// X-2 (full-audit 2026-08-05 §3.10): the previous guard only caught direct
+/// self-reference (`session A = A`); a cycle of length >= 2 such as
+/// `session A = B; session B = A` recursed forever and overflowed the
+/// compiler stack (user-source DoS on every check/build/run path). A
+/// visited-set now detects cycles at any depth and fails closed with `None`.
 pub fn resolve(s: &SessionType, env: &HashMap<String, SessionType>) -> Option<SessionType> {
+    let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
+    resolve_inner(s, env, &mut visiting)
+}
+
+fn resolve_inner(
+    s: &SessionType,
+    env: &HashMap<String, SessionType>,
+    visiting: &mut std::collections::HashSet<String>,
+) -> Option<SessionType> {
     match s.unlocated() {
         SessionType::Send(t, cont) => {
-            let c = resolve(cont, env)?;
+            let c = resolve_inner(cont, env, visiting)?;
             Some(SessionType::Send(t.clone(), Box::new(c)))
         }
         SessionType::Recv(t, cont) => {
-            let c = resolve(cont, env)?;
+            let c = resolve_inner(cont, env, visiting)?;
             Some(SessionType::Recv(t.clone(), Box::new(c)))
         }
         SessionType::End => Some(SessionType::End),
         SessionType::Name(n) => {
-            let body = env.get(n)?;
-            // Avoid infinite recursion on self-referential sessions by only
-            // expanding one level of Name; dual/send/recv continue resolve.
-            match body.unlocated() {
-                SessionType::Name(n2) if n2 == n => Some(SessionType::Name(n.clone())),
-                other => resolve(other, env),
+            // X-2: re-entering a name that is currently being expanded means
+            // the definitions are circular — fail closed instead of recursing.
+            if !visiting.insert(n.clone()) {
+                return None;
             }
+            let result = match env.get(n) {
+                Some(body) => resolve_inner(body, env, visiting),
+                None => None,
+            };
+            // Path-based stack: pop on exit so the same name reached through
+            // an independent (non-cyclic) branch can still be expanded.
+            visiting.remove(n);
+            result
         }
         SessionType::Dual(inner) => {
-            let r = resolve(inner, env)?;
+            let r = resolve_inner(inner, env, visiting)?;
             Some(dual(&r))
         }
         SessionType::Located { .. } => unreachable!("unlocated session type"),
     }
+}
+
+/// Collect every session name referenced anywhere inside `st` (recursively).
+fn referenced_names(st: &SessionType, out: &mut std::collections::HashSet<String>) {
+    match st.unlocated() {
+        SessionType::Send(_, cont) | SessionType::Recv(_, cont) => referenced_names(cont, out),
+        SessionType::Dual(inner) => referenced_names(inner, out),
+        SessionType::Name(n) => {
+            out.insert(n.clone());
+        }
+        SessionType::End => {}
+        SessionType::Located { .. } => unreachable!("unlocated session type"),
+    }
+}
+
+/// Detect a circular session definition in `env` (X-2).
+///
+/// Returns one offending cycle as a name path whose first and last elements
+/// are equal (e.g. `["A", "B", "A"]`), suitable for a user-facing diagnostic.
+/// Returns `None` when the session definitions are acyclic.
+///
+/// Implemented as an iterative three-color DFS over the name-reference graph
+/// so a hostile chain of thousands of declarations cannot overflow the stack
+/// either.
+pub fn detect_session_cycle(env: &HashMap<String, SessionType>) -> Option<Vec<String>> {
+    // Build the reference graph: name -> referenced names that exist in `env`
+    // (unknown names terminate resolution, so they cannot form a cycle).
+    // Edges are owned strings: the scratch set below is reused per node, so
+    // references into it must not leak into the graph.
+    let mut refs: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (name, body) in env {
+        names.clear();
+        referenced_names(body, &mut names);
+        let edges: Vec<String> = names
+            .iter()
+            .filter(|n| env.contains_key(n.as_str()))
+            .cloned()
+            .collect();
+        refs.insert(name.as_str(), edges);
+    }
+
+    // 0 = white (unvisited), 1 = gray (on current path), 2 = black (done).
+    let mut color: HashMap<&str, u8> = HashMap::new();
+    // Outlives the DFS frames: stack/path entries may borrow from it.
+    let no_edges: Vec<String> = Vec::new();
+    for start in env.keys() {
+        if color.get(start.as_str()).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        color.insert(start.as_str(), 1);
+        let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
+        let mut path: Vec<&str> = vec![start.as_str()];
+        loop {
+            // Copy the frame out so `stack` can be mutated below (NLL).
+            let Some(&(node, idx)) = stack.last() else {
+                break;
+            };
+            let edges = refs.get(node).unwrap_or(&no_edges);
+            if idx < edges.len() {
+                let next: &str = edges[idx].as_str();
+                stack.last_mut().expect("stack non-empty").1 += 1;
+                match color.get(next).copied().unwrap_or(0) {
+                    0 => {
+                        color.insert(next, 1);
+                        stack.push((next, 0));
+                        path.push(next);
+                    }
+                    1 => {
+                        // Gray node on the current path: extract the cycle.
+                        let pos = path
+                            .iter()
+                            .position(|n| *n == next)
+                            .expect("gray node must be on the current path");
+                        let mut cycle: Vec<String> =
+                            path[pos..].iter().map(|n| n.to_string()).collect();
+                        cycle.push(next.to_string());
+                        return Some(cycle);
+                    }
+                    _ => {} // black: subtree fully explored, no cycle there.
+                }
+            } else {
+                color.insert(node, 2);
+                stack.pop();
+                path.pop();
+            }
+        }
+    }
+    None
 }
 
 /// Structural equality of session types after dual-normalization.

@@ -28,37 +28,70 @@ impl VerifierCtx {
     ) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         let extern_names: HashSet<String> = externs.keys().cloned().collect();
+        self.verify_ffi_items_with_externs(
+            session,
+            &file.items,
+            externs,
+            &extern_names,
+            &mut results,
+        );
+        results
+    }
 
-        for item in &file.items {
-            if let Item::Func(func) = item {
-                if func.body.is_empty() {
-                    continue;
-                }
-                let calls = Self::find_extern_calls_in_func(func, &extern_names);
-                if calls.is_empty() {
-                    continue;
-                }
-                session.push();
-                let mut vars = self.setup_ffi_func_vars(session, func);
-                self.assert_func_requires(session, func, &mut vars);
-
-                for (extern_name, args, call_span) in &calls {
-                    if let Some(extern_func) = externs.get(extern_name.as_str()) {
-                        let result = self.check_extern_call(
-                            session,
-                            &func.name,
-                            extern_func,
-                            args,
-                            &mut vars,
-                            *call_span,
-                        );
-                        results.push(result);
+    /// Wave-2 (wave1-review §5.8): call-site discovery descends into
+    /// `Item::Module` — the Wave-1 walker made If/While/For conditions,
+    /// Match, Defer, etc. exhaustive INSIDE a function body, but functions
+    /// nested in modules were never visited at all, so `--verify-ffi` stayed
+    /// blind to every extern call they contain.
+    fn verify_ffi_items_with_externs(
+        &mut self,
+        session: &mut SolverSession,
+        items: &[Item],
+        externs: &HashMap<String, ExternFunc>,
+        extern_names: &HashSet<String>,
+        results: &mut Vec<VerificationResult>,
+    ) {
+        for item in items {
+            match item {
+                Item::Func(func) => {
+                    if func.body.is_empty() {
+                        continue;
                     }
+                    let calls = Self::find_extern_calls_in_func(func, extern_names);
+                    if calls.is_empty() {
+                        continue;
+                    }
+                    session.push();
+                    let mut vars = self.setup_ffi_func_vars(session, func);
+                    self.assert_func_requires(session, func, &mut vars);
+
+                    for (extern_name, args, call_span) in &calls {
+                        if let Some(extern_func) = externs.get(extern_name.as_str()) {
+                            let result = self.check_extern_call(
+                                session,
+                                &func.name,
+                                extern_func,
+                                args,
+                                &mut vars,
+                                *call_span,
+                            );
+                            results.push(result);
+                        }
+                    }
+                    session.pop();
                 }
-                session.pop();
+                Item::Module(m) => {
+                    self.verify_ffi_items_with_externs(
+                        session,
+                        &m.items,
+                        externs,
+                        extern_names,
+                        results,
+                    );
+                }
+                _ => {}
             }
         }
-        results
     }
 
     fn collect_externs(items: &[Item], externs: &mut HashMap<String, ExternFunc>) {

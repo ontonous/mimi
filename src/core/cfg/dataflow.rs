@@ -308,9 +308,25 @@ fn validate_return_resources(
     droppable: &BTreeSet<ResourceId>,
 ) {
     for (block_id, block) in &cfg.blocks {
-        if !cfg.reachable.contains(block_id)
-            || !matches!(block.terminator, Terminator::Return { .. })
-        {
+        if !cfg.reachable.contains(block_id) {
+            continue;
+        }
+        let is_return = matches!(block.terminator, Terminator::Return { .. });
+        // Audit 2026-08-05 (wave-2, G-5): diverging paths never reach a
+        // Return terminator, so the audit used to skip them entirely:
+        // `if flag { drop(t) } else { loop { } }` leaked t on the loop path
+        // without a single diagnostic. Treat the two divergent shapes as
+        // consumption points too (fail-closed — holding a capability inside
+        // an infinite loop is not consumption): explicit Diverge terminators
+        // and blocks whose only exits are back-edges (infinite loop bodies).
+        let is_diverging_sink = matches!(block.terminator, Terminator::Diverge) || {
+            let successors = cfg.successors(block_id);
+            !successors.is_empty()
+                && successors
+                    .iter()
+                    .all(|edge| edge.kind == EdgeKind::Backedge)
+        };
+        if !is_return && !is_diverging_sink {
             continue;
         }
         let Some(state) = out.get(block_id) else {
@@ -327,6 +343,11 @@ fn validate_return_resources(
             .points
             .last()
             .map_or(&block.source, |point| &point.source);
+        let path_noun = if is_return {
+            "before this return path"
+        } else {
+            "on this diverging path"
+        };
         for (resource, fact) in &state.resources {
             // 0.31.16: flow state resources are auto-droppable at scope exit.
             // Unlike Cap/SessionChan, flow states represent data that can be
@@ -350,10 +371,7 @@ fn validate_return_resources(
                     errors.push(
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0256,
-                            format!(
-                                "linear resource '{}' must be consumed before this return path",
-                                name
-                            ),
+                            format!("linear resource '{}' must be consumed {}", name, path_noun),
                             source.span,
                         )
                         .with_help("move, return, transfer, or drop the resource before returning"),
@@ -421,6 +439,14 @@ fn transfer(
         }
         CanonicalActionKind::Move => {
             reject_conflicting_loans(action, state, loans, errors);
+            // Audit 2026-08-05 (wave-2, H-5): validate the action names the
+            // CURRENT owner before any transfer. A Move with target used to
+            // rewrite only fact.owner while keeping Available, and later
+            // Drop/Move/Return of the OLD name kept hitting the same fact by
+            // ResourceId — `let x = a; sink(a)` checked green.
+            if let Some(existing) = state.resources.get(&action.resource) {
+                validate_action_owner(action, existing, errors);
+            }
             let fact = state
                 .resources
                 .entry(action.resource.clone())
@@ -454,6 +480,11 @@ fn transfer(
         | CanonicalActionKind::Return
         | CanonicalActionKind::TransferChild => {
             reject_conflicting_loans(action, state, loans, errors);
+            // Audit 2026-08-05 (wave-2, H-5): same owner validation as Move —
+            // consuming through a stale name is a use-after-move.
+            if let Some(existing) = state.resources.get(&action.resource) {
+                validate_action_owner(action, existing, errors);
+            }
             let fact = state
                 .resources
                 .entry(action.resource.clone())
@@ -539,6 +570,41 @@ fn transfer(
             });
         }
     }
+}
+
+/// Audit 2026-08-05 (wave-2, H-5): the action's source place must be the
+/// current owner of the resource fact. Moves with a target rewrite the owner;
+/// any later action addressing the resource through a STALE place name is a
+/// use-after-move and must be rejected before the fact is touched. Facts with
+/// no owner (joined ambiguously) and non-Available facts skip the check —
+/// double-consumption of a consumed fact is reported by the caller's own
+/// availability check, and ownerless facts cannot be attributed.
+fn validate_action_owner(
+    action: &CanonicalResourceAction,
+    fact: &ResourceFact,
+    errors: &mut Vec<Diagnostic>,
+) {
+    if fact.availability != Availability::Available {
+        return;
+    }
+    let (Some(owner), Some(source)) = (&fact.owner, &action.source) else {
+        return;
+    };
+    if owner.base == source.base {
+        return;
+    }
+    errors.push(
+        Diagnostic::error_code(
+            crate::diagnostic::codes::E0304,
+            format!(
+                "resource '{}' cannot be used after it was moved to '{}'",
+                source.display(),
+                owner.display()
+            ),
+            action.span,
+        )
+        .with_help("use the binding that currently owns the resource"),
+    );
 }
 
 fn reject_read_conflicts(

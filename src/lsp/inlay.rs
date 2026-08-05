@@ -237,19 +237,28 @@ impl LspServer {
                 // Last argument
                 if arg_idx < args.len() && arg_idx < param_names.len() {
                     let end_pos = line_content.rfind(')').unwrap_or(line_content.len());
-                    let arg_str = line_content[arg_start_byte..end_pos].trim();
-                    if !arg_str.is_empty()
-                        && !arg_str.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    {
-                        hints.push(serde_json::json!({
-                            "position": {
-                                "line": cl,
-                                "character": arg_start_char as u64
-                            },
-                            "label": format!("{}:", param_names[arg_idx]),
-                            "kind": 2,
-                            "paddingRight": true
-                        }));
+                    // X-6 (full audit 2026-08-05 §3.10): guard the range. For
+                    // a multi-line call the scanned line can contain a closing
+                    // paren from an INNER call before the last argument region
+                    // (e.g. `add(add(1, 2),\n    3)` — the inner `)` sits left
+                    // of the final-arg start), making end_pos < arg_start_byte.
+                    // Slicing unguarded panicked the entire inlay-hints request;
+                    // skip the hint instead of guessing at the argument text.
+                    if end_pos >= arg_start_byte {
+                        let arg_str = line_content[arg_start_byte..end_pos].trim();
+                        if !arg_str.is_empty()
+                            && !arg_str.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            hints.push(serde_json::json!({
+                                "position": {
+                                    "line": cl,
+                                    "character": arg_start_char as u64
+                                },
+                                "label": format!("{}:", param_names[arg_idx]),
+                                "kind": 2,
+                                "paddingRight": true
+                            }));
+                        }
                     }
                 }
             }

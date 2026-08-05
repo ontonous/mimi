@@ -4,7 +4,6 @@
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
 use super::*;
 
-
 /// Local harness: run bytecode with stdout capture, returning the Result too
 /// (the shared helpers either panic on error or drop the captured stdout).
 fn vm_result_with_stdout(src: &str) -> (Result<interp::Value, String>, String) {
@@ -183,10 +182,19 @@ func main() -> i64 {
 
 #[test]
 fn audit_vm_impl_method_mut_param_writeback() {
+    // Rewritten from the rejected `impl C { ... }` inherent-impl syntax to
+    // `impl Trait for Type` (0.34 syntax freeze: the parser only accepts the
+    // trait form — "expected `for`, found {"). The Wave-1 §9.4 fix (mut_param_
+    // indices +1 for the implicit self + MutateSetup at method call sites)
+    // was never exercised end-to-end because the original test did not parse.
     let src = r#"
+trait Adder {
+    func addk(mut k: i64) -> i64;
+}
+
 type C { v: i64 }
 
-impl C {
+impl Adder for C {
     func addk(mut k: i64) -> i64 {
         k = k + 10
         k
@@ -407,12 +415,19 @@ func main() -> i64 {
 // ─────────────────────────────────────────────────────────────
 
 #[test]
-fn audit_vm_i32_literal_pow_folds_with_wrap_not_trap() {
-    // `let x: i32 = 2 ** 31` — codegen wraps to i32::MIN (no trap); the VM
-    // pre-fix folded to 2^31 and the let-level CheckI32 trapped.
+fn audit_vm_i32_literal_pow_exact_value_family() {
+    // ADJUDICATED — DEFERRED (width-model A1 family): wrap-vs-trap in literal
+    // constant folding is NOT settled; per devdocs/full-audit-2026-08-05.md
+    // §16 V-6 (same ruling: "分歧归入宽度模型统一议题") and the Wave-2 battle
+    // plan §1.1 ("i32 literal 折叠 wrap-vs-trap 不修——归宽度模型 A1 族，与 V-6
+    // 裁决同理；测试侧规避"). The original test drove the wrap edge (`2 ** 31`
+    // → i32::MIN by VM folding, E0802 trap by codegen let-bind) and is
+    // rewritten to the EXACT-VALUE family per §4-C avoidance discipline: 2**30
+    // fits i32 on both backends, so the L1 parity assertion holds without
+    // touching either backend's folding semantics.
     let src = r#"
 func main() -> i32 {
-    let x: i32 = 2 ** 31
+    let x: i32 = 2 ** 30
     println(x)
     0
 }
@@ -420,8 +435,8 @@ func main() -> i32 {
     let (_, vm_out) = run_source_with_stdout(src);
     assert_eq!(
         vm_out.trim(),
-        "-2147483648",
-        "VM must wrap folded literal i32 pow like codegen"
+        "1073741824",
+        "VM folded literal i32 pow (exact-value family: 2**30 fits i32)"
     );
     if !can_link() {
         return;
@@ -429,20 +444,25 @@ func main() -> i32 {
     let cg_out = compile_and_run(src).expect("codegen i32 literal pow");
     assert_eq!(
         cg_out.trim(),
-        "-2147483648",
-        "codegen i32 literal pow (L1 parity)"
+        "1073741824",
+        "codegen i32 literal pow (L1 parity, exact-value family)"
     );
 }
 
 #[test]
-fn audit_vm_i32_literal_shl_masks_and_wraps() {
-    // 1 << 40 in an i32 place: amount masked mod 32 (→ 1 << 8 = 256), result
-    // wrapped — codegen semantics; pre-fix the VM folded 2^40 then trapped.
+fn audit_vm_i32_literal_shl_exact_value_family() {
+    // ADJUDICATED — DEFERRED (width-model A1 family): same ruling as the pow
+    // test above (full-audit-2026-08-05.md §16 V-6; Wave-2 battle plan §1.1 —
+    // "不修，测试侧规避"). The original drove both wrap edges (`1 << 40` amount
+    // mask → 256, `1 << 31` → i32::MIN; codegen E0802 on the folded let-bind)
+    // and is rewritten to the exact-value family: shifts with non-overflowing
+    // counts (1<<20, 1<<30) that need no amount masking and produce the same
+    // exact value on both backends.
     let src = r#"
 func main() -> i32 {
-    let x: i32 = 1 << 40
+    let x: i32 = 1 << 20
     println(x)
-    let y: i32 = 1 << 31
+    let y: i32 = 1 << 30
     println(y)
     0
 }
@@ -450,8 +470,8 @@ func main() -> i32 {
     let (_, vm_out) = run_source_with_stdout(src);
     assert_eq!(
         vm_out.trim(),
-        "256\n-2147483648",
-        "VM literal i32 shl must mask the amount and wrap the result"
+        "1048576\n1073741824",
+        "VM literal i32 shl (exact-value family: no amount mask, no overflow)"
     );
     if !can_link() {
         return;
@@ -459,8 +479,8 @@ func main() -> i32 {
     let cg_out = compile_and_run(src).expect("codegen i32 literal shl");
     assert_eq!(
         cg_out.trim(),
-        "256\n-2147483648",
-        "codegen i32 literal shl (L1 parity)"
+        "1048576\n1073741824",
+        "codegen i32 literal shl (L1 parity, exact-value family)"
     );
 }
 
@@ -773,4 +793,368 @@ func main() -> i64 {
 "#;
     let v = run_source_bytecode_result(src);
     assert_eq!(v, Ok(interp::Value::Int(9)));
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Wave-2 VM-A (bytecode COMPILER) regressions — prefix audit2_vma_.
+// Findings: devdocs/full-audit-2026-08-05-0656.md §2.4 / §3.5
+// (C-3, H-12, H-13, B-3, B-6, B-8). L1 items assert BOTH backends.
+// ═════════════════════════════════════════════════════════════════════
+
+// ── C-3: float comparisons on call results ─────────────────────────
+// Pre-fix, call results inferred Unknown (type_hints were write-only),
+// float comparisons compiled Op::LtInt and the VM fell back to
+// to_string lexicographic compare while codegen ran IEEE — silent L1
+// divergence. Fix: return-type directory (AST + CheckedProgram) feeds
+// infer_expr_type/expr_is_float so LtFloat/GtFloat/LeFloat/GeFloat emit.
+
+#[test]
+fn audit2_vma_c3_float_call_result_comparison_is_ieee_dual() {
+    // 9.5 vs 10.5: lexicographic "9.5" < "10.5" is FALSE but numeric
+    // 9.5 < 10.5 is TRUE — the pair discriminates both orderings.
+    let src = r#"
+func half(x: f64) -> f64 { x / 2.0 }
+func main() -> i64 {
+    let a = half(19.0)
+    let b = half(21.0)
+    if a < b { println("LT_TRUE") } else { println("LT_FALSE") }
+    if b > a { println("GT_TRUE") } else { println("GT_FALSE") }
+    if a <= b { println("LE_TRUE") } else { println("LE_FALSE") }
+    if b >= a { println("GE_TRUE") } else { println("GE_FALSE") }
+    if a == half(19.0) { println("EQ_TRUE") } else { println("EQ_FALSE") }
+    0
+}
+"#;
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "LT_TRUE\nGT_TRUE\nLE_TRUE\nGE_TRUE\nEQ_TRUE",
+        "VM float comparison must be IEEE-numeric, not lexicographic"
+    );
+    if !can_link() {
+        return;
+    }
+    let cg_out = compile_and_run(src).expect("codegen float comparison");
+    assert_eq!(
+        cg_out.trim(),
+        "LT_TRUE\nGT_TRUE\nLE_TRUE\nGE_TRUE\nEQ_TRUE",
+        "codegen parity (L1)"
+    );
+}
+
+#[test]
+fn audit2_vma_c3_float_direct_call_comparison_dual() {
+    // Direct call-result operands (no intermediate let). Lexicographic
+    // "10.5" < "9.5" is TRUE, numeric 10.5 < 9.5 is FALSE.
+    let src = r#"
+func half(x: f64) -> f64 { x / 2.0 }
+func main() -> i64 {
+    if half(21.0) < half(19.0) { println("BAD") } else { println("OK") }
+    if half(19.0) <= half(19.0) { println("LE_OK") } else { println("LE_BAD") }
+    0
+}
+"#;
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "OK\nLE_OK", "VM direct-call float compare");
+    if !can_link() {
+        return;
+    }
+    let cg_out = compile_and_run(src).expect("codegen direct-call float compare");
+    assert_eq!(cg_out.trim(), "OK\nLE_OK", "codegen parity (L1)");
+}
+
+#[test]
+fn audit2_vma_c3_checked_program_install_path_agrees() {
+    // Same comparison through the checker + install_checked_program path
+    // (the G1 type-hints read path activated by the fix).
+    let src = r#"
+func half(x: f64) -> f64 { x / 2.0 }
+func main() -> i64 {
+    let a = half(19.0)
+    let b = half(21.0)
+    if a < b { 1 } else { 0 }
+}
+"#;
+    let v = checked_run_source_bytecode_result(src).expect("checked VM run");
+    assert_eq!(v, interp::Value::Int(1), "a < b must hold numerically");
+}
+
+// ── H-13: flow transition / actor method param type registration ────
+// Pre-fix, transition/actor-method params were never registered, so two
+// f64 params compared with int-shape ops (lexicographic VM fallback).
+// 9.5 vs 10.0 discriminates: numeric TRUE, lexicographic "9.5" < "10.0"
+// FALSE. (A float LITERAL operand would mask the bug — expr_is_float
+// catches the literal side; both operands must be untyped params.)
+
+#[test]
+fn audit2_vma_h13_actor_method_float_params_compare_numerically_dual() {
+    let src = r#"
+actor Sensor {
+    func lt(x: f64, y: f64) -> i64 {
+        if x < y { 1 } else { 0 }
+    }
+}
+func main() -> i64 {
+    let s = Sensor.spawn()
+    println(s.lt(9.5, 10.0))
+    println(s.lt(19.0, 10.0))
+    0
+}
+"#;
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "1\n0",
+        "actor-method f64 params must compare numerically (was lexicographic)"
+    );
+    if !can_link() {
+        return;
+    }
+    let cg_out = compile_and_run(src).expect("codegen actor float params");
+    assert_eq!(cg_out.trim(), "1\n0", "codegen parity (L1)");
+}
+
+#[test]
+fn audit2_vma_h13_flow_transition_float_params_registered() {
+    // Flow transitions compile as synthetic functions
+    // __flow_{Flow}_{transition}_{from_state}; call the transition body
+    // directly with two f64 params whose ordering discriminates numeric
+    // from lexicographic comparison.
+    let src = r#"
+flow Pump {
+    state Idle
+    state Done { flag: i64 }
+    transition check(Idle, a: f64, b: f64) -> Done { {
+        if a < b { return Done { flag: 1 } }
+        return Done { flag: 0 }
+    } }
+}
+func main() -> i64 { 0 }
+"#;
+    let v = bytecode_call_named(
+        src,
+        "__flow_Pump_check_Idle",
+        vec![
+            interp::Value::Unit,
+            interp::Value::Float(9.5),
+            interp::Value::Float(10.0),
+        ],
+    )
+    .expect("transition call must succeed");
+    let flag = match &v {
+        interp::Value::Record(Some(name), fields) if name == "Done" => fields.get("flag").cloned(),
+        other => panic!("expected Done record, got {other:?}"),
+    };
+    assert_eq!(
+        flag,
+        Some(interp::Value::Int(1)),
+        "transition f64 params must compare numerically (9.5 < 10.0); lexicographic would give 0"
+    );
+}
+
+// ── H-12: `?` must treat Some as success, not only Ok ──────────────
+// Pre-fix Expr::Try tested only the "Ok" tag (the comment lied about
+// "Ok/Some"), so `Some(v)?` early-returned Some(v) instead of continuing
+// with v. The checker accepts `?` on Option (infer_try_expr) and codegen
+// extracts T on Ok/Some.
+
+#[test]
+fn audit2_vma_h12_try_unwraps_some_and_ok_dual() {
+    let src = r#"
+func maybe() -> Option<i64> { Some(42) }
+func okval() -> Result<i64, i64> { Ok(7) }
+func main() -> i64 {
+    let v = maybe()?
+    let w = okval()?
+    println(v)
+    println(w)
+    0
+}
+"#;
+    let (res, stdout) = vm_result_with_stdout(src);
+    res.expect("Some(v)? / Ok(v)? must unwrap and continue (pre-fix early-returned Some(42))");
+    assert_eq!(stdout.trim(), "42\n7", "both unwrapped payloads must print");
+    if !can_link() {
+        return;
+    }
+    let cg_out = compile_and_run(src).expect("codegen try on Some/Ok");
+    assert_eq!(cg_out.trim(), "42\n7", "codegen parity (L1)");
+}
+
+#[test]
+fn audit2_vma_h12_try_err_and_none_still_propagate_vm() {
+    // Guard for the restructured failure branch: Err/None must still
+    // early-return the wrapped value from the enclosing function
+    // (VM semantics; codegen's failure path exits the process — a
+    // pre-existing divergence, calibration note).
+    let src = r#"
+func bad() -> Result<i64, i64> { Err(9) }
+func lift_res() -> Result<i64, i64> {
+    let v = bad()?
+    Ok(v)
+}
+func empt() -> Option<i64> { None }
+func lift_opt() -> Option<i64> {
+    let v = empt()?
+    Some(v)
+}
+func main() -> i64 {
+    let r = match lift_res() {
+        Err(e) => e
+        Ok(v) => v
+    }
+    let o = match lift_opt() {
+        None => 100
+        Some(v) => v
+    }
+    println(r)
+    println(o)
+    0
+}
+"#;
+    let (res, stdout) = vm_result_with_stdout(src);
+    res.expect("Err/None propagation must not trap");
+    assert_eq!(
+        stdout.trim(),
+        "9\n100",
+        "Err(9) and None must propagate through `?` unchanged"
+    );
+}
+
+// ── B-3: break/continue crossing on-failure scopes pop handlers ─────
+// Pre-fix the jump skipped the block-exit ClearFaultPc pops, leaving
+// stale handlers on the frame stack; a later fault ran old compensation
+// code against recycled registers.
+
+#[test]
+fn audit2_vma_b3_break_pops_loop_body_fault_handler() {
+    let src = r#"
+func main() -> i64 {
+    loop {
+        on failure { println("STALE") }
+        break
+    }
+    let c = char_at("abc", 7)
+    println(c)
+    0
+}
+"#;
+    let (res, stdout) = vm_result_with_stdout(src);
+    assert!(res.is_err(), "the char_at fault must still propagate");
+    assert!(
+        !stdout.contains("STALE"),
+        "handler from the exited loop body must NOT run after break, stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn audit2_vma_b3_break_does_not_overpop_outer_handler() {
+    // The break pops only handlers registered inside the loop body scope
+    // subtree; an `on failure` declared AFTER the loop must survive.
+    let src = r#"
+func main() -> i64 {
+    loop {
+        on failure { println("INNER") }
+        break
+    }
+    on failure { println("OUTER") }
+    let c = char_at("abc", 7)
+    println(c)
+    0
+}
+"#;
+    let (res, stdout) = vm_result_with_stdout(src);
+    assert!(res.is_err(), "the fault must propagate after compensations");
+    assert!(
+        stdout.contains("OUTER"),
+        "post-loop handler must survive the break's pops, stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("INNER"),
+        "loop-body handler must be popped by break (no cascade from a stale entry), stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn audit2_vma_b3_continue_pops_loop_body_fault_handler() {
+    let src = r#"
+func main() -> i64 {
+    let mut i = 0
+    while i < 2 {
+        on failure { println("STALE") }
+        i = i + 1
+        if i == 1 { continue }
+    }
+    let c = char_at("abc", 7)
+    println(c)
+    0
+}
+"#;
+    let (res, stdout) = vm_result_with_stdout(src);
+    assert!(res.is_err(), "the char_at fault must propagate");
+    assert!(
+        !stdout.contains("STALE"),
+        "continue must pop the iteration's handler just like block exit, stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn audit2_vma_b3_nested_loop_break_pops_only_innermost_loop_handlers() {
+    // break exits only the innermost loop: its body handlers are popped,
+    // the outer loop's still-active handler must fire for a later fault.
+    let src = r#"
+func main() -> i64 {
+    loop {
+        on failure { println("OUTER_LOOP") }
+        loop {
+            on failure { println("INNER_LOOP") }
+            break
+        }
+        let c = char_at("abc", 7)
+        println(c)
+    }
+    0
+}
+"#;
+    let (res, stdout) = vm_result_with_stdout(src);
+    assert!(
+        res.is_err(),
+        "fault propagates after the outer compensation"
+    );
+    assert!(
+        stdout.contains("OUTER_LOOP"),
+        "outer loop's active handler must fire, stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("INNER_LOOP"),
+        "inner handler was popped by the inner break and must not cascade, stdout: {stdout:?}"
+    );
+}
+
+// ── B-8: `as i64` saturating cast — VM reference semantics ─────────
+// The VM (reference) saturates float→int casts (Rust `as`: NaN→0,
+// overflow→MIN/MAX); legacy codegen aligns (emit_saturating_float_to_int_cast,
+// Wave-1 C1). Dual assert deferred: the RESOLVED emitter still lowers
+// float→int as raw fptosi (resolved/mod.rs apply_conversion) — RES
+// territory, cross-territory report filed.
+
+#[test]
+fn audit2_vma_b8_float_to_i64_cast_saturates_vm_reference() {
+    let src = r#"
+func main() -> i64 {
+    let f: f64 = 1e100
+    println(f as i64)
+    let nf: f64 = -1e100
+    println(nf as i64)
+    let small: f64 = 42.9
+    println(small as i64)
+    0
+}
+"#;
+    let (_, out) = run_source_with_stdout(src);
+    assert_eq!(
+        out.trim(),
+        "9223372036854775807\n-9223372036854775808\n42",
+        "saturating conversion + truncate-toward-zero (reference semantics)"
+    );
 }

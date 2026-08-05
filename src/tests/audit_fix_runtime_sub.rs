@@ -3,7 +3,6 @@
 //! Discipline: each fix must carry a regression test here; L1 divergences
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
 
-
 // ---------------------------------------------------------------------------
 // quote.rs fixes (2026-08-05 audit, MEDIUM): unbounded drop recursion +
 // argc i32 truncation in mimi_quote_new_list.

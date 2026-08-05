@@ -1489,7 +1489,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| {
                             CompileError::LlvmError(format!("match arm variant lookup: {}", e))
                         })?;
-                    let tag_val = self.context.i64_type().const_int(ordinal, false);
+                    // K-2 family: tag constant at the scrutinee's own width
+                    // (icmp operands must match).
+                    let tag_val = scrutinee_iv.get_type().const_int(ordinal, false);
                     let cmp = self
                         .builder
                         .build_int_compare(inkwell::IntPredicate::EQ, scrutinee_iv, tag_val, "cmp")
@@ -1551,38 +1553,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })?;
                     let lit_val = match lit {
-                        // Match the scrutinee's integer width — i32 scrutinees need i32 constants.
-                        Lit::Int(n) => {
-                            let bw = scrutinee_iv.get_type().get_bit_width();
-                            if bw < 64 {
-                                self.context.i32_type().const_int(*n as u64, true)
-                            } else {
-                                self.context.i64_type().const_int(*n as u64, true)
-                            }
-                        }
-                        Lit::Bool(b) => {
-                            let b_val = self.context.bool_type().const_int(*b as u64, false);
-                            // Match scrutinee width for bool comparison too.
-                            let bw = scrutinee_iv.get_type().get_bit_width();
-                            let target = if bw < 64 {
-                                self.context.i32_type()
-                            } else {
-                                self.context.i64_type()
-                            };
-                            self.builder
-                                .build_int_z_extend(b_val, target, "bool_ext")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("zext error: {}", e))
-                                })?
-                        }
-                        Lit::Unit => {
-                            let bw = scrutinee_iv.get_type().get_bit_width();
-                            if bw < 64 {
-                                self.context.i32_type().const_int(0, false)
-                            } else {
-                                self.context.i64_type().const_int(0, false)
-                            }
-                        }
+                        // K-2 (full-audit 2026-08-05 §3.6): materialize the
+                        // arm constant at the scrutinee's OWN width. The old
+                        // `bw < 64 → i32 / else → i64` split produced an i32
+                        // constant for an i1 (bool) scrutinee, and the icmp
+                        // below (i1 vs i32) is invalid IR — the legacy channel
+                        // has no per-function verify fallback, so it ICEs.
+                        // Building from scrutinee_iv.get_type() is correct for
+                        // i1, i32 and i64 scrutinees alike.
+                        Lit::Int(n) => scrutinee_iv.get_type().const_int(*n as u64, true),
+                        Lit::Bool(b) => scrutinee_iv.get_type().const_int(*b as u64, false),
+                        Lit::Unit => scrutinee_iv.get_type().const_int(0, false),
                         _ => return Err("unsupported match literal type".into()),
                     };
                     let cmp = self
@@ -1624,7 +1605,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| {
                         CompileError::LlvmError(format!("match arm variant lookup: {}", e))
                     })?;
-                let tag_val = self.context.i64_type().const_int(ordinal, false);
+                // K-2 family: tag constant at the scrutinee's own width
+                // (icmp operands must match).
+                let tag_val = scrutinee_iv.get_type().const_int(ordinal, false);
                 let cmp = self
                     .builder
                     .build_int_compare(inkwell::IntPredicate::EQ, scrutinee_iv, tag_val, "cmp")

@@ -457,9 +457,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
         let entry = self.generator.context.append_basic_block(function, "entry");
         self.generator.builder.position_at_end(entry);
-        // Push a heap scope so fstring/string allocations are tracked and
-        // freed at function exit (matching legacy emitter behavior).
-        self.generator.push_heap_scope();
+        // Function-level heap scope with a boundary marker (legacy B9 shape,
+        // func.rs begin_function_heap_scope): every return path emits its own
+        // frees via flush_heap_scopes_to_boundary (frees without popping), and
+        // the scope bookkeeping is popped here exactly once by
+        // end_function_heap_scope — no matter how many returns the body has,
+        // and never after a terminator (roadmap Wave-2 #1d: the old
+        // free-after-ret shape left dangling instructions that the
+        // per-function verify() rejected, silently demoting functions to
+        // legacy).
+        self.generator.begin_function_heap_scope();
         let mut frame = ResolvedFrame {
             owner: callable.owner.clone(),
             locals: BTreeMap::new(),
@@ -467,10 +474,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.bind_parameters(callable, function, &mut frame)?;
         let value = self.emit_block(&callable.body, &callable.body.root, &mut frame)?;
         if self.current_block_terminated() {
-            // Early return already emitted; still need to balance the heap
-            // scope. Pop without freeing — the early return path is
-            // responsible for its own cleanup.
-            let _ = self.generator.free_heap_allocs();
+            // An early Return statement already emitted its path-specific
+            // heap flush BEFORE the ret (emit_statement Return arm). Only
+            // the bookkeeping needs balancing here; emitting anything after
+            // the terminator would dangle.
+            self.generator.end_function_heap_scope();
             return Ok(());
         }
         let result_type = self.lower_type(&callable.signature.result)?;
@@ -603,7 +611,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                 }
                 let value = self.apply_conversion(value, conversion)?;
-                let target = self.root_place(frame, target)?;
+                // Assignment targets an index WRITE (negative indices trap,
+                // VM ListSet parity) — see emit_checked_list_index (H-15).
+                let target = self.root_place(frame, target, false)?;
                 let value = self.coerce_to(value, target.llvm_type)?;
                 self.generator.build_store(target.storage, value)?;
                 Ok(None)
@@ -844,7 +854,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.emit_const_value(&expression.ty, &constant.value)
             }
             ResolvedExprKind::Load(place) => {
-                let entry = self.root_place(frame, place)?;
+                let entry = self.root_place(frame, place, true)?;
                 self.generator
                     .build_load(entry.llvm_type, entry.storage, "resolved_load")
             }
@@ -1036,7 +1046,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "index projection on non-struct (list) value".into(),
                             ));
                         };
-                        // Extract data pointer (field 1).
+                        // Extract len (field 0) and data pointer (field 1).
+                        let len_val = struct_val
+                            .get_field_at_index(0)
+                            .ok_or_else(|| CompileError::LlvmError("list len field absent".into()))?
+                            .into_int_value();
                         let data_ptr = struct_val
                             .get_field_at_index(1)
                             .ok_or_else(|| {
@@ -1045,6 +1059,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             .into_pointer_value();
                         // Evaluate index.
                         let idx_val = self.emit_expr(index_expr, frame)?.into_int_value();
+                        // H-15: bounds-check before the element GEP (VM parity:
+                        // reads wrap negative indices, OOB traps E0803).
+                        let idx_val =
+                            self.emit_checked_list_index(len_val, idx_val, true, "index read")?;
                         // GEP into the i64 data buffer.
                         let i64_ty = self.generator.context.i64_type();
                         let elem_ptr = self.generator.build_in_bounds_gep(
@@ -1087,6 +1105,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
             }
             ResolvedExprKind::Binary { op, left, right } => {
+                // C-4 (full-audit 2026-08-05, VERIFIED CRITICAL L1): `and`/`or`
+                // were compiled eagerly — RHS evaluated unconditionally, then
+                // mapped to bitwise and/or. The VM and the legacy emitter
+                // (operator.rs compile_short_circuit_expr, "VERIFIED CRITICAL,
+                // L1") both short-circuit, so the eager lowering trapped on
+                // effects the VM never reaches (`x != 0 and 10/x > 2` with
+                // x=0 → spurious E0801) and ran skipped-branch side effects.
+                // Lower through the block-structured short-circuit machine.
+                if matches!(
+                    op,
+                    ResolvedBinaryOp::LogicalAnd | ResolvedBinaryOp::LogicalOr
+                ) {
+                    return self.emit_short_circuit(*op, left, right, frame);
+                }
                 let left = self.emit_expr(left, frame)?;
                 let right = self.emit_expr(right, frame)?;
                 self.generator.compile_binop(binary_op(*op), left, right)
@@ -1494,6 +1526,18 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     }
                                 }
                             }
+                        }
+                        // Audit wave2 (D-5a): element-type channel for
+                        // sum(List<f64>) — mirrors the legacy call-site
+                        // setter in expr/call/simple.rs so the builtin does
+                        // not accumulate f64 bit patterns as i64.
+                        if name == "sum" {
+                            self.generator.pending_sum_elem_type =
+                                call.arguments.first().and_then(|arg| {
+                                    CodeGenerator::strip_list_element_type(
+                                        &resolved_type_display_name(self.program, &arg.value.ty),
+                                    )
+                                });
                         }
                         let result = self.generator.compile_builtin_call(name, &arguments)?;
                         // ABI bridge: builtins return raw ptr for strings, but the
@@ -1973,12 +2017,18 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // strlen: only used over NUL-free renderings (bool literals, snprintf
         // temp buffers, mimi_to_string_f64 results) or raw C-string pointers
         // that carry no length at all. Never over composed data.
-        let strlen_fn = self.generator.module.get_function("strlen").unwrap_or_else(|| {
-            let ty = i64_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr_ty)], false);
-            self.generator
-                .module
-                .add_function("strlen", ty, Some(inkwell::module::Linkage::External))
-        });
+        let strlen_fn = self
+            .generator
+            .module
+            .get_function("strlen")
+            .unwrap_or_else(|| {
+                let ty = i64_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr_ty)], false);
+                self.generator.module.add_function(
+                    "strlen",
+                    ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
 
         enum CompiledPart<'ctx> {
             Text(String),
@@ -2057,15 +2107,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             )
                             .map_err(|e| CompileError::LlvmError(format!("select error: {e}")))?
                             .into_pointer_value();
-                        let len = self.call_strlen(strlen_fn, ptr, &format!("fstr_bool_strlen_{}", i))?;
+                        let len =
+                            self.call_strlen(strlen_fn, ptr, &format!("fstr_bool_strlen_{}", i))?;
                         total_size = self
                             .generator
                             .builder
-                            .build_int_add(
-                                total_size,
-                                len,
-                                &format!("fstr_bool_sz_{}", i),
-                            )
+                            .build_int_add(total_size, len, &format!("fstr_bool_sz_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
                         compiled_parts.push(CompiledPart::Interp { ptr, len });
                     } else if matches!(prim, Some(PrimitiveType::F32 | PrimitiveType::F64)) {
@@ -2076,8 +2123,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             BasicValueEnum::FloatValue(fv) => fv,
                             _ => {
                                 return Err(CompileError::Unsupported(
-                                    "f-string float interpolation did not lower to a float"
-                                        .into(),
+                                    "f-string float interpolation did not lower to a float".into(),
                                 ))
                             }
                         };
@@ -2109,15 +2155,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // Heap-owned by this f-string evaluation; freed at scope
                         // exit via the heap-scope registry.
                         self.generator.register_heap_alloc(ptr);
-                        let len = self.call_strlen(strlen_fn, ptr, &format!("fstr_strlen_{}", i))?;
+                        let len =
+                            self.call_strlen(strlen_fn, ptr, &format!("fstr_strlen_{}", i))?;
                         total_size = self
                             .generator
                             .builder
-                            .build_int_add(
-                                total_size,
-                                len,
-                                &format!("fstr_isz_{}", i),
-                            )
+                            .build_int_add(total_size, len, &format!("fstr_isz_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
                         compiled_parts.push(CompiledPart::Interp { ptr, len });
                     } else if matches!(prim, Some(PrimitiveType::String)) {
@@ -2203,29 +2246,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         let ext_iv = if bw < 64 {
                             self.generator
                                 .builder
-                                .build_int_s_extend(
-                                    iv,
-                                    i64_ty,
-                                    &format!("fstr_ext_{}", i),
-                                )
+                                .build_int_s_extend(iv, i64_ty, &format!("fstr_ext_{}", i))
                                 .map_err(|e| CompileError::LlvmError(format!("sext: {e}")))?
                         } else if bw > 64 {
                             // i128: %ld reads the low 64 bits (pre-existing
                             // limitation of the printf-based rendering).
                             self.generator
                                 .builder
-                                .build_int_truncate(
-                                    iv,
-                                    i64_ty,
-                                    &format!("fstr_trunc_{}", i),
-                                )
+                                .build_int_truncate(iv, i64_ty, &format!("fstr_trunc_{}", i))
                                 .map_err(|e| CompileError::LlvmError(format!("trunc: {e}")))?
                         } else {
                             iv
                         };
-                        let temp_buf = self
-                            .generator
-                            .malloc_or_abort(i64_ty.const_int(32, false), &format!("fstr_temp_{}", i))?;
+                        let temp_buf = self.generator.malloc_or_abort(
+                            i64_ty.const_int(32, false),
+                            &format!("fstr_temp_{}", i),
+                        )?;
                         self.generator.register_heap_alloc(temp_buf);
                         let fmt = self
                             .generator
@@ -2248,20 +2284,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             .ok_or_else(|| {
                                 CompileError::LlvmError("snprintf returned void".into())
                             })?;
-                        let len = self.call_strlen(strlen_fn, temp_buf, &format!("fstr_strlen_{}", i))?;
+                        let len =
+                            self.call_strlen(strlen_fn, temp_buf, &format!("fstr_strlen_{}", i))?;
                         total_size = self
                             .generator
                             .builder
-                            .build_int_add(
-                                total_size,
-                                len,
-                                &format!("fstr_isz_{}", i),
-                            )
+                            .build_int_add(total_size, len, &format!("fstr_isz_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("add error: {e}")))?;
-                        compiled_parts.push(CompiledPart::Interp {
-                            ptr: temp_buf,
-                            len,
-                        });
+                        compiled_parts.push(CompiledPart::Interp { ptr: temp_buf, len });
                     }
                 }
             }
@@ -2445,9 +2475,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ],
                     true, // variadic
                 );
-                self.generator
-                    .module
-                    .add_function("snprintf", fn_type, Some(inkwell::module::Linkage::External))
+                self.generator.module.add_function(
+                    "snprintf",
+                    fn_type,
+                    Some(inkwell::module::Linkage::External),
+                )
             })
     }
 
@@ -2911,16 +2943,128 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator
                     .compile_binop(BinOp::Sub, zero.into(), value.into())
             }
-            (ResolvedUnaryOp::Not, BasicValueEnum::IntValue(value)) => self
-                .generator
-                .builder
-                .build_not(value, "resolved_not")
-                .map(BasicValueEnum::from)
-                .map_err(|error| CompileError::LlvmError(format!("not error: {error}"))),
+            // H-16 (full-audit 2026-08-05, HIGH): builtin predicates return
+            // i64 0/1 in the LLVM ABI (operator.rs:201 ABI note), so a bare
+            // `build_not` on a wide integer flips bits instead of truth value:
+            // `not 1` became -2, and the following `!= 0` compared true —
+            // the branch direction inverted (PoC: `not contains(xs, 2)` took
+            // the then-arm). Legacy normalizes wide bools via `x == 0`
+            // (operator.rs:274-283). Mirror that: i1 passes through build_not,
+            // wider integers normalize to an i1 boolean first.
+            (ResolvedUnaryOp::Not, BasicValueEnum::IntValue(value)) => {
+                if value.get_type().get_bit_width() == 1 {
+                    self.generator
+                        .builder
+                        .build_not(value, "resolved_not")
+                        .map(BasicValueEnum::from)
+                        .map_err(|error| CompileError::LlvmError(format!("not error: {error}")))
+                } else {
+                    let zero = value.get_type().const_int(0, false);
+                    self.generator
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, value, zero, "resolved_not")
+                        .map(BasicValueEnum::from)
+                        .map_err(|error| CompileError::LlvmError(format!("not error: {error}")))
+                }
+            }
             _ => Err(CompileError::Unsupported(
                 "resolved unary operator is not in the scalar-leaf slice".into(),
             )),
         }
+    }
+
+    /// C-4: short-circuit lowering for `and`/`or`, mirroring the legacy
+    /// emitter (`compile_short_circuit_expr`, operator.rs) and the bytecode
+    /// VM (`compile_short_circuit`, interp/bytecode/compiler.rs):
+    ///
+    /// - `l and r`: evaluate `l`; falsy → constant `false` without touching
+    ///   `r`; truthy → the value of `r` (evaluated only on this path).
+    /// - `l or r`: evaluate `l`; truthy → constant `true` without touching
+    ///   `r`; falsy → the value of `r`.
+    ///
+    /// The checker restricts `and`/`or` operands to bool (E0202); builtin
+    /// predicate results that surface as i64-bool are normalized by
+    /// `ensure_bool`, which mirrors the VM's `is_truthy`.
+    fn emit_short_circuit(
+        &mut self,
+        op: ResolvedBinaryOp,
+        left: &ResolvedExpr,
+        right: &ResolvedExpr,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let function = self.current_function()?;
+        let lhs = self.emit_expr(left, frame)?;
+        let cond = self.ensure_bool(lhs)?;
+
+        let rhs_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "sc_rhs");
+        let const_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "sc_const");
+        let merge_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "sc_merge");
+
+        // and: truthy LHS → evaluate RHS; falsy LHS → constant false.
+        // or:  truthy LHS → constant true;  falsy LHS → evaluate RHS.
+        let (truthy_bb, falsy_bb) = match op {
+            ResolvedBinaryOp::LogicalAnd => (rhs_bb, const_bb),
+            ResolvedBinaryOp::LogicalOr => (const_bb, rhs_bb),
+            _ => {
+                return Err(CompileError::Unsupported(format!(
+                    "short-circuit lowering requires `and`/`or`, got {op:?}"
+                )))
+            }
+        };
+        self.generator.build_cond_br(cond, truthy_bb, falsy_bb)?;
+
+        // RHS arm — compiled ONLY on the branch that needs it.
+        self.generator.builder.position_at_end(rhs_bb);
+        let rhs = self.emit_expr(right, frame)?;
+        let result_ty = rhs.get_type();
+        let rhs_reaches = !self.current_block_terminated();
+        if rhs_reaches {
+            self.generator.build_br(merge_bb)?;
+        }
+        let rhs_end_bb = rhs_reaches
+            .then(|| self.generator.builder.get_insert_block())
+            .flatten();
+
+        // Constant arm: `false` for `and`, `true` for `or`, in the RHS
+        // value's own type so the merge phi is well-typed. The VM yields
+        // Bool(false/true) here; for wider i64-bool RHS values the 0/1
+        // constant is truthiness-equivalent (legacy short_circuit_const).
+        self.generator.builder.position_at_end(const_bb);
+        let const_bit = match op {
+            ResolvedBinaryOp::LogicalAnd => 0u64, // LHS falsy → false
+            ResolvedBinaryOp::LogicalOr => 1u64,  // LHS truthy → true
+            _ => unreachable!("guarded above"),
+        };
+        let const_val: BasicValueEnum<'ctx> = match result_ty {
+            BasicTypeEnum::IntType(int_ty) => int_ty.const_int(const_bit, false).into(),
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "'and'/'or' result must be boolean, got {other:?}"
+                )))
+            }
+        };
+        self.generator.build_br(merge_bb)?;
+
+        self.generator.builder.position_at_end(merge_bb);
+        let phi = self
+            .generator
+            .builder
+            .build_phi(result_ty, "sc_result")
+            .map_err(|error| CompileError::LlvmError(format!("phi error: {error}")))?;
+        if let Some(bb) = rhs_end_bb {
+            phi.add_incoming(&[(&rhs as &dyn inkwell::values::BasicValue, bb)]);
+        }
+        phi.add_incoming(&[(&const_val as &dyn inkwell::values::BasicValue, const_bb)]);
+        Ok(phi.as_basic_value())
     }
 
     fn apply_conversion(
@@ -3705,10 +3849,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         )))
     }
 
+    /// Resolve a place to a pointer + type. `read` distinguishes index-read
+    /// sites (negative indices wrap Python-style, VM ListGet parity) from
+    /// index-write sites (negative indices trap, VM ListSet parity) — see
+    /// `emit_checked_list_index` (H-15).
     fn root_place(
         &mut self,
         frame: &mut ResolvedFrame<'ctx>,
         place: &ResolvedPlace,
+        read: bool,
     ) -> Result<ResolvedVarEntry<'ctx>, CompileError> {
         let base_entry = frame.locals.get(&place.base).copied().ok_or_else(|| {
             CompileError::Unsupported(format!(
@@ -3751,6 +3900,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             "index projection on non-struct (list) place".into(),
                         ));
                     };
+                    // Load the len (field 0) for the H-15 bounds check.
+                    let i64_ty = self.generator.context.i64_type();
+                    let len_gep = self
+                        .generator
+                        .builder
+                        .build_struct_gep(struct_type, current_ptr, 0, "list_len_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("list len gep: {e}")))?;
+                    let len_val = self
+                        .generator
+                        .build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "list_len_val")?
+                        .into_int_value();
                     // Load the data pointer (field 1).
                     let data_gep = self
                         .generator
@@ -3790,8 +3950,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             self.emit_expr(&idx_expr, frame)?.into_int_value()
                         }
                     };
+                    // H-15: bounds-check before the element GEP (VM parity:
+                    // reads wrap negative indices, writes trap; OOB traps E0803).
+                    let idx_val = self.emit_checked_list_index(
+                        len_val,
+                        idx_val,
+                        read,
+                        if read { "index read" } else { "index write" },
+                    )?;
                     // GEP into the data buffer.
-                    let i64_ty = self.generator.context.i64_type();
                     current_ptr = self.generator.build_in_bounds_gep(
                         i64_ty,
                         data_ptr,
@@ -3992,6 +4159,121 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "condition value is not an integer".into(),
             )),
         }
+    }
+
+    /// H-15 (full-audit 2026-08-05, HIGH): bounds-check a list index before
+    /// the element GEP. The previous code went straight to
+    /// `build_in_bounds_gep`, so an OOB index read garbage at O0 and poison
+    /// at O1+ (silent miscompilation + L3) while the VM traps (E0803
+    /// "index out of bounds") and legacy checks (check_list_bounds).
+    ///
+    /// Semantics follow the VM (Op::ListGet / Op::ListSet):
+    /// - READ: negative indices wrap Python-style (`xs[-1]` = last element);
+    ///   wrap past the front traps.
+    /// - WRITE: negative indices trap outright (ListSet rejects them).
+    /// Both directions trap when the effective index >= len.
+    ///
+    /// Returns the effective (possibly wrapped) i64 index to GEP with.
+    fn emit_checked_list_index(
+        &mut self,
+        len: inkwell::values::IntValue<'ctx>,
+        idx: inkwell::values::IntValue<'ctx>,
+        read: bool,
+        operation: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        // Widen narrow index values (i32 literals/locals) to the i64 width
+        // of `len` so the compares are well-formed.
+        let idx = match idx.get_type().get_bit_width() {
+            64 => idx,
+            width if width < 64 => self
+                .generator
+                .builder
+                .build_int_s_extend(idx, i64_ty, "idx_sext")
+                .map_err(|e| CompileError::LlvmError(format!("index sext: {e}")))?,
+            _ => {
+                return Err(CompileError::Unsupported(format!(
+                    "list index width {} is not supported",
+                    idx.get_type().get_bit_width()
+                )))
+            }
+        };
+        let zero = i64_ty.const_int(0, false);
+        // READ: wrap negative indices (VM ListGet parity).
+        let idx = if read {
+            let is_neg = self
+                .generator
+                .builder
+                .build_int_compare(inkwell::IntPredicate::SLT, idx, zero, "idx_neg")
+                .map_err(|e| CompileError::LlvmError(format!("index cmp: {e}")))?;
+            let wrapped = self
+                .generator
+                .builder
+                .build_int_add(idx, len, "idx_wrap")
+                .map_err(|e| CompileError::LlvmError(format!("index wrap: {e}")))?;
+            self.generator
+                .builder
+                .build_select(is_neg, wrapped, idx, "idx_eff")
+                .map_err(|e| CompileError::LlvmError(format!("index select: {e}")))?
+                .into_int_value()
+        } else {
+            idx
+        };
+        // OOB condition: still negative (read wrapped past the front, or a
+        // negative write) or >= len.
+        let neg = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, zero, "idx_oob_neg")
+            .map_err(|e| CompileError::LlvmError(format!("index cmp: {e}")))?;
+        let ge_len = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGE, idx, len, "idx_oob_ge")
+            .map_err(|e| CompileError::LlvmError(format!("index cmp: {e}")))?;
+        let oob = self
+            .generator
+            .builder
+            .build_or(neg, ge_len, "idx_oob")
+            .map_err(|e| CompileError::LlvmError(format!("index or: {e}")))?;
+
+        let function = self.current_function()?;
+        let trap_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "list_idx_oob");
+        let ok_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "list_idx_ok");
+        self.generator.build_cond_br(oob, trap_bb, ok_bb)?;
+
+        // Trap block: E0803 (index out of bounds at runtime). The code rides
+        // the message the same way contract messages carry `[E0808]`
+        // (mimi_runtime_abort doc, 0.34.34).
+        self.generator.builder.position_at_end(trap_bb);
+        let abort_fn = self.generator.get_or_declare_abort_fn();
+        let msg = format!("[E0803] list index out of bounds: {operation}");
+        let msg_ptr = self
+            .generator
+            .builder
+            .build_global_string_ptr(&msg, "idx_oob_msg")
+            .map_err(|e| CompileError::LlvmError(format!("index oob msg: {e}")))?;
+        self.generator.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                msg_ptr.as_pointer_value(),
+            )],
+            "idx_oob_abort",
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("index unreachable: {e}")))?;
+
+        self.generator.builder.position_at_end(ok_bb);
+        Ok(idx)
     }
 
     fn emit_if(

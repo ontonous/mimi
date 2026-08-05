@@ -62,12 +62,15 @@ impl Parser {
     }
 
     fn parse_item_kind(&mut self) -> Result<Item, ParseError> {
-        let pub_ = if self.at(&TokenKind::Pub) {
-            self.advance();
-            true
-        } else {
-            false
-        };
+        // P-8 (full-audit 2026-08-05-0656) CHOICE: accept `pub` and item
+        // attributes in EITHER order (`#[derive(Debug)] pub type X` as well
+        // as the historical `pub #[derive(Debug)] type X`). Both spellings
+        // are unambiguous; rejecting the attr-first order produced a
+        // confusing "attribute only supported on type declarations" error
+        // because the placement check ran before `pub` was consumed. A
+        // repeated `pub` is not admitted here (it falls through to the
+        // item-kind match and gets the generic unexpected-token error).
+        let mut pub_ = false;
         // Parse optional #[derive(...)], #[repr(...)], #[no_panic], and #[errno] attributes
         let mut derives = Vec::new();
         let mut attributes = Vec::new();
@@ -76,10 +79,18 @@ impl Parser {
         let mut type_attribute_token = None;
         let mut no_panic_attribute_token = None;
         let mut errno_attribute_token = None;
-        while self.at(&TokenKind::Hash)
-            && self.pos + 1 < self.tokens.len()
-            && self.tokens[self.pos + 1].kind == TokenKind::LBracket
-        {
+        loop {
+            if !pub_ && self.at(&TokenKind::Pub) {
+                self.advance();
+                pub_ = true;
+                continue;
+            }
+            if !(self.at(&TokenKind::Hash)
+                && self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].kind == TokenKind::LBracket)
+            {
+                break;
+            }
             self.advance(); // skip #
             self.advance(); // skip [
             if self.at(&TokenKind::Ident("derive".to_string())) {
@@ -631,8 +642,13 @@ impl Parser {
             if self.at(&TokenKind::RBrace) {
                 break;
             }
-            // Check if it's a method (func keyword) or field
-            if self.at(&TokenKind::Mut) || matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            // Check if it's a method (func keyword) or field.
+            // P-7 (full-audit 2026-08-05-0656): the field discriminant only
+            // admitted `Mut | Ident`, rejecting soft-keyword field names
+            // (`view`, `end`, …) even though `expect_ident` below accepts
+            // them and the type-definition site (M4, parse_type.rs) was
+            // already fixed to use the ident-like set. Sync the actor site.
+            if self.at(&TokenKind::Mut) || super::helpers::is_ident_like_kind(self.peek_kind()) {
                 let field_start = self.pos;
                 // Could be field: [mut] name: Type [= expr]
                 let mut_ = self.at(&TokenKind::Mut);
@@ -695,7 +711,15 @@ impl Parser {
         // Full-audit 2026-08-05: module nesting recurses via
         // parse_item_block → parse_item → parse_module with no depth guard
         // (stack overflow DoS on crafted input). Mirror the parse_expr guard.
-        self.check_depth()?;
+        //
+        // Wave-2 red line (wave1-review §1.2): the shared MAX=128 cap was
+        // sized for session/expr frames; the module path recurses through
+        // five mutually-recursive frames per nesting level (parse_module →
+        // parse_module_inner → parse_item_block → parse_item →
+        // parse_item_kind) and still overflowed the 2 MB libtest thread
+        // stack at depth 128 inside the guard. Use the module-specific cap
+        // measured for that frame budget (helpers.rs DEPTH_MAX_MODULE).
+        self.check_depth_with(super::helpers::DEPTH_MAX_MODULE)?;
         self.inc_depth();
         let result = self.parse_module_inner();
         self.dec_depth();
@@ -981,7 +1005,10 @@ impl Parser {
                         // PR-C1: parse failure is a hard error, not silent default.
                         let tok = self.peek();
                         let (line, col) = (tok.line, tok.col);
-                        let depth = s.parse::<usize>().map_err(|_| {
+                        // P-3 (full-audit 2026-08-05-0656): strip numeric
+                        // separators (`@mailbox(depth=2_048)`), mirroring the
+                        // literal sites in parse_expr.rs.
+                        let depth = s.replace('_', "").parse::<usize>().map_err(|_| {
                             ParseError::new(
                                 format!(
                                     "invalid @mailbox depth '{}': expected non-negative integer",
@@ -1014,7 +1041,10 @@ impl Parser {
                         // PR-C1: parse failure is a hard error, not silent default.
                         let tok = self.peek();
                         let (line, col) = (tok.line, tok.col);
-                        let n = s.parse::<usize>().map_err(|_| {
+                        // P-3 (full-audit 2026-08-05-0656): strip numeric
+                        // separators (`@max_children(1_0)`), mirroring the
+                        // literal sites in parse_expr.rs.
+                        let n = s.replace('_', "").parse::<usize>().map_err(|_| {
                             ParseError::new(
                                 format!(
                                     "invalid @max_children value '{}': expected non-negative integer",
@@ -1125,7 +1155,9 @@ impl Parser {
                             // PR-C1: parse failure is a hard error, not silent default.
                             let tok = self.peek();
                             let (line, col) = (tok.line, tok.col);
-                            let depth = s.parse::<usize>().map_err(|_| {
+                            // P-3 (full-audit 2026-08-05-0656): strip numeric
+                            // separators (`@mailbox(depth=2_048)`).
+                            let depth = s.replace('_', "").parse::<usize>().map_err(|_| {
                                     ParseError::new(
                                         format!(
                                             "invalid @mailbox depth '{}': expected non-negative integer",
@@ -1158,7 +1190,9 @@ impl Parser {
                             // PR-C1: parse failure is a hard error, not silent default.
                             let tok = self.peek();
                             let (line, col) = (tok.line, tok.col);
-                            let n = s.parse::<usize>().map_err(|_| {
+                            // P-3 (full-audit 2026-08-05-0656): strip numeric
+                            // separators (`@max_children(1_0)`).
+                            let n = s.replace('_', "").parse::<usize>().map_err(|_| {
                                     ParseError::new(
                                         format!(
                                             "invalid @max_children value '{}': expected non-negative integer",

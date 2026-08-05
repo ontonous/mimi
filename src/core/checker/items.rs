@@ -618,6 +618,22 @@ impl<'a> Checker<'a> {
                     derives: Vec::new(),
                     attributes: Vec::new(),
                 };
+                // T-4 (audit 2026-08-05): an actor projects a record type under
+                // its own name. Previously that projection silently OVERWROTE a
+                // pre-existing `type` (or earlier `actor`) of the same name, and
+                // the damage only surfaced later as an opaque
+                // "no resolved nominal identity" resolution error. Reject the
+                // collision here with E0402, mirroring the Item::Type guard.
+                if self.types.contains_key(&actor.name) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0402,
+                        format!(
+                            "duplicate type definition '{}' (actor conflicts with an existing type or actor)",
+                            actor.name
+                        ),
+                    );
+                    return;
+                }
                 self.types.insert(actor.name.clone(), actor_type_def);
 
                 // Collect actor methods as functions
@@ -878,9 +894,37 @@ impl<'a> Checker<'a> {
                 } else {
                     value_ty
                 };
+                // T-4 (audit 2026-08-05): duplicate const definitions were
+                // silently overwritten (`const K = 1; const K = 2` kept the
+                // second). Mirror the Item::Type E0402 guard. Detection lives
+                // in this collect pass only — `check_item` re-inserts the same
+                // key, so a guard there would fire on the first definition.
+                if self.const_types.contains_key(name) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0402,
+                        format!("duplicate constant definition '{}'", name),
+                    );
+                    return;
+                }
                 self.const_types.insert(name.clone(), const_ty);
             }
             Item::Flow(f) => {
+                // T-4 (audit 2026-08-05): duplicate flow names previously
+                // double-registered state types and flooded the resolved layer
+                // with opaque TOOL-RESOLUTION-001 duplicate-node errors. Reject
+                // at the checker with E0402, mirroring Item::Type.
+                let flow_key = if self.module_path.is_empty() {
+                    f.name.clone()
+                } else {
+                    format!("{}::{}", self.module_path.join("::"), f.name)
+                };
+                if !self.declared_flows.insert(flow_key) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0402,
+                        format!("duplicate flow definition '{}'", f.name),
+                    );
+                    return;
+                }
                 // Register states and transitions for type checking
                 let qualified = format!("flow::{}", f.name);
                 // FLOW-IDENTITY-001: register the root (first-declared) state for

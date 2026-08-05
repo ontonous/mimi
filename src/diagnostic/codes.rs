@@ -222,6 +222,9 @@ pub const E0820: &str = "E0820"; // let binding requires an initializer
 /// Resolved-body lowering error codes (E083x) — full audit 2026-08-05 wave-1.
 pub const E0830: &str = "E0830"; // resolved body lowering lacks a canonical fact (fail-closed; never infer)
 
+/// Linear-analysis error codes (E084x) — full audit 2026-08-05 wave-2 (agent L).
+pub const E0840: &str = "E0840"; // branch expression consumes distinct linear resources; XOR semantics leak every arm not taken
+
 /// Codegen error code not yet defined as constant (used inline)
 pub const E0712: &str = "E0712"; // codegen internal error (json builtin)
 
@@ -407,6 +410,7 @@ pub fn describe(code: &str) -> &'static str {
         E0814 => "slice out of bounds at runtime",
         E0820 => "let binding requires an initializer",
         E0830 => "resolved body lowering lacks a canonical fact (fail-closed)",
+        E0840 => "branch expression consumes distinct linear resources (XOR leak)",
         E0712 => "codegen internal error (json builtin)",
 
         W001 => "standalone desc/rule has no implementation",
@@ -625,6 +629,8 @@ mod tests {
             super::E0820,
             // Resolved-body lowering (E083x)
             super::E0830,
+            // Linear-analysis (E084x) — wave-2 agent L
+            super::E0840,
             // Warning codes (W0xx)
             super::W001,
             super::W002,

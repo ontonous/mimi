@@ -20,8 +20,9 @@ fn free_c_string_ptrs(items: &[*mut std::ffi::c_char]) {
     for &p in items {
         if !p.is_null() {
             // SAFETY: each non-null pointer was allocated by `alloc_c_string`
-            // via libc::malloc and is freed exactly once here.
-            unsafe { libc::free(p as *mut std::ffi::c_void) };
+            // (mimi_alloc) and is freed exactly once here through the
+            // matching deallocator (audit 2026-08-05, N-1 pairing).
+            super::mimi_free(p as *mut std::ffi::c_void);
         }
     }
 }
@@ -29,11 +30,13 @@ fn free_c_string_ptrs(items: &[*mut std::ffi::c_char]) {
 /// H1-pattern fix (matches `mimi_str_split` in mod.rs): move
 /// `alloc_c_string` element pointers out of a `Vec` into a fresh
 /// `libc::malloc` array so `mimi_list_free` can free the data buffer with
-/// `libc::free` (same allocator) and `list_cap`'s read of `data[-8]` never
-/// goes OOB on a Rust Vec buffer. The Vec's own backing storage is dropped
-/// normally (allocator-consistent). Returns null when the input is empty or
-/// on allocation failure (elements are freed in the failure case so they do
-/// not leak).
+/// `libc::free` (same allocator). Audit 2026-08-05 (H-26): lists built from
+/// this array carry `has_header=false`, so `list_cap`/`mimi_list_free` never
+/// read `data[-8]` — the explicit flag replaced the old negative-value
+/// heuristic that made every such free an out-of-bounds read. The Vec's own
+/// backing storage is dropped normally (allocator-consistent). Returns null
+/// when the input is empty or on allocation failure (elements are freed in
+/// the failure case so they do not leak).
 fn malloc_c_string_array(items: Vec<*mut std::ffi::c_char>) -> *mut *mut std::ffi::c_char {
     if items.is_empty() {
         return std::ptr::null_mut();
@@ -90,7 +93,9 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
     // Audit fix (H1 pattern): copy the element pointers out of the Vec into a
     // libc::malloc'd array. The old code handed the Vec buffer to MimiList
     // with owns_data=true → list_cap read data[-8] OOB and mimi_list_free
-    // freed a Vec buffer via libc::free (allocator mismatch).
+    // freed a Vec buffer via libc::free (allocator mismatch). Since the
+    // 2026-08-05 audit (H-26) the list also carries has_header=false, so
+    // data[-8] is never read regardless of allocator.
     let data_ptr = malloc_c_string_array(entries);
     if data_ptr.is_null() && len > 0 {
         // Allocation failure (elements already freed by the helper): degrade
@@ -100,7 +105,8 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
     }
     // 0.31.23: directory entries are strings. The MimiList STRUCT is
     // Box-allocated, matching mimi_list_free which frees it via
-    // Box::from_raw (mod.rs). No hidden capacity header.
+    // Box::from_raw (mod.rs). No hidden capacity header: has_header=false
+    // (with_data default) → free(data) is direct and data[-8] is never read.
     Box::into_raw(Box::new(MimiList::with_data(
         data_ptr,
         len,
@@ -244,7 +250,8 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
         results.into_iter().map(|s| alloc_c_string(&s)).collect();
     // Audit fix (H1 pattern): same as mimi_listdir — copy the element
     // pointers out of the Vec into a libc::malloc'd array so mimi_list_free
-    // frees with the matching allocator and list_cap doesn't read OOB.
+    // frees with the matching allocator; has_header=false (H-26) keeps
+    // list_cap from ever reading data[-8].
     let data_ptr = malloc_c_string_array(items);
     if data_ptr.is_null() && len > 0 {
         // Allocation failure (elements already freed by the helper): degrade
@@ -422,7 +429,9 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
 }
 
 /// Frees a MimiExecResult allocated by mimi_exec.
-/// stdout/stderr are allocated by alloc_c_string (libc::malloc), so must use libc::free.
+/// stdout/stderr are allocated by alloc_c_string (mimi_alloc), so they are
+/// freed through mimi_free — the matching deallocator under both normal and
+/// miri builds (audit 2026-08-05, N-1).
 #[no_mangle]
 pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
     if res.is_null() {
@@ -432,10 +441,10 @@ pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
     unsafe {
         let r = Box::from_raw(res);
         if !r.stdout.is_null() {
-            libc::free(r.stdout as *mut std::ffi::c_void);
+            super::mimi_free(r.stdout as *mut std::ffi::c_void);
         }
         if !r.stderr.is_null() {
-            libc::free(r.stderr as *mut std::ffi::c_void);
+            super::mimi_free(r.stderr as *mut std::ffi::c_void);
         }
     }
 }
@@ -795,6 +804,11 @@ mod tests {
         let c_path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
         let list = mimi_listdir(c_path.as_ptr());
         assert!(!list.is_null());
+        // H-26 flag contract: header-less owning list.
+        // SAFETY: `list` was just returned by mimi_listdir.
+        unsafe {
+            assert!(!(*list).has_header);
+        }
         let mut names = list_to_strings(list);
         names.sort();
         assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);

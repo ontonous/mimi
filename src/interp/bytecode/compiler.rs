@@ -49,6 +49,15 @@ pub struct BytecodeCompiler {
     /// Type hints from CheckedProgram: function name → parameter VarTypes.
     /// Eliminates expr_is_float heuristics for parameters (G1).
     type_hints: HashMap<String, Vec<VarType>>,
+    /// Function return-type directory: function name → VarType of its return
+    /// value (C-3 / Wave-2 #2: type-hints read path). Populated from the AST
+    /// (top-level, module, impl methods) and from CheckedProgram when
+    /// installed. `infer_expr_type` reads this for `Expr::Call` so that
+    /// `let a = half(19.0)` tracks `a` as Float and comparisons emit
+    /// `LtFloat` instead of falling through to the VM's non-numeric compare
+    /// shapes. Without it, call results were `Unknown` and float comparisons
+    /// compiled as `Op::LtInt`.
+    func_ret_types: HashMap<String, VarType>,
     /// Method resolution table from CheckedProgram impls:
     /// (type_name, method_name) → mangled function name.
     /// Eliminates string prefix guessing (G1).
@@ -114,6 +123,15 @@ struct FuncCompiler {
     /// Loop result registers: one per active loop (for break-with-value).
     /// `break expr` writes to the top register; the loop expression reads it.
     loop_result_regs: Vec<Reg>,
+    /// Loop body scope depth for each active loop (index into
+    /// `fault_pc_patches` / `on_failure_scopes`), pushed alongside the loop
+    /// body's `push_scope`. `break`/`continue` jump past the block-exit
+    /// `ClearFaultPc` pops, so they must emit one pop per fault handler
+    /// registered at scope levels `[body_idx, current]` — every `on failure`
+    /// statement compiled (and thus executed) inside the loop body subtree so
+    /// far (B-3: pre-fix, stale handlers outlived their scope on the frame's
+    /// handler stack and recycled registers executed old compensation code).
+    loop_body_scope_idx: Vec<usize>,
     /// Audit fix #9: set while compiling an expression whose result lands in a
     /// declared-`i32` place (annotated `let`, assignment into an i32 var).
     /// Literal constant folding must respect the i32 width policy here:
@@ -173,6 +191,7 @@ impl FuncCompiler {
             fault_pc_patches: vec![Vec::new()],
             borrow_aliases: HashMap::new(),
             loop_result_regs: Vec::new(),
+            loop_body_scope_idx: Vec::new(),
             i32_ctx_active: false,
             self_call: None,
             old_regs: HashMap::new(),
@@ -230,6 +249,41 @@ impl FuncCompiler {
         match self.continue_jumps.last_mut() {
             Some(v) => v,
             None => unreachable!("bytecode: continue outside loop (compiler invariant violated)"),
+        }
+    }
+
+    /// Enter a loop body scope (B-3): pushes the variable scope and records
+    /// its depth so `break`/`continue` can pop exactly the fault handlers
+    /// registered inside the loop body subtree.
+    #[inline]
+    fn enter_loop_body_scope(&mut self) {
+        self.push_scope();
+        // The body scope is the innermost level after push_scope.
+        self.loop_body_scope_idx
+            .push(self.on_failure_scopes.len() - 1);
+    }
+
+    /// Exit a loop body scope (B-3), paired with `enter_loop_body_scope`.
+    #[inline]
+    fn exit_loop_body_scope(&mut self) {
+        self.loop_body_scope_idx.pop();
+        self.pop_scope();
+    }
+
+    /// Number of fault handlers pushed (at runtime) by `on failure` statements
+    /// compiled inside the innermost loop body's scope subtree so far. These
+    /// handlers are skipped over by `break`/`continue` and need explicit
+    /// `ClearFaultPc` pops at the jump site (B-3).
+    #[inline]
+    fn active_loop_fault_handler_count(&self) -> usize {
+        match self.loop_body_scope_idx.last() {
+            Some(&body_idx) => self
+                .fault_pc_patches
+                .iter()
+                .skip(body_idx)
+                .map(|v| v.len())
+                .sum(),
+            None => 0,
         }
     }
 
@@ -374,6 +428,7 @@ impl BytecodeCompiler {
             cap_names: std::collections::HashSet::new(),
             cap_components: HashMap::new(),
             type_hints: HashMap::new(),
+            func_ret_types: HashMap::new(),
             method_table: HashMap::new(),
             flow_defs: HashMap::new(),
             actor_defs: HashMap::new(),
@@ -392,10 +447,12 @@ impl BytecodeCompiler {
     }
 
     /// Install type information from CheckedProgram (G1 integration).
-    /// Populates `type_hints` (parameter types) and `method_table` (impl dispatch).
+    /// Populates `type_hints` (parameter types), `func_ret_types` (return
+    /// types — the READ path that `infer_expr_type` consults for `Expr::Call`,
+    /// C-3 / Wave-2 #2) and `method_table` (impl dispatch).
     /// Call this BEFORE `compile_file` to enable type-directed compilation.
     pub fn install_checked_program(&mut self, program: &crate::core::CheckedProgram) {
-        // Extract parameter types for each function.
+        // Extract parameter and return types for each function.
         for func in program.functions().values() {
             let param_types: Vec<VarType> = func
                 .params
@@ -404,6 +461,15 @@ impl BytecodeCompiler {
                 .collect();
             self.type_hints
                 .insert(func.qualified_name.clone(), param_types);
+            // Return type directory (C-3): lets `infer_expr_type` resolve
+            // call-result types without relying on AST-only visibility (e.g.
+            // module-qualified callees the checker resolved). The AST pass in
+            // `compile_file` re-registers the same facts later; both sources
+            // agree because the checker validates signatures against the AST.
+            self.func_ret_types.insert(
+                func.qualified_name.clone(),
+                surface_type_to_var_type(&func.ret),
+            );
         }
 
         // Build method resolution table from impls.
@@ -426,6 +492,9 @@ impl BytecodeCompiler {
             if let Item::Func(f) = item {
                 let idx = self.functions.len() as FuncIdx;
                 self.func_table.insert(f.name.clone(), idx);
+                // Register the declared return type (C-3 return-type directory).
+                self.func_ret_types
+                    .insert(f.name.clone(), ret_type_to_var_type(&f.ret));
                 // Collect default parameter values and param names for call-site handling.
                 let defaults: Vec<Option<Expr>> =
                     f.params.iter().map(|p| p.default_value.clone()).collect();
@@ -551,6 +620,11 @@ impl BytecodeCompiler {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
                     let idx = self.functions.len() as FuncIdx;
                     self.func_table.insert(mangled_name.clone(), idx);
+                    // Register the declared return type (C-3 return-type
+                    // directory). Method calls that resolve through the method
+                    // table dispatch to this mangled name.
+                    self.func_ret_types
+                        .insert(mangled_name.clone(), ret_type_to_var_type(&method.ret));
                     // 0.34.24: also register the (type, method) → mangled
                     // mapping here, not only in install_checked_program —
                     // callers that compile a raw file without a
@@ -648,8 +722,14 @@ impl BytecodeCompiler {
                         // Bind `self` to register 0 (direct insert, like compile_func).
                         fc.vars[0].insert("self".to_string(), 0);
                         // Bind transition params to registers 1..n.
+                        // H-13: register param TYPES the way compile_func does —
+                        // pre-fix every transition param stayed Unknown, so float
+                        // params in guards/conditions compiled `Op::LtInt`-shape
+                        // comparisons (C-3 amplification into Flow cores).
                         for (i, p) in t.params.iter().enumerate() {
                             fc.vars[0].insert(p.name.clone(), (i + 1) as Reg);
+                            fc.set_var_mut(&p.name, p.mut_);
+                            fc.set_reg_type(&p.name, param_type_to_var_type(&p.ty));
                         }
                         let last_reg = self.compile_block(&mut fc, body)?;
                         // Return the last expression's value, or Unit if none
@@ -689,8 +769,13 @@ impl BytecodeCompiler {
                     // Compile the method body (like compile_func_impl).
                     let mut fc = FuncCompiler::new(func_name, param_count as u16);
                     fc.vars[0].insert("self".to_string(), 0);
+                    // H-13: register param TYPES like compile_func_impl does —
+                    // pre-fix actor-method params stayed Unknown, so float
+                    // params compiled int-shape comparisons (C-3 amplification).
                     for (i, p) in method.params.iter().enumerate() {
                         fc.vars[0].insert(p.name.clone(), (i + 1) as Reg);
+                        fc.set_var_mut(&p.name, p.mut_);
+                        fc.set_reg_type(&p.name, param_type_to_var_type(&p.ty));
                     }
                     let last_reg = self.compile_block(&mut fc, &method.body)?;
                     // Return the last expression's value, or Unit if none.
@@ -924,6 +1009,9 @@ impl BytecodeCompiler {
                     let qualified = format!("{}::{}", current, f.name);
                     let idx = self.functions.len() as FuncIdx;
                     self.func_table.insert(qualified.clone(), idx);
+                    // Register the declared return type (C-3 return-type directory).
+                    self.func_ret_types
+                        .insert(qualified.clone(), ret_type_to_var_type(&f.ret));
                     let defaults: Vec<Option<Expr>> =
                         f.params.iter().map(|p| p.default_value.clone()).collect();
                     if defaults.iter().any(|d| d.is_some()) {
@@ -1412,12 +1500,27 @@ impl BytecodeCompiler {
                             }
                         }
                     }
+                    // B-3: the jump skips the block-exit ClearFaultPc pops, so
+                    // pop here every fault handler pushed by `on failure`
+                    // statements executed inside the loop body subtree. Pre-fix
+                    // the stale handlers survived on the frame's handler stack
+                    // and recycled registers executed old compensation code.
+                    let pops = fc.active_loop_fault_handler_count();
+                    for _ in 0..pops {
+                        fc.emit(Op::ClearFaultPc);
+                    }
                     let idx = fc.emit(Op::Jmp { offset: 0 });
                     fc.break_jumps_mut().push(idx);
                 }
                 Stmt::Continue => {
                     if fc.continue_jumps.is_empty() {
                         return Err(InterpError::new("continue outside loop"));
+                    }
+                    // B-3: same handler-pop discipline as break — continue
+                    // exits the body scope (re-entered next iteration).
+                    let pops = fc.active_loop_fault_handler_count();
+                    for _ in 0..pops {
+                        fc.emit(Op::ClearFaultPc);
                     }
                     let idx = fc.emit(Op::Jmp { offset: 0 });
                     fc.continue_jumps_mut().push(idx);
@@ -2122,29 +2225,44 @@ impl BytecodeCompiler {
                 let r_inner = self.compile_expr(fc, inner)?;
                 let rd = fc.proto.alloc_reg();
 
-                // Check if it's Ok/Some (variant tag).
-                let r_is_ok = fc.proto.alloc_reg();
+                // H-12: SUCCESS = variant tag Ok OR Some. The checker accepts
+                // `?` on Result AND Option (infer/helpers.rs infer_try_expr
+                // extracts T from both) and codegen extracts T on Ok/Some
+                // (expr/try_expr.rs). Pre-fix only "Ok" was tested — the
+                // comment claimed "Ok/Some" but the code disagreed — so
+                // `Some(v)?` fell into the failure branch and early-returned
+                // Some(v) instead of continuing with v.
+                let r_is_success = fc.proto.alloc_reg();
                 let ok_tag = fc.proto.add_const(ConstValue::Str("Ok".into()));
                 fc.emit(Op::IsVariant {
-                    rd: r_is_ok,
+                    rd: r_is_success,
                     ra: r_inner,
                     tag: ok_tag,
                 });
-                let jmp_err = fc.emit(Op::JmpIfNot {
+                let jmp_ok = fc.emit(Op::JmpIf {
                     offset: 0,
-                    ra: r_is_ok,
+                    ra: r_is_success,
+                });
+                let some_tag = fc.proto.add_const(ConstValue::Str("Some".into()));
+                fc.emit(Op::IsVariant {
+                    rd: r_is_success,
+                    ra: r_inner,
+                    tag: some_tag,
+                });
+                let jmp_some = fc.emit(Op::JmpIf {
+                    offset: 0,
+                    ra: r_is_success,
                 });
 
-                // Ok branch: unwrap.
-                fc.emit(Op::Unwrap { rd, ra: r_inner });
-                let jmp_end = fc.emit(Op::Jmp { offset: 0 });
-
-                // Err branch: return the error value (via RetEarly so
-                // wrap_ok can distinguish `?` from final-expression Err).
-                fc.proto.patch_jump(jmp_err);
+                // Failure branch (Err/None): return the wrapped value early
+                // (via RetEarly so wrap_ok can distinguish `?` from a
+                // final-expression Err).
                 fc.emit(Op::RetEarly { ra: r_inner });
 
-                fc.proto.patch_jump(jmp_end);
+                // Success branch: both Ok and Some jump here and unwrap.
+                fc.proto.patch_jump(jmp_ok);
+                fc.proto.patch_jump(jmp_some);
+                fc.emit(Op::Unwrap { rd, ra: r_inner });
                 Ok(rd)
             }
 
@@ -3971,7 +4089,15 @@ impl BytecodeCompiler {
                         ra: r_subject,
                         rb: r_lit,
                     },
-                    Lit::Float(_) => Op::EqFloat {
+                    // B-6: route float literals through the generic Eq
+                    // (values_equal) instead of EqFloat. EqFloat ERRORS when
+                    // the subject is not a Float, so a float-literal arm
+                    // tested against a mismatched subject aborted the whole
+                    // match instead of falling through to the next arm; EqInt
+                    // already degrades via values_equal, and generic Eq keeps
+                    // Float==Float exact (SD-10 OEQ parity) while letting
+                    // non-float subjects fall through.
+                    Lit::Float(_) => Op::Eq {
                         rd: r_test,
                         ra: r_subject,
                         rb: r_lit,
@@ -4447,9 +4573,9 @@ impl BytecodeCompiler {
             ra: r_cond,
         });
 
-        fc.push_scope();
+        fc.enter_loop_body_scope();
         let body_result = self.compile_block(fc, body)?;
-        fc.pop_scope();
+        fc.exit_loop_body_scope();
 
         // Loop-as-expression: non-Unit body value → terminate.
         if let Some(r_body) = body_result {
@@ -4514,9 +4640,9 @@ impl BytecodeCompiler {
 
         let loop_start = fc.proto.code.len();
 
-        fc.push_scope();
+        fc.enter_loop_body_scope();
         self.compile_block(fc, body)?;
-        fc.pop_scope();
+        fc.exit_loop_body_scope();
 
         // Jump back to loop start (infinite).
         fc.emit(Op::Jmp { offset: 0 });
@@ -4578,12 +4704,12 @@ impl BytecodeCompiler {
         });
 
         // Bind pattern variables and compile body.
-        fc.push_scope();
+        fc.enter_loop_body_scope();
         for (name, r) in &bindings {
             fc.vars_mut().insert(name.clone(), *r);
         }
         let body_result = self.compile_block(fc, body)?;
-        fc.pop_scope();
+        fc.exit_loop_body_scope();
 
         // Mimi loop-as-expression: if body produced a non-Unit value,
         // store it in result_reg and terminate the loop.
@@ -4699,7 +4825,7 @@ impl BytecodeCompiler {
         });
 
         // Push scope for loop variable (prevents leak to outer scope).
-        fc.push_scope();
+        fc.enter_loop_body_scope();
         // element = iter[idx]; bind via pattern (single ident or destructure).
         let r_elem = fc.proto.alloc_reg();
         fc.emit(Op::ListGet {
@@ -4710,7 +4836,7 @@ impl BytecodeCompiler {
         self.bind_pattern(fc, var, r_elem);
 
         let body_result = self.compile_block(fc, body)?;
-        fc.pop_scope();
+        fc.exit_loop_body_scope();
 
         // Loop-as-expression: non-Unit body value → terminate.
         if let Some(r_body) = body_result {
@@ -4813,7 +4939,7 @@ impl BytecodeCompiler {
         });
 
         // Bind loop variable to the counter (range element is an i32 value).
-        fc.push_scope();
+        fc.enter_loop_body_scope();
         let r_elem = fc.proto.alloc_reg();
         fc.emit(Op::Mov {
             rd: r_elem,
@@ -4822,7 +4948,7 @@ impl BytecodeCompiler {
         self.bind_pattern(fc, var, r_elem);
 
         let body_result = self.compile_block(fc, body)?;
-        fc.pop_scope();
+        fc.exit_loop_body_scope();
 
         // Loop-as-expression: non-Unit body value → terminate.
         if let Some(r_body) = body_result {
@@ -5458,7 +5584,11 @@ impl BytecodeCompiler {
                     })
                 })
             }
-            _ => false,
+            // C-3: everything else (call results, record fields, …) goes
+            // through the typed inference path. Pre-fix this arm was
+            // `_ => false`, so `Expr::Call` returning f64 was never float and
+            // float comparisons compiled as int comparisons.
+            _ => self.infer_expr_type(fc, expr) == VarType::Float,
         }
     }
 
@@ -5771,6 +5901,34 @@ impl BytecodeCompiler {
                 }
             }
             Expr::Unary(_, e) => self.infer_expr_type(fc, e),
+            // C-3: call results resolve through the return-type directory.
+            // Pre-fix every call result was Unknown, so `let a = half(19.0)`
+            // tracked `a` as Unknown and `a < b` compiled Op::LtInt even when
+            // both operands were floats. Local bindings (closures / nested
+            // funcs) shadow global names and stay Unknown.
+            Expr::Call(callee, _) => {
+                if let Expr::Ident(name) = callee.unlocated() {
+                    if fc.lookup_var(name).is_none() {
+                        if let Some(ty) = self.func_ret_types.get(name) {
+                            return ty.clone();
+                        }
+                    }
+                }
+                VarType::Unknown
+            }
+            // Record field access: resolve through the record-field directory
+            // when the owner's nominal type is known (flow-state/record
+            // comparisons were the other C-3 hot spot).
+            Expr::Field(obj, field) => {
+                if let VarType::User(type_name) = self.infer_expr_type(fc, obj) {
+                    if let Some(fields) = self.record_fields.get(&type_name) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == field) {
+                            return surface_type_str_to_var_type(fty);
+                        }
+                    }
+                }
+                VarType::Unknown
+            }
             _ => VarType::Unknown,
         }
     }
@@ -5807,6 +5965,47 @@ fn surface_type_to_var_type(ty: &Type) -> VarType {
             other => VarType::User(other.to_string()),
         },
         Type::Ref(_, inner) | Type::RefMut(_, inner) => surface_type_to_var_type(inner),
+        _ => VarType::Unknown,
+    }
+}
+
+/// Surface parameter type → VarType tag (int/float dispatch). Shared by
+/// compile_func / compile_func_impl / flow-transition / actor-method param
+/// registration (H-13: transitions and actor methods previously skipped
+/// registration entirely, leaving float params Unknown and amplifying C-3's
+/// non-numeric comparison shapes into Flow cores).
+fn param_type_to_var_type(ty: &Type) -> VarType {
+    match ty.unlocated() {
+        Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
+        Type::Name(n, _) if n == "i32" => VarType::Int32,
+        Type::Name(n, _) if n == "i64" => VarType::Int,
+        Type::Name(n, _) if n == "bool" => VarType::Bool,
+        Type::Name(n, _) if n == "string" => VarType::String,
+        Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
+        Type::Name(n, _) => VarType::User(n.clone()),
+        _ => VarType::Unknown,
+    }
+}
+
+/// Declared return type → VarType tag for the return-type directory (C-3).
+/// No annotation = unit return → Unknown (never needs scalar dispatch).
+fn ret_type_to_var_type(ret: &Option<Type>) -> VarType {
+    ret.as_ref()
+        .map(surface_type_to_var_type)
+        .unwrap_or(VarType::Unknown)
+}
+
+/// Printed (`fmt_type`) type string → VarType tag. The record-field directory
+/// stores field types as display strings; only scalar tags matter for
+/// comparison/arithmetic dispatch (nominal containers stay Unknown).
+fn surface_type_str_to_var_type(s: &str) -> VarType {
+    let base = s.split('<').next().unwrap_or(s).trim();
+    match base {
+        "f32" | "f64" => VarType::Float,
+        "i32" => VarType::Int32,
+        "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64" => VarType::Int,
+        "bool" => VarType::Bool,
+        "string" => VarType::String,
         _ => VarType::Unknown,
     }
 }

@@ -426,10 +426,23 @@ impl<'a> LexerPos<'a> {
                             pos = next!(pos);
                         } else if c == '_' {
                             // LX-C3: separator only between digits.
+                            // P-9 (full-audit 2026-08-05-0656): "between"
+                            // means a digit on BOTH sides — the old check
+                            // only looked ahead, so `0x_1` (separator right
+                            // after the radix prefix, digits still empty)
+                            // was accepted while the decimal branch is
+                            // strict. `s` ends in 'x' until the first hex
+                            // digit is pushed, so the trailing-char check
+                            // rejects prefix-adjacent separators.
                             let (sep_line, sep_col) = (pos.line, pos.col);
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
-                                Some(n) if n.is_ascii_hexdigit() => {
+                                Some(n)
+                                    if n.is_ascii_hexdigit()
+                                        && s.chars()
+                                            .last()
+                                            .is_some_and(|p| p.is_ascii_hexdigit()) =>
+                                {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
@@ -453,10 +466,15 @@ impl<'a> LexerPos<'a> {
                             s.push(c);
                             pos = next!(pos);
                         } else if c == '_' {
+                            // LX-C3 + P-9: separator needs a binary digit on
+                            // BOTH sides; rejects `0b_1` (prefix-adjacent).
                             let (sep_line, sep_col) = (pos.line, pos.col);
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
-                                Some(n) if n == '0' || n == '1' => {
+                                Some(n)
+                                    if (n == '0' || n == '1')
+                                        && matches!(s.chars().last(), Some('0') | Some('1')) =>
+                                {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
@@ -483,11 +501,20 @@ impl<'a> LexerPos<'a> {
                             // Aligned with hex/bin (full-audit 2026-08-05): the
                             // old `|| n == '_'` arm accepted `0o1__2`; any '_'
                             // not followed by an octal digit is a separator
-                            // violation.
+                            // violation. P-9: additionally require an octal
+                            // digit BEFORE the separator, rejecting `0o_1`
+                            // (prefix-adjacent).
                             let (sep_line, sep_col) = (pos.line, pos.col);
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
-                                Some(n) if n.is_ascii_digit() && n != '8' && n != '9' => {
+                                Some(n)
+                                    if n.is_ascii_digit()
+                                        && n != '8'
+                                        && n != '9'
+                                        && s.chars().last().is_some_and(|p| {
+                                            p.is_ascii_digit() && p != '8' && p != '9'
+                                        }) =>
+                                {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
@@ -704,6 +731,14 @@ impl<'a> LexerState<'a> {
             // ── Start: handle shebang ─────────────────────────────
             (LexerState::Start { pos, mode, acc, .. }, LexerEvent::Step) => {
                 let mut pos = pos;
+                // P-6 (full-audit 2026-08-05-0656): skip a UTF-8 BOM
+                // (U+FEFF) at the very start of the file. Previously the
+                // BOM reached the dispatch catch-all and reported
+                // "unexpected character". Only position 0 is skipped — a
+                // U+FEFF mid-file is still an error (it is not whitespace).
+                if pos.peek() == Some('\u{FEFF}') {
+                    pos = next!(pos);
+                }
                 if pos.peek() == Some('#') {
                     let mut tmp = pos.chars.clone();
                     if tmp.next() == Some('!') {

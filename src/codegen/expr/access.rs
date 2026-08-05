@@ -70,7 +70,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                             })?;
                         (index as u32, Some(fields[index].ty.clone()))
                     } else {
-                        return Err(format!("type '{}' is not a record", base_name).into());
+                        // R-4 (audit 2026-08-05 wave-2): `type Pt = Point` —
+                        // field access through a type alias. The base's
+                        // TypeDefKind is Alias (or Newtype), not Record;
+                        // resolve the alias chain to the underlying record
+                        // definition so `p.x` works for `let p: Pt = ...`
+                        // (alias_to_record_layout regression).
+                        let resolved = self.resolve_alias_type_name(base_name);
+                        match self.type_defs.get(&resolved) {
+                            Some(crate::ast::TypeDef {
+                                kind: TypeDefKind::Record(fields),
+                                ..
+                            }) => {
+                                let index = fields
+                                    .iter()
+                                    .position(|candidate| candidate.name == *field)
+                                    .ok_or_else(|| {
+                                        CompileError::Generic(format!(
+                                            "field '{}' not found on type '{}'",
+                                            field, resolved
+                                        ))
+                                    })?;
+                                (index as u32, Some(fields[index].ty.clone()))
+                            }
+                            _ => return Err(format!("type '{}' is not a record", base_name).into()),
+                        }
                     }
                 } else if let Ok(index) = field.parse::<u32>() {
                     struct_ty.get_field_type_at_index(index).ok_or_else(|| {
@@ -335,9 +359,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let obj_type = self.infer_object_type(obj, vars);
         let base_type = Self::strip_generic_params(&obj_type);
         let field_ptr = self.materialize_field_base(obj_val, &obj_type)?;
-        let sty = self.expect_struct_type(base_type)?;
+        // R-4 (audit 2026-08-05 wave-2): `type Pt = Point` — field access
+        // through a type alias. Resolve the alias chain to the underlying
+        // nominal before consulting the record catalog (alias_to_record_layout
+        // regression; the resolved lowering side got the same treatment in
+        // lower.rs resolve_field).
+        let base_type = self.resolve_alias_type_name(base_type);
+        let sty = self.expect_struct_type(&base_type)?;
 
-        if let Some(td) = self.type_defs.get(base_type) {
+        if let Some(td) = self.type_defs.get(&base_type) {
             if let TypeDefKind::Record(fields) = &td.kind {
                 if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
                     let gep = self

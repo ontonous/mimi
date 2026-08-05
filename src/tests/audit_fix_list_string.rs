@@ -4,7 +4,6 @@
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
 use super::*;
 
-
 fn can_link() -> bool {
     crate::tests::can_link()
 }

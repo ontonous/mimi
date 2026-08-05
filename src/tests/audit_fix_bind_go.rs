@@ -10,7 +10,6 @@ use crate::ast::{
 use crate::ffi::go_bind::GoBindGenerator;
 use std::collections::HashMap;
 
-
 fn meta() -> AstNodeMeta {
     AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("audit.bind_go"))
 }

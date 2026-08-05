@@ -269,7 +269,35 @@ fn codegen_icmp() {
 
 #[test]
 fn codegen_and_instruction() {
-    assert_ir_contains("func main(a: i32, b: i32) -> i32 { a && b }", "and");
+    // Wave-2 2026-08-05 (full audit §7, wave1-review §2-A): the old assertion
+    // pinned the EAGER lowering (`and` over both operands). Eager evaluation
+    // was exactly the bug the audit fixed (codegen/expr/operator.rs
+    // compile_short_circuit_expr): the bytecode VM short-circuits, so the
+    // eager lowering trapped on effects the VM never reaches and ran side
+    // effects on the skipped branch. `&&` now lowers to short-circuit control
+    // flow. For the i32 operands here the LHS is coerced to a truthiness
+    // condition (`icmp ne 0`, mirroring the VM's is_truthy) and the result is
+    // merged by an i32 phi over the RHS-evaluated arm (sc_rhs) and the
+    // constant-0 arm (sc_const).
+    let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a && b }");
+    assert!(
+        ir.contains("icmp ne i32"),
+        "and: non-bool LHS is coerced to a truthiness condition (icmp ne 0): {}",
+        ir
+    );
+    assert!(
+        ir.contains("br i1")
+            && ir.contains("label %sc_rhs, label %sc_const")
+            && ir.contains("phi i32"),
+        "and must lower to short-circuit control flow (cond_br to sc_rhs/sc_const + merge phi), \
+         not an eager bitwise and: {}",
+        ir
+    );
+    assert!(
+        !ir.contains("and i32"),
+        "no eager bitwise and over the operands: {}",
+        ir
+    );
 }
 
 #[test]

@@ -43,27 +43,18 @@ pub(crate) fn extract_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> (S
 /// V-C3: scan **forward** for the first reachable explicit `return` / top-level
 /// `if`. Reverse search previously picked dead code after an early return
 /// (e.g. `return 0; return 1` → wrongly chose `1`).
+///
+/// C-6 (full-audit-2026-08-05-0656 §1): an `if` whose branches yield NO
+/// extractable return value (e.g. `if c { let y2 = y + 1 }`) no longer
+/// propagates `None` as the overall result. Extraction failure means the
+/// `if` produces no value and execution continues — the scan MUST keep
+/// looking at subsequent statements. Previously the swallowed tail made
+/// `ensures: result == 0` a fake Proven (func.rs binds result to 0 when
+/// extraction fails) even though the runtime always returned the tail `y`.
 pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
-    // First pass (forward): first explicit return or branching if wins.
-    for stmt in block.iter() {
-        match stmt.unlocated() {
-            Stmt::Return(Some(expr)) => return Some(expr.clone()),
-            Stmt::Return(None) => return Some(Expr::Literal(Lit::Unit)),
-            Stmt::If { cond, then_, else_ } => {
-                return extract_if_return(cond, then_, else_);
-            }
-            Stmt::Requires(_, _)
-            | Stmt::Ensures(_, _)
-            | Stmt::Invariant(_, _)
-            | Stmt::Math(_)
-            | Stmt::Desc(..)
-            | Stmt::Rule(..)
-            | Stmt::MmsBlock { .. }
-            | Stmt::Let { .. }
-            | Stmt::Assign { .. }
-            | Stmt::Expr(_) => continue,
-            _ => continue,
-        }
+    // First pass (forward): first explicit return or value-producing if wins.
+    if let Some(early) = extract_forward_return(block) {
+        return Some(early);
     }
     // Second pass (reverse): implicit return = last expression, skipping lets.
     for stmt in block.iter().rev() {
@@ -71,6 +62,18 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
             Stmt::Expr(expr) => return Some(expr.clone()),
             Stmt::If { cond, then_, else_ } => {
                 return extract_if_return(cond, then_, else_);
+            }
+            // C-6: a tail bare block (including unsafe/ieee_float-style
+            // wrapper blocks) contributes its own implicit value. Previously
+            // `_ => break` discarded it, binding result to 0 → fake verdicts.
+            Stmt::Block(inner)
+            | Stmt::Arena(inner)
+            | Stmt::Unsafe(inner)
+            | Stmt::IeeeFloat(inner) => {
+                return extract_body_return(inner);
+            }
+            Stmt::Alloc { body, .. } => {
+                return extract_body_return(body);
             }
             Stmt::Requires(_, _)
             | Stmt::Ensures(_, _)
@@ -82,6 +85,55 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
             | Stmt::Let { .. }
             | Stmt::Assign { .. } => continue,
             _ => break,
+        }
+    }
+    None
+}
+
+/// Forward scan for guaranteed early returns: the first explicit `return`, or
+/// an `if` whose branches BOTH yield extractable return expressions (i.e. no
+/// fall-through path), or an early return nested inside an unconditional block
+/// wrapper.
+///
+/// C-6: extraction failure on an `if` (a branch without a return/tail value)
+/// means the statement produces no value and control falls through — the scan
+/// continues instead of returning `None`. Block wrappers are recursed for
+/// EARLY RETURNS ONLY: their tail expressions are discarded values unless the
+/// block itself is the tail statement (handled by the reverse pass in
+/// `extract_body_return`).
+fn extract_forward_return(block: &[Stmt]) -> Option<Expr> {
+    for stmt in block.iter() {
+        match stmt.unlocated() {
+            Stmt::Return(Some(expr)) => return Some(expr.clone()),
+            Stmt::Return(None) => return Some(Expr::Literal(Lit::Unit)),
+            Stmt::If { cond, then_, else_ } => {
+                // C-6: only a fully-extractable if (value on every branch)
+                // can stand in for the block's result here. On extraction
+                // failure keep scanning — the tail statements after the if
+                // are the true result.
+                if let Some(expr) = extract_if_return(cond, then_, else_) {
+                    return Some(expr);
+                }
+            }
+            // Unconditional block wrappers: an early return inside them ends
+            // the whole function. Tail expressions do NOT (they are the
+            // wrapper's discarded value when the wrapper is not the tail).
+            Stmt::Block(inner)
+            | Stmt::Arena(inner)
+            | Stmt::Unsafe(inner)
+            | Stmt::IeeeFloat(inner)
+            | Stmt::OnFailure(inner)
+            | Stmt::Parasteps(inner) => {
+                if let Some(expr) = extract_forward_return(inner) {
+                    return Some(expr);
+                }
+            }
+            Stmt::Alloc { body, .. } => {
+                if let Some(expr) = extract_forward_return(body) {
+                    return Some(expr);
+                }
+            }
+            _ => continue,
         }
     }
     None

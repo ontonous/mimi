@@ -160,17 +160,85 @@ impl VerifierState {
 }
 
 /// Driver: run the verifier to completion with proof hashes (P1-24).
+///
+/// V-4 (audit 2026-08-05): verification results must not depend on SOURCE
+/// ORDER. The single preseed+pass schedule lost callee axioms permanently
+/// when a caller preceded its callee in the file (chain C→B→A declared
+/// [C,B,A] ⇒ C stayed Disproven forever). The driver now iterates full
+/// waves over the same queue until `func_status` stops changing (fixpoint),
+/// so callee proofs propagate bottom-up regardless of declaration order.
 pub fn flow_verify_file_with_hashes(
     file: &File,
     source_hash: String,
     resolved_ir_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
     let state = VerifierState::with_hashes(file, source_hash, resolved_ir_hash)?;
-    let state = run_to_done(state)?;
-    Ok(state.into_output().results)
+    match state {
+        VerifierState::Ready {
+            session,
+            ctx,
+            queue,
+            acc,
+        } => {
+            let acc = verify_queue_to_fixpoint(session, ctx, queue, acc)?;
+            Ok(acc.results)
+        }
+        VerifierState::Done(acc) => Ok(acc.results),
+    }
 }
 
-/// Drive the state machine until Done.
+/// V-4: process the full queue in waves until `func_status` is stable.
+///
+/// Each wave re-verifies every step in source order, updating `func_status`
+/// as it goes; a callee proved in wave N becomes an available axiom to its
+/// callers in wave N+1. The wave count is capped at `steps + 1` — a call
+/// chain longer than the number of steps cannot exist, so the loop always
+/// terminates. Only the final wave's results are reported; earlier waves are
+/// scheduling scaffolding.
+fn verify_queue_to_fixpoint(
+    mut session: SolverSession,
+    mut ctx: VerifierCtx,
+    queue: Vec<StepKind>,
+    mut acc: FlowAcc,
+) -> Result<FlowAcc, String> {
+    let max_waves = queue.len() + 1;
+    for _ in 0..max_waves {
+        let status_before = ctx.func_status.clone();
+        acc.results.clear();
+        let mut wave_queue = queue.clone();
+        while let Some(step) = wave_queue.pop() {
+            match step {
+                StepKind::Func(func) => {
+                    if !func.body.is_empty() {
+                        session.reset();
+                        let result = ctx.verify_func(&mut session, &func);
+                        ctx.func_status
+                            .insert(func.name.clone(), result.status.clone());
+                        acc.results.push(result);
+                    }
+                }
+                StepKind::Extern(func) => {
+                    if func.requires.is_some() || func.ensures.is_some() {
+                        session.reset();
+                        let result = ctx.verify_extern_func(&mut session, &func);
+                        ctx.func_status
+                            .insert(func.name.clone(), result.status.clone());
+                        acc.results.push(result);
+                    }
+                }
+            }
+        }
+        if ctx.func_status == status_before {
+            break; // fixpoint reached — verdicts no longer depend on ordering
+        }
+    }
+    Ok(acc)
+}
+
+/// Drive the state machine until Done. Single-pass stepping retained for the
+/// `VerifierState` API and its tests; production verification uses the
+/// fixpoint driver (`flow_verify_file_with_hashes`).
+#[allow(dead_code)]
 fn run_to_done(mut state: VerifierState) -> Result<VerifierState, String> {
     loop {
         state = state.transition(FlowEvent::Step)?;
@@ -185,18 +253,35 @@ fn run_to_done(mut state: VerifierState) -> Result<VerifierState, String> {
 /// Items are stored in reverse order so that `pop()` returns them in source order.
 fn flatten_items(items: &[Item]) -> Vec<StepKind> {
     let mut queue = Vec::new();
-    flatten_items_inner(items, &mut queue);
+    flatten_items_prefixed(items, "", &mut queue);
     queue.reverse(); // pop() yields from end → reverse so first item is at end
     queue
 }
 
-fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
+/// V-3 (audit 2026-08-05): module-nested functions are queued under their
+/// QUALIFIED name (`module::func`), mirroring `collect_func_defs` keying.
+/// Bare-name queue entries collided across modules and propagated the wrong
+/// `func_status` / result identity.
+fn flatten_items_prefixed(items: &[Item], prefix: &str, queue: &mut Vec<StepKind>) {
+    fn qualify(prefix: &str, name: &str) -> String {
+        if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", prefix, name)
+        }
+    }
     for item in items {
         match item {
             Item::Func(f) => {
-                queue.push(StepKind::Func(f.clone()));
+                let mut func = f.clone();
+                func.name = qualify(prefix, &func.name);
+                queue.push(StepKind::Func(func));
             }
-            Item::Module(m) => flatten_items_inner(&m.items, queue),
+            Item::Module(m) => {
+                let qualified = qualify(prefix, &m.name);
+                flatten_items_prefixed(&m.items, &qualified, queue);
+            }
+            // Extern symbols keep their ABI name (no module qualification).
             Item::ExternBlock(block) => {
                 for func in &block.funcs {
                     queue.push(StepKind::Extern(func.clone()));
@@ -206,14 +291,17 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
             Item::Actor(a) => {
                 for m in &a.methods {
                     let mut f = m.clone();
-                    f.name = format!("{}::{}", a.name, m.name);
+                    f.name = qualify(prefix, &format!("{}::{}", a.name, m.name));
                     queue.push(StepKind::Func(f));
                 }
             }
             Item::Impl(i) => {
                 for m in &i.methods {
                     let mut f = m.clone();
-                    f.name = format!("{}::{}::{}", i.type_name, i.trait_name, m.name);
+                    f.name = qualify(
+                        prefix,
+                        &format!("{}::{}::{}", i.type_name, i.trait_name, m.name),
+                    );
                     queue.push(StepKind::Func(f));
                 }
             }
@@ -226,7 +314,7 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
                                 t.meta.span,
                                 AstOrigin::RuntimeSystem("verifier.transition_function"),
                             ),
-                            name: format!("{}::{}", flow.name, t.name),
+                            name: qualify(prefix, &format!("{}::{}", flow.name, t.name)),
                             pub_: false,
                             params: t.params.clone(),
                             ret: None,
@@ -318,44 +406,104 @@ mod tests {
         crate::verifier::parse_memory_source(source, "flow-tests")
     }
 
-    /// Assert that Flow verifier produces equivalent results to legacy.
+    /// Assert the Flow state-machine driver and the two-wave legacy AST
+    /// engine agree on (func_name, status) for every verified function.
+    ///
+    /// V-5 (audit 2026-08-05): the previous "equivalence test" called the
+    /// SAME flow engine twice and compared the results with itself — a
+    /// self-comparison that could never fail and caught nothing. This
+    /// version compares two genuinely different schedulers:
+    ///   1. `flow_verify_file_with_hashes` — Flow state-machine queue with
+    ///      the V-4 fixpoint driver;
+    ///   2. `Verifier::verify_file` — `VerifierCtx::verify_items`, the
+    ///      two-wave AST engine with an independent call graph schedule.
+    /// Any scheduler/status-propagation divergence (V-4-class source-order
+    /// bugs included) fails the test.
     fn assert_verify_equivalent(source: &str) {
-        // Skip if source doesn't parse or Z3 is unavailable
-        if parse_source(source).is_err()
-            || SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err()
-        {
-            return;
-        }
-        // Run legacy verifier
-        let legacy_results = match flow_verify_source_unchecked(source) {
-            Ok(r) => r,
-            Err(e) => panic!("legacy verifier failed: {}", e),
+        let file = match parse_source(source) {
+            Ok(f) => f,
+            Err(_) => return,
         };
-        // Run Flow verifier
-        let flow_results = match flow_verify_source_unchecked(source) {
+        if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
+            return; // Z3 unavailable
+        }
+        // Engine 1: Flow state machine (fixpoint driver).
+        let flow_results = match flow_verify_file_with_hashes(&file, String::new(), String::new()) {
             Ok(r) => r,
             Err(e) => panic!("flow verifier failed: {}", e),
         };
+        // Engine 2: legacy two-wave AST engine.
+        let mut verifier = match crate::verifier::ctx::Verifier::new() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let legacy_results = verifier.verify_file(&file);
         assert_eq!(
-            legacy_results.len(),
             flow_results.len(),
-            "result count mismatch for source:\n{}\nlegacy: {} results\nflow: {} results",
-            source,
             legacy_results.len(),
-            flow_results.len()
+            "result count mismatch for source:\n{}\nflow: {} results\nlegacy: {} results",
+            source,
+            flow_results.len(),
+            legacy_results.len()
         );
-        for (i, (leg, flow)) in legacy_results.iter().zip(flow_results.iter()).enumerate() {
+        for (i, (flow, legacy)) in flow_results.iter().zip(legacy_results.iter()).enumerate() {
             assert_eq!(
-                leg.func_name, flow.func_name,
+                flow.func_name, legacy.func_name,
                 "func_name mismatch at index {} for source:\n{}",
                 i, source
             );
             assert_eq!(
-                leg.status, flow.status,
-                "status mismatch for '{}' at index {} for source:\n{}\nlegacy: {}\nflow: {}",
-                leg.func_name, i, source, leg.message, flow.message
+                flow.status, legacy.status,
+                "status mismatch for '{}' at index {} for source:\n{}\nflow: {}\nlegacy: {}",
+                flow.func_name, i, source, flow.message, legacy.message
             );
         }
+    }
+
+    /// V-4 regression (audit 2026-08-05): verdicts must not depend on
+    /// SOURCE ORDER. The chain C→B→A declared caller-first ([C,B,A]) used to
+    /// lose C's callee axioms permanently — C stayed Disproven while the
+    /// same program declared [A,B,C] verified everything. Both declarations
+    /// must now yield identical verdicts, with C Proven.
+    #[test]
+    fn test_flow_source_order_independence() {
+        if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
+            return; // Z3 unavailable
+        }
+        let caller_first = "
+            func c(x: int) -> int { requires: x >= 0; ensures: result == x; b(x) }
+            func b(x: int) -> int { requires: x >= 0; ensures: result == x; a(x) }
+            func a(x: int) -> int { requires: x >= 0; ensures: result == x; x }";
+        let callee_first = "
+            func a(x: int) -> int { requires: x >= 0; ensures: result == x; x }
+            func b(x: int) -> int { requires: x >= 0; ensures: result == x; a(x) }
+            func c(x: int) -> int { requires: x >= 0; ensures: result == x; b(x) }";
+
+        let status_map = |source: &str| -> std::collections::BTreeMap<
+            String,
+            crate::verifier::ctx::VerifStatus,
+        > {
+            let results = flow_verify_source_unchecked(source)
+                .unwrap_or_else(|e| panic!("verifier failed: {}", e));
+            results
+                .into_iter()
+                .map(|r| (r.func_name, r.status))
+                .collect()
+        };
+
+        let by_caller_first = status_map(caller_first);
+        let by_callee_first = status_map(callee_first);
+        assert_eq!(
+            by_caller_first, by_callee_first,
+            "verification verdicts differ between source orders (V-4):\n\
+             caller-first: {:?}\ncallee-first: {:?}",
+            by_caller_first, by_callee_first
+        );
+        assert_eq!(
+            by_caller_first.get("c"),
+            Some(&crate::verifier::ctx::VerifStatus::Proven),
+            "chained caller c must be Proven regardless of declaration order"
+        );
     }
 
     // ── Basic contract verification ──

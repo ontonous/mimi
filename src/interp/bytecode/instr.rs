@@ -783,6 +783,16 @@ pub enum Op {
     Trap {
         msg: ConstIdx,
     },
+    /// H-9 (Wave-2): runtime non-exhaustive-match panic (E0805). Emitted by the
+    /// compiler at the fall-through point of a `match` whose arms can all miss
+    /// (previously `LoadUnit` — silent Unit). Zero operands: the op diverges, so
+    /// no result register is written (the register the compiler allocated for
+    /// the match result simply stays dead on this path, mirroring codegen's
+    /// mimi_match_panic abort). The VM raises
+    /// `InterpError::non_exhaustive_match` — code E0805, member of
+    /// `is_runtime_panic`, so flow transitions absorb it into
+    /// `Fault("panic:E0805")` exactly like codegen's fallible-multi-target path.
+    NonExhaustiveMatch,
 
     // ═══════════════════════════════════════════════════════════
     // Actor / Flow / Session (Phase D)

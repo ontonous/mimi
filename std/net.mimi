@@ -33,8 +33,13 @@
 
 // Networking utilities — wraps socket builtins
 
-// Structured network error type
-type NetError {
+// Structured network error type.
+// `pub` is load-bearing: the std module loader carries only pub items
+// across `use std::net`, and every pub function below returns
+// Result<_, NetError> — a private declaration leaves consumers with
+// unknown-type errors (same mechanism as the strings.mimi is_ws_char
+// regression, wave1-review §1.6).
+pub type NetError {
     SocketCreate
     ConnectFailed
     BindFailed

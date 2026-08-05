@@ -355,11 +355,24 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 None
             }
             ResolvedStmtKind::Expr(expression) => {
-                self.lower_expr(expression, current, CfgPointKind::Expression)
+                let current = self.lower_expr(expression, current, CfgPointKind::Expression)?;
+                // Audit 2026-08-05 (wave-2, H-6): statement-terminating point.
+                // Anonymous temporary borrows created inside the expression
+                // (`inc(&mut x)`) end at the statement boundary; resource
+                // lowering flushes their synthesized BorrowEnd at THIS point.
+                // The point carries no accesses — it exists purely as a
+                // termination location after the expression's own points.
+                self.point(
+                    &current,
+                    &statement.node_id,
+                    &statement.origin,
+                    CfgPointKind::Statement,
+                    PointAccesses::default(),
+                );
+                Some(current)
             }
-            ResolvedStmtKind::While { condition, body } => {
-                self.lower_conditional_loop(condition, body, None, current, statement, "while")
-            }
+            ResolvedStmtKind::While { condition, body } => self
+                .lower_conditional_loop(condition, body, None, current, statement, "while", false),
             ResolvedStmtKind::WhileLet {
                 pattern,
                 initializer,
@@ -371,6 +384,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 current,
                 statement,
                 "while-let",
+                true,
             ),
             ResolvedStmtKind::IfLet {
                 pattern,
@@ -396,6 +410,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 current,
                 statement,
                 "for",
+                true,
             ),
             ResolvedStmtKind::Loop(body) => self.lower_infinite_loop(body, current, statement),
             ResolvedStmtKind::Drop(places) => {
@@ -878,7 +893,32 @@ impl<'a> ResolvedCfgLowerer<'a> {
         current: BasicBlockId,
         statement: &ResolvedStmt,
         role: &str,
+        hoist_initializer: bool,
     ) -> Option<BasicBlockId> {
+        // Audit 2026-08-05 (wave-2, G-4): for/while-let initializers are
+        // evaluated EXACTLY ONCE before the loop (backend reference
+        // semantics). Previously the iterable lived inside the loop header
+        // and its uses/reads replayed on every back-edge — extending loan
+        // liveness across iterations and producing false E0415 reports.
+        // `while` conditions stay in the header: they re-evaluate each round.
+        let mut current = current;
+        if hoist_initializer {
+            current = self.lower_expr(condition, current, CfgPointKind::Expression)?;
+            // Audit 2026-08-05 (wave-2, G-4): the hoisted iterable's
+            // anonymous temporary borrows (`[g(&y)]` in a for) end at the
+            // loop statement's terminating point, BEFORE the loop body —
+            // mirroring the H-6 statement-boundary flush (Expr statements).
+            // Resource lowering flushes its synthesized BorrowEnd at THIS
+            // point; without it the iterable loan would remain live across
+            // every body write, producing false E0415 reports.
+            self.point(
+                &current,
+                &statement.node_id,
+                &statement.origin,
+                CfgPointKind::Statement,
+                PointAccesses::default(),
+            );
+        }
         let header = self.new_block(
             &condition.node_id,
             &condition.origin,
@@ -898,7 +938,20 @@ impl<'a> ResolvedCfgLowerer<'a> {
             &statement.origin,
             &format!("{role}-enter"),
         );
-        let condition_end = self.lower_expr(condition, header.clone(), CfgPointKind::Condition)?;
+        let (condition_end, condition_node) = if hoist_initializer {
+            let recheck = NodeId(format!("{}/loop-recheck", condition.node_id.0));
+            self.point(
+                &header,
+                &recheck,
+                &condition.origin,
+                CfgPointKind::Condition,
+                PointAccesses::default(),
+            );
+            (header.clone(), recheck)
+        } else {
+            let end = self.lower_expr(condition, header.clone(), CfgPointKind::Condition)?;
+            (end, condition.node_id.clone())
+        };
         let body_edge = self.edge(
             &condition_end,
             &body_entry,
@@ -918,7 +971,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
         self.terminate(
             &condition_end,
             Terminator::Branch {
-                condition: condition.node_id.clone(),
+                condition: condition_node,
                 then_edge: body_edge,
                 else_edge: exit_edge,
             },

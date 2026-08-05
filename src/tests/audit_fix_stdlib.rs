@@ -1,15 +1,43 @@
 //! Wave-1 audit-fix regression tests — stdlib.
 //! Findings: devdocs/full-audit-2026-08-05.md §13 (2026-08-05 full audit).
+//! Wave-2 items: devdocs/wave2-battle-plan-2026-08-05.md (STDLIB package),
+//! devdocs/wave1-review-2026-08-05.md §1.6 / §6.1.
+//!
 //! Discipline: each stdlib (.mimi) fix carries a regression test here.
 //! Runtime behavior is exercised through the Bytecode VM via
 //! `run_with_stdlib` (stdlib source + test source concatenated, same
 //! inclusion pattern as stdlib_v02813.rs / audit_regression.rs); typing is
 //! exercised through `check_source`.
+//!
+//! Wave-2 dual-backend discipline (wave1-review §6.1): this file's original
+//! all-VM-only tests are exactly how the net `Ok(dangling string)` codegen
+//! bug shipped — the broken backend had no watching test. Every test added
+//! or updated in Wave-2 carries a `compile_and_run`-side (native codegen)
+//! assertion where the stdlib surface is exercisable there; legacy VM-only
+//! tests are tagged TODO(#audit-wave2-codegen-side) until converted.
 use super::*;
 
+/// Read a std module source file (same resolution as `run_with_stdlib`).
+fn audit2_stdlib_src(stdlib_name: &str) -> String {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(manifest.join("std").join(stdlib_name))
+        .unwrap_or_else(|e| panic!("failed to read std/{}: {}", stdlib_name, e))
+}
+
+/// Codegen-side counterpart of `run_with_stdlib` (which is VM-only):
+/// concatenate the std module source with the test source and feed the
+/// combined program to `compile_and_run` (native execution). The stdlib
+/// items are visible without `use` statements exactly as on the VM side,
+/// so both backends see the identical program text.
+fn audit2_compile_and_run_with_stdlib(stdlib_name: &str, src: &str) -> Result<String, String> {
+    let combined = format!("{}\n{}", audit2_stdlib_src(stdlib_name), src);
+    compile_and_run(&combined)
+}
 
 // ===== mymath.mimi — fix 1: gcd abs-normalizes, lcm overflow-safe + abs =====
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_gcd_abs_normalized() {
     // gcd used to return a negative value when either argument was negative
@@ -31,6 +59,8 @@ func main() -> i32 {
     );
 }
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_lcm_overflow_safe_and_abs() {
     // lcm(65536, 65536) overflowed i32 via the naive a*b/gcd form even
@@ -55,6 +85,8 @@ func main() -> i32 {
 
 // ===== mymath.mimi — fix 2: free factorial gains the n>12 overflow guard ====
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_factorial_free_overflow_guard() {
     // The IntMath method caps at 12! and returns -1; the free function had
@@ -78,6 +110,8 @@ func main() -> i32 {
 
 // ===== mymath.mimi — fix 3: try_pow_int overflow bounds for negative bases ==
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_try_pow_int_negative_base_edges() {
     // Old check `result < MIN / base` for base < 0 was inverted: it rejected
@@ -113,6 +147,8 @@ func main() -> i32 {
 
 // ===== mymath.mimi — fix 4: random_exponential guards lambda <= 0 ===========
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_random_exponential_invalid_lambda_sentinel() {
     // λ <= 0 used to divide by zero (trap). Now returns the -1.0 sentinel,
@@ -131,7 +167,14 @@ func main() -> i32 {
 }
 
 // ===== strings.mimi — fix 5: trim_left/trim_right strip the whitespace set ==
+// Wave-2 (§1.6): the private is_ws_char helper was inlined into trim_left/
+// trim_right because the std module loader carries only pub items across
+// `use std::strings` — private helpers are invisible to consumers while the
+// pub bodies calling them are not (E0401). Dual-backend guard:
+// audit2_std_trim_left_right_dual below.
 
+// TODO(#audit-wave2-codegen-side): VM-only companion of
+// audit2_std_trim_left_right_dual (which carries the codegen side).
 #[test]
 fn audit_stdlib_trim_left_right_whitespace_set() {
     // trim_left/trim_right only stripped " " while the docs (and trim())
@@ -153,6 +196,8 @@ func main() -> string {
 
 // ===== strings.mimi — fix 6: words() drops empty tokens =====================
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_words_filters_empty_tokens() {
     // "a  b" split by " " yields ["a", "", "b"]; the empty token made
@@ -176,6 +221,8 @@ func main() -> i32 {
 
 // ===== collections.mimi — fix 7: take/drop_n negative-n guard ===============
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_take_drop_negative_n_guard() {
     // take(xs, -1) used to wrap through slice semantics (all-but-last);
@@ -210,6 +257,8 @@ func main() -> i32 {
 
 // ===== fs.mimi — fix 8: file_size returns bytes, not characters =============
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_file_size_counts_bytes_not_chars() {
     // "héllo" is 5 chars but 6 UTF-8 bytes (é = 2 bytes); file_size used
@@ -234,6 +283,8 @@ func main() -> i32 {{
     assert_eq!(v, interp::Value::Int(6), "byte size of 'héllo' is 6");
 }
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_file_size_missing_file_is_err() {
     let src = r#"
@@ -248,6 +299,23 @@ func main() -> i32 {
 }
 
 // ===== net.mimi — fix 9: recv EOF / empty body are success, not error =======
+// Wave-2 (ruling 1, wave1-review §1.4/§6.1): the stdlib guard removal
+// STAYS; the codegen builtins must surface real errors instead of wrapping
+// NULL as Ok(dangling string). The tests below add the codegen side the
+// original VM-only suite lacked.
+
+/// Bind an ephemeral TCP listener whose one accepted connection is closed
+/// immediately (peer sees EOF on recv). Returns (port, join handle).
+fn audit2_eof_server() -> (i32, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port() as i32;
+    let handle = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            drop(stream); // close → EOF for the peer
+        }
+    });
+    (port, handle)
+}
 
 #[test]
 fn audit_stdlib_tcp_recv_eof_is_ok_empty() {
@@ -255,13 +323,9 @@ fn audit_stdlib_tcp_recv_eof_is_ok_empty() {
     // the client's recv sees EOF (n == 0). The recv builtin maps that to an
     // empty string; the stdlib must surface it as Ok(""), not Err(RecvFailed).
     // Blocking accept mirrors the reliable pattern in src/tests/net.rs.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port() as i32;
-    let server = std::thread::spawn(move || {
-        if let Ok((stream, _)) = listener.accept() {
-            drop(stream); // close → EOF for the peer
-        }
-    });
+    //
+    // VM side (reference semantics).
+    let (port, server) = audit2_eof_server();
     let src = format!(
         r#"
 func main() -> i32 {{
@@ -286,36 +350,357 @@ func main() -> i32 {{
         interp::Value::Int(100),
         "EOF must surface as Ok(\"\") — old code returned Err(RecvFailed)"
     );
+
+    // Codegen side (Wave-2 §6.1 discipline — the Ok(dangling string) bug
+    // shipped because this side did not exist). Same scenario via
+    // compile_and_run + native execution. NOTE (coordination): runtime
+    // mimi_recv conflates EOF (n==0) and error (n<0) into NULL
+    // (runtime/net.rs mimi_recv); the adjudicated shape keeps EOF == Ok("").
+    // If a future NULL->error fix turns EOF into an error, mimi_recv must
+    // first learn to distinguish EOF from error — a red test here would
+    // point at exactly that gap.
+    if !can_link() {
+        return;
+    }
+    let (cg_port, cg_server) = audit2_eof_server();
+    let cg_src = format!(
+        r#"
+func main() -> i32 {{
+    let fd = tcp_socket()
+    if fd < 0 {{ return 1 }}
+    let ret = connect(fd, "127.0.0.1", {})
+    if ret < 0 {{ close_fd(fd); return 2 }}
+    let r = tcp_recv(fd, 64)
+    close_fd(fd)
+    match r {{
+        Ok(data) => if len(data) == 0 {{ println(100) }} else {{ println(101) }}
+        Err(_) => println(200)
+    }}
+    0
+}}
+"#,
+        cg_port
+    );
+    let out = audit2_compile_and_run_with_stdlib("net.mimi", &cg_src);
+    let _ = cg_server.join();
+    let out = out.unwrap_or_else(|e| panic!("codegen EOF scenario failed: {}", e));
+    assert_eq!(
+        out.trim(),
+        "100",
+        "EOF must surface as Ok(\"\") on codegen too"
+    );
+}
+
+// ===== Wave-2: net stdlib surface, codegen side (ruling 1) ==================
+
+#[test]
+fn audit2_std_net_tcp_roundtrip_dual() {
+    // Success-path L1 guard over the std/net.mimi wrapper surface
+    // (tcp_socket/tcp_connect/tcp_send/tcp_recv): a one-shot server reads
+    // the client's message and replies with a fixed payload. Both backends
+    // must observe the same result. No timing dependency: the recv success
+    // path (n > 0) never touches the NULL->Err question.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port() as i32;
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 5];
+            let _ = stream.read_exact(&mut buf); // consume "hello"
+            let _ = stream.write_all(b"ping-pong");
+            let _ = stream.flush();
+        }
+    });
+    let src = format!(
+        r#"
+func handle(fd: i64) -> i32 {{
+    let _sent = tcp_send(fd, "hello")
+    let r = tcp_recv(fd, 64)
+    close_fd(fd)
+    match r {{
+        Ok(data) => if data == "ping-pong" {{ 100 }} else {{ 101 }}
+        Err(_) => 200
+    }}
+}}
+func main() -> i32 {{
+    let cr = tcp_connect("127.0.0.1", {})
+    let code = match cr {{
+        Ok(fd) => handle(fd)
+        Err(_) => 2
+    }}
+    println(code)
+    code
+}}
+"#,
+        port
+    );
+    // VM side.
+    let v = run_with_stdlib("net.mimi", &src);
+    assert_eq!(
+        v,
+        interp::Value::Int(100),
+        "VM roundtrip must receive the server payload"
+    );
+    // Codegen side (fresh server on a fresh port).
+    if !can_link() {
+        let _ = server.join();
+        return;
+    }
+    let _ = server.join();
+    let listener2 = std::net::TcpListener::bind("127.0.0.1:0").expect("bind second port");
+    let port2 = listener2.local_addr().expect("local addr").port() as i32;
+    let server2 = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener2.accept() {
+            let mut buf = [0u8; 5];
+            let _ = stream.read_exact(&mut buf);
+            let _ = stream.write_all(b"ping-pong");
+            let _ = stream.flush();
+        }
+    });
+    let src2 = format!(
+        r#"
+func handle(fd: i64) -> i32 {{
+    let _sent = tcp_send(fd, "hello")
+    let r = tcp_recv(fd, 64)
+    close_fd(fd)
+    match r {{
+        Ok(data) => if data == "ping-pong" {{ 100 }} else {{ 101 }}
+        Err(_) => 200
+    }}
+}}
+func main() -> i32 {{
+    let cr = tcp_connect("127.0.0.1", {})
+    let code = match cr {{
+        Ok(fd) => handle(fd)
+        Err(_) => 2
+    }}
+    println(code)
+    0
+}}
+"#,
+        port2
+    );
+    let out = audit2_compile_and_run_with_stdlib("net.mimi", &src2);
+    let _ = server2.join();
+    let out = out.unwrap_or_else(|e| panic!("codegen roundtrip failed: {}", e));
+    assert_eq!(out.trim(), "100", "codegen roundtrip must match the VM");
+}
+
+#[test]
+fn audit2_std_net_recv_on_dead_fd_error_dual() {
+    // recv on a closed fd: the VM traps (bytecode runtime error, E0800) —
+    // the reference shape. Pre-fix codegen wrapped mimi_recv's NULL as
+    // Ok(dangling string) (red line §1.4). Adjudicated (battle-plan ruling
+    // 1): compile_recv must surface NULL as an error, matching the VM.
+    let src = r#"
+func main() -> i32 {
+    let fd = tcp_socket()
+    if fd < 0 { return 1 }
+    close_fd(fd)
+    let r = tcp_recv(fd, 64)
+    match r {
+        Ok(_) => 100
+        Err(_) => 200
+    }
+}
+"#;
+    // VM side: must trap, never return Ok.
+    let combined = format!("{}\n{}", audit2_stdlib_src("net.mimi"), src);
+    let vm = run_source_result(&combined);
+    assert!(
+        vm.is_err(),
+        "VM recv-after-close must trap, got Ok({:?})",
+        vm
+    );
+
+    // Codegen side. TIMING: asserts the ADJUDICATED shape; requires agent
+    // BUILTINS's compile_recv NULL->error fix (codegen/builtins/network.rs).
+    // Until that lands, codegen returns Ok("100") and this test is red —
+    // deliberately: it watches the exact surface that shipped
+    // Ok(dangling string). Do NOT weaken the assertion to match pre-fix
+    // behavior.
+    if !can_link() {
+        return;
+    }
+    let cg_src = r#"
+func main() -> i32 {
+    let fd = tcp_socket()
+    if fd < 0 { return 1 }
+    close_fd(fd)
+    let r = tcp_recv(fd, 64)
+    match r {
+        Ok(_) => println(100)
+        Err(_) => println(200)
+    }
+    0
+}
+"#;
+    let cg = audit2_compile_and_run_with_stdlib("net.mimi", cg_src);
+    assert!(
+        cg.is_err(),
+        "codegen recv-after-close must surface an error like the VM, got Ok({:?})",
+        cg
+    );
+}
+
+#[test]
+fn audit2_std_net_fetch_https_rejected_dual() {
+    // fetch() on an https:// URL: the VM rejects it before any I/O (no TLS)
+    // and traps — the reference shape. Pre-fix codegen substituted a NULL
+    // from mimi_http_get with "" and returned Ok(""), swallowing the
+    // failure (red line §1.4). Adjudicated: NULL must surface as an error.
+    // Deterministic: the scheme check runs before DNS/connect, so no
+    // network access happens on either backend.
+    let vm_src = r#"
+func main() -> i32 {
+    let r = fetch("https://example.invalid/")
+    match r {
+        Ok(_) => 100
+        Err(_) => 200
+    }
+}
+"#;
+    let combined = format!("{}\n{}", audit2_stdlib_src("net.mimi"), vm_src);
+    let vm = run_source_result(&combined);
+    assert!(
+        vm.is_err(),
+        "VM fetch(https://) must trap (no TLS), got Ok({:?})",
+        vm
+    );
+
+    // Codegen side. TIMING: asserts the ADJUDICATED shape; requires agent
+    // BUILTINS's compile_http_get NULL->error fix (replacing the NULL->""
+    // select currently in compile_http_get). Red until that lands — see
+    // audit2_std_net_recv_on_dead_fd_error_dual for the rationale.
+    if !can_link() {
+        return;
+    }
+    let cg_src = r#"
+func main() -> i32 {
+    let r = fetch("https://example.invalid/")
+    match r {
+        Ok(_) => println(100)
+        Err(_) => println(200)
+    }
+    0
+}
+"#;
+    let cg = audit2_compile_and_run_with_stdlib("net.mimi", cg_src);
+    assert!(
+        cg.is_err(),
+        "codegen fetch(https://) must surface an error like the VM, got Ok({:?})",
+        cg
+    );
+}
+
+// ===== random.mimi — Wave-2 §1.6-mechanism fix: private remove_at inlined ==
+
+#[test]
+fn audit2_std_random_sample_shuffle_semantics_vm() {
+    // Regression for the remove_at inlining: the private helper was
+    // invisible across `use std::random` (loader carries only pub items,
+    // same mechanism as strings.mimi is_ws_char / red line §1.6). Shuffle
+    // must preserve the multiset of elements and random_sample(n) must
+    // return n elements — RNG-independent assertions only.
+    let src = r#"
+func xs_sum(xs: List<i32>) -> i32 {
+    let mut s = 0
+    for v in xs { s = s + v }
+    s
+}
+func main() -> i32 {
+    let xs = [10, 20, 30, 40, 50]
+    let s = shuffle(xs)
+    let p = random_sample(xs, 3)
+    let mut ok = 0
+    if len(s) == 5 { ok = ok + 1 }
+    if xs_sum(s) == 150 { ok = ok + 1 }
+    if len(p) == 3 { ok = ok + 1 }
+    ok
+}
+"#;
+    assert_eq!(run_with_stdlib("random.mimi", src), interp::Value::Int(3));
+    // TODO(#audit-wave2-codegen-side): codegen-side assertion blocked by a
+    // PRE-EXISTING codegen bug (Wave-2 STDLIB calibration): while-loop list
+    // building inside `impl<T> RandomChoice<T> for List<T>` methods yields
+    // wrong values (e.g. 203993 instead of 150) or SIGSEGV on the checked
+    // path, while the identical loop in a free generic function is correct
+    // on both backends. HEAD's remove_at version SIGSEGVs the same way —
+    // the inlining is not the cause. VM (reference) is correct.
 }
 
 // ===== result.mimi — fix 10: map/map_result rebuild Err at Result<U, E> =====
+// Wave-2 (battle-plan ruling 4): the original test wrote
+// `Err(_) => score = score` inside match arms; bare assignment is not a
+// parseable arm body ("unexpected token in pattern ="). Rewritten to legal
+// expression-form arms preserving the INTENT (Err value preservation
+// through map_result); the parser is not opened (PM territory).
 
 #[test]
 fn audit_stdlib_map_result_preserves_err_value() {
     // The Err branch used to return the original Result<T, E> where
     // Result<U, E> is declared. The Err payload must be carried into a
     // freshly-built Err at the target type.
-    let src = r#"
+    let vm_src = r#"
 func main() -> i32 {
     let ok_r: Result<i32, string> = Ok(21)
     let mapped_ok = map_result(ok_r, fn(x: i32) -> string { to_string(x) })
     let err_r: Result<i32, string> = Err("boom")
     let mapped_err = map_result(err_r, fn(x: i32) -> string { to_string(x) })
-    let mut score = 0
-    match mapped_ok {
-        Ok(s) => if s == "21" { score = score + 1 } else { score = score }
-        Err(_) => score = score
+    let ok_score = match mapped_ok {
+        Ok(s) => if s == "21" { 1 } else { 0 }
+        Err(_) => 0
     }
-    match mapped_err {
-        Ok(_) => score = score
-        Err(e) => if e == "boom" { score = score + 10 } else { score = score }
+    let err_score = match mapped_err {
+        Ok(_) => 0
+        Err(e) => if e == "boom" { 10 } else { 0 }
     }
-    score
+    ok_score + err_score
 }
 "#;
-    assert_eq!(run_with_stdlib("result.mimi", src), interp::Value::Int(11));
+    assert_eq!(
+        run_with_stdlib("result.mimi", vm_src),
+        interp::Value::Int(11)
+    );
+
+    // Codegen side (Wave-2 §6.1 discipline): same program, native run.
+    // The map_result<T,E,U> generic wrapper's closure-typed param has a
+    // known legacy monomorphization gap (std/result.mimi comment), so the
+    // codegen side exercises the BUILTIN map directly, with EXPLICIT result
+    // type annotations — legacy needs them to reconstruct the string Err
+    // payload (match.rs Q1 relies on the scrutinee's Result<T,E> AST type;
+    // without the annotation the builtin-map return type is unknown and
+    // `Err(e) => e == "boom"` fails "eq requires same types").
+    if !can_link() {
+        return;
+    }
+    let cg_src = r#"
+func main() -> i32 {
+    let ok_r: Result<i32, string> = Ok(21)
+    let mapped_ok: Result<bool, string> = ok_r.map(fn(x: i32) -> bool { x == 21 })
+    let err_r: Result<i32, string> = Err("boom")
+    let mapped_err: Result<bool, string> = err_r.map(fn(x: i32) -> bool { x == 21 })
+    let ok_score = match mapped_ok {
+        Ok(v) => if v { 1 } else { 0 }
+        Err(_) => 0
+    }
+    let err_score = match mapped_err {
+        Ok(_) => 0
+        Err(e) => if e == "boom" { 10 } else { 0 }
+    }
+    println(ok_score + err_score)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("result.mimi", cg_src);
+    let out = out.unwrap_or_else(|e| panic!("codegen map_result scenario failed: {}", e));
+    assert_eq!(out.trim(), "11", "codegen must preserve the Err payload");
 }
 
+// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
+// compile_and_run-side assertion when converting (shares the result.mimi
+// generic surface with audit_stdlib_map_result_preserves_err_value).
 #[test]
 fn audit_stdlib_result_ext_map_method_rebuilds_err() {
     // Same fix through the ResultExt::map trait method on an Err value.
@@ -338,6 +723,12 @@ fn audit_stdlib_result_module_typechecks_with_strict_map() {
     // returned where Result<U, E> is declared) as a possible unification
     // hole [UNVERIFIED]. After the fix the module must still typecheck
     // under a use that instantiates U != T.
+    //
+    // Wave-2 (item 4): this test fails on the NEW resolved lowering —
+    // "member generic binder … has no canonical instantiation" for all
+    // ResultExt methods. TRUE BUG in core/ir/lower.rs (agent IR); the
+    // result.mimi source stays semantically correct and must NOT be
+    // rewritten to dodge it. This test flips green when IR lands.
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let stdlib_src = std::fs::read_to_string(manifest.join("std").join("result.mimi"))
         .expect("read std/result.mimi");
@@ -358,5 +749,47 @@ func main() -> i32 {{
         check_source(&src).is_ok(),
         "result.mimi with rebuilt-Err map must typecheck: {:?}",
         check_source(&src)
+    );
+}
+
+// ===== strings.mimi — Wave-2 §1.6: inlined-helper dual guard ===============
+
+#[test]
+fn audit2_std_trim_left_right_dual() {
+    // Dual-backend guard for the is_ws_char inlining (red line §1.6): the
+    // loop+break form must not depend on short-circuit `&&` (the resolved
+    // emitter is known to evaluate `&&` eagerly on some paths), and must
+    // agree across backends.
+    let src = r#"
+func main() -> i32 {
+    let a = trim_left("\t\n hello \t")
+    let b = trim_right("\t hello \t\n ")
+    let c = trim_left("   a b ")
+    let d = trim_right("a b   ")
+    let e = trim_left("   ")
+    let f = trim_right("")
+    println(a + "|" + b + "|" + c + "|" + d + "|" + e + "|" + f + "|end")
+    0
+}
+"#;
+    let combined = format!("{}\n{}", audit2_stdlib_src("strings.mimi"), src);
+    // VM side (reference semantics).
+    let (v, out) = run_source_with_stdout(&combined);
+    assert_eq!(v, interp::Value::Int(0));
+    assert_eq!(
+        out.trim(),
+        "hello \t|\t hello|a b |a b|||end",
+        "VM trim_left/trim_right whitespace set"
+    );
+    // Codegen side.
+    if !can_link() {
+        return;
+    }
+    let cg = compile_and_run(&combined)
+        .unwrap_or_else(|e| panic!("codegen trim scenario failed: {}", e));
+    assert_eq!(
+        cg.trim(),
+        "hello \t|\t hello|a b |a b|||end",
+        "codegen trim must match the VM"
     );
 }

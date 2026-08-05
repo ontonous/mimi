@@ -347,7 +347,11 @@ impl Parser {
                     // [T; n] — fixed-size array
                     let size_tok = self.peek();
                     let size = match &size_tok.kind {
-                        TokenKind::Int(s) => s.parse::<usize>().map_err(|_| {
+                        // P-3 (full-audit 2026-08-05-0656): strip numeric
+                        // separators before parsing, mirroring the literal
+                        // sites in parse_expr.rs (`[i32; 1_000]` is a legal
+                        // integer literal elsewhere).
+                        TokenKind::Int(s) => s.replace('_', "").parse::<usize>().map_err(|_| {
                             ParseError::new(
                                 "array size must be a non-negative integer",
                                 size_tok.line,
@@ -596,6 +600,16 @@ impl Parser {
                 self.advance();
                 self.skip_newlines();
             } else if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                // P-12 (full-audit 2026-08-05-0656) RULING: space-separated
+                // bare variants on one line (`type Color { Red Green }`)
+                // stay LEGAL. Making this a "missing comma" error was
+                // evaluated and rejected: the syntax is de-facto used by the
+                // existing suite (audit_fix_checker fix9_*, dual_backend
+                // dual_enum_bool_variant, typecheck ck3_*), which Wave-2
+                // agent PM may not edit. It is consistent with newline
+                // separation above. The record-field asymmetry is intended:
+                // fields need `name: T`, so a second bare ident cannot start
+                // one and record parsing fails loudly instead.
                 self.skip_newlines();
             } else {
                 break;

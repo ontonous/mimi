@@ -809,6 +809,93 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(result)
     }
 
+    /// Trap with a STATIC message via `mimi_runtime_abort` (noreturn), then
+    /// terminate the current block with `unreachable`. Callers must position
+    /// the builder at a block that exists solely for this trap. Used by the
+    /// fail-loud parse family (audit-wave2 §5.7): `to_int`/`to_float` on
+    /// unparsable input mirror the VM's `Err("to_int parse error: …")`.
+    fn emit_parse_trap(&self, message: &str, label: &str) -> MimiResult<()> {
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(message, &format!("{}_msg", label))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+                &format!("{}_abort", label),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("abort error: {}", e)))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        Ok(())
+    }
+
+    /// Trap with a printf-formatted message carrying one `%s` string value
+    /// (same layout contract as `emit_trap_with_int_message`). Used for
+    /// `to_float parse error: non-finite value '<input>'` where the message
+    /// embeds the offending input string.
+    fn emit_trap_with_str_message(
+        &self,
+        fmt: &str,
+        s_ptr: PointerValue<'ctx>,
+        name: &str,
+    ) -> MimiResult<()> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        // 256-byte scratch message buffer (cold trap path); snprintf caps the
+        // write, so over-long inputs truncate inside the message only.
+        let buf = self.build_alloca(i64_ty.array_type(32), &format!("{}_msg", name))?;
+        let fmt_global = self
+            .builder
+            .build_global_string_ptr(fmt, &format!("{}_fmt", name))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let snprintf_ty = i32_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function(
+                "snprintf",
+                snprintf_ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        self.builder
+            .build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(256, false)),
+                    BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                ],
+                &format!("{}_snprintf", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("snprintf error: {}", e)))?;
+        let abort_fn = self.get_or_declare_abort_fn();
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(buf)],
+                &format!("{}_abort", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("abort error: {}", e)))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        Ok(())
+    }
+
     /// Trap with a printf-formatted message carrying one integer value.
     ///
     /// Emits `snprintf(buf, 128, fmt, value)` into a stack scratch buffer and
@@ -1053,8 +1140,168 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => {}
         }
         let s_ptr = self.extract_string_arg_ptr(&args[0], "to_int")?;
-        let (_ok, value) = self.emit_strtol(s_ptr)?;
+        // Audit wave2 §5.7 (red-line tier — ACTIVE L1 divergence): the old
+        // code IGNORED the strtol ok flag and returned the sentinel (0 for
+        // "abc"); the VM (interp/bytecode/builtins/convert.rs builtin_to_int)
+        // fails loud with `to_int parse error: <Rust ParseIntError text>`.
+        // Trap loud on any whole-string parse failure, classifying the
+        // message Rust-style (empty input vs invalid digit).
+        let (ok, value) = self.emit_strtol(s_ptr)?;
+        self.emit_parse_fail_guard(s_ptr, ok, true, "to_int")?;
         Ok(value.into())
+    }
+
+    /// Fail-loud gate for the parse family (audit wave2 §5.7). Branches on
+    /// the strtol/strtod whole-string `ok` flag: success continues in a
+    /// fresh block; failure aborts with a Rust-style message. Rust rejects
+    /// leading whitespace that strtol/strtod silently skip, so a leading
+    /// blank byte is routed to the same trap (`is_int` selects the message
+    /// family). `mimi_runtime_abort` is noreturn; on the trap path the
+    /// builder ends after `unreachable`.
+    fn emit_parse_fail_guard(
+        &self,
+        s_ptr: PointerValue<'ctx>,
+        ok: inkwell::values::IntValue<'ctx>,
+        is_int: bool,
+        builtin: &str,
+    ) -> MimiResult<()> {
+        let i8_ty = self.context.i8_type();
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError(format!("{}: no enclosing function", builtin))
+        })?;
+        let ok_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_parse_ok_bb", builtin));
+        let trap_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_parse_trap_bb", builtin));
+        self.builder
+            .build_conditional_branch(ok, ok_bb, trap_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        self.builder.position_at_end(trap_bb);
+        // Rust message classification: empty input → "cannot parse … from
+        // empty string"; any other failure (including lead-whitespace
+        // inputs strtol would skip) → "invalid digit found in string".
+        let first_byte = self
+            .build_load(BasicTypeEnum::IntType(i8_ty), s_ptr, "parse_first_byte")?
+            .into_int_value();
+        let is_empty = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                first_byte,
+                i8_ty.const_int(0, false),
+                "parse_is_empty",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let empty_msg = if is_int {
+            "to_int parse error: cannot parse integer from empty string"
+        } else {
+            "to_float parse error: cannot parse float from empty string"
+        };
+        let invalid_msg = if is_int {
+            "to_int parse error: invalid digit found in string"
+        } else {
+            "to_float parse error: invalid digit found in string"
+        };
+        let empty_g = self
+            .builder
+            .build_global_string_ptr(empty_msg, &format!("{}_parse_empty_msg", builtin))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        let invalid_g = self
+            .builder
+            .build_global_string_ptr(invalid_msg, &format!("{}_parse_invalid_msg", builtin))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        let msg = self
+            .builder
+            .build_select(
+                is_empty,
+                empty_g.as_pointer_value(),
+                invalid_g.as_pointer_value(),
+                "parse_trap_msg",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
+        let abort_fn = self.get_or_declare_abort_fn();
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    msg.into_pointer_value(),
+                )],
+                &format!("{}_parse_abort", builtin),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("abort error: {}", e)))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+
+        self.builder.position_at_end(ok_bb);
+        // Rust's int/float parsers reject leading whitespace that strtol /
+        // strtod silently skip ("  12"). Detect it and trap with the same
+        // invalid-digit message so `to_int("  12")` matches the VM's Err.
+        let lead_sp = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                first_byte,
+                i8_ty.const_int(0x20, false),
+                "parse_lead_sp",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let lead_tab = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                first_byte,
+                i8_ty.const_int(0x09, false),
+                "parse_lead_tab",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let lead_nl = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                first_byte,
+                i8_ty.const_int(0x0A, false),
+                "parse_lead_nl",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let lead_cr = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                first_byte,
+                i8_ty.const_int(0x0D, false),
+                "parse_lead_cr",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let ws1 = self
+            .builder
+            .build_or(lead_sp, lead_tab, "parse_ws1")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let ws2 = self
+            .builder
+            .build_or(lead_nl, lead_cr, "parse_ws2")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let lead_ws = self
+            .builder
+            .build_or(ws1, ws2, "parse_lead_ws")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let cont_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_parse_cont_bb", builtin));
+        let ws_trap_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_parse_ws_trap_bb", builtin));
+        self.builder
+            .build_conditional_branch(lead_ws, ws_trap_bb, cont_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(ws_trap_bb);
+        self.emit_parse_trap(invalid_msg, &format!("{}_ws", builtin))?;
+        self.builder.position_at_end(cont_bb);
+        Ok(())
     }
 
     /// Emit a call to `mimi_any_to_int(value: i64) -> i64` (runtime heuristic:
@@ -1282,7 +1529,79 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => {}
         }
         let s_ptr = self.extract_string_arg_ptr(&args[0], "to_float")?;
-        let (_ok, value) = self.emit_strtod(s_ptr)?;
+        // Audit wave2 §5.7 (red-line tier): the old code ignored the strtod
+        // ok flag (sentinel 0.0 for "abc"); strtod also happily parses
+        // "inf"/"nan"/"1e999" (→ ±Inf/NaN) which the VM rejects. Mirror the
+        // VM (convert.rs builtin_to_float): whole-string parse failure →
+        // "to_float parse error: …"; non-finite RESULT → "to_float parse
+        // error: non-finite value '<input>'" — the finiteness rejection is
+        // UNCONDITIONAL (the VM does not gate it on ieee_float{}).
+        let (ok, value) = self.emit_strtod(s_ptr)?;
+        self.emit_parse_fail_guard(s_ptr, ok, false, "to_float")?;
+        // Non-finite gate (unconditional — VM parity, not SD-9 ieee-gated).
+        let f64_ty = self.context.f64_type();
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("to_float: no enclosing function".to_string())
+        })?;
+        let is_nan = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::UNO,
+                value,
+                value,
+                "to_float_is_nan",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        let fabs_fn = self
+            .module
+            .get_function("llvm.fabs.f64")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "llvm.fabs.f64",
+                    f64_ty.fn_type(&[BasicMetadataTypeEnum::FloatType(f64_ty)], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let abs_val = self
+            .builder
+            .build_call(
+                fabs_fn,
+                &[BasicMetadataValueEnum::FloatValue(value)],
+                "to_float_abs",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fabs error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("llvm.fabs.f64 returned void")?
+            .into_float_value();
+        let is_inf = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OEQ,
+                abs_val,
+                f64_ty.const_float(f64::INFINITY),
+                "to_float_is_inf",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        let not_finite = self
+            .builder
+            .build_or(is_nan, is_inf, "to_float_not_finite")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let finite_bb = self
+            .context
+            .append_basic_block(function, "to_float_finite_bb");
+        let nf_trap_bb = self
+            .context
+            .append_basic_block(function, "to_float_nonfinite_trap_bb");
+        self.builder
+            .build_conditional_branch(not_finite, nf_trap_bb, finite_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(nf_trap_bb);
+        self.emit_trap_with_str_message(
+            "to_float parse error: non-finite value '%s'",
+            s_ptr,
+            "to_float_nf",
+        )?;
+        self.builder.position_at_end(finite_bb);
         Ok(value.into())
     }
 

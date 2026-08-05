@@ -5,12 +5,11 @@
 //! the 0.1.0 mechanical split (behavior bit-exact). Pure `extern "C"` leaf: no
 //! crate-level Rust-path callers. Filesystem-related; may merge into `fs.rs`
 //! in a later refinement. Forward deps on the parent module's `alloc_c_string`
-//! / `alloc_c_string_from_bytes` helpers; uses `libc` in standalone mode.
+//! / `alloc_c_string_from_bytes` / `mimi_free` helpers (audit 2026-08-05,
+//! N-1: every string freed through the matching mimi_alloc deallocator).
 
 use std::ffi::CStr;
 
-#[cfg(standalone)]
-use super::libc;
 use super::{alloc_c_string, alloc_c_string_from_bytes};
 
 /// Reads up to max_bytes from a file. Returns an allocated C string.
@@ -94,10 +93,12 @@ pub extern "C" fn mimi_write_file_bytes(
 /// callback_fn is a function pointer: fn(line_ptr: *const c_char) -> ()
 ///
 /// # String lifecycle (M7)
-/// The `line_ptr` passed to `callback_fn` is freed by `libc::free` immediately
-/// after the callback returns. The callback MUST copy the string if it needs
-/// the data after returning (e.g., by calling `alloc_c_string` on it).
-/// Holding onto the pointer after the callback returns is a use-after-free bug.
+/// The `line_ptr` passed to `callback_fn` is freed via `mimi_free` (the
+/// `alloc_c_string` / `mimi_alloc` matching deallocator — audit 2026-08-05,
+/// N-1) immediately after the callback returns. The callback MUST copy the
+/// string if it needs the data after returning (e.g., by calling
+/// `alloc_c_string` on it). Holding onto the pointer after the callback
+/// returns is a use-after-free bug.
 #[no_mangle]
 pub extern "C" fn mimi_read_lines_each(
     path: *const std::ffi::c_char,
@@ -123,9 +124,12 @@ pub extern "C" fn mimi_read_lines_each(
             Ok(line) => {
                 let c_line = alloc_c_string(&line);
                 callback_fn(c_line);
-                // Free the allocated string after callback
-                // SAFETY: freeing the line buffer allocated by `alloc_c_string` after the callback.
-                unsafe { libc::free(c_line as *mut std::ffi::c_void) };
+                // Free the allocated string after callback through the
+                // matching deallocator (N-1: alloc_c_string → mimi_alloc;
+                // a raw libc::free was wrong-allocator/wrong-base under miri).
+                // SAFETY: `c_line` was allocated by `alloc_c_string` just
+                // above and the callback has already returned.
+                super::mimi_free(c_line as *mut std::ffi::c_void);
                 count += 1;
             }
             Err(_) => break,

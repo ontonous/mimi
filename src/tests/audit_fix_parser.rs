@@ -4,7 +4,6 @@
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
 use super::*;
 
-
 /// Parse-level diagnostics (message list) without panicking. Mirrors the
 /// helper in audit_regression.rs so parse/lex errors are observable.
 fn parse_diag_messages(src: &str) -> Vec<String> {
@@ -231,9 +230,18 @@ func main() -> i32 {
     let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
     let (file, _errors) =
         crate::parser::Parser::new_with_recovery(tokens).parse_file_with_recovery();
-    let crate::ast::Item::Func(f) = &file.items[0] else {
-        panic!("expected a function item");
-    };
+    // Find the user func by name, not items[0]: progressive typestate
+    // (src/progressive.rs) injects an implicit `flow Main` at index 0 for
+    // script-mode files, so positional indexing lands on the synthetic flow.
+    // Same pattern as v1_2_error_paths.rs / basic_let.rs recovery tests.
+    let f = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(function) if function.name == "main" => Some(function),
+            _ => None,
+        })
+        .expect("expected a function item");
     let has_marker_let = f.body.iter().any(|s| {
         matches!(
             s.unlocated(),
@@ -486,3 +494,566 @@ func main() -> i32 { 0 }
     assert!(check_source(src).is_ok(), "check: {:?}", check_source(src));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// TEMP WAVE-2 PROBE (agent PM) — stack-budget measurement harness.
+// Driven by MIMI_PROBE_DEPTH / MIMI_PROBE_SHAPE / MIMI_PROBE_CAP.
+// Runs on a libtest thread (2 MB stack) exactly like the red-line test.
+// REMOVED once the module-path cap is fixed and documented.
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_probe_depth_budget() {
+    // Inert unless driven explicitly (normal suite runs skip it).
+    let Ok(raw) = std::env::var("MIMI_PROBE_DEPTH") else {
+        return;
+    };
+    let depth: usize = raw.parse().unwrap();
+    let shape = std::env::var("MIMI_PROBE_SHAPE").unwrap_or_else(|_| "module".into());
+    let src = match shape.as_str() {
+        "module" => format!("{}{}", "module m { ".repeat(depth), "}".repeat(depth)),
+        "session" => format!("session S = {}end", "!i32 . ".repeat(depth)),
+        "pattern" => {
+            let pat = format!("{}x{}", "(".repeat(depth), ")".repeat(depth));
+            format!("func main() -> i32 {{ let {} = 0\n 0 }}", pat)
+        }
+        "paren_expr" => {
+            let e = format!("{}0{}", "(".repeat(depth), ")".repeat(depth));
+            format!("func main() -> i32 {{ let x = {}\n x }}", e)
+        }
+        "if_nest" => {
+            let mut s = String::from("func main() -> i32 {\n");
+            for _ in 0..depth {
+                s.push_str("if true { ");
+            }
+            s.push_str("42");
+            for _ in 0..depth {
+                s.push_str(" } else { 0 }");
+            }
+            s.push_str("\n}");
+            s
+        }
+        other => panic!("unknown probe shape {other}"),
+    };
+    let tokens = crate::lexer::Lexer::new(&src)
+        .tokenize()
+        .expect("lex probe source");
+    let res = crate::parser::Parser::new(tokens).parse_file();
+    match res {
+        Ok(_) => println!("PROBE shape={shape} depth={depth} PARSE_OK"),
+        Err(e) => println!("PROBE shape={shape} depth={depth} PARSE_ERR: {}", e.message),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Wave-2 agent PM — red line: module-path depth cap (wave1-review §1.2)
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_module_cap_fires_below_default_cap() {
+    // The module path recurses through 5 frames per nesting level
+    // (parse_module → parse_module_inner → parse_item_block → parse_item →
+    // parse_item_kind), so it gets its own cap (helpers.rs
+    // DEPTH_MAX_MODULE = 32), well below the default 128. Depths between
+    // the two caps must be rejected by the MODULE cap — proving the
+    // module-specific budget is wired, not just the shared one.
+    let depth: usize = 40; // > 32 (module cap), < 128 (default cap)
+    let src = format!("{}{}", "module m { ".repeat(depth), "}".repeat(depth));
+    let msgs = parse_diag_messages(&src);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("recursion limit") && m.contains("> 32 nested")),
+        "module nesting beyond the module cap must mention the module cap, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn audit2_pm_shallow_module_nesting_still_parses() {
+    // 16 nested modules (half the module cap) must parse cleanly so real
+    // code keeps headroom; also validates the cap is not accidentally 0.
+    let depth: usize = 16;
+    let src = format!("{}{}", "module m { ".repeat(depth), "}".repeat(depth));
+    let msgs = parse_diag_messages(&src);
+    assert!(
+        msgs.is_empty(),
+        "16 nested modules must parse, got: {:?}",
+        msgs
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-1 — sketch+recovery orphan `}` must make progress, not hang
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_sketch_recovery_orphan_brace_makes_progress() {
+    // Sketch-mode blocks terminate on Dedent, so an orphan `}` at statement
+    // position is not the terminator. In recovery mode recover_to_sync
+    // stops ON the `}` (it is a sync token), nothing consumed it, and the
+    // loop retried parse_stmt on the same token forever (infinite hang).
+    // Run on a watchdog thread: a hang fails the test instead of freezing
+    // the whole suite.
+    let src = "func main():\n    }\n";
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let tokens = crate::lexer::Lexer::new_sketch(src)
+            .tokenize()
+            .expect("lex sketch source");
+        let parser = crate::parser::Parser::splice(
+            &tokens,
+            0,
+            crate::parser::ParseMode::Sketch,
+            true,
+            crate::span::SourceId::UNKNOWN,
+        );
+        let (_file, _errors) = parser.parse_file_with_recovery();
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "sketch+recovery parse hung on an orphan `}}` (P-1 regression)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-2 — parse_expr_without_range no longer leaks recursion_depth
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_failed_slice_starts_do_not_leak_depth_under_recovery() {
+    // Each `a[)..]` statement fails inside parse_expr_without_range before
+    // any token is consumed. The old code skipped dec_depth on that error
+    // path, leaking one depth level per statement; after 128 failures the
+    // next statement got a FALSE "recursion limit exceeded". Build 140
+    // failing slice statements under recovery and require (a) no
+    // recursion-limit error among the collected diagnostics and (b) the
+    // trailing valid statement still parsed.
+    let mut body = String::new();
+    for _ in 0..140 {
+        body.push_str("    let v = a[)..]\n");
+    }
+    body.push_str("    let marker = 7\n");
+    let src = format!("func main() -> i32 {{\n{}}}", body);
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().expect("lex");
+    let (file, errors) =
+        crate::parser::Parser::new_with_recovery(tokens).parse_file_with_recovery();
+    assert!(
+        !errors.iter().any(|e| e.message.contains("recursion limit")),
+        "false recursion-limit after many failed slice starts: {:?}",
+        errors
+            .iter()
+            .filter(|e| e.message.contains("recursion limit"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        errors.len() >= 140,
+        "the 140 malformed slices must each surface an error, got {}",
+        errors.len()
+    );
+    // Find the user func by name: progressive typestate injects an implicit
+    // `flow Main` at items[0] for script-mode files, so positional indexing
+    // would land on the synthetic flow, not the func.
+    let f = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(function) if function.name == "main" => Some(function),
+            _ => None,
+        })
+        .expect("expected a function item");
+    assert!(
+        f.body.iter().any(|s| matches!(
+            s.unlocated(),
+            crate::ast::Stmt::Let { pat, .. } if pat.single_var_name() == Some("marker")
+        )),
+        "statement after the failed slices must still parse: {:#?}",
+        f.body
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-3 — numeric separators in array sizes and flow annotations
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_array_size_accepts_digit_separators() {
+    let src = "func f(a: [i32; 1_000]) -> i32 { 0 }\nfunc main() -> i32 { f([]) }";
+    // Parse level: `[i32; 1_000]` must no longer be rejected.
+    let msgs = parse_diag_messages(src);
+    // Only the call-site arity/type issue is acceptable — NOT a parse error
+    // about the array size. There must be no parse diagnostic at all here.
+    assert!(
+        msgs.is_empty(),
+        "array size with separators must parse, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn audit2_pm_flow_annotations_accept_digit_separators() {
+    let src = r#"
+type E { code: i32 }
+flow F @mailbox(depth=2_048) @max_children(1_0) {
+    state Idle
+    fault E
+}
+func main() -> i32 { 0 }
+"#;
+    let msgs = parse_diag_messages(src);
+    assert!(
+        msgs.is_empty(),
+        "@mailbox/@max_children with separators must parse, got: {:?}",
+        msgs
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-4 — range precedence relative to comparisons
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_range_binds_tighter_than_equality() {
+    // Old tree for `1..2 == 2..3`: ((1..2)==2)..3 — a range over a bool.
+    // New tree: (1..2) == (2..3).
+    let src = "1..2 == 2..3";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let expr = crate::parser::Parser::new(tokens)
+        .parse_expr(0)
+        .expect("parse range comparison");
+    let crate::ast::Expr::Binary(crate::ast::BinOp::EqCmp, lhs, rhs) = expr.unlocated() else {
+        panic!("top of `1..2 == 2..3` must be ==, got: {:?}", expr);
+    };
+    assert!(
+        matches!(
+            lhs.unlocated(),
+            crate::ast::Expr::Binary(crate::ast::BinOp::Range, ..)
+        ),
+        "LHS must be the range 1..2, got: {:?}",
+        lhs
+    );
+    assert!(
+        matches!(
+            rhs.unlocated(),
+            crate::ast::Expr::Binary(crate::ast::BinOp::Range, ..)
+        ),
+        "RHS must be the range 2..3, got: {:?}",
+        rhs
+    );
+}
+
+#[test]
+fn audit2_pm_range_rhs_extends_past_comparison() {
+    // `x == 1..2` must read `x == (1..2)`, not `(x==1)..2`.
+    let src = "x == 1..2";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let expr = crate::parser::Parser::new(tokens)
+        .parse_expr(0)
+        .expect("parse comparison with range rhs");
+    let crate::ast::Expr::Binary(crate::ast::BinOp::EqCmp, _lhs, rhs) = expr.unlocated() else {
+        panic!("top of `x == 1..2` must be ==, got: {:?}", expr);
+    };
+    assert!(
+        matches!(
+            rhs.unlocated(),
+            crate::ast::Expr::Binary(crate::ast::BinOp::Range, ..)
+        ),
+        "RHS must be the range 1..2, got: {:?}",
+        rhs
+    );
+}
+
+#[test]
+fn audit2_pm_slice_syntax_unaffected_by_range_precedence() {
+    // Slice bounds parse through parse_expr_without_range; the precedence
+    // change must not disturb `a[1..2]` / `a[1..]` / `a[..2]`.
+    let src = "func main() -> i32 { let a = [1, 2, 3]\n let s = a[1..2]\n len(s) }";
+    let msgs = parse_diag_messages(src);
+    assert!(msgs.is_empty(), "slice syntax must still parse: {:?}", msgs);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-5 — Span::contains is half-open like every other end position
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_span_contains_is_half_open_with_point_exception() {
+    let span = crate::span::Span::new(1, 1, 1, 4); // covers cols 1..4 (1,2,3)
+    assert!(span.contains(1, 1), "start col is inclusive");
+    assert!(span.contains(1, 3), "last covered col");
+    assert!(!span.contains(1, 4), "end col is exclusive (half-open)");
+    assert!(!span.contains(1, 5));
+    // Zero-width point spans contain exactly their point.
+    let point = crate::span::Span::single(2, 7);
+    assert!(point.contains(2, 7), "point span contains its own point");
+    assert!(!point.contains(2, 8));
+    // Multi-line: end column still exclusive on the final line.
+    let multi = crate::span::Span::new(1, 3, 3, 5);
+    assert!(multi.contains(2, 1), "middle line fully inside");
+    assert!(multi.contains(3, 4));
+    assert!(!multi.contains(3, 5), "end col exclusive on last line");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-6 — leading UTF-8 BOM is skipped
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_leading_bom_is_skipped() {
+    let src = "\u{FEFF}func main() -> i32 { 0 }";
+    let msgs = parse_diag_messages(src);
+    assert!(
+        msgs.is_empty(),
+        "a file starting with U+FEFF must lex/parse cleanly, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn audit2_pm_mid_file_bom_still_rejected() {
+    // Only position-0 BOMs are skipped; a U+FEFF inside the file is not
+    // whitespace and must stay an error.
+    let src = "func main() -> i32 { let x = \u{FEFF}1\n 0 }";
+    let res = crate::lexer::Lexer::new(src).tokenize();
+    assert!(
+        res.is_err(),
+        "mid-file U+FEFF must remain a lex error, got tokens: {:?}",
+        res.map(|t| t.len())
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-7 — actor fields accept soft-keyword names
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_actor_soft_keyword_field_names_parse() {
+    let src = r#"
+actor Counter {
+    view: i32
+    mut end: i32
+}
+func main() -> i32 { 0 }
+"#;
+    let msgs = parse_diag_messages(src);
+    assert!(
+        msgs.is_empty(),
+        "soft-keyword actor field names must parse, got: {:?}",
+        msgs
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-8 — attributes and `pub` in either order
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_attribute_before_pub_parses() {
+    // Choice documented at parse_item_kind: BOTH orders accepted.
+    let attr_first = "#[derive(Debug)]\npub type P8Rec { a: i32 }";
+    let pub_first = "pub #[derive(Debug)] type P8Rec { a: i32 }";
+    for src in [attr_first, pub_first] {
+        let msgs = parse_diag_messages(src);
+        assert!(msgs.is_empty(), "`{}` must parse, got: {:?}", src, msgs);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-9 — radix prefixes reject prefix-adjacent separators
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_radix_prefix_adjacent_separator_rejected() {
+    for bad in ["let x = 0x_1", "let x = 0b_1", "let x = 0o_1"] {
+        let res = crate::lexer::Lexer::new(bad).tokenize();
+        let err = res.expect_err(&format!("`{}` must be a lex error", bad));
+        assert!(
+            err.to_string().contains("invalid digit separator"),
+            "`{}` must fail with the separator diagnostic, got: {}",
+            bad,
+            err
+        );
+    }
+    // Separators BETWEEN digits stay legal in every base.
+    for good in [
+        "let x = 0x1_2",
+        "let x = 0b1_0",
+        "let x = 0o7_7",
+        "let x = 1_0",
+    ] {
+        assert!(
+            crate::lexer::Lexer::new(good).tokenize().is_ok(),
+            "`{}` must still lex",
+            good
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-10 — negative literal patterns
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_negative_literal_pattern_matches() {
+    let src = r#"
+func main() -> i32 {
+    let x = 0 - 1
+    match x {
+        -1 => 42
+        _ => 0
+    }
+}
+"#;
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(42)));
+}
+
+#[test]
+fn audit2_pm_negative_i64_min_pattern_parses() {
+    // The positive magnitude of i64::MIN does not fit i64; the parser must
+    // fold `-9223372036854775808` directly, exactly like parse_expr.
+    let src = r#"
+func pick(v: i64) -> i32 {
+    match v {
+        -9223372036854775808 => 1
+        _ => 0
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let msgs = parse_diag_messages(src);
+    assert!(
+        msgs.is_empty(),
+        "i64::MIN literal pattern must parse, got: {:?}",
+        msgs
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-11 — hard keywords rejected at expression position
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_hard_keyword_at_expr_position_is_parse_error() {
+    for bad in [
+        "func main() -> i32 { let x = return\n x }",
+        "func main() -> i32 { let x = else\n x }",
+        "func main() -> i32 { let x = module\n x }",
+    ] {
+        let msgs = parse_diag_messages(bad);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("cannot start an expression")),
+            "`{}` must be a parse-time keyword error, got: {:?}",
+            bad,
+            msgs
+        );
+    }
+}
+
+#[test]
+fn audit2_pm_soft_keyword_still_works_as_expression_ident() {
+    // The ident-like soft keywords (view/mutate/end/...) remain valid
+    // binding names and therefore valid expressions.
+    let src = r#"
+func main() -> i32 {
+    let view = 3
+    let end = 4
+    view + end
+}
+"#;
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(7)));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P-12 — space-separated enum variants ruling (remains legal)
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_space_separated_enum_variants_remain_legal() {
+    // RULING documented in parse_enum_variants: `type Color { Red Green }`
+    // is de-facto syntax used across the suite; this nail prevents a future
+    // "missing comma" hard error from regressing it silently.
+    let src = "type Color { Red Green }\nfunc main() -> i32 { 0 }";
+    let msgs = parse_diag_messages(src);
+    assert!(
+        msgs.is_empty(),
+        "space-separated bare variants stay legal, got: {:?}",
+        msgs
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Stress — else-if chains parse iteratively (flat, no depth cost)
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn audit2_pm_long_else_if_chain_parses_without_depth_cost() {
+    // 1500-link `else if` chains exceed every depth cap, yet they are
+    // semantically FLAT; the iterative chain parser must accept them
+    // (scripts/stress-test.sh big-if-else-2000 shape). Genuine nesting is
+    // still capped (deeply_nested_module/pattern tests).
+    let n = 1500usize;
+    let mut src = String::from("func main() -> i32 {\n    let x = 5\n");
+    for i in 0..n {
+        src.push_str(&format!("    if x == {} {{ {} }} else ", i, i));
+    }
+    src.push_str("{ -1 }\n}");
+    let msgs = parse_diag_messages(&src);
+    assert!(
+        msgs.is_empty(),
+        "a flat {}-link else-if chain must parse, got: {:?}",
+        n,
+        msgs
+    );
+}
+
+#[test]
+fn audit2_pm_else_if_chain_ast_shape_unchanged() {
+    // The iterative parser must produce the SAME right-nested AST the
+    // recursive form did: If(c0, t0, [If(c1, t1, [If(c2, t2, else)])]).
+    let src = "if a { 1 } else if b { 2 } else { 3 }";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let stmt = crate::parser::Parser::new(tokens)
+        .parse_stmt()
+        .expect("parse if chain");
+    let crate::ast::Stmt::If {
+        cond: c0,
+        then_,
+        else_,
+    } = stmt.unlocated()
+    else {
+        panic!("outer must be If, got: {:?}", stmt);
+    };
+    assert!(matches!(c0.unlocated(), crate::ast::Expr::Ident(name) if name == "a"));
+    assert_eq!(then_.len(), 1);
+    let else_block = else_.as_ref().expect("else branch");
+    assert_eq!(else_block.len(), 1, "else holds exactly the elif statement");
+    let crate::ast::Stmt::If {
+        cond: c1,
+        else_: else2,
+        ..
+    } = else_block[0].unlocated()
+    else {
+        panic!("elif must be If, got: {:?}", else_block[0]);
+    };
+    assert!(matches!(c1.unlocated(), crate::ast::Expr::Ident(name) if name == "b"));
+    let else_block2 = else2.as_ref().expect("elif else branch");
+    assert_eq!(else_block2.len(), 1);
+    assert!(
+        matches!(else_block2[0].unlocated(), crate::ast::Stmt::Expr(_)),
+        "final else is an expression statement, got: {:?}",
+        else_block2[0]
+    );
+}
+
+#[test]
+fn audit2_pm_else_if_expr_chain_runs_correctly() {
+    // End-to-end: expression-position else-if chain evaluates correctly.
+    let src = r#"
+func main() -> i32 {
+    let x = 2
+    let r = if x == 1 { 10 } else if x == 2 { 20 } else if x == 3 { 30 } else { 40 }
+    r
+}
+"#;
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(20)));
+}

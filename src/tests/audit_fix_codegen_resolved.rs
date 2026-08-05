@@ -16,7 +16,8 @@ func add(a: i32, b: i32) -> i32 {
     a + b
 }
 func main() -> i32 {
-    add(20, 22) - 42
+    println(add(20, 22) - 42)
+    0
 }
 "#;
     let out = compile_and_run(src);

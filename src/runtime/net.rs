@@ -173,12 +173,32 @@ pub extern "C" fn mimi_accept(fd: i64) -> i64 {
     }
 }
 
+/// Maximum `mimi_send` byte count. Mirrors `MAX_RECV_SIZE`: an absurd `len`
+/// is rejected instead of handed to `send(2)` (audit 2026-08-05, H-28).
+const MAX_SEND_SIZE: i64 = 100 * 1024 * 1024; // 100MB
+
 #[no_mangle]
 pub extern "C" fn mimi_send(fd: i64, data: *const std::ffi::c_char, len: i64) -> i64 {
+    // Audit fix (H-28, SECURITY): validate `len` BEFORE the usize cast and
+    // before any fd use. A negative len wrapped `len as usize` to ~2^64-1,
+    // making send(2) read out of bounds past `data` — a page fault (SIGSEGV)
+    // or a HEAP MEMORY LEAK TO THE PEER for whatever bytes mapped. mimi_recv
+    // already had the symmetric MAX_RECV_SIZE hardening; send was missed.
+    // Compared as i64 so it is correct on 32-bit too.
+    if len < 0 {
+        return -1;
+    }
+    if len == 0 {
+        return 0; // nothing to send; fd untouched (mimi_recv parity)
+    }
+    if len > MAX_SEND_SIZE {
+        return -1;
+    }
     if fd < 0 || data.is_null() {
         return -1;
     }
-    // SAFETY: direct POSIX calls with validated file descriptor and non-null buffer.
+    // SAFETY: `len` is bounded to [1, MAX_SEND_SIZE] above, so the cast is
+    // lossless; fd and buffer preconditions checked.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -215,7 +235,9 @@ pub extern "C" fn mimi_recv(fd: i64, buf_size: i64, out_len: *mut i64) -> *mut s
     let mut buf: Vec<u8> = vec![0u8; size + 1];
     // SAFETY: `buf` has `size + 1` allocated bytes; `fd_i32` is validated.
     let n = unsafe { libc::recv(fd_i32, buf.as_mut_ptr() as *mut std::ffi::c_void, size, 0) };
-    if n <= 0 {
+    if n < 0 {
+        // Real error (ECONNRESET, EAGAIN-after-timeout, ...). Return NULL so
+        // the codegen side can fail loud (compile_recv NULL check → trap).
         if !out_len.is_null() {
             unsafe {
                 // SAFETY: `out_len` was checked non-null above.
@@ -223,6 +245,19 @@ pub extern "C" fn mimi_recv(fd: i64, buf_size: i64, out_len: *mut i64) -> *mut s
             }
         }
         return std::ptr::null_mut();
+    }
+    if n == 0 {
+        // EOF (peer closed the connection). The stdlib contract
+        // (std/net.mimi recv) is: "" on EOF, hard failures abort. EOF is a
+        // SUCCESSFUL read of zero bytes — return a non-NULL empty string so
+        // the codegen side surfaces Ok("") instead of trapping on NULL.
+        if !out_len.is_null() {
+            unsafe {
+                // SAFETY: `out_len` was checked non-null above.
+                *out_len = 0;
+            }
+        }
+        return alloc_c_string("");
     }
     // S8: Clamp n to buffer size to prevent out-of-bounds write.
     let n = (n as usize).min(size);
@@ -293,15 +328,142 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
     Some((host, port, path_part.to_string()))
 }
 
+/// SSRF protection for the native (codegen) HTTP client. Mirrors the bytecode
+/// VM's validate_host_ssrf (interp/bytecode/builtins/net.rs) — the VM blocks
+/// loopback/private/internal addresses; the native runtime must too, or a
+/// codegen-built program can reach 127.0.0.1/169.254.169.254 while the VM
+/// cannot (L1 divergence + a genuine SSRF hole in the native backend).
+/// Returns None when the host is blocked.
+fn ssrf_validate_host(host: &str) -> Option<()> {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    let blocked_hosts = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "metadata.google.internal",
+    ];
+    if blocked_hosts.contains(&h) {
+        return None;
+    }
+    let private_prefixes = [
+        "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
+    ];
+    if private_prefixes.iter().any(|p| h.starts_with(p)) {
+        return None;
+    }
+    Some(())
+}
+
+/// SSRF protection for the native HTTP client. Mirrors the bytecode VM's
+/// validate_host_ssrf (interp/bytecode/builtins/net.rs): loopback, link-local,
+/// private, and cloud-metadata addresses are blocked with a loud abort. The
+/// VM blocks them; the native runtime must too, otherwise a codegen-built
+/// program can reach 127.0.0.1 / 169.254.169.254 while the VM cannot (L1
+/// divergence + a real SSRF hole in the native backend).
+/// Returns true when the host passes (is allowed).
+fn validate_ssrf(host: &str) -> bool {
+    let blocked_hosts = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "metadata.google.internal",
+    ];
+    if blocked_hosts.contains(&host) {
+        return false;
+    }
+    let private_prefixes = [
+        "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
+    ];
+    if private_prefixes.iter().any(|p| host.starts_with(p)) {
+        return false;
+    }
+    true
+}
+
 fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::net::TcpStream;
 
+    // SSRF protection (2026-08-05 Wave-2): the bytecode VM rejects loopback
+    // and private/internal addresses for http_get/http_post (validate_host_ssrf
+    // in interp/bytecode/builtins/net.rs). The runtime entry points (mimi_http_get
+    // / mimi_http_post) had NO equivalent guard — codegen-compiled programs could
+    // fetch loopback/cloud-metadata/private hosts while VM programs could not:
+    // a security-relevant dual-backend divergence (P-0: VM is reference).
+    // Centralize here so every HTTP request is guarded once.
+    let blocked_hosts = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "metadata.google.internal",
+    ];
+    if blocked_hosts.contains(&host) {
+        eprintln!(
+            "[mimi runtime] http_get/http_post: SSRF protection — loopback addresses are blocked"
+        );
+        return None;
+    }
+    let private_prefixes = [
+        "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
+    ];
+    if private_prefixes.iter().any(|p| host.starts_with(p)) {
+        eprintln!("[mimi runtime] http_get/http_post: SSRF protection — private/internal addresses are blocked");
+        return None;
+    }
+
+    // Audit 2026-08-05 (N-2): connect timeout + write timeout. The old
+    // client had NEITHER — `TcpStream::connect` against a packet-dropping
+    // firewall blocked ~2 minutes on OS SYN retries before the post-connect
+    // 5s read timeout even existed. Resolve the address(es) and try each
+    // with an explicit connect timeout (std handles v4/v6, multi-homed
+    // hosts, and the nonblocking-connect/select dance internally).
+    const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const HTTP_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect(&addr).ok()?;
+    use std::net::ToSocketAddrs;
+    let addrs = match addr.to_socket_addrs() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[mimi runtime] HTTP resolve failed for {}: {}", addr, e);
+            return None;
+        }
+    };
+    let mut stream: Option<TcpStream> = None;
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, HTTP_CONNECT_TIMEOUT) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => {
+                // Try the next resolved address (multi-homed / v6-vs-v4).
+                eprintln!("[mimi runtime] HTTP connect to {} failed: {}", a, e);
+            }
+        }
+    }
+    let mut stream = match stream {
+        Some(s) => s,
+        None => return None,
+    };
     // C5-fix: propagate timeout failure instead of silently ignoring
     if let Err(e) = stream.set_read_timeout(Some(std::time::Duration::from_secs(5))) {
         eprintln!("[mimi runtime] HTTP set_read_timeout failed: {}", e);
+        return None;
+    }
+    // N-2: write timeout (the old client had none — a connected-but-stalled
+    // peer blocked write_all indefinitely).
+    if let Err(e) = stream.set_write_timeout(Some(HTTP_WRITE_TIMEOUT)) {
+        eprintln!("[mimi runtime] HTTP set_write_timeout failed: {}", e);
         return None;
     }
 
@@ -409,6 +571,14 @@ pub extern "C" fn mimi_http_post(
         }
     };
 
+    // SSRF: block loopback/private/internal hosts (VM parity).
+    if !validate_ssrf(&host) {
+        eprintln!(
+            "[mimi runtime] http_post: SSRF protection — address blocked: {}",
+            host
+        );
+        return std::ptr::null_mut();
+    }
     let request = format!(
         "POST {} HTTP/1.0\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         path, host, b.len(), b

@@ -387,6 +387,76 @@ impl<'ctx> CodeGenerator<'ctx> {
         // malformed input fails LOUD (VM: "json_get_string parse error: …")
         // instead of degenerating into the runtime's old NULL sentinel.
         self.require_valid_json_input(json_ptr, "json_get_string")?;
+        // Audit wave2 (roadmap #10, P-0 ruling: ALIGN TO VM): the runtime
+        // accessor aborts on a MISSING key ("json_get_string: key 'k' not
+        // found"), but the VM reference (bytecode builtin_json_get_string)
+        // returns the EMPTY STRING for `None`. Probe the key with
+        // json_has_key FIRST: it returns 0 for an absent key (its
+        // documented purpose) and aborts loud on malformed input, so the
+        // get_string call below only runs when the key is present and can
+        // no longer hit the runtime's missing-key abort. (Balanced-but-
+        // invalid documents that slip past mimi_is_valid_json's brace
+        // scanner abort inside json_has_key — still loud, message prefix
+        // "json_has_key parse error" instead of "json_get_string".)
+        let has_key_fn = self
+            .module
+            .get_function("json_has_key")
+            .ok_or_else(|| "codegen: json_has_key not declared".to_string())?;
+        let has_key = self
+            .builder
+            .build_call(
+                has_key_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(json_ptr),
+                    BasicMetadataValueEnum::PointerValue(key_ptr),
+                ],
+                "json_get_string_has_key_call",
+            )
+            .map_err(|e| format!("json_has_key error: {}", e))?
+            .try_as_basic_value_opt()
+            .ok_or("json_has_key returned void")?
+            .into_int_value();
+        let function = self.current_function().ok_or(CompileError::CodegenJson(
+            "json_get_string: no enclosing function".into(),
+        ))?;
+        let has_key_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                has_key,
+                has_key.get_type().const_zero(),
+                "json_get_string_has_key",
+            )
+            .map_err(|e| format!("cmp error: {}", e))?;
+        let missing_bb = self
+            .context
+            .append_basic_block(function, "json_get_string_missing_bb");
+        let present_bb = self
+            .context
+            .append_basic_block(function, "json_get_string_present_bb");
+        let final_bb = self
+            .context
+            .append_basic_block(function, "json_get_string_final_bb");
+        self.builder
+            .build_conditional_branch(has_key_bool, present_bb, missing_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+
+        // Missing key → heap "" (VM parity).
+        self.builder.position_at_end(missing_bb);
+        let missing_empty = self.build_empty_heap_string("json_get_string_missing_empty")?;
+        // NOTE: not registered — returned value owns the allocation.
+        let missing_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("json_get_string: lost missing block")?;
+        self.builder
+            .build_unconditional_branch(final_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+
+        // Present key → runtime accessor (cannot hit its missing-key abort
+        // now). Defense in depth: a NULL result still maps to "" instead of
+        // escaping downstream (puts/strlen UB) — mirrors FIX-1.
+        self.builder.position_at_end(present_bb);
         let func = self
             .module
             .get_function("json_get_string")
@@ -405,15 +475,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("json_get_string returned void")?
             .into_pointer_value();
-        // Audit 2026-08-05 §8 [VERIFIED CRITICAL] FIX-1 (defense in depth):
-        // never pass NULL downstream (puts/strlen UB). After the validity
-        // guard above, a NULL result can only mean "key absent" — and VM
-        // parity for a missing key is the EMPTY STRING
-        // (bytecode builtin_json_get_string: None → String::new()). Return a
-        // genuine heap C-string "", not a NULL pointer.
-        let function = self.current_function().ok_or(CompileError::CodegenJson(
-            "json_get_string: no enclosing function".into(),
-        ))?;
         let is_null = self
             .builder
             .build_is_null(result, "json_get_string_is_null")
@@ -424,9 +485,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ok_bb = self
             .context
             .append_basic_block(function, "json_get_string_ok_bb");
-        let merge_bb = self
+        let present_merge_bb = self
             .context
-            .append_basic_block(function, "json_get_string_merge_bb");
+            .append_basic_block(function, "json_get_string_present_merge_bb");
         self.builder
             .build_conditional_branch(is_null, empty_bb, ok_bb)
             .map_err(|e| format!("branch error: {}", e))?;
@@ -438,7 +499,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_insert_block()
             .ok_or("json_get_string: lost empty block")?;
         self.builder
-            .build_unconditional_branch(merge_bb)
+            .build_unconditional_branch(present_merge_bb)
             .map_err(|e| format!("branch error: {}", e))?;
         self.builder.position_at_end(ok_bb);
         let ok_end = self
@@ -446,18 +507,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_insert_block()
             .ok_or("json_get_string: lost ok block")?;
         self.builder
-            .build_unconditional_branch(merge_bb)
+            .build_unconditional_branch(present_merge_bb)
             .map_err(|e| format!("branch error: {}", e))?;
-        self.builder.position_at_end(merge_bb);
-        let phi = self
+        self.builder.position_at_end(present_merge_bb);
+        let present_phi = self
             .builder
             .build_phi(result.get_type(), "json_get_string_phi")
             .map_err(|e| format!("phi error: {}", e))?;
-        phi.add_incoming(&[
+        present_phi.add_incoming(&[
             (&empty_str as &dyn inkwell::values::BasicValue, empty_end),
             (&result as &dyn inkwell::values::BasicValue, ok_end),
         ]);
-        Ok(phi.as_basic_value())
+        let present_ptr = present_phi.as_basic_value();
+        let present_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("json_get_string: lost present-merge block")?;
+
+        // Outer merge: missing-key "" vs present-key accessor result.
+        self.builder
+            .build_unconditional_branch(final_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+        self.builder.position_at_end(final_bb);
+        let final_phi = self
+            .builder
+            .build_phi(result.get_type(), "json_get_string_final_phi")
+            .map_err(|e| format!("phi error: {}", e))?;
+        final_phi.add_incoming(&[
+            (
+                &missing_empty as &dyn inkwell::values::BasicValue,
+                missing_end,
+            ),
+            (
+                &present_ptr as &dyn inkwell::values::BasicValue,
+                present_end,
+            ),
+        ]);
+        Ok(final_phi.as_basic_value())
     }
 
     pub(super) fn compile_json_get_int(

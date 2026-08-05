@@ -4,6 +4,18 @@ use serde_json::Value;
 
 use crate::span::Span;
 
+/// LOSSY no-text fallback for Span → LSP range.
+///
+/// X-11 (full audit 2026-08-05 §3.10): Mimi span columns are 1-indexed CHAR
+/// counts (lexer advances per char); LSP `character` is UTF-16 code units.
+/// The exact conversion walks the line's chars summing `len_utf16`
+/// (AU-LSP-3, `PositionMap::span_to_lsp`) and REQUIRES the document text.
+/// Without text this fallback can only subtract the 1-based bias, which is
+/// exact on pure-ASCII lines and drifts when supplementary-plane chars
+/// (e.g. emoji, 1 char = 2 UTF-16 units) precede the span on its line.
+/// Callers must prefer the text-based path (`diagnostic_to_lsp` with
+/// `Some(text)`); this exists solely for diagnostics whose source text
+/// cannot be recovered.
 pub(crate) fn span_to_range(span: &Span) -> Value {
     serde_json::json!({
         "start": {

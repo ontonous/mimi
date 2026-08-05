@@ -222,12 +222,34 @@ impl<'a> Checker<'a> {
                                                 ),
                                             );
                                         } else {
-                                            let resolved: Vec<Type> = fields
-                                                .iter()
-                                                .map(|f| self.resolve_type(&f.ty))
-                                                .collect();
-                                            for ((_, p), t) in pats.iter().zip(resolved.iter()) {
-                                                self.check_pattern(p, t, scopes);
+                                            // H-3 (audit 2026-08-05): record-payload
+                                            // constructor patterns must match fields BY
+                                            // NAME, not positionally by zip. Previously
+                                            // `V { bogus1, bogus2 }` bound silently because
+                                            // the names were discarded (`(_, p)`) and the
+                                            // patterns were zipped onto fields in order.
+                                            // The flow-state branch (CK1) already validates
+                                            // names via E0226; mirror it here so a bogus
+                                            // field name is rejected instead of binding the
+                                            // wrong field. Clone `fields` to end the borrow
+                                            // on self.types before the &mut-self calls below
+                                            // (same pattern as the Tuple branch's types.clone()).
+                                            let fields: Vec<Field> = fields.clone();
+                                            for (field_name, pat) in pats.iter() {
+                                                if let Some(field) =
+                                                    fields.iter().find(|f| f.name == *field_name)
+                                                {
+                                                    let resolved = self.resolve_type(&field.ty);
+                                                    self.check_pattern(pat, &resolved, scopes);
+                                                } else {
+                                                    self.emit_code(
+                                                        crate::diagnostic::codes::E0226,
+                                                        format!(
+                                                            "variant '{}' has no field '{}'",
+                                                            name, field_name
+                                                        ),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
