@@ -85,7 +85,7 @@ pub(crate) fn resolved_to_z3_int(
                 ResolvedValueProjection::Index(_) => "idx".to_string(),
                 ResolvedValueProjection::Dereference => "deref".to_string(),
             };
-            let key = format!("{}_{}", base, proj_name);
+            let key = format!("{}.{}", base, proj_name);
             Some(vars.get_or_create_int(&key))
         }
         ResolvedExprKind::Binary { op, left, right } => {
@@ -412,7 +412,7 @@ fn resolved_field_var_name(expr: &ResolvedExpr, body: &ResolvedBody) -> String {
                 ResolvedValueProjection::Index(_) => "idx".to_string(),
                 ResolvedValueProjection::Dereference => "deref".to_string(),
             };
-            format!("{}_{}", resolved_field_var_name(value, body), proj_name)
+            format!("{}.{}", resolved_field_var_name(value, body), proj_name)
         }
         _ => "_expr".into(),
     }

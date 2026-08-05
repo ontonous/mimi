@@ -24,12 +24,12 @@ pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> 
         }
         Expr::Field(obj, field) => {
             let base = field_var_name(obj);
-            let key = format!("{}_{}", base, field);
+            let key = format!("{}.{}", base, field);
             Some(vars.get_or_create_int(&key))
         }
         Expr::TupleIndex(obj, idx) => {
             let base = field_var_name(obj);
-            let key = format!("{}_t{}", base, idx);
+            let key = format!("{}[{}]", base, idx);
             Some(vars.get_or_create_int(&key))
         }
         Expr::Binary(op, lhs, rhs) => {
@@ -306,7 +306,7 @@ fn field_var_name(expr: &Expr) -> String {
             }
         }
         Expr::Field(obj, field) => {
-            format!("{}_{}", field_var_name(obj), field)
+            format!("{}.{}", field_var_name(obj), field)
         }
         _ => format!("_{:?}", expr),
     }
@@ -340,11 +340,11 @@ fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
             }
         }
         Expr::Field(obj, field) => {
-            let key = format!("{}_{}", field_var_name(obj), field);
+            let key = format!("{}.{}", field_var_name(obj), field);
             vars.is_real(&key)
         }
         Expr::TupleIndex(obj, idx) => {
-            let key = format!("{}_t{}", field_var_name(obj), idx);
+            let key = format!("{}[{}]", field_var_name(obj), idx);
             vars.is_real(&key)
         }
         Expr::Binary(_, lhs, rhs) => is_f64_expr(lhs, vars) || is_f64_expr(rhs, vars),
@@ -417,7 +417,7 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
         }
         Expr::Field(obj, field) => {
             let base = field_var_name(obj);
-            let key = format!("{}_{}", base, field);
+            let key = format!("{}.{}", base, field);
             if let Some(v) = vars.get_real(&key) {
                 Some(v.clone())
             } else if let Some(v) = vars.get_int(&key) {
@@ -428,7 +428,7 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
         }
         Expr::TupleIndex(obj, idx) => {
             let base = field_var_name(obj);
-            let key = format!("{}_t{}", base, idx);
+            let key = format!("{}[{}]", base, idx);
             if let Some(v) = vars.get_real(&key) {
                 Some(v.clone())
             } else if let Some(v) = vars.get_int(&key) {
@@ -558,7 +558,7 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
         }
         Expr::Field(obj, field) => {
             let base = field_var_name(obj);
-            let key = format!("{}_{}", base, field);
+            let key = format!("{}.{}", base, field);
             if let Some(v) = vars.get_int(&key) {
                 Some(v.ne(Z3Int::from_i64(0)))
             } else if let Some(v) = vars.get_real(&key) {
@@ -570,7 +570,7 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
         }
         Expr::TupleIndex(obj, idx) => {
             let base = field_var_name(obj);
-            let key = format!("{}_t{}", base, idx);
+            let key = format!("{}[{}]", base, idx);
             if let Some(v) = vars.get_int(&key) {
                 Some(v.ne(Z3Int::from_i64(0)))
             } else if let Some(v) = vars.get_real(&key) {
@@ -783,11 +783,11 @@ fn is_real_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
             }
         }
         Expr::Field(obj, field) => {
-            let key = format!("{}_{}", field_var_name(obj), field);
+            let key = format!("{}.{}", field_var_name(obj), field);
             vars.is_real(&key)
         }
         Expr::TupleIndex(obj, idx) => {
-            let key = format!("{}_t{}", field_var_name(obj), idx);
+            let key = format!("{}[{}]", field_var_name(obj), idx);
             vars.is_real(&key)
         }
         Expr::Binary(_, lhs, rhs) => is_real_expr(lhs, vars) || is_real_expr(rhs, vars),
@@ -1030,7 +1030,7 @@ fn resolve_string_expr(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3String> {
         }
         // V4: Support field paths like p.name in string operations.
         Expr::Field(obj, field) => {
-            let key = format!("{}_{}", field_var_name(obj), field);
+            let key = format!("{}.{}", field_var_name(obj), field);
             vars.get_string_var(&key).cloned()
         }
         Expr::Call(callee, args) => {
