@@ -502,3 +502,25 @@ func wrong(x: i32) -> i32 {
 "#;
     assert_failed(src);
 }
+
+#[test]
+fn verify_audit40_tail_if_let_without_value_is_not_fake_proven() {
+    // #40 (full-audit-2026-08-05 §11): a tail `if let` whose branches yield
+    // no extractable value used to fall through to `result = 0` in func.rs,
+    // so `ensures: result == 0` proved against a fabricated constraint even
+    // though the program really returns the tail expression `7` — a fake
+    // Proven. The reverse scan must keep looking past the value-less if:
+    // the body returns 7, so the postcondition must NOT hold.
+    let src = r#"
+func f(opt: Option<i32>) -> i32 {
+    ensures: result == 0
+    if let Some(x) = opt {
+        let y = x + 1
+    }
+    7
+}
+"#;
+    assert_failed(src);
+}
+
+
