@@ -777,8 +777,12 @@ malloc_call_ok:                                   ; preds = %entry
   %list.len_check = getelementptr inbounds { i64, ptr }, ptr %xs3, i32 0, i32 0
   %list_len4 = getelementptr inbounds { i64, ptr }, ptr %xs3, i32 0, i32 0
   %list_len_val = load i64, ptr %list_len4, align 4
-  %oob = icmp uge i64 0, %list_len_val
-  br i1 %oob, label %bounds_fail, label %bounds_ok
+  %idx_wrap = add i64 0, %list_len_val
+  %idx_effective = select i1 false, i64 %idx_wrap, i64 0
+  %oob_neg = icmp slt i64 %idx_effective, 0
+  %oob = icmp uge i64 %idx_effective, %list_len_val
+  %oob_any = or i1 %oob_neg, %oob
+  br i1 %oob_any, label %bounds_fail, label %bounds_ok
 
 malloc_call_oom:                                  ; preds = %entry
   call void @mimi_runtime_abort(ptr @malloc_call_oom_msg)
@@ -787,65 +791,73 @@ malloc_call_oom:                                  ; preds = %entry
 bounds_ok:                                        ; preds = %bounds_fail, %malloc_call_ok
   %list.data = getelementptr inbounds { i64, ptr }, ptr %xs3, i32 0, i32 1
   %data = load ptr, ptr %list.data, align 8
-  %elem5 = getelementptr inbounds i64, ptr %data, i64 0
+  %elem5 = getelementptr inbounds i64, ptr %data, i64 %idx_effective
   %elem_val = load i64, ptr %elem5, align 4
   %xs6 = load ptr, ptr %xs, align 8
   %list.len_check7 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 0
   %list_len8 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 0
   %list_len_val9 = load i64, ptr %list_len8, align 4
-  %oob12 = icmp uge i64 1, %list_len_val9
-  br i1 %oob12, label %bounds_fail11, label %bounds_ok10
+  %idx_wrap10 = add i64 1, %list_len_val9
+  %idx_effective11 = select i1 false, i64 %idx_wrap10, i64 1
+  %oob_neg14 = icmp slt i64 %idx_effective11, 0
+  %oob15 = icmp uge i64 %idx_effective11, %list_len_val9
+  %oob_any16 = or i1 %oob_neg14, %oob15
+  br i1 %oob_any16, label %bounds_fail13, label %bounds_ok12
 
 bounds_fail:                                      ; preds = %malloc_call_ok
   call void @mimi_runtime_abort(ptr @oob_msg)
   br label %bounds_ok
 
-bounds_ok10:                                      ; preds = %bounds_fail11, %bounds_ok
-  %list.data13 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 1
-  %data14 = load ptr, ptr %list.data13, align 8
-  %elem15 = getelementptr inbounds i64, ptr %data14, i64 1
-  %elem_val16 = load i64, ptr %elem15, align 4
-  %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %elem_val, i64 %elem_val16)
+bounds_ok12:                                      ; preds = %bounds_fail13, %bounds_ok
+  %list.data17 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 1
+  %data18 = load ptr, ptr %list.data17, align 8
+  %elem19 = getelementptr inbounds i64, ptr %data18, i64 %idx_effective11
+  %elem_val20 = load i64, ptr %elem19, align 4
+  %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %elem_val, i64 %elem_val20)
   %op_result = extractvalue { i64, i1 } %checked_op, 0
   %op_overflow = extractvalue { i64, i1 } %checked_op, 1
   br i1 %op_overflow, label %trap_overflow, label %op_ok
 
-bounds_fail11:                                    ; preds = %bounds_ok
+bounds_fail13:                                    ; preds = %bounds_ok
   call void @mimi_runtime_abort(ptr @oob_msg.10)
-  br label %bounds_ok10
+  br label %bounds_ok12
 
-trap_overflow:                                    ; preds = %bounds_ok10
+trap_overflow:                                    ; preds = %bounds_ok12
   call void @mimi_trap_overflow(ptr @op_name)
   unreachable
 
-op_ok:                                            ; preds = %bounds_ok10
-  %xs17 = load ptr, ptr %xs, align 8
-  %list.len_check18 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 0
-  %list_len19 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 0
-  %list_len_val20 = load i64, ptr %list_len19, align 4
-  %oob23 = icmp uge i64 2, %list_len_val20
-  br i1 %oob23, label %bounds_fail22, label %bounds_ok21
+op_ok:                                            ; preds = %bounds_ok12
+  %xs21 = load ptr, ptr %xs, align 8
+  %list.len_check22 = getelementptr inbounds { i64, ptr }, ptr %xs21, i32 0, i32 0
+  %list_len23 = getelementptr inbounds { i64, ptr }, ptr %xs21, i32 0, i32 0
+  %list_len_val24 = load i64, ptr %list_len23, align 4
+  %idx_wrap25 = add i64 2, %list_len_val24
+  %idx_effective26 = select i1 false, i64 %idx_wrap25, i64 2
+  %oob_neg29 = icmp slt i64 %idx_effective26, 0
+  %oob30 = icmp uge i64 %idx_effective26, %list_len_val24
+  %oob_any31 = or i1 %oob_neg29, %oob30
+  br i1 %oob_any31, label %bounds_fail28, label %bounds_ok27
 
-bounds_ok21:                                      ; preds = %bounds_fail22, %op_ok
-  %list.data24 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 1
-  %data25 = load ptr, ptr %list.data24, align 8
-  %elem26 = getelementptr inbounds i64, ptr %data25, i64 2
-  %elem_val27 = load i64, ptr %elem26, align 4
-  %checked_op28 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %op_result, i64 %elem_val27)
-  %op_result29 = extractvalue { i64, i1 } %checked_op28, 0
-  %op_overflow30 = extractvalue { i64, i1 } %checked_op28, 1
-  br i1 %op_overflow30, label %trap_overflow31, label %op_ok32
+bounds_ok27:                                      ; preds = %bounds_fail28, %op_ok
+  %list.data32 = getelementptr inbounds { i64, ptr }, ptr %xs21, i32 0, i32 1
+  %data33 = load ptr, ptr %list.data32, align 8
+  %elem34 = getelementptr inbounds i64, ptr %data33, i64 %idx_effective26
+  %elem_val35 = load i64, ptr %elem34, align 4
+  %checked_op36 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %op_result, i64 %elem_val35)
+  %op_result37 = extractvalue { i64, i1 } %checked_op36, 0
+  %op_overflow38 = extractvalue { i64, i1 } %checked_op36, 1
+  br i1 %op_overflow38, label %trap_overflow39, label %op_ok40
 
-bounds_fail22:                                    ; preds = %op_ok
+bounds_fail28:                                    ; preds = %op_ok
   call void @mimi_runtime_abort(ptr @oob_msg.11)
-  br label %bounds_ok21
+  br label %bounds_ok27
 
-trap_overflow31:                                  ; preds = %bounds_ok21
+trap_overflow39:                                  ; preds = %bounds_ok27
   call void @mimi_trap_overflow(ptr @op_name.12)
   unreachable
 
-op_ok32:                                          ; preds = %bounds_ok21
-  %trunc = trunc i64 %op_result29 to i32
+op_ok40:                                          ; preds = %bounds_ok27
+  %trunc = trunc i64 %op_result37 to i32
   %heap_slot_gep = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
   %heap_slot = load ptr, ptr %heap_slot_gep, align 8
   call void @free(ptr %heap_slot)
