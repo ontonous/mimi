@@ -1502,12 +1502,75 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(tuple_ty, alloca, 0, "parse_ok")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(ok_gep, ok)?;
         let val_gep = self
             .gep()
             .build_struct_gep(tuple_ty, alloca, 1, "parse_val")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        // B-1 (SD-9, 2026-08-06): finiteness gate for str_parse_float. The VM
+        // requires the parsed value finite — NaN/±Inf → (false, 0.0), matching
+        // its `Ok(n) if n.is_finite()` / `Ok(_) => (false, 0.0)` arms
+        // (interp/bytecode/builtins/string.rs:531-532). codegen's strtod
+        // ACCEPTS "NaN"/"inf" (ok=true) -> non-finite value entered the system
+        // and the native output diverged from the VM (b1.mimi: nan:ok vs
+        // nan:bad). Gate the emitted value here: finite → keep, else
+        // (false, 0.0).
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for parse_float".into()))?;
+        let f64_ty = self.context.f64_type();
+        // not NaN: `v == v` is false for NaN under ORD.
+        let not_nan = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::ORD, value, value, "pf_not_nan")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        // not ±Inf: |v| <= f64::MAX.
+        let fabs_name = format!("llvm.fabs.f{}", f64_ty.get_bit_width());
+        let fabs_fn = self.module.get_function(&fabs_name).unwrap_or_else(|| {
+            self.module.add_function(
+                &fabs_name,
+                f64_ty.fn_type(&[BasicMetadataTypeEnum::FloatType(f64_ty)], false),
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let abs_val = self
+            .builder
+            .build_call(
+                fabs_fn,
+                &[BasicMetadataValueEnum::FloatValue(value)],
+                "pf_abs",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fabs: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("pf_abs void".into()))?
+            .into_float_value();
+        let max_val = f64_ty.const_float(f64::MAX);
+        let le_max = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OLE, abs_val, max_val, "pf_le_max")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp: {}", e)))?;
+        let finite = self
+            .builder
+            .build_and(not_nan, le_max, "pf_finite")
+            .map_err(|e| CompileError::LlvmError(format!("and: {}", e)))?;
+        let finite_bb = self.context.append_basic_block(function, "pf_finite");
+        let bad_bb = self.context.append_basic_block(function, "pf_nonfinite");
+        let merge_bb = self.context.append_basic_block(function, "pf_merge");
+        self.builder
+            .build_conditional_branch(finite, finite_bb, bad_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+        self.builder.position_at_end(finite_bb);
+        self.build_store(ok_gep, ok)?;
         self.build_store(val_gep, value)?;
+        self.build_br(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+        self.builder.position_at_end(bad_bb);
+        let false_bool = self.context.bool_type().const_int(0, false);
+        let zero = f64_ty.const_float(0.0);
+        self.build_store(ok_gep, false_bool)?;
+        self.build_store(val_gep, zero)?;
+        self.build_br(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+        self.builder.position_at_end(merge_bb);
         self.build_load(tuple_ty, alloca, "parse_float_tuple_val")
     }
 
