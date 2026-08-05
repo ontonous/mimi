@@ -7458,6 +7458,53 @@ fn dual_format_mixed() {
     );
 }
 
+// H-17 audit fix: `format` with an aggregate (List) substitution arg used
+// to panic the compiler (codegen extracted the list length field as a
+// string pointer, ICE at io.rs). Must render like the VM's Display impl:
+// `[1, 2, 3]` / `[1.5, 2.5]` / `[a, b]`, with no ICE and no invalid IR.
+#[test]
+fn dual_format_list_aggregate() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ints = [1, 2, 3]
+            println(format("{}", ints))
+            let floats = [1.5, 2.5]
+            println(format("{}", floats))
+            let strs = ["a", "b"]
+            println(format("{}", strs))
+            println(format("x={} y={} s={}", 42, 3.14, "hi"))
+            0
+        }
+    "#,
+        "[1, 2, 3]\n[1.5, 2.5]\n[a, b]\nx=42 y=3.14 s=hi"
+    );
+}
+
+// H-17: >8 substitutions must still chain mimi_str_format calls correctly
+// when an aggregate arg is present (display buffers released after the
+// chain — previously a lingering display free crashed LLVM linking).
+#[test]
+fn dual_format_list_ten_args() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let list = [9, 10]
+            let msg = format("{} {} {} {} {} {} {} {} {} {}", 1, 2, 3, 4, 5, 6, 7, 8, 9, list)
+            println(msg)
+            0
+        }
+    "#,
+        "1 2 3 4 5 6 7 8 9 [9, 10]"
+    );
+}
+
 #[test]
 fn dual_lexer_builtin_codegen() {
     if !can_link() {

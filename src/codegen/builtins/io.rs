@@ -11650,55 +11650,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         // current string). Known edge vs the single-pass VM: when >8 args
         // are used AND an earlier substituted value itself contains "{}",
         // later passes may substitute inside that value.
+        // H-17 fix: type info is staged by the call dispatcher
+        // (`pending_print_arg_types`, same as print/println) — read it and
+        // lower every supported arg type through `format_arg_to_cstr`
+        // (print-family emitters). Previously any non-string StructValue
+        // (e.g. a List's `{i64 len, ptr data}`) reached
+        // `.into_pointer_value()` on the length field and panicked the
+        // compiler (ICE); unknown shapes got a silent null pointer.
+        let arg_types: Vec<String> = self.pending_print_arg_types.clone();
+        // H-17: snapshot the display-buffer registry *before* converting
+        // substitution args. Aggregate emitters (List/Map/...) register their
+        // heap strings via `register_display_alloc`; unlike print/println,
+        // format consumes them inside `mimi_str_format` and must release them
+        // here — otherwise the pointers linger in `display_frees` and the next
+        // function's `flush_display_frees` emits a `free` on a foreign
+        // function's SSA value (invalid IR → LLVM crash).
+        let disp_marker = self.display_marker();
         let mut arg_ptrs: Vec<inkwell::values::PointerValue<'ctx>> = Vec::new();
         for i in 1..args.len() {
-            let p = match &args[i] {
-                BasicMetadataValueEnum::PointerValue(pv) => *pv,
-                BasicMetadataValueEnum::StructValue(sv) => self
-                    .builder
-                    .build_extract_value(*sv, 0, "fmt_str_data")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("format extract str data: {}", e))
-                    })?
-                    .into_pointer_value(),
-                BasicMetadataValueEnum::IntValue(iv) => {
-                    let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
-                    // Defensive width normalization: mimi_to_string_i64
-                    // expects an i64 operand.
-                    let bw = iv.get_type().get_bit_width();
-                    let iv64 = if bw == 1 {
-                        self.builder
-                            .build_int_z_extend(*iv, i64_ty, "fmt_bool_zext")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                    } else if bw < 64 {
-                        self.builder
-                            .build_int_s_extend(*iv, i64_ty, "fmt_int_sext")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                    } else {
-                        *iv
-                    };
-                    self.build_call(
-                        to_i64_fn,
-                        &[BasicMetadataValueEnum::IntValue(iv64)],
-                        "to_str_i64",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("mimi_to_string_i64 returned void")?
-                    .into_pointer_value()
-                }
-                BasicMetadataValueEnum::FloatValue(fv) => {
-                    let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
-                    self.build_call(
-                        to_f64_fn,
-                        &[BasicMetadataValueEnum::FloatValue(*fv)],
-                        "to_str_f64",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("mimi_to_string_f64 returned void")?
-                    .into_pointer_value()
-                }
-                _ => i8_ptr.const_null(),
-            };
+            let arg_type = arg_types.get(i).cloned().unwrap_or_default();
+            let p = self.format_arg_to_cstr(&args[i], &arg_type, i)?;
             arg_ptrs.push(p);
         }
         let format_fn = self.get_runtime_fn("mimi_str_format")?;
@@ -11733,6 +11704,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         let result_ptr = current;
+        // H-17: release display buffers registered by aggregate arg emitters
+        // (consumed by the mimi_str_format call chain above). Safe: the
+        // format result is the runtime's own allocation, not a display buffer.
+        self.flush_display_since(disp_marker)?;
         // Wrap into canonical string struct {i8*, i64}
         let strlen_fn = self.get_runtime_fn("strlen")?;
         let len = self
@@ -11746,6 +11721,120 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("strlen returned void")?
             .into_int_value();
         self.build_string_struct(result_ptr, len)
+    }
+
+    /// H-17 fix: lower a `format` substitution argument to a C string
+    /// pointer, reusing the print-family type dispatch (`extract_print_arg`).
+    ///
+    /// Supported: strings (pass-through), scalars (int/bool via
+    /// `mimi_to_string_i64`, float via `mimi_to_string_f64`), Map/Set opaque
+    /// handles (runtime JSON serializers), and all aggregates
+    /// (List/Record/Enum/Option/Result/Tuple) via their display emitters —
+    /// matching the VM, which formats any value with its Display impl
+    /// (e.g. `format("{}", [1,2,3])` → `"[1, 2, 3]"`).
+    ///
+    /// Anything else — including shapes with no compile-time type info that
+    /// cannot be shape-detected — is a compile error, never a panic and
+    /// never a silent null substitution.
+    fn format_arg_to_cstr(
+        &self,
+        arg: &BasicMetadataValueEnum<'ctx>,
+        arg_type: &str,
+        idx: usize,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        // Scalar int (excluding Map/Set opaque handles): render via
+        // `mimi_to_string_i64` with defensive width normalization.
+        if let BasicMetadataValueEnum::IntValue(iv) = arg {
+            let is_handle = arg_type == "Map"
+                || arg_type.starts_with("Map<")
+                || arg_type == "Set"
+                || arg_type.starts_with("Set<")
+                || arg_type == "set";
+            if !is_handle {
+                let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
+                let bw = iv.get_type().get_bit_width();
+                let iv64 = if bw == 1 {
+                    self.builder
+                        .build_int_z_extend(*iv, i64_ty, "fmt_bool_zext")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else if bw < 64 {
+                    self.builder
+                        .build_int_s_extend(*iv, i64_ty, "fmt_int_sext")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    *iv
+                };
+                let str_ptr = self
+                    .build_call(
+                        to_i64_fn,
+                        &[BasicMetadataValueEnum::IntValue(iv64)],
+                        "to_str_i64",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_to_string_i64 returned void")?
+                    .into_pointer_value();
+                return Ok(str_ptr);
+            }
+        }
+        if let BasicMetadataValueEnum::FloatValue(fv) = arg {
+            let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+            let str_ptr = self
+                .build_call(
+                    to_f64_fn,
+                    &[BasicMetadataValueEnum::FloatValue(*fv)],
+                    "to_str_f64",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("mimi_to_string_f64 returned void")?
+                .into_pointer_value();
+            return Ok(str_ptr);
+        }
+        // Raw C string / plain pointer with a known non-aggregate type:
+        // pass through unchanged.
+        if let BasicMetadataValueEnum::PointerValue(pv) = arg {
+            let is_list = arg_type.starts_with("List");
+            let is_record = !arg_type.is_empty()
+                && self
+                    .type_defs
+                    .get(arg_type)
+                    .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
+            if !is_list && !is_record {
+                return Ok(*pv);
+            }
+        }
+        // No compile-time type info (legacy codegen path): shape-detect the
+        // common struct layouts so `format` keeps working there too.
+        if arg_type.is_empty() {
+            if let BasicMetadataValueEnum::StructValue(sv) = arg {
+                let fields = sv.get_type().get_field_types();
+                let is_str = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_));
+                let is_list = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64)
+                    && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                if is_str {
+                    let ptr = self
+                        .build_extract_value((*sv).into(), 0, "fmt_str_ptr")?
+                        .into_pointer_value();
+                    return Ok(ptr);
+                }
+                if is_list {
+                    return self.emit_list_i32_to_string(*sv);
+                }
+            }
+        }
+        // Aggregates (List/Map/Set/Record/Enum/Option/Result/Tuple) and any
+        // remaining shapes: reuse the print-family dispatch, which lowers
+        // every supported type to a display C string ("%s"). Anything else
+        // is a compile error — never a panic.
+        match self.extract_print_arg(arg, i64_ty, arg_type)? {
+            (BasicMetadataValueEnum::PointerValue(pv), spec) if spec == "%s" => Ok(pv),
+            _ => Err(CompileError::TypeMismatch(format!(
+                "format: argument {} has unsupported type '{}'",
+                idx, arg_type
+            ))),
+        }
     }
 
     // === Binary I/O & streaming line reading (codegen) ===
