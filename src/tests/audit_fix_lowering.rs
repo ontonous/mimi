@@ -1100,3 +1100,81 @@ func main() -> i32 {
     let legacy = compile_and_run(src).expect("legacy -NaN inside ieee");
     assert_eq!(legacy.trim(), "1", "legacy: -NaN inside ieee_float");
 }
+
+// ─── D-2 — Set-method dispatch prefix hijack of user `Settings` type ───────
+// legacy method.rs:210 dispatched to compile_set_method when obj_type
+// `starts_with("Set")` || `starts_with("set")`. A user type whose name merely
+// STARTS with "Set" (e.g. `Settings`), once its method name collided with the
+// builtin set table (here: trait `size()`), would be compiled against
+// mimi_set_size on a non-set struct (garbage/UB). The real set type boxes to
+// `Set<T>`, so the guard is now exact: bare `set`/`Set` or a `Set<`
+// instantiation.
+
+#[test]
+fn audit_d2_settings_method_not_hijacked_by_set_dispatch() {
+    // A `Settings` struct's `size()` must run its trait impl on EVERY
+    // backend. Pre-fix the legacy path would match `starts_with("Set")` and
+    // call compile_set_method on the struct.
+    let src = r#"
+trait Sized {
+    func size() -> i32
+}
+type Settings {
+    n: i32
+}
+impl Sized for Settings {
+    func size() -> i32 { 7 }
+}
+func main() -> i32 {
+    let s = Settings { n: 1 }
+    println(s.size())
+    0
+}
+"#;
+    check_source(src).expect("Settings trait size type checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "7", "bytecode: Settings.size() = 7");
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved Settings.size() must run");
+    assert_eq!(
+        resolved.trim(),
+        "7",
+        "resolved: Settings.size() not hijacked"
+    );
+    let legacy = compile_and_run(src).expect("legacy Settings.size() must run");
+    assert_eq!(
+        legacy.trim(),
+        "7",
+        "legacy: Settings.size() not hijacked by mimi_set_size (D-2)"
+    );
+}
+
+#[test]
+fn audit_d2_real_set_size_still_dispatches_to_builtin() {
+    // Regression guard: a genuine `Set<T>` `.size()` must STILL route to the
+    // builtin (mimi_set_size) on the legacy path (method.rs:210), now via the
+    // exact `Set<` guard. (Resolved Set.SIZE dispatch is a SEPARATE gap — it
+    // reports E0722 `{ptr,i64} → ptr` in resolved_emit, not D-2's prefix
+    // hijack; asserted here only for the legacy compile path + VM.)
+    let src = r#"
+func main() -> i32 {
+    let s = from_json::<Set<i32>>("[4,1,1]")
+    println(s.size())
+    0
+}
+"#;
+    check_source(src).expect("real Set size type checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "2", "bytecode: Set size = 2 (dedup)");
+    if !can_link() {
+        return;
+    }
+    let legacy = compile_and_run(src).expect("legacy Set size");
+    assert_eq!(
+        legacy.trim(),
+        "2",
+        "legacy: genuine Set.size() still dispatches to builtin (D-2 guard is exact)"
+    );
+}
