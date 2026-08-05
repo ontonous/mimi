@@ -874,6 +874,13 @@ impl<'a> BytecodeVM<'a> {
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a < b,
                         (Value::String(a), Value::String(b)) => a < b,
+                        // C-3 defense-in-depth: if the compiler mis-emits an
+                        // int compare for float operands (type info gap), do
+                        // the NUMERIC compare instead of the old lexicographic
+                        // `to_string()` fallback (9.5 < 10.5 was false).
+                        (Value::Float(a), Value::Float(b)) => a < b,
+                        (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
+                        (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
                         (a, b) => a.to_string() < b.to_string(),
                     };
                     frame.regs[rd as usize] = Value::Bool(result);
@@ -883,6 +890,9 @@ impl<'a> BytecodeVM<'a> {
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a > b,
                         (Value::String(a), Value::String(b)) => a > b,
+                        (Value::Float(a), Value::Float(b)) => a > b,
+                        (Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
+                        (Value::Float(a), Value::Int(b)) => *a > (*b as f64),
                         (a, b) => a.to_string() > b.to_string(),
                     };
                     frame.regs[rd as usize] = Value::Bool(result);
@@ -892,6 +902,9 @@ impl<'a> BytecodeVM<'a> {
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a <= b,
                         (Value::String(a), Value::String(b)) => a <= b,
+                        (Value::Float(a), Value::Float(b)) => a <= b,
+                        (Value::Int(a), Value::Float(b)) => (*a as f64) <= *b,
+                        (Value::Float(a), Value::Int(b)) => *a <= (*b as f64),
                         (a, b) => a.to_string() <= b.to_string(),
                     };
                     frame.regs[rd as usize] = Value::Bool(result);
@@ -901,6 +914,9 @@ impl<'a> BytecodeVM<'a> {
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a >= b,
                         (Value::String(a), Value::String(b)) => a >= b,
+                        (Value::Float(a), Value::Float(b)) => a >= b,
+                        (Value::Int(a), Value::Float(b)) => (*a as f64) >= *b,
+                        (Value::Float(a), Value::Int(b)) => *a >= (*b as f64),
                         (a, b) => a.to_string() >= b.to_string(),
                     };
                     frame.regs[rd as usize] = Value::Bool(result);

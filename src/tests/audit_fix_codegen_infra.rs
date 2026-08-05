@@ -230,3 +230,54 @@ fn generic_body_defer_lifo_and_early_return() {
         "work\nsecond\nfirst\n7"
     );
 }
+
+// ── 0.34.36 audit wave-2 #6: resolved slice copy + let-binding type reg ──
+// The resolved slice emitter CLAMPED indices and ALIASED the source buffer
+// (new_data = data + offset): scope-exit `free(data+offset)` freed a non-malloc
+// base → munmap_chunk invalid pointer / double free on `println(sub)`. Also,
+// top-level `let sub = xs[a .. b]` never registered the List type, so
+// `println(sub)` fell into the puts fast path and printed the list struct
+// pointer as a C string (garbage). Fixed: VM semantics (negative wrap, OOB
+// E0814 trap, fresh-buffer copy) + type registration in func.rs/block.rs.
+
+#[test]
+fn audit2_cg_slice_positive_copy_and_print() {
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3, 4, 5]
+    let sub = xs[1 .. 3]
+    println(sub)
+    0
+}
+"#;
+    dual_eq!(src, "[2, 3]");
+}
+
+#[test]
+fn audit2_cg_slice_reused_binding_no_double_free() {
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3, 4, 5]
+    let sub = xs[0 .. 2]
+    println(sub)
+    println(sub)
+    println(xs)
+    0
+}
+"#;
+    dual_eq!(src, "[1, 2]\n[1, 2]\n[1, 2, 3, 4, 5]");
+}
+
+#[test]
+fn audit2_cg_slice_negative_wrap_parity() {
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3, 4, 5]
+    let sub = xs[-2 .. ]
+    println(sub)
+    0
+}
+"#;
+    // VM: (len + -2).max(0) = 3 → [4, 5]
+    dual_eq!(src, "[4, 5]");
+}
