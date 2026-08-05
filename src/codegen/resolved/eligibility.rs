@@ -499,15 +499,14 @@ fn require_block(
                 }
             }
             ResolvedStmtKind::Continue => {}
-            ResolvedStmtKind::Scope { kind, body } => {
-                // Only plain lexical scopes are in the resolved native slice.
-                if !matches!(kind, crate::core::ir::ResolvedScopeKind::Lexical) {
-                    return Err(UnsupportedResolvedNode::new(
-                        owner,
-                        &statement.node_id,
-                        format!("scope kind {kind:?} is not in the resolved native slice"),
-                    ));
-                }
+            ResolvedStmtKind::Scope { body, .. } => {
+                // H-8 (full-audit-2026-08-05): scope kind (Unsafe/IeeeFloat/
+                // Arena/Allocator wrappers) does not change codegen lowering —
+                // the emitter emits the inner block identically for every kind
+                // and discards statement values. Accept all kinds so tail
+                // wrapper blocks stay on the resolved native slice; float
+                // semantics inside IeeeFloat are still gated by the recursive
+                // require_block below.
                 require_block(program, owner, body, entry_source)?;
             }
             ResolvedStmtKind::Loop(body) => {
@@ -801,14 +800,10 @@ fn require_expr(
             }
             Ok(())
         }
-        ResolvedExprKind::Scope { kind, body } => {
-            if !matches!(kind, crate::core::ir::ResolvedScopeKind::Lexical) {
-                return Err(UnsupportedResolvedNode::new(
-                    owner,
-                    &expression.node_id,
-                    format!("scope kind {kind:?} is not in the resolved native slice"),
-                ));
-            }
+        ResolvedExprKind::Scope { body, .. } => {
+            // H-8: scope kind does not change codegen lowering; accept all
+            // wrapper kinds so tail wrapper blocks (unsafe/ieee_float/arena/
+            // alloc) keep their implicit value on the resolved native slice.
             require_block(program, owner, body, entry_source)
         }
         // 0.32.10: Try expression (`?` operator). The inner value must be
