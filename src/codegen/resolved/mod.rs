@@ -512,8 +512,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // The resolved emitter's `register_heap_slot` only tracks the data
         // pointer of list/string allocas.  Any struct field whose LLVM type
         // is a PointerType *may* reference such a tracked allocation.
+        // 0.34.36 (audit §6.1): the old check was SHALLOW — it only looked at
+        // the top-level fields, so a nested record (`Outer { inner: Inner }`
+        // where `Inner` holds a string/list) whose direct fields were all
+        // StructType fell through to free_heap_allocs and could free the
+        // inner string's data out from under the caller. Recurse into
+        // nested struct fields: any transitively-reachable pointer means the
+        // return owns heap data.
         let return_owns_heap = matches!(result_type, BasicTypeEnum::StructType(st) if {
-            st.get_field_types().iter().any(|f| matches!(f, BasicTypeEnum::PointerType(_)))
+            fn type_owns_heap(t: &BasicTypeEnum<'_>) -> bool {
+                match t {
+                    BasicTypeEnum::PointerType(_) => true,
+                    BasicTypeEnum::StructType(s) => {
+                        s.get_field_types().iter().any(type_owns_heap)
+                    }
+                    _ => false,
+                }
+            }
+            st.get_field_types().iter().any(type_owns_heap)
         });
         if return_owns_heap {
             self.generator.drain_heap_scope();
@@ -5208,36 +5224,102 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .build_load(BasicTypeEnum::PointerType(ptr_ty), data_gep, "slice_data")?
             .into_pointer_value();
 
-        // Compute start index (default 0).
-        let start_idx = match start {
+        // 0.34.36 (audit wave-2 #6 / slice 4th-axis): this emitter previously
+        // CLAMPED out-of-bounds indices to [0, len] and ALIASED the source
+        // data buffer (`new_data = data + offset`). Both diverge from the VM
+        // reference (`builtin_slice`, interp/bytecode/builtins/list.rs):
+        //   - negative indices WRAP Python-style: (len + idx).max(0)
+        //   - start/end > len and start > end TRAP (E0814 slice error)
+        //   - the result COPIES the range into a fresh buffer (l[start..end]
+        //     .to_vec()) — aliasing made scope-exit `free(data+offset)` free a
+        //     non-malloc base → munmap_chunk invalid pointer / double free.
+        let zero = i64_ty.const_int(0, false);
+        let function = self.current_function()?;
+
+        // Resolve start (default 0) and end (default len).
+        let start_raw = match start {
             Some(expr) => {
-                let val = self.emit_expr(expr, frame)?;
-                self.coerce_to_i64(val)?
+                let v = self.emit_expr(expr, frame)?;
+                self.coerce_to_i64(v)?
             }
-            None => i64_ty.const_int(0, false),
+            None => zero,
         };
-        // Compute end index (default: list length).
-        let end_idx = match end {
+        let end_raw = match end {
             Some(expr) => {
-                let val = self.emit_expr(expr, frame)?;
-                self.coerce_to_i64(val)?
+                let v = self.emit_expr(expr, frame)?;
+                self.coerce_to_i64(v)?
             }
             None => list_len,
         };
 
-        // Clamp start to [0, list_len].
-        let zero = i64_ty.const_int(0, false);
-        let start_neg = self
-            .generator
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, start_idx, zero, "start_neg")
-            .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
-        let start_idx = self
-            .generator
-            .builder
-            .build_select(start_neg, zero, start_idx, "start_clamp_low")
-            .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
-            .into_int_value();
+        // Negative wrap (VM parity): idx < 0 → (len + idx).max(0).
+        let wrap_idx = |b: &inkwell::builder::Builder<'ctx>,
+                        idx: inkwell::values::IntValue<'ctx>,
+                        len: inkwell::values::IntValue<'ctx>,
+                        label: &str|
+         -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+            let is_neg = b
+                .build_int_compare(
+                    inkwell::IntPredicate::SLT,
+                    idx,
+                    zero,
+                    &format!("{label}_neg"),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+            let wrapped = b
+                .build_int_add(idx, len, &format!("{label}_wrap"))
+                .map_err(|e| CompileError::LlvmError(format!("slice add: {e}")))?;
+            let idx = b
+                .build_select(is_neg, wrapped, idx, &format!("{label}_wrapped"))
+                .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+                .into_int_value();
+            // After wrap, clamp to 0 (max(0, len+idx) for very negative idx).
+            let still_neg = b
+                .build_int_compare(
+                    inkwell::IntPredicate::SLT,
+                    idx,
+                    zero,
+                    &format!("{label}_still_neg"),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+            let idx = b
+                .build_select(still_neg, zero, idx, &format!("{label}_max0"))
+                .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+                .into_int_value();
+            Ok(idx)
+        };
+
+        // Emit a trap block that aborts with a VM-shaped E0814 message and
+        // branches to the ok block on the happy path.
+        let emit_bounds_trap = |this: &Self,
+                                cond: inkwell::values::IntValue<'ctx>,
+                                bb_ok: inkwell::basic_block::BasicBlock<'ctx>,
+                                msg: &str|
+         -> Result<(), CompileError> {
+            let bb_trap = this
+                .generator
+                .context
+                .append_basic_block(function, "slice_oob_trap");
+            this.generator.build_cond_br(cond, bb_trap, bb_ok)?;
+            this.generator.builder.position_at_end(bb_trap);
+            let abort_fn = this.generator.get_or_declare_abort_fn();
+            let msg_global = this
+                .generator
+                .builder
+                .build_global_string_ptr(msg, "slice_oob_msg")
+                .map_err(|e| CompileError::LlvmError(format!("slice msg: {e}")))?;
+            this.generator.build_call(
+                abort_fn,
+                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                    msg_global.as_pointer_value(),
+                )],
+                "slice_trap",
+            )?;
+            Ok(())
+        };
+
+        // start > len → trap (VM: "slice start out of bounds").
+        let start_idx = wrap_idx(&self.generator.builder, start_raw, list_len, "start")?;
         let start_exceeds = self
             .generator
             .builder
@@ -5248,38 +5330,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "start_exceeds",
             )
             .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
-        let start_idx = self
+        let bb_start_ok = self
             .generator
-            .builder
-            .build_select(start_exceeds, list_len, start_idx, "start_clamp_high")
-            .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
-            .into_int_value();
+            .context
+            .append_basic_block(function, "slice_start_ok");
+        emit_bounds_trap(
+            self,
+            start_exceeds,
+            bb_start_ok,
+            "[E0814] slice start out of bounds",
+        )?;
+        self.generator.builder.position_at_end(bb_start_ok);
 
-        // Clamp end to [0, list_len].
-        let end_neg = self
-            .generator
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, end_idx, zero, "end_neg")
-            .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
-        let end_idx = self
-            .generator
-            .builder
-            .build_select(end_neg, zero, end_idx, "end_clamp_low")
-            .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
-            .into_int_value();
+        // end > len → trap (VM: "slice end out of bounds").
+        let end_idx = wrap_idx(&self.generator.builder, end_raw, list_len, "end")?;
         let end_exceeds = self
             .generator
             .builder
             .build_int_compare(inkwell::IntPredicate::SGT, end_idx, list_len, "end_exceeds")
             .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
-        let end_idx = self
+        let bb_end_ok = self
             .generator
-            .builder
-            .build_select(end_exceeds, list_len, end_idx, "end_clamp_high")
-            .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
-            .into_int_value();
+            .context
+            .append_basic_block(function, "slice_end_ok");
+        emit_bounds_trap(
+            self,
+            end_exceeds,
+            bb_end_ok,
+            "[E0814] slice end out of bounds",
+        )?;
+        self.generator.builder.position_at_end(bb_end_ok);
 
-        // new_len = max(0, end - start).
+        // start > end → trap (VM: "slice start > end").
         let start_gt_end = self
             .generator
             .builder
@@ -5290,20 +5372,67 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "slice_start_gt_end",
             )
             .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
-        let safe_end = self
+        let bb_range_ok = self
             .generator
-            .builder
-            .build_select(start_gt_end, start_idx, end_idx, "slice_safe_end")
-            .map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
-            .into_int_value();
+            .context
+            .append_basic_block(function, "slice_range_ok");
+        emit_bounds_trap(self, start_gt_end, bb_range_ok, "[E0814] slice start > end")?;
+        self.generator.builder.position_at_end(bb_range_ok);
+
+        // new_len = end - start (>= 0 by the traps above).
         let new_len = self
             .generator
             .builder
-            .build_int_sub(safe_end, start_idx, "slice_new_len")
+            .build_int_sub(end_idx, start_idx, "slice_new_len")
             .map_err(|e| CompileError::LlvmError(format!("slice sub: {e}")))?;
 
-        // new_data = data + start * 8 (byte offset into i64 array).
+        // Copy path: fresh malloc + memcpy (VM `.to_vec()` parity — the
+        // result OWNS its buffer; no aliasing, no free(non-malloc-base)).
         let elem_size = i64_ty.const_int(8, false);
+        let is_empty = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, new_len, zero, "slice_empty_cmp")
+            .map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+        let bb_empty = self
+            .generator
+            .context
+            .append_basic_block(function, "slice_empty_bb");
+        let bb_copy = self
+            .generator
+            .context
+            .append_basic_block(function, "slice_copy_bb");
+        let bb_merge = self
+            .generator
+            .context
+            .append_basic_block(function, "slice_merge_bb");
+        self.generator.build_cond_br(is_empty, bb_empty, bb_copy)?;
+
+        // Empty: null data (VM returns Vec::new() → null data, len 0).
+        self.generator.builder.position_at_end(bb_empty);
+        let null_data = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null();
+        let empty_list = self.generator.build_list_struct(new_len, null_data)?;
+        self.generator
+            .builder
+            .build_unconditional_branch(bb_merge)
+            .map_err(|e| CompileError::LlvmError(format!("slice br: {e}")))?;
+        let bb_empty_end =
+            self.generator.builder.get_insert_block().ok_or_else(|| {
+                CompileError::LlvmError("no insert block after empty slice".into())
+            })?;
+
+        // Copy: malloc `new_len * 8` bytes, memcpy from data + start*8.
+        self.generator.builder.position_at_end(bb_copy);
+        let bytes = self
+            .generator
+            .builder
+            .build_int_mul(new_len, elem_size, "slice_bytes")
+            .map_err(|e| CompileError::LlvmError(format!("slice mul: {e}")))?;
+        let dest = self.generator.malloc_or_abort(bytes, "slice_data")?;
         let byte_offset = self
             .generator
             .builder
@@ -5314,25 +5443,50 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .builder
             .build_pointer_cast(data_ptr, ptr_ty, "data_as_i8")
             .map_err(|e| CompileError::LlvmError(format!("slice cast: {e}")))?;
-        let new_data_i8 = self.generator.build_in_bounds_gep(
+        let src_i8 = self.generator.build_in_bounds_gep(
             self.generator.context.i8_type(),
             data_i8,
             &[byte_offset],
-            "slice_new_data",
+            "slice_src",
         )?;
-        let new_data_ptr = self
+        let memcpy_fn = self.generator.get_runtime_fn("memcpy")?;
+        self.generator.build_call(
+            memcpy_fn,
+            &[
+                inkwell::values::BasicMetadataValueEnum::PointerValue(dest),
+                inkwell::values::BasicMetadataValueEnum::PointerValue(src_i8),
+                inkwell::values::BasicMetadataValueEnum::IntValue(bytes),
+            ],
+            "slice_memcpy",
+        )?;
+        let copy_list = self.generator.build_list_struct(new_len, dest)?;
+        self.generator
+            .builder
+            .build_unconditional_branch(bb_merge)
+            .map_err(|e| CompileError::LlvmError(format!("slice br: {e}")))?;
+        let bb_copy_end =
+            self.generator.builder.get_insert_block().ok_or_else(|| {
+                CompileError::LlvmError("no insert block after slice copy".into())
+            })?;
+
+        self.generator.builder.position_at_end(bb_merge);
+        let phi = self
             .generator
             .builder
-            .build_pointer_cast(new_data_i8, ptr_ty, "slice_data_void")
-            .map_err(|e| CompileError::LlvmError(format!("slice cast 2: {e}")))?;
-
-        // Build result list struct { new_len, new_data_ptr }.
-        let result_ptr = self.generator.build_list_struct(new_len, new_data_ptr)?;
-        self.generator.build_load(
+            .build_phi(empty_list.get_type(), "slice_result_phi")
+            .map_err(|e| CompileError::LlvmError(format!("slice phi: {e}")))?;
+        phi.add_incoming(&[
+            (
+                &empty_list as &dyn inkwell::values::BasicValue,
+                bb_empty_end,
+            ),
+            (&copy_list as &dyn inkwell::values::BasicValue, bb_copy_end),
+        ]);
+        return self.generator.build_load(
             BasicTypeEnum::StructType(list_ty),
-            result_ptr.into_pointer_value(),
+            phi.as_basic_value().into_pointer_value(),
             "slice_result",
-        )
+        );
     }
 
     ///   Result<T, E> → {i1 disc, T ok_val, i64 err_val}

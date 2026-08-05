@@ -5901,6 +5901,19 @@ impl BytecodeCompiler {
                 }
             }
             Expr::Unary(_, e) => self.infer_expr_type(fc, e),
+            // C-3 (record hot spot): a record literal is a nominal User type.
+            // Pre-fix this arm was `_ => Unknown`, so `let p = Pair { ... }`
+            // tracked `p` as Unknown, the `Expr::Field` arm below could not
+            // resolve field types through record_fields, and `p.x < p.y`
+            // compiled Op::LtInt — the VM's non-numeric fallback then did a
+            // LEXICOGRAPHIC `to_string()` compare (9.5 < 10.5 → false).
+            Expr::Record { ty, .. } => {
+                if let Some(n) = ty.as_deref() {
+                    VarType::User(n.to_string())
+                } else {
+                    VarType::Unknown
+                }
+            }
             // C-3: call results resolve through the return-type directory.
             // Pre-fix every call result was Unknown, so `let a = half(19.0)`
             // tracked `a` as Unknown and `a < b` compiled Op::LtInt even when

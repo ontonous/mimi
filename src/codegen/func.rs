@@ -1979,6 +1979,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if !elem_type.is_empty() {
                                 self.var_type_names.insert(name.clone(), elem_type);
                             }
+                        } else if let Expr::SliceExpr { target, .. } = init.unlocated() {
+                            // 0.34.36 (audit wave-2 #6): a slice `xs[a .. b]`
+                            // keeps the target's element type (List<T> →
+                            // List<T>). Without this registration,
+                            // `let sub = xs[1 .. 3]` (TOP-LEVEL body) left
+                            // `sub` untyped, so `println(sub)` fell into the
+                            // puts fast path and printed the list struct
+                            // pointer as a C string (garbage). Mirror the
+                            // source list's type so println dispatches to the
+                            // list formatter. (Nested-block counterpart:
+                            // block.rs compile_block.)
+                            let target_type = self.infer_object_type(target, vars);
+                            if target_type.starts_with("List") || target_type == "set" {
+                                self.var_type_names
+                                    .insert(name.clone(), target_type.clone());
+                            }
                         } else if let Expr::Call(callee, call_args) = init.unlocated() {
                             if let Expr::Field(obj, method_name) = callee.unlocated() {
                                 if method_name == "spawn" || method_name == "spawn_detached" {

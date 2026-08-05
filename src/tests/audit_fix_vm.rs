@@ -1158,3 +1158,55 @@ func main() -> i64 {
         "saturating conversion + truncate-toward-zero (reference semantics)"
     );
 }
+
+// ── C-3: float field comparisons must be NUMERIC, not lexicographic ──
+// audit 2026-08-05 §9.1/C-3: `infer_expr_type` had no `Expr::Record` arm, so
+// `let p = Pair { x: 9.5, y: 10.5 }; p.x < p.y` tracked `p` as Unknown and
+// compiled Op::LtInt — the VM's old non-numeric fallback compared
+// `to_string()` lexicographically ("9.5" < "10.5" → '9'>'1' → false).
+// Fixed on BOTH sides: record literals now infer as VarType::User → field
+// types resolve through record_fields → LT_FLOAT; and the VM's int-compare
+// ops do a numeric compare on Float operands (defense-in-depth).
+
+#[test]
+fn audit2_vma_c3_float_record_field_compare_numeric() {
+    let src = r#"
+type Pair { x: f64, y: f64 }
+func main() -> i32 {
+    let p = Pair { x: 9.5, y: 10.5 }
+    println(p.x < p.y)
+    println(p.y > p.x)
+    println(p.x <= p.x)
+    println(p.y >= p.x)
+    0
+}
+"#;
+    let (_, out) = run_source_with_stdout(src);
+    assert_eq!(
+        out.trim(),
+        "true\ntrue\ntrue\ntrue",
+        "float record field comparisons must be numeric (9.5 < 10.5)"
+    );
+}
+
+#[test]
+fn audit2_vma_c3_float_record_field_compare_codegen_parity() {
+    let src = r#"
+type Pair { x: f64, y: f64 }
+func main() -> i32 {
+    let p = Pair { x: 9.5, y: 10.5 }
+    println(p.x < p.y)
+    0
+}
+"#;
+    let vm_out = run_source_with_stdout(src);
+    assert_eq!(vm_out.1.trim(), "true", "VM reference");
+    if can_link() {
+        let cg_out = compile_and_run(src).expect("codegen should compile & run");
+        assert_eq!(
+            cg_out.trim(),
+            "true",
+            "codegen parity: float record field compare"
+        );
+    }
+}
