@@ -61,7 +61,15 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
         match stmt.unlocated() {
             Stmt::Expr(expr) => return Some(expr.clone()),
             Stmt::If { cond, then_, else_ } => {
-                return extract_if_return(cond, then_, else_);
+                if let Some(expr) = extract_if_return(cond, then_, else_) {
+                    return Some(expr);
+                }
+                // #40 (full-audit-2026-08-05 §11): an `if let` whose branch
+                // yields no extractable value (e.g. `if let Some(x) = opt {
+                // y += x }` — zero matches produce no value) must NOT fall
+                // through to `None`. Mirrors the C-6 forward-scan fix: keep
+                // looking for the true tail. Previously the swallowed tail
+                // made func.rs bind `result = 0`, faking a Proven.
             }
             // C-6: a tail bare block (including unsafe/ieee_float-style
             // wrapper blocks) contributes its own implicit value. Previously

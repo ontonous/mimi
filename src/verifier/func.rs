@@ -842,16 +842,22 @@ impl VerifierCtx {
                 );
             }
         } else if func.ret.is_some() {
-            // No return expression found but function has a return type:
-            // bind result to 0 so postconditions don't pass vacuously.
-            if returns_real {
-                if let Some(r) = vars.get_real("result") {
-                    let zero = Z3Real::from_int(&Z3Int::from_i64(0));
-                    session.assert(r.eq(&zero));
-                }
-            } else if let Some(i) = vars.get_int("result") {
-                session.assert(i.eq(Z3Int::from_i64(0)));
-            }
+            // #40 (full-audit-2026-08-05 §11): binding result to 0 here
+            // FABRICATES a return value — `ensures: result == 0` then proves
+            // against a constraint the real program never produces when the
+            // tail expression is not extractable. A fake Proven. Fail closed
+            // instead: no extractable return expression, no proof.
+            return VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::NotInTrustedSubset,
+                message: "no extractable return expression for a function with a return type — cannot prove ensures (fail-closed)"
+                    .into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count: requires_exprs.len(),
+                artifact: None,
+                trusted_subset_domain: None,
+            };
         }
 
         // 1.2: Cross-module ensures propagation — for each function call in
