@@ -188,6 +188,66 @@ func main() -> i32 {
     assert_eq!(native.trim(), "42", "codegen: statement value discarded");
 }
 
+// ─── H-20 — user `deref` method hijacked by the 0.5 shared-deref branch ─────
+
+#[test]
+fn audit_h20_user_deref_method_not_hijacked_by_shared_deref() {
+    // CRITICAL (codegen): method.rs 0.5 branch ran `compile_shared_deref`
+    // whenever the method name was "deref" and the receiver was an Ident,
+    // BEFORE trait dispatch. An ordinary struct receiver was then unwrapped
+    // as Option<shared T> (extract field1 → inttoptr → load) → garbage read
+    // / segfault, and the user's `deref` method was unreachable. The branch
+    // is now gated on the shared registry + Option<shared …> type shape.
+    let src = r#"
+type Point { x: i32, y: i32 }
+
+trait Deref {
+    func deref() -> i32
+}
+impl Deref for Point {
+    func deref() -> i32 { self.x }
+}
+
+func main() -> i32 {
+    let p = Point { x: 42, y: 7 }
+    println(p.deref())
+    0
+}
+"#;
+    check_source(src).expect("user deref method checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "42", "bytecode: trait deref dispatches");
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src).expect("codegen user deref method");
+    assert_eq!(
+        native.trim(),
+        "42",
+        "codegen: trait deref dispatches (must not be hijacked)"
+    );
+}
+
+#[test]
+fn audit_h20_shared_var_deref_still_works_after_gate() {
+    // Companion: the new gate must not break the genuine shared deref path.
+    let src = r#"
+func main() -> i32 {
+    shared x = 42;
+    println(x.deref());
+    0
+}
+"#;
+    check_source(src).expect("shared deref checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "42", "bytecode: shared deref");
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src).expect("codegen shared deref");
+    assert_eq!(native.trim(), "42", "codegen: shared deref");
+}
+
 // ─── #3 — nested func inside `defer` ─────────────────────────────────────────
 
 #[test]

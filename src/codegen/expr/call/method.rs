@@ -32,10 +32,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         // load the value from the heap pointer directly.
         // Also handles raw pointer values from w.upgrade() which returns i8*,
         // and Option<shared T> values where deref extracts payload+loads.
+        // H-20: this branch must only fire for genuine shared/weak receivers.
+        // A user method named `deref` on an ordinary struct was hijacked here
+        // BEFORE trait dispatch and unwrapped as Option<shared T>
+        // (field1 → inttoptr → load) → garbage read / segfault. Gate on the
+        // shared registry (authoritative: inserted at `shared let`/`weak`
+        // declaration) plus the Option<shared …> type shape; anything else
+        // falls through to normal trait/method dispatch.
         if method_name == "deref" {
             if let Expr::Ident(name) = obj.unlocated() {
-                if let Some(val) = self.compile_shared_deref(name, vars)? {
-                    return Ok(val);
+                let is_deref_target = self.shared_var_names.contains(name.as_str())
+                    || obj_type.starts_with("Option<shared ")
+                    || obj_type.starts_with("Option<weak ");
+                if is_deref_target {
+                    if let Some(val) = self.compile_shared_deref(name, vars)? {
+                        return Ok(val);
+                    }
                 }
             }
         }
@@ -756,6 +768,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .into_pointer_value();
             let val = self.build_load(ty, heap_ptr, &format!("{}_deref", name))?;
             return Ok(Some(val));
+        }
+
+        // H-20: ordinary structs are never deref sources. The branches below
+        // unwrap a variable as a raw pointer (load) or as Option<shared T>
+        // (field1 → inttoptr → load). A plain struct's field1 would be treated
+        // as a heap pointer → garbage read / segfault. All named struct
+        // variables have a recorded type name at declaration, so gate on it.
+        if let Some(ty_name) = self.var_type_names.get(name) {
+            let is_deref_source = ty_name.starts_with("shared ")
+                || ty_name.starts_with("Option<shared ")
+                || ty_name.starts_with("Option<weak ")
+                || ty_name.starts_with("weak ")
+                || ty_name.starts_with("local_shared ")
+                || ty_name.starts_with("c_shared ")
+                || ty_name.starts_with("*");
+            if !is_deref_source {
+                return Ok(None);
+            }
         }
 
         if let Some(&(alloca, ty)) = vars.get(name) {
