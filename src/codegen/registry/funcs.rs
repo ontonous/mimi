@@ -22,6 +22,11 @@ struct ExternFnSignature<'ctx> {
     extern_fn_type: FunctionType<'ctx>,
     is_complex_reprc_ret: bool,
     c_struct_ty: Option<StructType<'ctx>>,
+    /// (extern param index, repr(C) record name) pairs that must be passed by
+    /// value on the stack (SysV MEMORY class, >16B). LLVM encodes this as a
+    /// `byval` pointer parameter — see export.rs M-010 for the ABI rationale.
+    /// The index is into the raw extern fn type (before any sret insertion).
+    byval_params: Vec<(u32, String)>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -474,6 +479,21 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let call = self.build_call(extern_fn, &wrapper_args, "extern_call")?;
 
+        // M-010 alignment: mirror the byval attributes from the extern
+        // declaration onto this call site (LLVM requires both sides to agree
+        // for byval; a mismatch makes the backend pick different argument
+        // conventions between caller and callee).
+        {
+            use inkwell::attributes::{Attribute, AttributeLoc};
+            let arg_offset: u32 = if sig.is_complex_reprc_ret { 1 } else { 0 };
+            for (param_idx, rname) in &sig.byval_params {
+                let c_sty = self.c_sty_for_reprc_record(rname)?;
+                let kind = Attribute::get_named_enum_kind_id("byval");
+                let attr = self.context.create_type_attribute(kind, c_sty.into());
+                call.add_attribute(AttributeLoc::Param(param_idx + arg_offset), attr);
+            }
+        }
+
         // Free temporary allocations, release shared params, restore handlers.
         self.emit_ffi_cleanup(&ef, wrapper_fn, &json_strings, &shared_params)?;
 
@@ -544,7 +564,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let mut extern_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
-        for p in &ef.params {
+        let mut byval_params: Vec<(u32, String)> = Vec::new();
+        for (pi, p) in ef.params.iter().enumerate() {
             let llvm_ty = match p.ty.unlocated() {
                 crate::ast::Type::Name(n, _)
                     if n == "string"
@@ -565,6 +586,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if types::is_simple_reprc_record(fields) {
                                 BasicMetadataTypeEnum::IntType(self.context.i64_type())
                             } else {
+                                // 0.34.36 (M-010 alignment): MEMORY-class repr(C)
+                                // records are passed by VALUE on the stack in
+                                // SysV (>16B). The extern fn takes a `byval`
+                                // pointer parameter — record it so the
+                                // declaration and every call site can carry
+                                // the byval attribute (a plain ptr param made
+                                // the callee read rdi garbage instead of the
+                                // stack copy).
+                                byval_params.push((pi as u32, n.clone()));
                                 BasicMetadataTypeEnum::PointerType(i8_ptr_ty)
                             }
                         } else {
@@ -699,6 +729,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             extern_fn_type,
             is_complex_reprc_ret,
             c_struct_ty,
+            byval_params,
         })
     }
 
@@ -737,6 +768,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let cc = crate::ffi::abi_to_llvm_call_conv(abi);
         extern_fn.set_call_conventions(cc);
+
+        // 0.34.36 (M-010 alignment): MEMORY-class repr(C) record params are
+        // passed by value on the stack in SysV. Encode that as a `byval`
+        // attribute on the extern declaration AND every call site (matching
+        // export.rs); without it LLVM passes a plain register pointer and the
+        // C callee reads stack garbage. The sret return buffer occupies param
+        // 0 when present, so byval indices shift by one.
+        {
+            use inkwell::attributes::{Attribute, AttributeLoc};
+            let arg_offset: u32 = if sig.is_complex_reprc_ret { 1 } else { 0 };
+            for (param_idx, rname) in &sig.byval_params {
+                let c_sty = self.c_sty_for_reprc_record(rname)?;
+                let kind = Attribute::get_named_enum_kind_id("byval");
+                let attr = self.context.create_type_attribute(kind, c_sty.into());
+                extern_fn.add_attribute(AttributeLoc::Param(param_idx + arg_offset), attr);
+            }
+        }
         let wrapper_fn = self.module.add_function(
             &ef.name,
             sig.wrapper_fn_type,
