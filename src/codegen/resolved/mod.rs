@@ -1137,7 +1137,23 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
                 let left = self.emit_expr(left, frame)?;
                 let right = self.emit_expr(right, frame)?;
-                self.generator.compile_binop(binary_op(*op), left, right)
+                // §6-#57 (audit-2026-08-05, L1): the i32 width context for a
+                // binop comes from the checker-finalized canonical type of the
+                // whole expression — NOT from operand bit widths. `xs[0] + 1`
+                // on a List<i64> is i64 (both operands widened), while
+                // `x: i32 + 1` is i32; operand widths alone cannot tell the
+                // two apart (`1 + x: i32` is 64+32 but i32-width). The legacy
+                // heuristic (None) stays correct there because legacy list
+                // elements are i64 slots, but the resolved emitter passes the
+                // exact canonical answer.
+                let binop_i32_ctx = matches!(
+                    self.program.resolved_types().get(&expression.ty),
+                    Some(crate::core::ResolvedType::Primitive(
+                        crate::core::PrimitiveType::I32
+                    ))
+                );
+                self.generator
+                    .compile_binop(binary_op(*op), left, right, Some(binop_i32_ctx))
             }
             ResolvedExprKind::Unary { op, operand } => {
                 let value = self.emit_expr(operand, frame)?;
@@ -2553,9 +2569,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let pattern_matches = match &arm.pattern.kind {
                     ResolvedPatternKind::Literal(lit) => {
                         let lit_val = self.emit_literal(&arm.pattern.ty, lit)?;
-                        let cmp =
-                            self.generator
-                                .compile_binop(BinOp::EqCmp, scrutinee_val, lit_val)?;
+                        let cmp = self.generator.compile_binop(
+                            BinOp::EqCmp,
+                            scrutinee_val,
+                            lit_val,
+                            None,
+                        )?;
                         self.ensure_bool(cmp)?
                     }
                     ResolvedPatternKind::Wildcard | ResolvedPatternKind::Binding { .. } => {
@@ -2952,12 +2971,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             (ResolvedUnaryOp::Negate, BasicValueEnum::IntValue(value)) => {
                 let zero = value.get_type().const_zero();
                 self.generator
-                    .compile_binop(BinOp::Sub, zero.into(), value.into())
+                    .compile_binop(BinOp::Sub, zero.into(), value.into(), None)
             }
             (ResolvedUnaryOp::Negate, BasicValueEnum::FloatValue(value)) => {
                 let zero = value.get_type().const_zero();
                 self.generator
-                    .compile_binop(BinOp::Sub, zero.into(), value.into())
+                    .compile_binop(BinOp::Sub, zero.into(), value.into(), None)
             }
             // H-16 (full-audit 2026-08-05, HIGH): builtin predicates return
             // i64 0/1 in the LLVM ABI (operator.rs:201 ABI note), so a bare

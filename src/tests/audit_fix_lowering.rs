@@ -832,3 +832,164 @@ func main() -> i32 {
     assert_eq!(first.trim(), "7");
     assert_eq!(second.trim(), "7");
 }
+
+// ─── §6-#57 — binop i32 width context (operator.rs compile_binop) ───────────
+
+#[test]
+fn audit_h57_list_i64_element_add_literal_both_backends() {
+    // CRITICAL L1: the 0.34.34 i32_ctx predicate was `lhs is i32 || rhs is
+    // i32`. `let xs: List<i64> = [2147483647, 1]; xs[0] + 1` lowers the i64
+    // list element (runtime i64) against the i32 literal `1` — the checker
+    // unifies the binop to i64, so the mixed pair is a REAL i64 expression.
+    // The old predicate emitted a checked i64 add followed by a spurious i32
+    // range guard that trapped on 2147483648 (native E0802) while the VM
+    // printed it. The predicate is now `&&` (only two i32 operands are
+    // i32-width); this pins the L1 equivalence across VM, resolved
+    // (compile_checked) and legacy (compile_file) codegen.
+    let src = r#"
+func main() -> i32 {
+    let xs: List<i64> = [2147483647, 1]
+    println(xs[0] + 1)
+    0
+}
+"#;
+    check_source(src).expect("List<i64> element add literal checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "2147483648",
+        "bytecode: i64 element arithmetic"
+    );
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src)
+        .expect("resolved codegen List<i64> element add literal");
+    assert_eq!(
+        resolved.trim(),
+        "2147483648",
+        "resolved codegen: i64 element arithmetic (was spurious E0802)"
+    );
+    let legacy = compile_and_run(src).expect("legacy codegen List<i64> element add literal");
+    assert_eq!(
+        legacy.trim(),
+        "2147483648",
+        "legacy codegen: i64 element arithmetic"
+    );
+}
+
+#[test]
+fn audit_h57_i32_binop_still_traps_resolved_and_vm() {
+    // Guard against regressing the original 0.34.34 fix: a genuine i32 binop
+    // (both operands i32) must still trap at i32::MAX + 1 on the VM and on
+    // the resolved (compile_checked) codegen — the resolved emitter stores
+    // i32 variables as true i32 slots, so `&&` still sees two 32-bit
+    // operands and keeps the range guard.
+    let src = r#"
+func main() -> i32 {
+    let x: i32 = 2147483647
+    println(x + 1)
+    0
+}
+"#;
+    check_source(src).expect("i32 binop trap checks");
+    let vm_res = run_source_result(src);
+    assert!(
+        vm_res.is_err(),
+        "VM: i32 overflow must trap, got {:?}",
+        vm_res
+    );
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src);
+    assert!(
+        resolved.is_err(),
+        "resolved codegen: i32 overflow must trap, got {:?}",
+        resolved
+    );
+    // Legacy stores i32-annotated slots as true i32 (0.34.34) and int
+    // literals as i64, so `x + 1` is a 32+64 pair — the `||` heuristic
+    // still identifies the i32 context and traps, matching VM + resolved.
+    let legacy = compile_and_run(src);
+    assert!(
+        legacy.is_err(),
+        "legacy codegen: i32 overflow must trap, got {:?}",
+        legacy
+    );
+}
+
+#[test]
+fn audit_h57_i64_shift_not_truncated_to_32_bits() {
+    // The old `||` predicate also misrouted `x: i64 << 34` into a 32-bit
+    // shift (shift-amount masked by 31 → shifted by 2 → 4 instead of
+    // 17179869184) on the resolved emitter. `&&` restores width-based
+    // shifting: i64 expression → 64-bit shift.
+    let src = r#"
+func main() -> i32 {
+    let x: i64 = 1
+    println(x << 34)
+    0
+}
+"#;
+    check_source(src).expect("i64 shift checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "17179869184", "bytecode: i64 shift width");
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved codegen i64 shift");
+    assert_eq!(
+        resolved.trim(),
+        "17179869184",
+        "resolved codegen: i64 shift width"
+    );
+    let legacy = compile_and_run(src).expect("legacy codegen i64 shift");
+    assert_eq!(
+        legacy.trim(),
+        "17179869184",
+        "legacy codegen: i64 shift width"
+    );
+}
+
+#[test]
+fn audit_h57_for_loop_i64_element_arithmetic_both_backends() {
+    // §6-#57 core scenario: a List<i64> for-loop variable is i64-width —
+    // v + 1 must not trap even when v = 2147483647 (i32 range). The bytecode
+    // VM previously hard-wired loop variables to i64 anyway (no trap, no
+    // i32 range) but with the WRONG width for inferred i32 lists; the
+    // resolved codegen previously trapped v+1 through the spurious i32 binop
+    // context. All three paths must agree.
+    let src = r#"
+func main() -> i32 {
+    let xs: List<i64> = [2147483647, 1]
+    for v in xs {
+        println(v + 1)
+    }
+    0
+}
+"#;
+    check_source(src).expect("for-loop i64 element checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "2147483648\n2",
+        "bytecode: loop var i64 arithmetic"
+    );
+    if !can_link() {
+        return;
+    }
+    let resolved =
+        checked_codegen_compile_and_run(src).expect("resolved codegen for-loop i64 element");
+    assert_eq!(
+        resolved.trim(),
+        "2147483648\n2",
+        "resolved: loop var i64 arithmetic"
+    );
+    let legacy = compile_and_run(src).expect("legacy codegen for-loop i64 element");
+    assert_eq!(
+        legacy.trim(),
+        "2147483648\n2",
+        "legacy: loop var i64 arithmetic"
+    );
+}

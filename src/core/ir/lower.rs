@@ -835,6 +835,31 @@ impl BodyLowerer<'_> {
         }
     }
 
+    /// H-8 fix (2026-08-06, audit §6/#57 gate): a tail bare/wrapper block
+    /// carries an implicit value ONLY when it does not end in an explicit
+    /// `return`. A block ending in `return` terminates control flow — its
+    /// lowered result is None — so minting it as a value tail produces a
+    /// `ty = i32, result = None` phantom tail. That broke transition body
+    /// normalization (`{ { return S{} } }` lowered to an empty statement
+    /// list with the wrapper in `result`) and arena tail bodies
+    /// (`arena { let ref v = 42; *v }` became a tail Block expression
+    /// instead of a Scope statement).
+    fn tail_wrapper_has_implicit_value(tail: &Stmt) -> bool {
+        let body: &[Stmt] = match tail.unlocated() {
+            Stmt::Block(body) => body,
+            Stmt::Unsafe(body) | Stmt::IeeeFloat(body) | Stmt::Arena(body) => body,
+            Stmt::Alloc { body, .. } => body,
+            _ => return false,
+        };
+        match body.last().map(|s| s.unlocated()) {
+            // An explicit return terminates control flow; the block has no
+            // implicit tail value.
+            Some(Stmt::Return(_)) => false,
+            // Empty or otherwise non-value tail: not a value wrapper.
+            _ => !body.is_empty(),
+        }
+    }
+
     fn lower_block(
         &mut self,
         block: &[Stmt],
@@ -856,17 +881,15 @@ impl BodyLowerer<'_> {
                 // return), build failed (native) or the VM returned a wrong
                 // value. Mirror the verifier's C-6 extraction: treat such
                 // wrappers as value-producing tails.
-                matches!(
-                    tail,
-                    Stmt::Expr(_) | Stmt::If { else_: Some(_), .. }
-                ) || matches!(
-                    tail,
-                    Stmt::Block(_)
-                        | Stmt::Unsafe(_)
-                        | Stmt::IeeeFloat(_)
-                        | Stmt::Arena(_)
-                        | Stmt::Alloc { .. }
-                )
+                matches!(tail, Stmt::Expr(_) | Stmt::If { else_: Some(_), .. })
+                    || (matches!(
+                        tail,
+                        Stmt::Block(_)
+                            | Stmt::Unsafe(_)
+                            | Stmt::IeeeFloat(_)
+                            | Stmt::Arena(_)
+                            | Stmt::Alloc { .. }
+                    ) && Self::tail_wrapper_has_implicit_value(tail))
             });
         let mut statements = Vec::with_capacity(block.len());
         let mut result = None;
@@ -995,12 +1018,7 @@ impl BodyLowerer<'_> {
             backend_requirements: Vec::new(),
             kind: ResolvedExprKind::Scope {
                 kind: scope_kind,
-                body: Box::new(self.lower_block(
-                    body,
-                    &format!("{role}.tail"),
-                    block_ty,
-                    true,
-                )?),
+                body: Box::new(self.lower_block(body, &format!("{role}.tail"), block_ty, true)?),
             },
         })
     }
@@ -7138,6 +7156,19 @@ mod tests {
         let bodies = lower_checked_transition_bodies(&file, &program).expect("lower transition");
         let owner = NodeId("transition:Calc::add::Zero".into());
         let body = &bodies[&owner];
+        eprintln!("DBG root ty: {:?}", body.root.ty);
+        eprintln!(
+            "DBG root stmts: {:?}",
+            body.root
+                .statements
+                .iter()
+                .map(|s| &s.kind)
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "DBG result: {:?}",
+            body.root.result.as_ref().map(|r| &r.kind)
+        );
         assert!(body
             .locals
             .values()
@@ -7398,8 +7429,15 @@ mod tests {
         let main = program
             .resolved_body(&NodeId("function:main".into()))
             .expect("resolved arena reference");
-        let ResolvedStmtKind::Scope { body: arena, .. } = &main.root.statements[0].kind else {
-            panic!("arena scope expected");
+        // H-8 (2026-08-06): `arena { let ref value = 42; *value }` is the
+        // function's tail — the arena block is a value-producing tail
+        // (block tail `*value`), so it lives in `result` as a Scope/Arena
+        // expression rather than a plain Scope statement (the pre-H-8
+        // shape this test was written against discarded the tail value).
+        let ResolvedExprKind::Scope { body: arena, .. } =
+            &main.root.result.as_ref().expect("arena tail value").kind
+        else {
+            panic!("arena tail value expected");
         };
         let ResolvedStmtKind::Bind {
             pattern,

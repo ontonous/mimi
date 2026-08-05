@@ -87,7 +87,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let l = self.compile_expr(lhs, vars)?;
         let r = self.compile_expr(rhs, vars)?;
-        self.compile_binop(op, l, r)
+        // Legacy (raw AST) has no canonical types; let compile_binop use the
+        // 0.34.34 operand-width heuristic (None).
+        self.compile_binop(op, l, r, None)
     }
 
     /// Short-circuit lowering for `and`/`or`, matching the bytecode VM
@@ -250,7 +252,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // lose the i32 range guard. compile_binop also detects
                     // i32 operand width from `iv` directly.
                     let zero = iv.get_type().const_int(0, true);
-                    return self.compile_binop(BinOp::Sub, zero.into(), iv.into());
+                    return self.compile_binop(BinOp::Sub, zero.into(), iv.into(), None);
                 } else if let BasicValueEnum::FloatValue(fv) = v {
                     let zero = self.context.f64_type().const_float(0.0);
                     Ok(self
@@ -369,19 +371,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         op: BinOp,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
+        i32_ctx_hint: Option<bool>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // 0.34.34 (SD-7 / L1): i32 width context. promote_binop_operands
         // widens mixed operands to i64, which silently loses the i32 range:
         // `x: i32 + 1` (literal i64) became a checked i64 add that never
         // traps at i32::MAX + 1, diverging from the bytecode VM and from
         // native checked-i32 lowering. The declared width is recoverable
-        // from the PRE-promotion operands: if either operand is exactly
-        // i32, the expression is i32-width (the checker unifies binop
-        // operand types, so a genuine i64 runtime operand can never mix
-        // with i32 — the wide side is a literal/constant in well-typed
-        // programs).
-        let i32_ctx = matches!(lhs, BasicValueEnum::IntValue(l) if l.get_type().get_bit_width() == 32)
-            || matches!(rhs, BasicValueEnum::IntValue(r) if r.get_type().get_bit_width() == 32);
+        // from the PRE-promotion operands.
+        //
+        // 0.34.35 (audit §6-#57 / L1): operand bit width is NOT a reliable
+        // width oracle — `1 + x: i32` (64+32) is i32-width while
+        // `let xs: List<i64> = [...]; xs[0] + 1` (64+32 too) is i64-width.
+        // The two only differ in which side is the literal. So:
+        //   - resolved emitter (which has checker-finalized canonical types)
+        //     passes Some(expression.ty is i32) — exact, never wrong;
+        //   - legacy emitter (raw AST, no canonical types) passes None and
+        //     falls back to the 0.34.34 `||` heuristic. Legacy stores every
+        //     int slot as i64 and i32-annotated slots as true i32 (0.34.34),
+        //     so its only mixed pair is i32-slot vs i64-literal — `||` is
+        //     correct there and the List<i64>-element case cannot occur
+        //     (legacy list elements are i64 slots).
+        let i32_ctx = match i32_ctx_hint {
+            Some(is_i32) => is_i32,
+            None => {
+                matches!(lhs, BasicValueEnum::IntValue(l) if l.get_type().get_bit_width() == 32)
+                    || matches!(rhs, BasicValueEnum::IntValue(r) if r.get_type().get_bit_width() == 32)
+            }
+        };
         let (lhs, rhs) = self.promote_binop_operands(lhs, rhs)?;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {

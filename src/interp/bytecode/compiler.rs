@@ -92,6 +92,14 @@ struct FuncCompiler {
     vars: Vec<HashMap<String, Reg>>,
     /// Variable name → known type tag (for int/float dispatch without CheckedProgram).
     var_types: HashMap<String, VarType>,
+    /// §6-#57: list-bound variable name → ELEMENT width tag. A `List` value
+    /// is not a scalar, so it must NOT be recorded in `var_types` (a scalar
+    /// tag would misroute binop/assign guards — `xs = []` would emit
+    /// CHECK_I32 on a list value). The element width is recorded here so
+    /// for-in loop variables inherit the checker-guaranteed width
+    /// (List<i64> → Int, List<i32>/int-literal lists → Int32, List<f64> →
+    /// Float).
+    list_elem_types: HashMap<String, VarType>,
     /// Variable name → mutability (immutable by default; `let mut` and
     /// `mut` params are true). Mirrors tree-walker runtime check in
     /// scope_env::assign (compile-time here).
@@ -180,6 +188,7 @@ impl FuncCompiler {
             proto: FunctionProto::new(name, param_count),
             vars: vec![HashMap::new()],
             var_types: HashMap::new(),
+            list_elem_types: HashMap::new(),
             var_mut: HashMap::new(),
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
@@ -1398,10 +1407,60 @@ impl BytecodeCompiler {
                                     {
                                         surface_type_to_var_type(decl_ty)
                                     }
-                                    _ => self.infer_expr_type(fc, init_expr),
+                                    // §6-#57 (audit-2026-08-05) VM parity:
+                                    // an explicit `List<i32|i64|f64>`
+                                    // annotation is authoritative for for-in
+                                    // element width (the checker guarantees
+                                    // the init conforms). Without this, a
+                                    // `List<i64> = [1,2,3]` literal inferred
+                                    // Int32 and mis-guarded the loop var.
+                                    // The LIST VARIABLE itself is not a
+                                    // scalar — the element width goes into
+                                    // `list_elem_types`, var_types stays
+                                    // Unknown so no scalar guard can ever
+                                    // apply to the list value.
+                                    Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                                        if let PatternKind::Variable(name) = &pat.kind {
+                                            fc.list_elem_types.insert(
+                                                name.clone(),
+                                                surface_type_to_var_type(&args[0]),
+                                            );
+                                        }
+                                        VarType::Unknown
+                                    }
+                                    _ => {
+                                        let inferred = self.infer_expr_type(fc, init_expr);
+                                        // §6-#57: a list LITERAL init records
+                                        // its element width (all-int → Int32,
+                                        // all-float → Float) for for-in loop
+                                        // variables; the variable itself is
+                                        // not a scalar.
+                                        if let Expr::List(_) = init_expr.unlocated() {
+                                            if let PatternKind::Variable(name) = &pat.kind {
+                                                fc.list_elem_types.insert(name.clone(), inferred);
+                                            }
+                                            VarType::Unknown
+                                        } else {
+                                            inferred
+                                        }
+                                    }
                                 }
                             } else {
-                                self.infer_expr_type(fc, init_expr)
+                                // §6-#57: unannotated let — a list literal
+                                // init records ELEMENT width for for-in loop
+                                // variables (list_elem_types) while the
+                                // variable itself stays Unknown (a scalar
+                                // tag would misroute `xs = []` into a
+                                // CHECK_I32 on a list value).
+                                let inferred = self.infer_expr_type(fc, init_expr);
+                                if let Expr::List(_) = init_expr.unlocated() {
+                                    if let PatternKind::Variable(name) = &pat.kind {
+                                        fc.list_elem_types.insert(name.clone(), inferred);
+                                    }
+                                    VarType::Unknown
+                                } else {
+                                    inferred
+                                }
                             };
                             fc.set_reg_type(name, ty);
                             fc.set_var_mut(name, *mut_);
@@ -4834,6 +4893,24 @@ impl BytecodeCompiler {
             rb: r_idx,
         });
         self.bind_pattern(fc, var, r_elem);
+        // §6-#57 (audit-2026-08-05) VM parity: register the loop variable's
+        // element width so i32 list elements trigger CheckI32 overflow
+        // guards (codegen computes native checked i32). The iterable's
+        // width comes from a let-bound list variable's recorded element
+        // type (list_elem_types) or, for an inline list literal, from the
+        // Expr::List branch of infer_expr_type (all-int → Int32, all-float
+        // → Float). Anything else stays Unknown (no width guard).
+        if let PatternKind::Variable(name) = &var.kind {
+            let elem_ty = match iter.unlocated() {
+                Expr::Ident(n) => fc
+                    .list_elem_types
+                    .get(n)
+                    .cloned()
+                    .unwrap_or(VarType::Unknown),
+                _ => self.infer_expr_type(fc, iter),
+            };
+            fc.set_reg_type(name, elem_ty);
+        }
 
         let body_result = self.compile_block(fc, body)?;
         fc.exit_loop_body_scope();
@@ -5875,6 +5952,26 @@ impl BytecodeCompiler {
                 _ => VarType::Unknown,
             },
             Expr::Ident(name) => fc.var_types.get(name).cloned().unwrap_or(VarType::Unknown),
+            Expr::List(elems) => {
+                // §6-#57 (audit-2026-08-05) VM parity: a literal list's
+                // element width flows into for-in loop variables so i32
+                // elements get CheckI32 width guards like codegen. All-int
+                // in-range literals → Int32 (the checker's i32 default);
+                // all-float → Float; anything else stays Unknown.
+                if elems
+                    .iter()
+                    .all(|e| matches!(e.unlocated(), Expr::Literal(Lit::Int(_))))
+                {
+                    VarType::Int32
+                } else if elems
+                    .iter()
+                    .all(|e| matches!(e.unlocated(), Expr::Literal(Lit::Float(_))))
+                {
+                    VarType::Float
+                } else {
+                    VarType::Unknown
+                }
+            }
             Expr::Binary(op, l, r) => {
                 // Comparison operators produce Bool.
                 if matches!(
