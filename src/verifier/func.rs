@@ -1307,16 +1307,63 @@ impl VerifierCtx {
                 let fresh_name = format!("__call_{}", counter);
                 *counter += 1;
 
+                // Collect callee requires: at the call site they become proof
+                // obligations, not free assumptions (#41, full-audit-2026-08-05 §11).
+                let callee_requires: Vec<Expr> = callee_func
+                    .body
+                    .iter()
+                    .filter_map(|s| {
+                        if let Stmt::Requires(e, _) = s.unlocated() {
+                            Some(e.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
                 // Substitute callee ensures: params → args, result → fresh_var
                 let callee_params = callee_func.params.clone();
-                for ens_expr in &callee_ensures {
-                    let substituted =
-                        self.substitute_call(ens_expr, &callee_params, &new_args, &fresh_name);
-                    // Inject as a requires statement (assumed precondition, not
-                    // a postcondition to prove). The VIR lowering maps
-                    // Stmt::Requires → VStmt::Assume.
-                    let span = expr.meta().map(|m| m.span).unwrap_or(Span::UNKNOWN);
-                    injected.push(Stmt::Requires(substituted, span));
+                let span = expr.meta().map(|m| m.span).unwrap_or(Span::UNKNOWN);
+                if callee_requires.is_empty() {
+                    for ens_expr in &callee_ensures {
+                        let substituted =
+                            self.substitute_call(ens_expr, &callee_params, &new_args, &fresh_name);
+                        // Inject as a requires statement (assumed precondition, not
+                        // a postcondition to prove). The VIR lowering maps
+                        // Stmt::Requires → VStmt::Assume.
+                        injected.push(Stmt::Requires(substituted, span));
+                    }
+                } else {
+                    // #41: gate the injected ensures on the callee's requires,
+                    // substituted at the call site. Injecting ensures
+                    // unconditionally let a caller prove its postcondition
+                    // from a callee contract whose precondition it never
+                    // satisfies (e.g. `double(x)` with x outside the safe
+                    // range) — a fake Verified. With `requires ⇒ ensures`
+                    // injected as the assumption, the call-site precondition
+                    // becomes a proof obligation: only callers that can
+                    // derive it (their requires imply the callee's) get the
+                    // full callee contract.
+                    let req_conj = callee_requires
+                        .iter()
+                        .map(|r| self.substitute_call(r, &callee_params, &new_args, &fresh_name))
+                        .reduce(|acc, r| {
+                            Expr::Binary(BinOp::And, Box::new(acc), Box::new(r))
+                        })
+                        .expect("callee_requires is non-empty here");
+                    let ens_conj = callee_ensures
+                        .iter()
+                        .map(|e| self.substitute_call(e, &callee_params, &new_args, &fresh_name))
+                        .reduce(|acc, e| {
+                            Expr::Binary(BinOp::And, Box::new(acc), Box::new(e))
+                        })
+                        .expect("callee_ensures is non-empty here");
+                    let implication = Expr::Binary(
+                        BinOp::Or,
+                        Box::new(Expr::Unary(UnOp::Not, Box::new(req_conj))),
+                        Box::new(ens_conj),
+                    );
+                    injected.push(Stmt::Requires(implication, span));
                 }
 
                 // Replace the call with the fresh variable

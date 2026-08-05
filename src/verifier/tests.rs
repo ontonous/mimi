@@ -2408,3 +2408,67 @@ func wrong_quadruple(x: i32) -> i32 {
         wrong.unwrap().message
     );
 }
+
+/// #41 (full-audit-2026-08-05 §11): VIR callee inlining must NOT inject the
+/// callee's ensures unconditionally — the call-site must satisfy the callee's
+/// requires. A caller with no constraints can call `double(x)` outside its
+/// safe range, where the callee contract does not hold; `ensures:
+/// result == x * 2` used to verify against the fabricated `result == x*2`
+/// assumption (fake Verified). With the injection gated as
+/// `requires ⇒ ensures`, the call-site precondition becomes a proof
+/// obligation and the caller is Disproven.
+#[test]
+fn verify_callee_ensures_inlining_requires_call_site_precondition() {
+    require_z3!();
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x * 2
+    x * 2
+}
+
+func caller(x: i32) -> i32 {
+    ensures: result == x * 2
+    double(x)
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(caller.is_some(), "should have result for caller");
+    assert_ne!(
+        caller.unwrap().status,
+        VerifStatus::Verified,
+        "caller must not be Verified from an unsatisfied callee precondition: {}",
+        caller.unwrap().message
+    );
+}
+
+/// #41 companion: a caller whose requires IMPLY the callee's requires still
+/// gets the full callee contract — the gated injection degrades to the
+/// unconditional case exactly when the precondition is derivable.
+#[test]
+fn verify_callee_ensures_inlining_satisfying_requires_still_verifies() {
+    require_z3!();
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x * 2
+    x * 2
+}
+
+func caller(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x * 2
+    double(x)
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(caller.is_some(), "should have result for caller");
+    assert_eq!(
+        caller.unwrap().status,
+        VerifStatus::Verified,
+        "caller with satisfying requires must still verify: {}",
+        caller.unwrap().message
+    );
+}
