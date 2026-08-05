@@ -931,3 +931,66 @@ func main() -> i32 { 0 }
         check_source(src)
     );
 }
+
+// ─── Audit §2-#16: from_json::<cap> turbofish must not fabricate a linear
+// value ──────────────────────────────────────────────────────────────
+// VERIFIED 2026-08-05: `from_json::<Token>("...")` checked OK — a JSON
+// string minted a capability out of thin air, bypassing exactly-once.
+// Fix: infer_turbofish rejects linear target types (E0432, H2 deep
+// predicate). Bare capability names parse as `Type::Name` in turbofish /
+// type-argument position, so `Checker::is_linear_surface_type` now also
+// consults `declared_caps`; the unification table seeds cap names for the
+// C-1 bare-container arm.
+#[test]
+fn audit2_lin_from_json_turbofish_cap_rejected() {
+    let src = r#"
+cap Token
+func main() -> i32 {
+    let t = from_json::<Token>("{\"x\": 1}")
+    drop(t)
+    0
+}
+"#;
+    let codes = rejection_codes(src);
+    assert!(
+        codes.iter().any(|c| c == crate::diagnostic::codes::E0432),
+        "from_json::<cap> must reject with E0432, got: {codes:?}"
+    );
+}
+
+#[test]
+fn audit2_lin_from_json_turbofish_cap_container_rejected() {
+    // H2: a container carrying a linear element is equally forbidden.
+    let src = r#"
+cap Token
+func main() -> i32 {
+    let l = from_json::<List<Token>>("[{\"x\": 1}]")
+    drop(l)
+    0
+}
+"#;
+    let codes = rejection_codes(src);
+    assert!(
+        codes.iter().any(|c| c == crate::diagnostic::codes::E0432),
+        "from_json::<List<cap>> must reject with E0432, got: {codes:?}"
+    );
+}
+
+#[test]
+fn audit2_lin_from_json_nonlinear_still_ok() {
+    // Sanity: concrete non-linear targets keep working.
+    let src = r#"
+func main() -> i32 {
+    let v = from_json::<i32>("42")
+    let m = from_json::<Map<string, i32>>("{\"a\": 1}")
+    drop(v)
+    drop(m)
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "non-linear from_json targets must still check: {:?}",
+        check_source(src)
+    );
+}
