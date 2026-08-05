@@ -1178,3 +1178,49 @@ func main() -> i32 {
         "legacy: genuine Set.size() still dispatches to builtin (D-2 guard is exact)"
     );
 }
+
+// ─── B-1 — str_parse_float must reject NaN/±Inf (SD-9 input boundary) ──────
+// VM: `Ok(n) if n.is_finite()` — "NaN"/"inf" parse Ok but non-finite →
+// (false, 0.0). codegen: build_parse_float_tuple had NO finiteness gate, so
+// C strtod's successful "NaN"/"inf" parse produced (true, NaN/Inf) and the
+// non-finite value entered the system (b1.mimi: VM nan:bad, native nan:ok —
+// an L1 divergence). The gate now mirrors the VM arms: finite → ok, else
+// (false, 0.0).
+
+#[test]
+fn audit_b1_str_parse_float_rejects_non_finite_both_backends() {
+    let src = r#"
+func main() -> i32 {
+    let a = str_parse_float("NaN")
+    let b = str_parse_float("inf")
+    let c = str_parse_float("1.5")
+    println(a.0)
+    println(b.0)
+    println(c.1)
+    0
+}
+"#;
+    check_source(src).expect("str_parse_float non-finite checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "false\nfalse\n1.5",
+        "bytecode: NaN/inf rejected, 1.5 accepted"
+    );
+    if !can_link() {
+        return;
+    }
+    let resolved =
+        checked_codegen_compile_and_run(src).expect("resolved str_parse_float non-finite");
+    assert_eq!(
+        resolved.trim(),
+        "false\nfalse\n1.5",
+        "resolved: NaN/inf rejected (was true/NaN — B-1 gate)"
+    );
+    let legacy = compile_and_run(src).expect("legacy str_parse_float non-finite");
+    assert_eq!(
+        legacy.trim(),
+        "false\nfalse\n1.5",
+        "legacy: NaN/inf rejected"
+    );
+}
