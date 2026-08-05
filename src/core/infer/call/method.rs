@@ -826,6 +826,21 @@ impl<'a> Checker<'a> {
                     "from_json::<T> requires a concrete type argument, found unconstrained type. Use from_json::<ConcreteType>(s) to specify the deserialization target",
                 );
             }
+            // Audit §2-#16 (VERIFIED 2026-08-05): from_json::<T> only checked
+            // for unconstrained residuals — a *linear* target type slipped
+            // through, letting JSON fabricate a capability value out of thin
+            // air (bypassing exactly-once / linear consumption entirely).
+            // H2 ruling (AGENTS.md §0): containers carrying linear elements
+            // are equally forbidden, so use the deep is_linear_surface_type.
+            if self.is_linear_surface_type(target_ty) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0432,
+                    format!(
+                        "from_json::<{}> cannot deserialize a linear type — the JSON string would fabricate a capability value. Use a concrete non-linear type argument",
+                        fmt_type(target_ty)
+                    ),
+                );
+            }
             if args.len() != 1 {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,

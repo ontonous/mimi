@@ -496,11 +496,17 @@ impl<'a> Checker<'a> {
     /// consumer of this predicate (E0432 generic-argument rejection, E0427
     /// ref/shared wrapping, protocol payload checks) wants the conservative
     /// deep answer.
+    ///
+    /// Audit §2-#16 (2026-08-06): declared capability names must also be
+    /// recognized — a bare `Token` in a turbofish / type-argument position
+    /// parses as `Type::Name("Token")`, not `Type::Cap`, so the Cap-variant
+    /// arm alone let `from_json::<Token>` fabricate a capability value.
     pub(crate) fn is_linear_surface_type(&self, ty: &crate::ast::Type) -> bool {
         match ty.unlocated() {
             crate::ast::Type::Cap(_) | crate::ast::Type::CapAtom(_) => true,
             crate::ast::Type::Name(name, args) => {
                 self.flow_state_type_names.contains(name)
+                    || self.declared_caps.contains(name)
                     || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())
                     || args.iter().any(|arg| self.is_linear_surface_type(arg))
             }
@@ -624,6 +630,13 @@ impl<'a> Checker<'a> {
         }
         let mut names = Vec::new();
         walk(&self.file.items, &mut names);
+        // Audit §2-#16: declared capability names are linear too — seed them
+        // into the unification table so the C-1 bare-container arm
+        // (`contains_linear_surface`) recognizes `cap Token` names in
+        // type-argument / container positions.
+        for name in &self.declared_caps {
+            self.unification.note_linear_type_name(name.clone());
+        }
         for name in names {
             self.unification.note_linear_type_name(name);
         }
