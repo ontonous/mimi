@@ -545,5 +545,3 @@ func f(opt: Option<i32>) -> i32 {
 "#;
     assert_failed(src);
 }
-
-

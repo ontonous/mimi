@@ -11808,8 +11808,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         if arg_type.is_empty() {
             if let BasicMetadataValueEnum::StructValue(sv) = arg {
                 let fields = sv.get_type().get_field_types();
-                let is_str = fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_));
+                let is_str =
+                    fields.len() == 2 && matches!(fields[0], BasicTypeEnum::PointerType(_));
                 let is_list = fields.len() == 2
                     && matches!(fields[0], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64)
                     && matches!(fields[1], BasicTypeEnum::PointerType(_));
