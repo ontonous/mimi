@@ -794,20 +794,39 @@ impl<'a> Checker<'a> {
         if generalized.is_empty() {
             resolved
         } else {
-            // Remap original TypeVar IDs to sequential indices 0,1,2,...
+            // Audit H-1 (2026-08-06): remap targets 0,1,2,... could collide
+            // with *retained* env TypeVar IDs — fresh_var() starts at 0, so a
+            // captured outer variable can share an ID with a generalized
+            // binder. instantiate() would then silently re-instantiate the
+            // captured variable: one semantic value, two inconsistent types
+            // (silent L2 leak). Pick binder IDs that skip every retained
+            // env-var ID so the two ID spaces never overlap.
+            let mut binder_ids: Vec<u32> = Vec::with_capacity(generalized.len());
+            let mut next: u32 = 0;
+            for _ in 0..generalized.len() {
+                while env_vars.contains(&next) {
+                    next += 1;
+                }
+                binder_ids.push(next);
+                next += 1;
+            }
             let mut remap: HashMap<u32, u32> = HashMap::new();
             for (i, old_id) in generalized.iter().enumerate() {
-                remap.insert(*old_id, i as u32);
+                remap.insert(*old_id, binder_ids[i]);
             }
             let mut remapper = crate::core::type_folder::RemapFolder::new(remap);
             let remapped_body = crate::core::type_folder::walk_type(resolved, &mut remapper);
-            let param_names: Vec<String> =
-                (0..generalized.len()).map(|i| format!("T{}", i)).collect();
+            // Binder names carry the real TypeVar IDs so `instantiate` can
+            // substitute the correct variables; non-numeric names (generic
+            // function values, func_value_type) keep the index-as-ID convention.
+            let param_names: Vec<String> = binder_ids.iter().map(|id| id.to_string()).collect();
             let forall = Type::ForAll(param_names, Box::new(remapped_body.clone()));
             // Record the monotype body separately from its binders. The legacy
             // `Type::ForAll` wrapper remains only in the inference environment.
             if let Some(owner) = &self.current_callable_owner {
-                let binders: Vec<_> = (0..generalized.len() as u32)
+                let binders: Vec<_> = binder_ids
+                    .iter()
+                    .copied()
                     .map(crate::core::phase::InferVarId)
                     .collect();
                 if let Ok(scheme) = crate::core::phase::TypeScheme::new(binders, remapped_body) {
@@ -830,7 +849,11 @@ impl<'a> Checker<'a> {
                 for (i, _param) in params.iter().enumerate() {
                     let fresh = self.fresh_var();
                     if let Type::TypeVar(id) = fresh {
-                        substitutions.insert(i as u32, id);
+                        // Audit H-1: generalize's binders carry real TypeVar
+                        // IDs (skipping retained env-var IDs); non-numeric
+                        // names (generic function values) keep index = ID.
+                        let binder_id = params[i].parse::<u32>().unwrap_or(i as u32);
+                        substitutions.insert(binder_id, id);
                     }
                 }
                 let mut remapper = crate::core::type_folder::RemapFolder::new(substitutions);
@@ -964,6 +987,77 @@ mod diagnostic_dedup_tests {
 
 // Raw-AST use collection is retained only for the test-only CFG oracle.
 #[cfg(test)]
+mod h1_generalize_collision_tests {
+    use super::*;
+    use crate::ast::File;
+    use crate::span::SourceRegistry;
+
+    fn empty_file() -> File {
+        File {
+            sources: SourceRegistry::default(),
+            imports: Vec::new(),
+            items: Vec::new(),
+            implicit_single: false,
+        }
+    }
+
+    fn var_ids(ty: &Type, ids: &mut Vec<u32>) {
+        match ty {
+            Type::Located { ty, .. } => var_ids(ty, ids),
+            Type::TypeVar(id) => ids.push(*id),
+            Type::Tuple(ts) => {
+                for t in ts {
+                    var_ids(t, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn generalize_binder_ids_skip_retained_env_vars() {
+        let file = empty_file();
+        let mut checker = Checker::new(&file);
+        let retained = checker.fresh_var(); // TypeVar(0)
+        let to_gen = checker.fresh_var(); // TypeVar(1)
+        let mut env = HashMap::new();
+        env.insert("x".to_string(), retained.clone());
+        // (TypeVar(0), TypeVar(1)): captured outer variable + fresh let variable.
+        let ty = Type::Tuple(vec![retained.clone(), to_gen]);
+        let generalized = checker.generalize(&ty, &env);
+        let Type::ForAll(params, body) = generalized else {
+            panic!("expected ForAll, got {generalized:?}");
+        };
+        // Binder must skip the retained env ID 0 → binder carries real ID 1.
+        assert_eq!(
+            params,
+            vec!["1".to_string()],
+            "binder must carry the real TypeVar ID, skipping retained env IDs"
+        );
+        // Body must still reference the retained env var (TypeVar 0) untouched.
+        let mut body_ids = Vec::new();
+        var_ids(&body, &mut body_ids);
+        assert_eq!(
+            body_ids,
+            vec![0, 1],
+            "retained env var must stay TypeVar(0), generalized var becomes TypeVar(1)"
+        );
+        // instantiate must NOT re-bind the retained env var.
+        let inst = checker.instantiate(&Type::ForAll(params, Box::new((*body).clone())));
+        let mut inst_ids = Vec::new();
+        var_ids(&inst, &mut inst_ids);
+        assert_eq!(
+            inst_ids.first(),
+            Some(&0),
+            "retained env var TypeVar(0) must survive instantiation untouched"
+        );
+        assert_ne!(
+            inst_ids.get(1),
+            Some(&0),
+            "generalized binder must be replaced by a fresh var, not alias the retained var"
+        );
+    }
+}
 mod borrow;
 pub(crate) mod flow;
 mod func;
