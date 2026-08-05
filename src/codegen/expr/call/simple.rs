@@ -389,6 +389,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.pending_push_elem_type = Some(elem_type);
             }
         }
+        // Audit wave2 (D-5a): sum(List<f64>) — hand the element type to the
+        // builtin so f64 bit patterns are not accumulated as i64.
+        if name == "sum" && args.len() == 1 {
+            let list_type = self.infer_object_type(&args[0], vars);
+            self.pending_sum_elem_type = Self::strip_list_element_type(&list_type);
+        }
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
@@ -510,7 +516,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     if inner.starts_with("List") {
                         // Nested List: product-tuple inner uses codegen loop;
-                        // scalar inners use mimi_list_list_to_json + i64 formatter.
+                        // scalar/nested inners use element-type-aware
+                        // formatting. AUDIT FIX (H-18): the leaf formatter was
+                        // hardcoded to mimi_list_i64_to_json — f64 bit patterns
+                        // and string pointers were serialized as integers
+                        // (silently wrong JSON; VM emits correct values).
                         let mid_elem = Self::strip_list_element_type(inner)
                             .or_else(|| {
                                 inner
@@ -525,49 +535,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let callback_fn_ty = i8_ptr_ty
-                            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                        let inner_fn = self
-                            .module
-                            .get_function("mimi_list_i64_to_json")
-                            .unwrap_or_else(|| {
-                                self.module.add_function(
-                                    "mimi_list_i64_to_json",
-                                    callback_fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            });
-                        let callback = inner_fn.as_global_value().as_pointer_value();
-                        let fn_ty = i8_ptr_ty.fn_type(
-                            &[
-                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
-                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
-                            ],
-                            false,
-                        );
-                        let callee = self
-                            .module
-                            .get_function("mimi_list_list_to_json")
-                            .unwrap_or_else(|| {
-                                self.module.add_function(
-                                    "mimi_list_list_to_json",
-                                    fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            });
-                        let raw = self
-                            .build_call(
-                                callee,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(alloca),
-                                    BasicMetadataValueEnum::PointerValue(callback),
-                                ],
-                                "to_json_list_list",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("mimi_list_list_to_json void")?
-                            .into_pointer_value();
+                        let raw = self.emit_list_to_json_cstr(alloca, inner)?;
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }

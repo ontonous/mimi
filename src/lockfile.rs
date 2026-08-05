@@ -117,7 +117,16 @@ impl Lockfile {
         );
 
         if constraint == "*" || constraint.is_empty() {
-            return sorted.last().map(|s| s.to_string());
+            // X-3 (full-audit 2026-08-05 §3.10): the comparator above sorts
+            // NON-SEMVER directories (`.git`, `latest`, …) LAST, so
+            // `sorted.last()` used to install them as the "newest version".
+            // Mirror the VersionReq branch below: skip entries that are not
+            // valid semver and pick the highest one that is.
+            return sorted
+                .iter()
+                .filter_map(|s| semver::Version::parse(s).ok())
+                .max()
+                .map(|v| v.to_string());
         }
 
         // Try to parse as semver constraint

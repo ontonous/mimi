@@ -635,14 +635,23 @@ fn prepare_rename(
     if word_start >= word_end {
         return (server, None);
     }
+    // X-8 (full audit 2026-08-05 §3.10): `get_word_range` yields BYTE offsets;
+    // LSP `character` is UTF-16 code units. Convert via the line's
+    // PositionMap (same discipline as compute_rename's L-H1). On lines with
+    // multibyte content before the word the old code drifted by the byte/UTF-16
+    // difference.
+    let line_text = text.lines().nth(line).unwrap_or("");
+    let map = crate::lsp::position_map::PositionMap::new(line_text);
+    let start_utf16 = map.byte_to_lsp(word_start.min(line_text.len())).1;
+    let end_utf16 = map.byte_to_lsp(word_end.min(line_text.len())).1;
     (
         server,
         Some(serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
-                "start": { "line": line, "character": word_start },
-                "end": { "line": line, "character": word_end }
+                "start": { "line": line, "character": start_utf16 },
+                "end": { "line": line, "character": end_utf16 }
             }
         })),
     )
@@ -772,11 +781,26 @@ fn formatting(
         None => return (server, None),
     };
     let formatted = fmt::Formatter::new().format(&text);
-    // CL-H4: total_lines.saturating_sub(1) guards both empty doc (count=1, sub=0)
-    // and the single-line case. The result is the 0-based last-line index.
+    // X-8 (full audit 2026-08-05 §3.10), two defects in the full-replace range:
+    // 1. `character` must be UTF-16 code units, not BYTE length of the last
+    //    line (multibyte content drifted the end position).
+    // 2. `lines()` drops the empty line after a trailing '\n', so the range
+    //    stopped short of it; applying the edit left the original trailing
+    //    newline behind and duplicated the final blank line on every format.
+    //    When the doc ends with '\n', extend the range to (line_count, 0).
     let total_lines = text.lines().count();
-    let end_line = total_lines.saturating_sub(1);
-    let last_line_len = text.lines().last().map(|l| l.len()).unwrap_or(0);
+    let (end_line, end_character) = if text.ends_with('\n') {
+        (total_lines, 0usize)
+    } else {
+        // CL-H4: total_lines.saturating_sub(1) guards both empty doc and the
+        // single-line case. The result is the 0-based last-line index.
+        let last_utf16: usize = text
+            .lines()
+            .last()
+            .map(|l| l.chars().map(|c| c.len_utf16()).sum())
+            .unwrap_or(0);
+        (total_lines.saturating_sub(1), last_utf16)
+    };
     (
         server,
         Some(serde_json::json!({
@@ -785,7 +809,7 @@ fn formatting(
             "result": [{
                 "range": {
                     "start": { "line": 0, "character": 0 },
-                    "end": { "line": end_line, "character": last_line_len }
+                    "end": { "line": end_line, "character": end_character }
                 },
                 "newText": formatted
             }]

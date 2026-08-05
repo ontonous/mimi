@@ -49,7 +49,6 @@ macro_rules! dual_eq {
     }};
 }
 
-
 // ============================================================
 // Fix (§6 HIGH, actors.rs): mailbox argument/result packing must use a single
 // type lowering (registry-backed) on BOTH the call-site pack and the dispatch
@@ -66,6 +65,10 @@ fn actor_mailbox_record_param() {
     // record's alloca pointer into an 8-byte accounting slot while dispatch read
     // a full struct — pack/unpack divergence. Post-fix both sides agree on the
     // registry-resolved struct layout.
+    // Wave-2 C-group fix: record fields keep the declared i64 layout (the test
+    // intent is 8-byte slot packing); the literals are pinned to i64 explicitly
+    // because integer literals infer at minimum fitting width (i32) and record
+    // fields apply strict unification with no numeric coercion (E0247).
     dual_eq!(
         r#"
         type Point { x: i64, y: i64 }
@@ -74,7 +77,7 @@ fn actor_mailbox_record_param() {
         }
         func main() -> i32 {
             let c = Calc.spawn();
-            println(c.sum(Point { x: 3, y: 4 }));
+            println(c.sum(Point { x: 3 as i64, y: 4 as i64 }));
             0
         }
         "#,
@@ -89,6 +92,8 @@ fn actor_mailbox_mixed_param_offsets() {
     }
     // i64, string (16-byte slot), i64 — exercises slot offset arithmetic across
     // a non-scalar middle argument. The result must reflect the correct unpack.
+    // Wave-2 C-group fix: actor-method call sites unify strictly (no numeric
+    // coercion), so pin the i64 literals explicitly (E0211 otherwise).
     dual_eq!(
         r#"
         actor Adder {
@@ -96,7 +101,7 @@ fn actor_mailbox_mixed_param_offsets() {
         }
         func main() -> i32 {
             let ad = Adder.spawn();
-            println(ad.combine(10, "sep", 32));
+            println(ad.combine(10 as i64, "sep", 32 as i64));
             0
         }
         "#,
@@ -147,12 +152,14 @@ fn alias_to_record_layout() {
     }
     // `type Pt = Point` aliases a record; field access through the alias needs
     // the struct layout. Pre-fix the alias lowered to i64 (miscompiled access).
+    // Wave-2 C-group fix: pin the record literals to i64 (fields keep their
+    // declared i64 layout; literals infer i32 and fields unify strictly).
     dual_eq!(
         r#"
         type Point { x: i64, y: i64 }
         type Pt = Point
         func main() -> i32 {
-            let p: Pt = Point { x: 5, y: 6 };
+            let p: Pt = Point { x: 5 as i64, y: 6 as i64 };
             println(p.x + p.y);
             0
         }
@@ -176,6 +183,9 @@ fn generic_body_defer_runs() {
     // A defer inside a generic body must execute at scope exit (LIFO, before
     // the value is returned). Pre-fix codegen silently dropped it -> VM printed
     // "deferred", codegen did not (L1 divergence).
+    // Wave-2 C-group fix: the `tag` argument is pinned to i64 explicitly —
+    // minimum-width literal inference (i32) disagrees with the declared i64
+    // generic-parameter instantiation (TOOL-RESOLUTION-001 otherwise).
     dual_eq!(
         r#"
         func tap<T>(x: T, tag: i64) -> i64 {
@@ -184,7 +194,7 @@ fn generic_body_defer_runs() {
             tag
         }
         func main() -> i32 {
-            let r = tap(9, 42)
+            let r = tap(9, 42 as i64)
             println(r)
             0
         }
@@ -200,13 +210,16 @@ fn generic_body_defer_lifo_and_early_return() {
     }
     // Multiple defers run in reverse order, and still run when the generic body
     // returns early.
+    // Wave-2 C-group fix: pin the returned literal to i64 — explicit `return`
+    // statements unify strictly against the declared return type (E0207
+    // otherwise; minimum-width literal inference yields i32).
     dual_eq!(
         r#"
         func wrap<T>(x: T) -> i64 {
             defer { println("first") }
             defer { println("second") }
             println("work")
-            return 7
+            return 7 as i64
         }
         func main() -> i32 {
             let v = wrap(1)

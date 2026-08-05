@@ -29,16 +29,24 @@ impl<'a> Checker<'a> {
         // 0.31.17: reject flow state captures in closures. A lambda that
         // references a flow state variable from an outer scope would create
         // an implicit ownership transfer, violating linearity.
+        //
+        // T-2 (audit 2026-08-05): the check previously covered ONLY flow
+        // states. Capabilities and session channels are equally linear — a
+        // closure capturing one consumes it on EVERY invocation (double
+        // consumption for a twice-called lambda), escaping exactly-once
+        // enforcement (the CFG TransferChild consume at lambda construction
+        // does not police per-call reuse). Reject every linear surface type:
+        // flow states, Cap/CapAtom, SessionChan, and containers holding them.
         if self.lambda_depth > 0 {
             let is_lambda_param = self
                 .lambda_param_names
                 .iter()
                 .any(|params| params.contains(name));
             if !is_lambda_param {
-                // Check if the variable's type is a flow state.
+                // Check if the variable's type is a linear resource.
                 for scope in scopes.iter().rev() {
                     if let Some(ty) = scope.get(name) {
-                        if self.is_flow_state_type(ty) {
+                        if self.is_linear_surface_type(ty) {
                             self.errors.push(
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0427,
@@ -51,8 +59,9 @@ impl<'a> Checker<'a> {
                                     self.diagnostic_span(),
                                 )
                                 .with_help(
-                                    "flow states are linear: capturing them in a closure creates \
-                                     an implicit ownership transfer; pass the state as a lambda parameter",
+                                    "linear resources (flow states, capabilities, session channels) \
+                                     captured by a closure would be consumed on every invocation; \
+                                     pass the resource as a lambda parameter instead",
                                 ),
                             );
                         }

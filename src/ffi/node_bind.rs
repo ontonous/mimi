@@ -1008,6 +1008,27 @@ impl NodeBindGenerator {
         Ok(())
     }
 
+    /// Emit JS-object → C-struct extraction for a struct-by-value argument.
+    ///
+    /// X-12 fail-closed (full-audit-2026-08-05-0656 §3.10): the old emitter
+    /// declared `struct X x_struct;` uninitialised and silently skipped field
+    /// types it could not extract, passing indeterminate stack bytes into the
+    /// C call (UB / information leak). This version refuses the call at
+    /// runtime unless the record layout is known AND every field can be
+    /// extracted:
+    ///
+    /// * Unknown layout (type absent from `type_defs`, or not a Record):
+    ///   throw + return NULL. This branch is unreachable through
+    ///   `mimi bindgen` — `build_contract` derives `StructByValue` from the
+    ///   same `type_defs` map (node_bind.rs `build_contract` × contract.rs
+    ///   `from_type_with_caps`), and the checker rejects unresolved extern
+    ///   types (E0231) — but it keeps the generator fail-closed under direct
+    ///   API use.
+    /// * A field type without an N-API extraction (only i32/i64/f64/bool are
+    ///   supported by `napi_extract_for_field`): throw + return NULL. This
+    ///   one IS reachable: `is_valid_extern_type` accepts #[repr(C)] records
+    ///   without recursing into their fields, so e.g. a `string` field passes
+    ///   the checker and previously produced a partially-initialised struct.
     fn write_struct_arg_extract(
         &self,
         out: &mut String,
@@ -1015,34 +1036,82 @@ impl NodeBindGenerator {
         type_name: &str,
         arg_index: usize,
     ) -> Result<(), std::fmt::Error> {
-        writeln!(out, "    struct {} {}_struct;", type_name, param_name)?;
-        if let Some(td) = self.type_defs.get(type_name) {
-            if let TypeDefKind::Record(fields) = &td.kind {
-                for field in fields {
-                    writeln!(out, "    napi_value {}_{}_val;", param_name, field.name)?;
+        let record = self.type_defs.get(type_name).and_then(|td| match &td.kind {
+            TypeDefKind::Record(fields) => Some(fields),
+            _ => None,
+        });
+        let Some(fields) = record else {
+            writeln!(
+                out,
+                "    napi_throw_type_error(env, NULL, \"mimi: no #[repr(C)] record layout for struct argument '{}' (type '{}')\");",
+                param_name, type_name
+            )?;
+            writeln!(out, "    return NULL;")?;
+            return Ok(());
+        };
+
+        // X-12: every field must be extractable from JS; otherwise the struct
+        // would cross the ABI with indeterminate bytes. (`napi_extract_for_field`
+        // decides support purely from the field type; the name args are probes.)
+        if let Some(bad) = fields
+            .iter()
+            .find(|field| self.napi_extract_for_field(&field.ty, "_", "_").is_none())
+        {
+            // Declared (zero-initialised) so the unreachable call site emitted
+            // after this early return still references a complete variable.
+            writeln!(
+                out,
+                "    struct {} {}_struct = {{0}};",
+                type_name, param_name
+            )?;
+            writeln!(
+                out,
+                "    /* X-12 fail-closed: unsupported field type {} for {}.{} — refusing the call. */",
+                crate::core::fmt_type(&bad.ty),
+                param_name,
+                bad.name
+            )?;
+            writeln!(
+                out,
+                "    napi_throw_type_error(env, NULL, \"mimi: unsupported field type in struct argument '{}' (field '{}')\");",
+                param_name, bad.name
+            )?;
+            writeln!(out, "    return NULL;")?;
+            return Ok(());
+        }
+
+        // Zero-initialised so no byte is ever indeterminate, even if a future
+        // extraction path skips a field (defense-in-depth).
+        writeln!(
+            out,
+            "    struct {} {}_struct = {{0}};",
+            type_name, param_name
+        )?;
+        for field in fields {
+            writeln!(out, "    napi_value {}_{}_val;", param_name, field.name)?;
+            writeln!(
+                out,
+                "    MIMI_NAPI_CHECK(env, napi_get_named_property(env, args[{}], \"{}\", &{}_{}_val));",
+                arg_index, field.name, param_name, field.name
+            )?;
+            match self.napi_extract_for_field(
+                &field.ty,
+                &format!("{}_{}_val", param_name, field.name),
+                &format!("{}_struct.{}", param_name, field.name),
+            ) {
+                Some(extract) => {
+                    writeln!(out, "    MIMI_NAPI_CHECK(env, {});", extract)?;
+                }
+                None => {
+                    // Unreachable: the pre-scan above rejects records with any
+                    // unsupported field before extraction is emitted.
                     writeln!(
                         out,
-                        "    MIMI_NAPI_CHECK(env, napi_get_named_property(env, args[{}], \"{}\", &{}_{}_val));",
-                        arg_index, field.name, param_name, field.name
+                        "    /* unreachable: unsupported field type {} for {}.{} */",
+                        crate::core::fmt_type(&field.ty),
+                        param_name,
+                        field.name
                     )?;
-                    match self.napi_extract_for_field(
-                        &field.ty,
-                        &format!("{}_{}_val", param_name, field.name),
-                        &format!("{}_struct.{}", param_name, field.name),
-                    ) {
-                        Some(extract) => {
-                            writeln!(out, "    MIMI_NAPI_CHECK(env, {});", extract)?;
-                        }
-                        None => {
-                            writeln!(
-                                out,
-                                "    // unsupported field type {} for {}.{}",
-                                crate::core::fmt_type(&field.ty),
-                                param_name,
-                                field.name
-                            )?;
-                        }
-                    }
                 }
             }
         }

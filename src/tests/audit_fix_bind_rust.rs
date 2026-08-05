@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use crate::ast::{AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Type};
 use crate::ffi::rust_bind::RustBindGenerator;
 
-
 fn fixture_meta() -> AstNodeMeta {
     AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("test.audit_bind_rust"))
 }

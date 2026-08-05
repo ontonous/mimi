@@ -20,9 +20,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         if args.len() != 1 {
             return Err("atomic_i32_new expects 1 argument".into());
         }
-        let val = match args[0] {
+        let val_in = match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("atomic_i32_new: argument must be an integer".into()),
+        };
+        // D-1 (audit 2026-08-05-0656): the runtime expects i32
+        // (mimi_atomic_i32_new(value: i32)); a wider argument (i64 value or
+        // literal) must be truncated or the call is illegal IR. Mirrors the
+        // sibling pattern in atomic_i32_store / fetch_add / compare_exchange
+        // (and bool_new). VM parity: interp builtin_atomic_i32_new uses
+        // `*x as i32` (wrapping truncation). The legacy call path performs no
+        // width coercion for builtins; the resolved emitter coerces, so this
+        // is a no-op guard there.
+        let i32_ty = self.context.i32_type();
+        let val = if val_in.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(val_in, i32_ty, "atomic_new_trunc")
+                .map_err(|e| format!("atomic_i32_new truncate error: {}", e))?
+        } else {
+            val_in
         };
         let func = self
             .module

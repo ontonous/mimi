@@ -493,8 +493,16 @@ pub extern "C" fn mimi_actor_call(
     // Block waiting for the result.
     match resp_rx.recv() {
         Ok(result) => {
-            let write_size = (result.size as usize).min(MIMI_ACTOR_BLOB_SIZE);
-            if !result_ptr.is_null() && write_size > 0 && write_size <= result.data.len() {
+            // Audit 2026-08-05 (N-4): clamp the REPORTED size to the bytes
+            // actually present. A dispatch may misreport `result.size`
+            // (e.g. > blob → worker sends an empty `data` vec); the old code
+            // skipped the copy in that case but still returned the raw size,
+            // so the caller consumed an UNINITIALIZED buffer for the
+            // over-reported range. Reported = copied, always.
+            let write_size = (result.size as usize)
+                .min(result.data.len())
+                .min(MIMI_ACTOR_BLOB_SIZE);
+            if !result_ptr.is_null() && write_size > 0 {
                 // SAFETY: `result_ptr` is caller-allocated with sufficient space;
                 // `result.data` contains at least `write_size` bytes.
                 unsafe {
@@ -505,7 +513,7 @@ pub extern "C" fn mimi_actor_call(
                     );
                 }
             }
-            result.size as i64
+            write_size as i64
         }
         Err(_) => 0,
     }

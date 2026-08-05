@@ -40,11 +40,19 @@ impl Parser {
                 TokenKind::AndAnd | TokenKind::And => (BinOp::And, 2, false),
                 TokenKind::EqEq => (BinOp::EqCmp, 3, false),
                 TokenKind::Ne => (BinOp::NeCmp, 3, false),
+                // P-4 (full-audit 2026-08-05-0656): Range must bind TIGHTER
+                // than the comparison operators, not equal to them. At prec 3
+                // (same as ==/!=) `1..2 == 2..3` parsed as `((1..2)==2)..3`
+                // — a range whose LHS is a bool — so diagnostics pointed at
+                // the wrong tree. At prec 4 the same input parses as
+                // `(1..2) == (2..3)`, and `x == 1..2` parses as `x == (1..2)`.
+                // Slice syntax never goes through this table (bounds use
+                // parse_expr_without_range), so `a[1..2]` is unaffected.
+                TokenKind::DotDot => (BinOp::Range, 4, false),
                 TokenKind::Lt => (BinOp::Lt, 4, false),
                 TokenKind::Gt => (BinOp::Gt, 4, false),
                 TokenKind::Le => (BinOp::Le, 4, false),
                 TokenKind::Ge => (BinOp::Ge, 4, false),
-                TokenKind::DotDot => (BinOp::Range, 3, false),
                 TokenKind::BitOr => (BinOp::BitOr, 5, false),
                 TokenKind::BitXor => (BinOp::BitXor, 6, false),
                 TokenKind::BitAnd => (BinOp::BitAnd, 7, false),
@@ -74,9 +82,21 @@ impl Parser {
 
     /// Parse an expression without consuming `..` (used for slice start parsing)
     fn parse_expr_without_range(&mut self) -> Result<Expr, ParseError> {
+        // P-2 (full-audit 2026-08-05-0656): this was the one depth-guarded
+        // site whose error paths skipped `dec_depth` (the increment leaked
+        // whenever an inner `parse_unary`/`parse_expr` failed), so under
+        // recovery ≥128 failed slice-start parses produced a false
+        // "recursion limit exceeded". Use the same safe wrapper pattern as
+        // `parse_expr`: decrement unconditionally, then wrap the result.
         let start_pos = self.pos;
         self.check_depth()?;
         self.inc_depth();
+        let result = self.parse_expr_without_range_inner(start_pos);
+        self.dec_depth();
+        result.map(|expr| self.parsed_expr_from(start_pos, expr))
+    }
+
+    fn parse_expr_without_range_inner(&mut self, start_pos: usize) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_unary()?;
         loop {
             if self.at(&TokenKind::PipeArrow) {
@@ -119,8 +139,7 @@ impl Parser {
             let binary = lhs.binary(op, rhs);
             lhs = self.parsed_expr_from(start_pos, binary);
         }
-        self.dec_depth();
-        Ok(self.parsed_expr_from(start_pos, lhs))
+        Ok(lhs)
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
@@ -196,47 +215,75 @@ impl Parser {
     }
 
     fn parse_if_expr_inner(&mut self) -> Result<Expr, ParseError> {
-        self.advance(); // consume `if`
-        let cond = self.parse_expr(0)?;
-        self.skip_newlines();
-        self.expect(TokenKind::LBrace, "`{` for if expression")?;
-        let then_ = self.parse_block()?;
-        let else_ = if self.at(&TokenKind::Else) {
+        // Wave-2 stress fix: iterative `else if` chain — see parse_if_inner
+        // (parse_stmt.rs) for the rationale. Inner-link metadata is
+        // reproduced exactly: span from the link's own `if` token to the
+        // last consumed token of the chain (what consumed_meta computed on
+        // unwind in the recursive form), origin User on the elif expression
+        // and Desugared("parser.else_if.statement") on the wrapping
+        // statement, same as before.
+        let mut links: Vec<(usize, usize, Expr, Block)> = Vec::new(); // (`if` token idx, end idx, cond, then)
+        let tail: Option<Block>;
+        loop {
+            let if_idx = self.pos;
+            self.advance(); // consume `if`
+            let cond = self.parse_expr(0)?;
+            self.skip_newlines();
+            self.expect(TokenKind::LBrace, "`{` for if expression")?;
+            let then_ = self.parse_block()?;
+            let end_idx = self.pos; // position after this chain link's then block
+            links.push((if_idx, end_idx, cond, then_));
+            if !self.at(&TokenKind::Else) {
+                tail = None;
+                break;
+            }
             self.advance();
             self.skip_newlines();
             if self.at(&TokenKind::LBrace) {
                 self.advance();
                 let else_body = self.parse_block()?;
-                Some(else_body)
-            } else if self.at(&TokenKind::If) {
-                let elif = self.parse_if_expr()?;
-                let meta = elif
-                    .meta()
-                    .map(|meta| {
-                        AstNodeMeta::new(
-                            meta.span,
-                            AstOrigin::Desugared("parser.else_if.statement"),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        AstNodeMeta::synthetic(AstOrigin::Desugared("parser.else_if.statement"))
-                    });
-                Some(vec![Stmt::Expr(elif).with_meta(meta)])
-            } else {
-                return Err(ParseError::new(
-                    "`{` or `if` expected after `else`",
-                    self.peek().line,
-                    self.peek().col,
-                ));
+                tail = Some(else_body);
+                break;
             }
-        } else {
-            None
-        };
-        Ok(Expr::If {
+            if self.at(&TokenKind::If) {
+                continue; // next chain link — iterative, no recursion
+            }
+            return Err(ParseError::new(
+                "`{` or `if` expected after `else`",
+                self.peek().line,
+                self.peek().col,
+            ));
+        }
+        // Fold right-to-left; the loop above guarantees ≥1 link.
+        let mut iter = links.into_iter().rev();
+        let (_, _, cond, then_) = iter.next().expect("if-chain has at least one link");
+        let mut current = Expr::If {
             cond: Box::new(cond),
             then_,
-            else_,
-        })
+            else_: tail,
+        };
+        for (if_idx, end_idx, cond, then_) in iter {
+            let first = self.tokens.get(if_idx).expect("`if` token recorded");
+            let last = self.tokens.get(end_idx.saturating_sub(1)).unwrap_or(first);
+            // Per-link span: this link's own `if` token .. this link's own
+            // tail. Using the WHOLE chain's last token for every link made
+            // every elif share one span → identical NodeIds → "duplicate
+            // canonical NodeId" in resolved lowering (dual_if_chain
+            // regression, 2026-08-05 Wave-2).
+            let span = Span::new(first.line, first.col, last.end_line, last.end_col)
+                .with_source(self.source_id);
+            let elif = current.with_meta(AstNodeMeta::new(span, AstOrigin::User));
+            let stmt = Stmt::Expr(elif).with_meta(AstNodeMeta::new(
+                span,
+                AstOrigin::Desugared("parser.else_if.statement"),
+            ));
+            current = Expr::If {
+                cond: Box::new(cond),
+                then_,
+                else_: Some(vec![stmt]),
+            };
+        }
+        Ok(current)
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -463,12 +510,30 @@ impl Parser {
                 let block = self.parsed_expr_from(start_pos, Expr::Block(block));
                 return self.parse_postfix(block, start_pos);
             }
-            // Keywords as identifiers in expression context (e.g., Func, Module for enum comparison)
-            ref kw if is_keyword_token(kw) => {
+            // Soft keywords usable as identifiers (view/mutate/session/end/…)
+            // may appear in expression context (binding-style names). Hard
+            // keywords (return/else/let/module/…) are NOT identifiers: the
+            // old catch-all silently converted them to Ident and deferred the
+            // error to the checker ("undefined variable `return`"), so the
+            // diagnostic pointed at name resolution instead of the syntax
+            // mistake. P-11 (full-audit 2026-08-05-0656): reject them here
+            // with a precise parse-time message.
+            ref kw if super::helpers::is_ident_like_kind(kw) => {
                 let name = kind.source_text().to_string();
                 self.advance();
                 let ident = self.parsed_expr_from(start_pos, Expr::Ident(name));
                 return self.parse_postfix(ident, start_pos);
+            }
+            ref kw if is_keyword_token(kw) => {
+                let (line, col) = (self.peek().line, self.peek().col);
+                return Err(ParseError::new(
+                    format!(
+                        "keyword `{}` cannot start an expression",
+                        kind.source_text()
+                    ),
+                    line,
+                    col,
+                ));
             }
             _ => {
                 let (line, col) = (self.peek().line, self.peek().col);

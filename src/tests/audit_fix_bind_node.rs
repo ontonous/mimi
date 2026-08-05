@@ -10,7 +10,6 @@ use crate::ast::{
 use crate::ffi::node_bind::NodeBindGenerator;
 use std::collections::HashMap;
 
-
 fn meta() -> AstNodeMeta {
     AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("audit.bind_node"))
 }
@@ -198,7 +197,19 @@ fn node_raw_ptr_args_marshaled_as_address() {
             Some(i32_ty()),
         )])
         .unwrap();
-    assert!(dts.contains("export function read_ptr(p: number | bigint): bigint;"));
+    // Contract (verified against `mimi bindgen` output for
+    // `func read_ptr(p: *i32) -> i32`): the RawPtr ARGUMENT marshals as an
+    // address — Component IR maps `*T`/`*mut T` to `AbiTypeRef::Pointer`
+    // (src/component/gen.rs `mimi_type_to_abi_depth`, rendered as C `T*` in
+    // src/component/types.rs), and the d.ts address type is `number | bigint`
+    // (node_bind.rs `mimi_type_to_ts` RawPtr/RawPtrMut arm; generated C
+    // accepts both and casts `(void*)(intptr_t)addr`). The RETURN here is
+    // plain `i32`, which maps to TS `number` (node_bind.rs `ret_type_to_ts`
+    // Int(I32) arm — same mapping pinned for `point_sum` in
+    // ffi/bindgen_tests.rs). `bigint` returns are reserved for i64 / RawPtr /
+    // handle returns and are pinned separately in
+    // `node_raw_ptr_returns_and_extern_prototypes` below.
+    assert!(dts.contains("export function read_ptr(p: number | bigint): number;"));
 }
 
 /// Fix 3 companion + sweep: pointer returns previously emitted JS `undefined`,
@@ -323,5 +334,186 @@ fn node_struct_bool_field_and_callback_prototype() {
     ));
     assert!(
         out.contains("MIMI_NAPI_CHECK(env, napi_get_value_bool(env, fl_on_val, &fl_struct.on));")
+    );
+}
+
+/// #[repr(C)] Bad { name: string, n: i32 } — `string` has no N-API field
+/// extraction (napi_extract_for_field supports only i32/i64/f64/bool).
+fn bad_field_type_defs() -> HashMap<String, TypeDef> {
+    let mut map = HashMap::new();
+    map.insert(
+        "Bad".to_string(),
+        TypeDef {
+            meta: meta(),
+            name: "Bad".to_string(),
+            pub_: true,
+            kind: TypeDefKind::Record(vec![
+                Field {
+                    meta: meta(),
+                    name: "name".to_string(),
+                    ty: string_ty(),
+                },
+                Field {
+                    meta: meta(),
+                    name: "n".to_string(),
+                    ty: i32_ty(),
+                },
+            ]),
+            generics: vec![],
+            derives: vec![],
+            attributes: vec![TypeAttribute::ReprC],
+        },
+    );
+    map
+}
+
+/// X-12 (full-audit-2026-08-05-0656 §3.10), CONFIRMED reachable chain: the
+/// checker accepts #[repr(C)] records with unsupported field types because
+/// `is_valid_extern_type` (core/checker/types.rs) does not recurse into
+/// record fields — `mimi check` passes `type Bad { name: string, n: i32 }`
+/// in an extern signature (PoC: /tmp/opencode/w2/FFI/poc_x12_*.mimi). The old
+/// emitter declared `struct Bad b_struct;` uninitialised, skipped `name` with
+/// a comment, and passed the struct by value to C → indeterminate stack bytes
+/// cross the ABI (UB / information leak). The wrapper must refuse the call.
+#[test]
+fn audit2_ffi_node_struct_arg_unsupported_field_fails_closed() {
+    let gen = NodeBindGenerator::new(bad_field_type_defs(), "audit");
+    let out = gen
+        .generate(&[extern_fn(
+            "take_bad",
+            vec![("b", Type::Name("Bad".into(), vec![]))],
+            Some(i32_ty()),
+        )])
+        .unwrap();
+
+    // Fail-closed throw naming the offending field.
+    assert!(out.contains(
+        "napi_throw_type_error(env, NULL, \"mimi: unsupported field type in struct argument 'b' (field 'name')\");"
+    ));
+    // The struct is declared zero-initialised so the (now unreachable) call
+    // site emitted afterwards still references a complete, defined variable.
+    assert!(out.contains("struct Bad b_struct = {0};"));
+    // The C call must be unreachable: the throw precedes it.
+    let throw_pos = out
+        .find("mimi: unsupported field type in struct argument")
+        .expect("fail-closed throw emitted");
+    let call_pos = out
+        .find("take_bad(b_struct)")
+        .expect("call still emitted as dead code after the early return");
+    assert!(throw_pos < call_pos, "throw must precede the C call");
+    // No field extraction is emitted before the throw (nothing half-marshalled).
+    assert!(!out.contains("napi_get_named_property(env, args[0], \"name\""));
+    assert!(!out.contains("napi_get_named_property(env, args[0], \"n\""));
+}
+
+/// X-12, the audit's literal phrasing ("type_defs 查不到该类型"): UNREACHABLE
+/// by construction, and this test pins the fail-closed shape that guards it.
+/// `build_contract` derives the record sets from the SAME `type_defs` map
+/// (node_bind.rs), so a name absent from `type_defs` can never become
+/// `StructByValue` — it lands in `FfiArgContract::Unsupported` and the
+/// wrapper throws before any struct is declared. (Upstream, `mimi bindgen`
+/// already rejects unresolved extern types via the checker, E0231.)
+#[test]
+fn audit2_ffi_node_unknown_arg_type_fails_closed_without_struct() {
+    let gen = NodeBindGenerator::new(HashMap::new(), "audit");
+    let out = gen
+        .generate(&[extern_fn(
+            "mystery",
+            vec![("w", Type::Name("Ghost".into(), vec![]))],
+            Some(i32_ty()),
+        )])
+        .unwrap();
+
+    assert!(out.contains(
+        "napi_throw_type_error(env, NULL, \"mimi: unsupported FFI argument type for parameter w\");"
+    ));
+    // No uninitialised struct is ever declared for the unknown type.
+    assert!(!out.contains("struct Ghost"));
+    assert!(!out.contains("w_struct"));
+}
+
+/// X-12 defense-in-depth: a fully marshalable record is declared
+/// zero-initialised (`= {0}`) so no byte is indeterminate even if a future
+/// extraction path skips a field; extraction of every field is preserved.
+#[test]
+fn audit2_ffi_node_supported_struct_arg_zero_initialized() {
+    let gen = NodeBindGenerator::new(flags_type_defs(), "audit");
+    let out = gen
+        .generate(&[extern_fn(
+            "check_flags",
+            vec![("fl", Type::Name("Flags".into(), vec![]))],
+            Some(i32_ty()),
+        )])
+        .unwrap();
+
+    assert!(out.contains("struct Flags fl_struct = {0};"));
+    assert!(out.contains(
+        "MIMI_NAPI_CHECK(env, napi_get_named_property(env, args[0], \"on\", &fl_on_val));"
+    ));
+    assert!(out.contains(
+        "MIMI_NAPI_CHECK(env, napi_get_named_property(env, args[0], \"n\", &fl_n_val));"
+    ));
+    // The call still receives the marshaled struct.
+    assert!(out.contains("check_flags(fl_struct)"));
+}
+
+/// Wave-2 item 3 (wave1-review-2026-08-05 §6.6): every bindgen test was a
+/// static text assertion — none compiled the generated code. Minimal gate:
+/// the generated C header must pass `cc -fsyntax-only`. Follows the repo's
+/// can_link() skip convention (src/tests/mod.rs): skips loudly-but-gracefully
+/// when no C compiler is installed. The fixture surface mirrors
+/// /tmp/opencode/w2/FFI/poc_ccgate.mimi, verified through the real
+/// `mimi bindgen` pipeline.
+#[test]
+fn audit2_ffi_c_header_passes_cc_syntax_only() {
+    if !crate::tests::can_link() {
+        eprintln!(
+            "SKIP audit2_ffi_c_header_passes_cc_syntax_only: no `cc` available (can_link() = false)"
+        );
+        return;
+    }
+
+    let cb_ty = Type::Func(vec![i32_ty(), i64_ty()], Box::new(i32_ty()));
+    let header = crate::ffi::c_header::generate_c_header(
+        &[
+            extern_fn(
+                "add2",
+                vec![("a", i32_ty()), ("b", i32_ty())],
+                Some(i32_ty()),
+            ),
+            extern_fn("borrow_str", vec![], Some(string_ty())),
+            extern_fn("take", vec![("s", raw_string_ty())], Some(unit_ty())),
+            extern_fn("read_ptr", vec![("p", raw_ptr_i32())], Some(i32_ty())),
+            extern_fn("alloc_buf", vec![], Some(raw_ptr_i32())),
+            extern_fn(
+                "check_flags",
+                vec![("fl", Type::Name("Flags".into(), vec![]))],
+                Some(i32_ty()),
+            ),
+            extern_fn(
+                "apply_cb",
+                vec![("f", cb_ty), ("x", i32_ty())],
+                Some(i32_ty()),
+            ),
+        ],
+        flags_type_defs(),
+    )
+    .expect("C header generation");
+
+    let dir = std::env::temp_dir().join(format!("mimi_audit2_ffi_hdr_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir for header gate");
+    let header_path = dir.join("mimi_ffi.h");
+    std::fs::write(&header_path, &header).expect("write generated header");
+    let output = std::process::Command::new("cc")
+        .arg("-fsyntax-only")
+        .arg(&header_path)
+        .output()
+        .expect("spawn `cc` (can_link() was true)");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "generated C header failed `cc -fsyntax-only`:\n--- stderr ---\n{}\n--- header ---\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        header
     );
 }

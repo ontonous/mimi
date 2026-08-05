@@ -49,6 +49,11 @@ pub(crate) struct Checker<'a> {
     /// linear feature (E0256); they remain after the `with` effect clause was
     /// abolished (§4.2). No longer used to cross-validate `with` clauses.
     pub(crate) declared_caps: HashSet<String>,
+    /// T-4 (audit 2026-08-05): declared flow names (module-qualified) for
+    /// duplicate-definition detection, mirroring the Item::Type E0402 guard.
+    /// `const_types` / `types` cannot serve as detectors because later passes
+    /// re-insert the same keys.
+    pub(crate) declared_flows: HashSet<String>,
     /// Component expansion of capability declarations: simple caps map to
     /// themselves; combined caps (`cap FullAccess = FileReadCap + FileWriteCap`)
     /// map to their component list. Mirrors the bytecode compiler's
@@ -265,6 +270,7 @@ impl<'a> Checker<'a> {
             impls: HashMap::new(),
             where_clauses: HashMap::new(),
             declared_caps: HashSet::new(),
+            declared_flows: HashSet::new(),
             cap_components: HashMap::new(),
             strict: false,
             var_scopes: vec![HashMap::new()],
@@ -549,6 +555,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check(&mut self) -> Result<(), Vec<Diagnostic>> {
         self.collect_decls();
+        self.seed_linear_type_names();
         self.emit_progressive_migration_hint();
         for item in &self.file.items {
             self.check_item(item);
@@ -590,6 +597,35 @@ impl<'a> Checker<'a> {
                     .then(a.message.cmp(&b.message))
             });
             Err(deduped)
+        }
+    }
+
+    /// C-1 (audit 2026-08-05): seed flow-state names into the unification
+    /// table before any body is checked, so the bare-container unify arm can
+    /// fail-closed on `List<flow state>` regardless of item declaration order
+    /// (a flow declared AFTER the function that consumes it must still be
+    /// recognized as linear). Cap/CapAtom are syntactic markers and
+    /// `SessionChan` is name-conventional; only flow states need seeding.
+    fn seed_linear_type_names(&mut self) {
+        fn walk(items: &[Item], out: &mut Vec<String>) {
+            for item in items {
+                match item {
+                    Item::Flow(f) => {
+                        let qualified = format!("flow::{}", f.name);
+                        for state in &f.states {
+                            out.push(state.name.clone());
+                            out.push(format!("{}::{}", qualified, state.name));
+                        }
+                    }
+                    Item::Module(m) => walk(&m.items, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut names = Vec::new();
+        walk(&self.file.items, &mut names);
+        for name in names {
+            self.unification.note_linear_type_name(name);
         }
     }
 

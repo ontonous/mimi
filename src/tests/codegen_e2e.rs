@@ -3040,46 +3040,29 @@ fn e2e_net_fetch_failure() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    let stdout = compile_and_run(
-        r#"
-type NetError {
-    SocketCreate
-    ConnectFailed
-    BindFailed
-    ListenFailed
-    AcceptFailed
-    SendFailed
-    RecvFailed
-    HttpGetFailed
-    HttpPostFailed
-}
-
-func fetch(url: string) -> Result<string, NetError> {
-    let body = http_get(url)
-    if body == "" { Result::Err(HttpGetFailed) }
-    else { Result::Ok(body) }
-}
-
+    // The http_get builtin is fail-loud: real errors (refused, resolve
+    // failure) abort with a trap rather than returning an Err value
+    // (std/net.mimi documents "The http_get builtin aborts on failure").
+    // The old test expected a `body == ""` sentinel — that shape was
+    // removed by the Wave-1 fail-loud fix. The observable contract is:
+    // loopback URLs are SSRF-blocked and the program aborts loudly (VM
+    // parity: interp/bytecode/builtins/net.rs validate_host_ssrf blocks
+    // 127.0.0.1; runtime/net.rs now mirrors it — 2026-08-05 Wave-2).
+    // compile_and_run returns Err carrying the abort stderr.
+    let src = r#"
 func main() -> i32 {
-    let result = fetch("http://127.0.0.1:1/nonexistent")
-    match result {
-        Ok(body) => { println(body) }
-        Err(e) => {
-            match e {
-                HttpGetFailed => { println("HTTP request failed") }
-                _ => { println("unknown error") }
-            }
-        }
-    }
+    let result = http_get("http://127.0.0.1:1/nonexistent")
+    println(result)
     0
 }
-"#,
-    )
-    .expect("src/tests/codegen_e2e.rs:1602 unwrap failed");
+"#;
+    let err = compile_and_run(src)
+        .err()
+        .unwrap_or_else(|| panic!("expected SSRF abort, got Ok"));
     assert!(
-        stdout.trim().contains("HTTP request failed"),
-        "expected HTTP request failed, got: {}",
-        stdout.trim()
+        err.contains("SSRF protection"),
+        "expected SSRF rejection of loopback URL, got: {}",
+        err
     );
 }
 
@@ -3089,50 +3072,25 @@ fn e2e_net_fetch_post_failure() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    let stdout = compile_and_run(
-        r#"
-type NetError {
-    SocketCreate
-    ConnectFailed
-    BindFailed
-    ListenFailed
-    AcceptFailed
-    SendFailed
-    RecvFailed
-    HttpGetFailed
-    HttpPostFailed
-}
-
-func fetch_post(url: string, body: string) -> Result<string, NetError> {
-    let resp = http_post(url, body)
-    if resp == "" { Result::Err(HttpPostFailed) }
-    else { Result::Ok(resp) }
-}
-
+    // http_post is fail-loud like http_get; loopback is SSRF-blocked
+    // (VM parity, see e2e_net_fetch_failure). The old test expected a
+    // `resp == ""` sentinel that the Wave-1 fail-loud fix removed.
+    let src = r#"
 func main() -> i32 {
-    let result = fetch_post("http://127.0.0.1:1/post", "data")
-    match result {
-        Ok(body) => { println(body) }
-        Err(e) => {
-            match e {
-                HttpPostFailed => { println("HTTP request failed") }
-                _ => { println("unknown error") }
-            }
-        }
-    }
+    let result = http_post("http://127.0.0.1:1/post", "data")
+    println(result)
     0
 }
-"#,
-    )
-    .expect("src/tests/codegen_e2e.rs:1643 unwrap failed");
+"#;
+    let err = compile_and_run(src)
+        .err()
+        .unwrap_or_else(|| panic!("expected SSRF abort, got Ok"));
     assert!(
-        stdout.trim().contains("HTTP request failed"),
-        "expected HTTP request failed, got: {}",
-        stdout.trim()
+        err.contains("SSRF protection"),
+        "expected SSRF rejection of loopback URL, got: {}",
+        err
     );
 }
-
-// ===================== UBSan Tests =====================
 
 fn can_ubsan() -> bool {
     std::process::Command::new("cc")

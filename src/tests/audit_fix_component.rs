@@ -12,7 +12,6 @@
 //!   bytes; schema index contiguity enforced.
 //! - §12 MEDIUM: wire handle generation fails closed past 16 bits.
 
-
 // ── Helper: build the core runtime ComponentIr ─────────────────────────────
 
 fn core_ir() -> crate::component::ComponentIr {

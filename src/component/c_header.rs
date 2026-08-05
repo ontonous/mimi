@@ -317,10 +317,6 @@ mod tests {
     }
 
     #[test]
-
-    #[test]
-
-    #[test]
     fn c_header_contains_function_decls() {
         let mut gen = AbiGenerator::new();
         register_core_runtime_abi(&mut gen);

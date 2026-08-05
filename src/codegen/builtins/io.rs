@@ -642,13 +642,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if elem.starts_with('(') {
                             // List of List of product tuples.
                             self.emit_list_list_product_tuple_to_string(*sv, &elem)?
+                        } else if elem == "f64" || elem == "f32" {
+                            // Audit wave2 (D-5b): the runtime-callback path
+                            // only has an i32 element formatter; List<List<f64>>
+                            // routed through it printed f64 bit patterns as
+                            // i32 garbage. Render inner lists with the sized
+                            // scalar emitter instead (kind-correct).
+                            self.emit_list_list_scalar_to_string(*sv, ScalarListKind::F64)?
+                        } else if elem == "i64" {
+                            self.emit_list_list_scalar_to_string(*sv, ScalarListKind::I64)?
+                        } else if elem == "bool" {
+                            self.emit_list_list_scalar_to_string(*sv, ScalarListKind::Bool)?
                         } else {
-                            // TODO(#audit-wave2): f64/i64 inner elements still
-                            // route through mimi_list_i32_to_string here (the
-                            // runtime exposes no f64/i64 list-display helper
-                            // to pass as a fn pointer; runtime is owned by
-                            // another agent). Single-level List<f64>/List<i64>
-                            // is fixed via emit_list_scalar_to_string.
                             let inner_fn = if elem == "string" {
                                 "mimi_list_to_string"
                             } else if elem.starts_with("Map") {
@@ -9286,6 +9291,65 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
+    /// Audit wave2 (D-5b): display `List<List<f64>>` / `List<List<i64>>` /
+    /// `List<List<bool>>` — outer sized assembly, inner lists rendered by
+    /// the element-kind-correct `emit_list_scalar_to_string`. Replaces the
+    /// old route through `mimi_list_i32_to_string`, which printed f64 bit
+    /// patterns as i32 garbage (VM reference: Value::List Display per
+    /// element type).
+    fn emit_list_list_scalar_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        kind: ScalarListKind,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let name = match kind {
+            ScalarListKind::F64 => "list_list_f64",
+            ScalarListKind::I64 => "list_list_i64",
+            ScalarListKind::Bool => "list_list_bool",
+        };
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), name)?;
+        self.build_store(alloca, sv)?;
+        let len = self.load_list_len(alloca)?;
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, &format!("{}_data_gep", name))
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, &format!("{}_data", name))?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], &format!("{}_slot", name))
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, &format!("{}_elem", name))?
+                    .into_int_value();
+                let inner_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, &format!("{}_as_ptr", name))
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let inner_sv = self
+                    .build_load(
+                        BasicTypeEnum::StructType(list_ty),
+                        inner_ptr,
+                        &format!("{}_ld", name),
+                    )?
+                    .into_struct_value();
+                self.emit_list_scalar_to_string(inner_sv, kind)
+            },
+            name,
+        )
+    }
+
     /// Serialize `List<List<(…)>>` to nested JSON arrays of product tuples.
     pub(in crate::codegen) fn emit_list_list_product_tuple_to_json(
         &self,
@@ -9606,13 +9670,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "assert expects 1 or 2 arguments (condition, optional message)".to_string(),
             ));
         }
-        let cond = match args[0] {
+        let cond_raw = match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "assert requires boolean/i64 argument".to_string(),
                 ))
             }
+        };
+        // H-22 (audit 2026-08-05-0656, io.rs half): builtin predicates
+        // (`str_contains`, `contains`, `has_key`, …) return i64 booleans;
+        // `br` requires i1. Normalize non-i1 conditions with a zero compare
+        // — mirrors the if-stmt/while fix in block.rs (the zero constant
+        // matches the condition's own width; icmp operands must agree).
+        let cond = if cond_raw.get_type().get_bit_width() == 1 {
+            cond_raw
+        } else {
+            let zero = cond_raw.get_type().const_zero();
+            self.builder
+                .build_int_compare(IntPredicate::NE, cond_raw, zero, "assert_cond_to_i1")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
         };
         let function = self
             .current_function()
@@ -10316,7 +10393,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Returning the alloca pointer made the resolved emitter's
         // wrap_builtin_string_result treat it as a raw char* and double-wrap
         // it ({ptr: &struct, len: 0}) → garbage len/data.
-        let loaded = self.build_load(BasicTypeEnum::StructType(string_ty), str_alloca, "input_result")?;
+        let loaded = self.build_load(
+            BasicTypeEnum::StructType(string_ty),
+            str_alloca,
+            "input_result",
+        )?;
         Ok(loaded)
     }
 

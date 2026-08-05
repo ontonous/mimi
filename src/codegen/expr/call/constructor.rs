@@ -1060,7 +1060,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_cond_br(ctx.disc, ok_bb, err_bb)?;
         // Err path: write Err variant {disc=0, ok=undef, err=copy_from_source}
         self.builder.position_at_end(err_bb);
-        self.emit_variant_err_path(ctx.is_result, result_sty, ctx.pv, result_alloca)?;
+        self.emit_variant_err_path(
+            ctx.is_result,
+            ctx.variant_sty,
+            result_sty,
+            ctx.pv,
+            result_alloca,
+        )?;
         self.build_br(merge_bb)?;
         // Ok path: call fn(payload), write Ok variant {disc=1, ok=mapped}
         self.builder.position_at_end(ok_bb);
@@ -1179,7 +1185,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_cond_br(ctx.disc, ok_bb, err_bb)?;
         // Err path: write Err variant {disc=0, ok=undef, err=copy_from_source}
         self.builder.position_at_end(err_bb);
-        self.emit_variant_err_path(ctx.is_result, result_sty, ctx.pv, result_alloca)?;
+        self.emit_variant_err_path(
+            ctx.is_result,
+            ctx.variant_sty,
+            result_sty,
+            ctx.pv,
+            result_alloca,
+        )?;
         self.build_br(merge_bb)?;
         // Ok path: call fn(payload), store resulting variant into result_alloca
         self.builder.position_at_end(ok_bb);
@@ -1348,6 +1360,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn emit_variant_err_path(
         &self,
         is_result: bool,
+        src_sty: StructType<'ctx>,
         variant_sty: StructType<'ctx>,
         pv: PointerValue<'ctx>,
         result_alloca: PointerValue<'ctx>,
@@ -1377,12 +1390,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let zero_payload = Self::zero_value_for_type(fields[1], i64_ty);
         self.build_store(o_gep_e, zero_payload)?;
         if is_result {
+            // H-19 (audit 2026-08-05 wave-2): the source Err slot must be
+            // GEP'd with the SOURCE layout. map/and_then change the Ok
+            // payload type (`Result<i32,string>` -> `Result<string,string>`),
+            // so the target field-2 offset differs from the source's; using
+            // the target layout on the source pointer read the wrong bytes
+            // and the payload was truncated to i64 ("eq requires same types",
+            // silent Err corruption on the codegen side). The Err payload
+            // type itself (E) is unchanged by map/and_then, so load it with
+            // the source field-2 type and store into the target field-2.
+            let src_err_ty = src_sty.get_field_types()[2];
             let src_err_gep = self
                 .gep()
-                .build_struct_gep(BasicTypeEnum::StructType(variant_sty), pv, 2, "src_err_gep")
+                .build_struct_gep(BasicTypeEnum::StructType(src_sty), pv, 2, "src_err_gep")
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let err_val =
-                self.build_load(BasicTypeEnum::IntType(i64_ty), src_err_gep, "err_val")?;
+            let err_val = self.build_load(src_err_ty, src_err_gep, "err_val")?;
             let dst_err_gep = self
                 .gep()
                 .build_struct_gep(

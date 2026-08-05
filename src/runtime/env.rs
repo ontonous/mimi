@@ -48,10 +48,13 @@ pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     // H5 fix: free old C strings before clearing to prevent memory leak.
     for ptr in args.argv.drain(..) {
         if ptr != 0 {
-            // SAFETY: ptr came from `libc::malloc`-family allocator in `alloc_c_string`,
-            // and the null check above guards against double-free. The same
-            // allocator must be used to free.
-            unsafe { libc::free(ptr as *mut std::ffi::c_void) };
+            // SAFETY: ptr came from `alloc_c_string` (mimi_alloc), and the
+            // null check above guards against double-free. `mimi_free` is the
+            // matching deallocator (audit 2026-08-05, N-1: a raw libc::free
+            // was the wrong allocator AND the wrong base under cfg(miri),
+            // where mimi_alloc uses the Rust allocator + a size header; in
+            // normal builds mimi_free IS libc::free).
+            super::mimi_free(ptr as *mut std::ffi::c_void);
         }
     }
     // Audit fix (env.rs:47-72,121): `argc` must only ever reflect the number
@@ -145,8 +148,9 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     // H1-pattern fix (matches mod.rs `mimi_str_split`): allocate the element
     // array itself with libc::malloc and copy out of the Vec. mimi_list_free
     // frees the data buffer with libc::free — a Rust Vec buffer is a
-    // different allocator (UB to free via libc), and list_cap reading
-    // data[-8] on a Vec buffer is OOB.
+    // different allocator (UB to free via libc). Audit 2026-08-05 (H-26):
+    // the list is constructed with has_header=false, so list_cap/list_free
+    // never read data[-8]; the flag replaced the old negative-value heuristic.
     let data_ptr = if count == 0 {
         std::ptr::null_mut()
     } else {
@@ -183,7 +187,8 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     let len = count as i64;
     // 0.31.23: args are strings. The MimiList STRUCT is Box-allocated,
     // matching mimi_list_free which frees it via Box::from_raw (mod.rs).
-    // No hidden capacity header (list_cap returns 0 → data freed directly).
+    // No hidden capacity header: has_header=false (with_data default) →
+    // list_cap returns 0 without reading data[-8] and free(data) is direct.
     Box::into_raw(Box::new(MimiList::with_data(
         data_ptr,
         len,
@@ -281,15 +286,17 @@ mod tests {
         assert!(!s0.is_null());
         // SAFETY: s0 is non-null (checked) and owned by alloc_c_string.
         assert_eq!(unsafe { cstr_to_string(s0) }, "alpha");
-        // SAFETY: s0 was allocated by alloc_c_string (libc::malloc).
-        unsafe { libc::free(s0 as *mut std::ffi::c_void) };
+        // SAFETY: s0 was allocated by alloc_c_string (mimi_alloc); mimi_free
+        // is the matching deallocator (N-1 pairing).
+        crate::runtime::mimi_free(s0 as *mut std::ffi::c_void);
 
         let s1 = mimi_args_get(1);
         assert!(!s1.is_null());
         // SAFETY: s1 is non-null (checked) and owned by alloc_c_string.
         assert_eq!(unsafe { cstr_to_string(s1) }, "beta");
-        // SAFETY: s1 was allocated by alloc_c_string (libc::malloc).
-        unsafe { libc::free(s1 as *mut std::ffi::c_void) };
+        // SAFETY: s1 was allocated by alloc_c_string (mimi_alloc); mimi_free
+        // is the matching deallocator (N-1 pairing).
+        crate::runtime::mimi_free(s1 as *mut std::ffi::c_void);
 
         let list = mimi_args_list();
         assert!(!list.is_null());
@@ -299,9 +306,14 @@ mod tests {
             assert_eq!((*list).len, 2);
             assert_eq!(cstr_to_string(*(*list).data), "alpha");
             assert_eq!(cstr_to_string(*(*list).data.add(1)), "beta");
+            // H-26 flag contract: args_list is a header-less owning list —
+            // list_cap/list_free must never read data[-8] for it.
+            assert!(!(*list).has_header);
+            assert!((*list).owns_data);
         }
         // The old Vec-buffer ABI failed exactly here: list_cap read data[-8]
-        // OOB and mimi_list_free freed a Vec buffer via libc::free.
+        // OOB and mimi_list_free freed a Vec buffer via libc::free. With the
+        // has_header flag the free goes straight to the malloc'd base.
         crate::runtime::mimi_list_free(list, true);
         reset_cli_args();
     }
@@ -312,13 +324,17 @@ mod tests {
         // a serial set → get cycle returns the written value.
         let key = std::ffi::CString::new("MIMI_AUDIT_ENV_SUB").unwrap();
         let val = std::ffi::CString::new("hello-audit").unwrap();
-        assert_eq!(crate::runtime::fs::mimi_set_env(key.as_ptr(), val.as_ptr()), 1);
+        assert_eq!(
+            crate::runtime::fs::mimi_set_env(key.as_ptr(), val.as_ptr()),
+            1
+        );
         let p = mimi_getenv(key.as_ptr());
         assert!(!p.is_null());
         // SAFETY: p is non-null (checked) and owned by alloc_c_string.
         assert_eq!(unsafe { cstr_to_string(p) }, "hello-audit");
-        // SAFETY: p was allocated by alloc_c_string (libc::malloc).
-        unsafe { libc::free(p as *mut std::ffi::c_void) };
+        // SAFETY: p was allocated by alloc_c_string (mimi_alloc); mimi_free
+        // is the matching deallocator (N-1 pairing).
+        crate::runtime::mimi_free(p as *mut std::ffi::c_void);
         std::env::remove_var("MIMI_AUDIT_ENV_SUB");
     }
 }

@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::codegen::{CodeGenerator, VarEntry};
+use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::types::BasicTypeEnum;
@@ -16,7 +16,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let cond_val = self.compile_expr(cond, vars)?;
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
-            iv
+            // H-22 (full-audit 2026-08-05 §2.6): builtin predicates (contains,
+            // str_contains, …) return i64 0/1 booleans. Passing an i64 straight
+            // to `br` emits invalid IR (`br i64`, instruction-selection crash);
+            // normalize to i1 first. The if-statement/while family in
+            // block.rs:1191 / func.rs:2432 already applies this same
+            // normalization — the if-EXPRESSION path had been missed.
+            if iv.get_type().get_bit_width() == 1 {
+                iv
+            } else {
+                let zero = iv.get_type().const_int(0, false);
+                self.builder
+                    .build_int_compare(inkwell::IntPredicate::NE, iv, zero, "ifexpr_cond")
+                    .map_err(|e| CompileError::LlvmError(format!("cond normalize: {}", e)))?
+            }
         } else {
             return Err("if expression condition must be boolean".into());
         };
@@ -99,6 +112,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(phi.as_basic_value())
     }
 
+    /// Slice: `target[start..end]`.
+    ///
+    /// Semantics are pinned to the bytecode VM's `__slice` builtin
+    /// (interp/bytecode/builtins/list.rs `builtin_slice`; P-0 ruling: VM is
+    /// reference). The pre-Wave-2 legacy emission diverged on four axes:
+    ///
+    /// 1. OOB indices were CLAMPED to [0, len] — VM traps (E0814 slice error).
+    /// 2. Negative indices were clamped to 0 — VM wraps Python-style:
+    ///    `idx < 0 → (len + idx).max(0)`.
+    /// 3. String targets were reinterpreted as lists (garbage) — VM slices
+    ///    strings by CHARACTER index (`mimi_str_substring` is char-based).
+    /// 4. The result ALIASED the source data buffer (no copy; double-free /
+    ///    mutation-through hazard) — VM copies (`l[start..end].to_vec()`).
+    ///
+    /// This emission resolves negatives, fails loud on OOB with the VM's
+    /// messages, and copies the slice into a fresh buffer registered for
+    /// scope-exit free (same discipline as the match `..rest` copy,
+    /// expr/match.rs `build_list_struct`).
     pub(in crate::codegen) fn compile_slice_expr(
         &mut self,
         target: &Expr,
@@ -106,20 +137,159 @@ impl<'ctx> CodeGenerator<'ctx> {
         end: &Option<Box<Expr>>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // Slice: arr[start..end] — compile target, compute slice offset and length
         let target_val = self.compile_expr(target, vars)?;
+        if self.infer_object_type(target, vars) == "string" {
+            return self.compile_string_slice(target_val, start, end, vars);
+        }
+        self.compile_list_slice(target_val, start, end, vars)
+    }
+
+    /// Compile a slice index expression (`Some` → value, `None` → `default`),
+    /// sign-extend sub-i64 indices, then resolve a negative index Python-style
+    /// exactly like the VM: `idx < 0 → (len + idx).max(0)`.
+    fn resolve_slice_index(
+        &mut self,
+        idx_expr: &Option<Box<Expr>>,
+        default: inkwell::values::IntValue<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let raw = match idx_expr {
+            Some(e) => self.compile_expr(e, vars)?.into_int_value(),
+            None => default,
+        };
+        // A1: widen i32 indices to i64 — slice arithmetic uses i64 throughout.
+        let raw = if raw.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(raw, i64_ty, &format!("{}_sext", name))
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            raw
+        };
+        let zero = i64_ty.const_int(0, false);
+        let is_neg = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                raw,
+                zero,
+                &format!("{}_neg", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        // len + idx (idx negative); clamp the wrap to >= 0 (VM .max(0)).
+        let wrapped = self
+            .builder
+            .build_int_add(len, raw, &format!("{}_wrap", name))
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        let wrap_neg = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                wrapped,
+                zero,
+                &format!("{}_wrap_neg", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let wrapped = self
+            .builder
+            .build_select(wrap_neg, zero, wrapped, &format!("{}_wrap_max0", name))
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        self.builder
+            .build_select(is_neg, wrapped, raw, &format!("{}_resolved", name))
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))
+            .map(|v| v.into_int_value())
+    }
+
+    /// Fail loud on a violated slice invariant (VM E0814 parity). Inside a
+    /// fallible multi-target transition the abort is absorbed into the Fault
+    /// variant (mirrors the div/mod trap sites, expr/operator.rs); elsewhere
+    /// abort with the exact VM message.
+    fn emit_slice_bounds_trap(
+        &mut self,
+        bad: inkwell::values::IntValue<'ctx>,
+        msg: &str,
+    ) -> Result<(), CompileError> {
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for slice trap".into()))?;
+        let ok_bb = self.context.append_basic_block(function, "slice_bounds_ok");
+        let fail_bb = self
+            .context
+            .append_basic_block(function, "slice_bounds_fail");
+        self.builder
+            .build_conditional_branch(bad, fail_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(fail_bb);
+        if self.in_fallible_multi_target() {
+            self.emit_panic_fault_return("E0814")?;
+        } else {
+            let msg_ptr = self
+                .builder
+                .build_global_string_ptr(msg, "slice_msg")
+                .map_err(|e| CompileError::LlvmError(format!("slice msg: {}", e)))?;
+            let abort_fn = self.get_or_declare_abort_fn();
+            self.builder
+                .build_call(
+                    abort_fn,
+                    &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                        msg_ptr.as_pointer_value(),
+                    )],
+                    "slice_abort",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("slice abort call: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        }
+        self.builder.position_at_end(ok_bb);
+        Ok(())
+    }
+
+    /// Strict VM-parity bounds gate over already-resolved indices:
+    /// start > len, end > len and start > end each trap (E0814 messages
+    /// verbatim from `builtin_slice`).
+    fn check_slice_bounds(
+        &mut self,
+        start: inkwell::values::IntValue<'ctx>,
+        end: inkwell::values::IntValue<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let start_oob = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, start, len, "slice_start_oob")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.emit_slice_bounds_trap(start_oob, "slice start out of bounds")?;
+        let end_oob = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, end, len, "slice_end_oob")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.emit_slice_bounds_trap(end_oob, "slice end out of bounds")?;
+        let start_gt_end = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, start, end, "slice_start_gt_end")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.emit_slice_bounds_trap(start_gt_end, "slice start > end")?;
+        Ok(())
+    }
+
+    /// List slice: bounds-checked, COPIED result (no aliasing into the source
+    /// buffer — VM `l[start..end].to_vec()` parity).
+    fn compile_list_slice(
+        &mut self,
+        target_val: BasicValueEnum<'ctx>,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let target_ptr = match target_val {
             BasicValueEnum::PointerValue(pv) => pv,
             _ => return Err("slice target must be a list/array pointer".into()),
         };
         // Get list length from struct field 0
-        let list_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(self.context.i64_type()),
-                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
-            ],
-            false,
-        );
+        let list_ty = self.list_struct_type();
         let len_gep = self
             .gep()
             .build_struct_gep(list_ty, target_ptr, 0, "slice_len")
@@ -146,97 +316,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
-        // Compute start index (default 0)
+
         let i64_ty = self.context.i64_type();
-        let start_idx = match start {
-            Some(e) => self.compile_expr(e, vars)?.into_int_value(),
-            None => i64_ty.const_int(0, false),
-        };
-        // Compute end index (default: list length)
-        let end_idx = match end {
-            Some(e) => self.compile_expr(e, vars)?.into_int_value(),
-            None => list_len,
-        };
-        // A1: widen i32 indices to i64 — slice arithmetic uses i64 throughout.
-        let start_idx = if start_idx.get_type().get_bit_width() < 64 {
-            self.builder
-                .build_int_s_extend(start_idx, i64_ty, "start_sext")
-                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else {
-            start_idx
-        };
-        let end_idx = if end_idx.get_type().get_bit_width() < 64 {
-            self.builder
-                .build_int_s_extend(end_idx, i64_ty, "end_sext")
-                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else {
-            end_idx
-        };
-        // CG-H9 (deep audit): clamp start/end indices to [0, list_len] to prevent
-        // OOB pointer arithmetic when user-provided indices exceed list bounds.
         let zero = i64_ty.const_int(0, false);
-        let start_neg = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, start_idx, zero, "start_neg")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let start_idx = self
-            .builder
-            .build_select(start_neg, zero, start_idx, "start_clamp_low")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let start_exceeds = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::SGT,
-                start_idx,
-                list_len,
-                "start_exceeds",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let start_idx = self
-            .builder
-            .build_select(start_exceeds, list_len, start_idx, "start_clamp_high")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let end_neg = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, end_idx, zero, "end_neg")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let end_idx = self
-            .builder
-            .build_select(end_neg, zero, end_idx, "end_clamp_low")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let end_exceeds = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGT, end_idx, list_len, "end_exceeds")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let end_idx = self
-            .builder
-            .build_select(end_exceeds, list_len, end_idx, "end_clamp_high")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        // Compute new length = end - start (clamped to 0 if start > end)
-        let start_gt_end = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::SGT,
-                start_idx,
-                end_idx,
-                "slice_start_gt_end",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let safe_end = self
-            .builder
-            .build_select(start_gt_end, start_idx, end_idx, "slice_safe_end")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
+        // Defaults: start = 0, end = len (VM compiler-side defaults).
+        let start_idx = self.resolve_slice_index(start, zero, list_len, vars, "start")?;
+        let end_idx = self.resolve_slice_index(end, list_len, list_len, vars, "end")?;
+        self.check_slice_bounds(start_idx, end_idx, list_len)?;
+
+        // new_len = end - start; guaranteed >= 0 by the bounds gate above.
         let new_len = self
             .builder
-            .build_int_sub(safe_end, start_idx, "slice_len")
+            .build_int_sub(end_idx, start_idx, "slice_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        // Compute new data pointer: data + start * sizeof(i64)
+
+        // Empty slice → empty list, no allocation (VM returns Vec::new()).
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for slice".into()))?;
+        let is_empty = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, new_len, zero, "slice_empty_cmp")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let empty_bb = self.context.append_basic_block(function, "slice_empty_bb");
+        let copy_bb = self.context.append_basic_block(function, "slice_copy_bb");
+        let merge_bb = self.context.append_basic_block(function, "slice_merge_bb");
+        self.builder
+            .build_conditional_branch(is_empty, empty_bb, copy_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        self.builder.position_at_end(empty_bb);
+        let null_data = self
+            .context
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null();
+        let empty_list = self.build_list_struct(zero, null_data)?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        let empty_end = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::LlvmError("no insert block after empty slice".into()))?;
+
+        // Copy path: malloc a fresh buffer and memcpy the element range.
+        self.builder.position_at_end(copy_bb);
         let elem_size = i64_ty.const_int(8, false);
+        let bytes = self
+            .builder
+            .build_int_mul(new_len, elem_size, "slice_bytes")
+            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let dest = self.malloc_or_abort(bytes, "slice_data")?;
         let byte_offset = self
             .builder
             .build_int_mul(start_idx, elem_size, "slice_offset")
@@ -246,42 +376,110 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_pointer_cast(data_ptr, i8_ptr, "data_as_i8")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
-        let new_data_i8 = {
-            self.gep().build_in_bounds_gep(
-                self.context.i8_type(),
-                data_i8,
-                &[byte_offset],
-                "new_data",
-            )
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let new_data_ptr = self
-            .builder
-            .build_pointer_cast(
-                new_data_i8,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "new_data_void",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
-        // Build new list struct { new_len, new_data_ptr }
-        let result_alloca = self
-            .builder
-            .build_alloca(list_ty, "slice_result")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let rlen_gep = self
+        let src_i8 = self
             .gep()
-            .build_struct_gep(list_ty, result_alloca, 0, "rlen")
+            .build_in_bounds_gep(self.context.i8_type(), data_i8, &[byte_offset], "slice_src")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        // SAFETY: bounds gate proved start..end ⊆ [0, len), so src covers
+        // `bytes` bytes inside the list data allocation; dest is a fresh
+        // `bytes`-sized malloc_or_abort allocation; regions are disjoint.
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
         self.builder
-            .build_store(rlen_gep, new_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let rdata_gep = self
-            .gep()
-            .build_struct_gep(list_ty, result_alloca, 1, "rdata")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            .build_call(
+                memcpy_fn,
+                &[
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(dest),
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(src_i8),
+                    inkwell::values::BasicMetadataValueEnum::IntValue(bytes),
+                ],
+                "slice_memcpy",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("memcpy: {}", e)))?;
+        // build_list_struct registers the data slot for scope-exit free; the
+        // copy OWNS its buffer (no aliasing, no double-free of the source).
+        let copy_list = self.build_list_struct(new_len, dest)?;
         self.builder
-            .build_store(rdata_gep, new_data_ptr)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(result_alloca.into())
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        let copy_end = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::LlvmError("no insert block after slice copy".into()))?;
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(empty_list.get_type(), "slice_result_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        phi.add_incoming(&[
+            (&empty_list as &dyn inkwell::values::BasicValue, empty_end),
+            (&copy_list as &dyn inkwell::values::BasicValue, copy_end),
+        ]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// String slice: CHARACTER-indexed (VM `s.chars()` parity). Defaults,
+    /// negative wrap and bounds gate are identical to the list path; the
+    /// substring itself is produced by the runtime's char-based
+    /// `mimi_str_substring` (fresh allocation, aborts are unreachable after
+    /// the gate), wrapped back into the canonical {ptr, len} string struct.
+    fn compile_string_slice(
+        &mut self,
+        target_val: BasicValueEnum<'ctx>,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // Extract the raw C pointer; keep the byte length when the target is
+        // the canonical {ptr, i64} string struct so the char count stays
+        // bounded (never a NUL walk, which would truncate embedded NULs).
+        let (str_ptr, byte_bound) = match target_val {
+            BasicValueEnum::PointerValue(pv) => (pv, None),
+            BasicValueEnum::StructValue(sv) => {
+                let fields = sv.get_type().get_field_types();
+                let is_string_struct = matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                        if t.get_bit_width() == 64
+                );
+                if !is_string_struct {
+                    return Err("slice target must be a list/array pointer".into());
+                }
+                let ptr = self
+                    .builder
+                    .build_extract_value(sv, 0, "str_data_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+                    .into_pointer_value();
+                let byte_len = self
+                    .builder
+                    .build_extract_value(sv, 1, "str_byte_len")
+                    .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+                    .into_int_value();
+                (ptr, Some(byte_len))
+            }
+            _ => return Err("slice target must be a list/array pointer".into()),
+        };
+        // VM index space is Unicode scalar values — count chars, not bytes.
+        let char_len = self.count_utf8_chars(str_ptr, byte_bound)?;
+        let i64_ty = self.context.i64_type();
+        let zero = i64_ty.const_int(0, false);
+        let start_idx = self.resolve_slice_index(start, zero, char_len, vars, "start")?;
+        let end_idx = self.resolve_slice_index(end, char_len, char_len, vars, "end")?;
+        self.check_slice_bounds(start_idx, end_idx, char_len)?;
+        let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
+        let sub_ptr = self
+            .build_call(
+                sub_fn,
+                &[
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(str_ptr),
+                    inkwell::values::BasicMetadataValueEnum::IntValue(start_idx),
+                    inkwell::values::BasicMetadataValueEnum::IntValue(end_idx),
+                ],
+                "str_slice",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("mimi_str_substring returned void".into()))?
+            .into_pointer_value();
+        self.wrap_c_string(sub_ptr)
     }
 }

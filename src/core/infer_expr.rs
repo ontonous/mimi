@@ -285,26 +285,29 @@ impl<'a> Checker<'a> {
             // x?.non_existent_field).
             Expr::OptionalChain(inner, field) => {
                 let inner_ty = self.infer_expr(inner, scopes);
-                // Normalize both Type::Option/Result and Type::Name("Option"/"Result", …).
-                let base_ty = match inner_ty.unlocated() {
+                // T-5 (audit 2026-08-05): validate `?` applicability. The old
+                // fallback silently degraded `x?.field` on a non-Option/Result
+                // receiver into a plain field access plus an Option wrap, so
+                // `let p = P{v:1}; p?.v` checked with zero diagnostics (the
+                // resolved layer rejected it later with an opaque internal
+                // message). Exempt only genuinely unresolved inference
+                // variables (they may still unify with Option/Result).
+                let resolved = self.unification.resolve(&inner_ty);
+                let base_ty = match resolved.unlocated() {
                     Type::Option(t) => t.as_ref().clone(),
                     Type::Result(ok, _) => ok.as_ref().clone(),
                     Type::Name(n, args) if n == "Option" && args.len() == 1 => args[0].clone(),
                     Type::Name(n, args) if n == "Result" && !args.is_empty() => args[0].clone(),
+                    Type::TypeVar(_) | Type::Infer => resolved.clone(),
                     _ => {
-                        // May still be a TypeVar unified to Option later — try resolve.
-                        let resolved = self.unification.resolve(&inner_ty);
-                        match resolved.unlocated() {
-                            Type::Option(t) => t.as_ref().clone(),
-                            Type::Result(ok, _) => ok.as_ref().clone(),
-                            Type::Name(n, args) if n == "Option" && args.len() == 1 => {
-                                args[0].clone()
-                            }
-                            Type::Name(n, args) if n == "Result" && !args.is_empty() => {
-                                args[0].clone()
-                            }
-                            _ => inner_ty.clone(),
-                        }
+                        self.emit_code(
+                            crate::diagnostic::codes::E0224,
+                            format!(
+                                "optional chain `?.` requires Option or Result receiver, found {}",
+                                fmt_type(&resolved)
+                            ),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
                     }
                 };
                 let field_ty = self.infer_field_access_on_type(&base_ty, field, scopes);

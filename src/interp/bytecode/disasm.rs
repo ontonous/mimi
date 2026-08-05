@@ -106,6 +106,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::ToString { .. } => "TO_STRING",
         Op::TypeOf { .. } => "TYPE_OF",
         Op::Trap { .. } => "TRAP",
+        Op::NonExhaustiveMatch => "NON_EXHAUSTIVE_MATCH",
         Op::Nop => "NOP",
         Op::IeeeEnter => "IEEE_ENTER",
         Op::IeeeExit => "IEEE_EXIT",
@@ -619,6 +620,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 })
                 .unwrap_or("?");
             format!("{:04}  {:<16} {:?}", pc, name, m)
+        }
+        Op::NonExhaustiveMatch => {
+            format!("{:04}  {:<16} panic:E0805", pc, name)
         }
         Op::Nop | Op::IeeeEnter | Op::IeeeExit => {
             format!("{:04}  {:<16}", pc, name)

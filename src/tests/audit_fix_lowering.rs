@@ -24,7 +24,6 @@
 //!  #13 deterministic call-site fact tables                  (resolved/mod.rs)
 use super::*;
 
-
 // ─── #1 — type-gated value-position `None` interception ──────────────────────
 
 #[test]

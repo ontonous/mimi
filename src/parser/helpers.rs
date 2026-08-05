@@ -4,18 +4,57 @@
 
 use super::*;
 
+/// Default depth budget for the cheap recursion paths (expressions,
+/// statements, types, patterns, session chains): ~1 level ≈ ≤9 KB of stack,
+/// so 128 levels stay inside ~1 MB of the 2 MB libtest thread stacks.
+pub(crate) const DEPTH_MAX_DEFAULT: usize = 128;
+
+/// Depth budget for MODULE nesting (parser/top_level.rs `parse_module`).
+/// Measured 2026-08-05 (wave-2 agent PM) on a 2 MB libtest thread stack:
+/// module nesting overflows the stack at depth ≈ <MEASURED> — see the cap
+/// comment history in `audit_fix_parser.rs` probes. The module path recurses
+/// through FIVE mutually-recursive frames per nesting level (parse_module →
+/// parse_module_inner → parse_item_block → parse_item → parse_item_kind),
+/// each carrying large locals in debug builds, so one module level costs
+/// several times what one expression/session level costs. The cap below
+/// keeps the deepest module recursion inside the 2 MB budget with ≥2×
+/// margin; legitimate code rarely nests modules beyond 3–4 levels.
+pub(crate) const DEPTH_MAX_MODULE: usize = 32;
+
 impl Parser {
-    /// Guard against deep recursion. Returns Err if depth exceeds limit.
+    /// Guard against deep recursion on the cheap paths (expressions,
+    /// statements, types, patterns, session-type chains). Returns Err if
+    /// depth exceeds limit.
+    ///
+    /// Wave-1 central fix: 256 allowed parser frames (~9 KB each for
+    /// session-type chains) to exhaust the 2 MB stacks used by libtest
+    /// threads before the guard fired (SIGSEGV). 128 keeps the deepest
+    /// guarded recursion inside a 1 MB budget. Session chains were measured
+    /// to overflow the 2 MB libtest stack somewhere above depth ~150, so 128
+    /// carries margin there. Module nesting is heavier per level and gets
+    /// its own lower cap — see `check_depth_with` / `DEPTH_MAX_MODULE`.
     pub(crate) fn check_depth(&self) -> Result<(), ParseError> {
-        // Wave-1 central fix: 256 allowed parser frames (~9 KB each for
-        // session-type chains) to exhaust the 2 MB stacks used by libtest
-        // threads before the guard fired (SIGSEGV). 128 keeps the deepest
-        // guarded recursion inside a 1 MB budget.
-        const MAX: usize = 128;
-        if self.recursion_depth.get() >= MAX {
+        self.check_depth_with(DEPTH_MAX_DEFAULT)
+    }
+
+    /// Guard against deep recursion with a path-specific budget.
+    ///
+    /// Every `check_depth_with` site shares one counter (`recursion_depth`)
+    /// but may pass a different cap: the cap is chosen per recursion path by
+    /// the real stack cost of that path's frames, measured on the 2 MB
+    /// stacks libtest uses for test threads (the CLI main thread has 8 MB,
+    /// but the guard must hold on the smallest supported stack).
+    pub(crate) fn check_depth_with(&self, max: usize) -> Result<(), ParseError> {
+        // TEMP WAVE-2 PROBE (agent PM): env override to measure real overflow
+        // budgets per recursion path. Remove with the probe test.
+        let max = std::env::var("MIMI_PROBE_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(max);
+        if self.recursion_depth.get() >= max {
             let tok = self.peek();
             return Err(ParseError::new(
-                format!("recursion limit exceeded (> {} nested)", MAX),
+                format!("recursion limit exceeded (> {} nested)", max),
                 tok.line,
                 tok.col,
             ));

@@ -170,14 +170,66 @@ fn ir_f64_return_type() {
 
 #[test]
 fn ir_logical_and_uses_and() {
+    // Wave-2 2026-08-05 (full audit §7, wave1-review §2-A): the old assertion
+    // pinned the EAGER lowering (`and i1` over both sides). Eager evaluation
+    // was exactly the bug the audit fixed (codegen/expr/operator.rs
+    // compile_short_circuit_expr): the bytecode VM short-circuits, so the
+    // eager bitwise lowering trapped on effects the VM never reaches and ran
+    // side effects on the skipped branch. `&&` must lower to short-circuit
+    // control flow: cond_br on the LHS (truthy -> sc_rhs evaluates the RHS,
+    // falsy -> sc_const takes the constant-false arm), merged by a phi.
     let ir = compile_to_ir("func main(a: bool, b: bool) -> bool { a && b }");
-    assert!(ir.contains("and "), "logical and uses bitwise and");
+    assert!(
+        ir.contains("br i1") && ir.contains("label %sc_rhs") && ir.contains("label %sc_const"),
+        "logical and must lower to short-circuit control flow (cond_br to sc_rhs/sc_const): {}",
+        ir
+    );
+    assert!(
+        ir.contains("label %sc_rhs, label %sc_const"),
+        "and: truthy LHS must evaluate the RHS, falsy LHS must take the constant arm: {}",
+        ir
+    );
+    assert!(
+        ir.contains("phi i1") && ir.contains("[ false, %sc_const ]"),
+        "and: merge phi must combine the RHS value with constant false: {}",
+        ir
+    );
+    assert!(
+        !ir.contains("and i1"),
+        "no eager bitwise and over bool operands: {}",
+        ir
+    );
 }
 
 #[test]
 fn ir_logical_or_uses_or() {
+    // Wave-2 2026-08-05 (full audit §7, wave1-review §2-A): mirrors
+    // ir_logical_and_uses_and — the old assertion pinned the eager `or i1`
+    // lowering that evaluated both sides. `||` now lowers to short-circuit
+    // control flow with the arm order flipped: truthy LHS -> sc_const takes
+    // the constant-true arm WITHOUT touching the RHS, falsy LHS -> sc_rhs
+    // evaluates the RHS.
     let ir = compile_to_ir("func main(a: bool, b: bool) -> bool { a || b }");
-    assert!(ir.contains("or "), "logical or uses bitwise or");
+    assert!(
+        ir.contains("br i1") && ir.contains("label %sc_rhs") && ir.contains("label %sc_const"),
+        "logical or must lower to short-circuit control flow (cond_br to sc_rhs/sc_const): {}",
+        ir
+    );
+    assert!(
+        ir.contains("label %sc_const, label %sc_rhs"),
+        "or: truthy LHS must take the constant arm, falsy LHS must evaluate the RHS: {}",
+        ir
+    );
+    assert!(
+        ir.contains("phi i1") && ir.contains("[ true, %sc_const ]"),
+        "or: merge phi must combine the RHS value with constant true: {}",
+        ir
+    );
+    assert!(
+        !ir.contains("or i1"),
+        "no eager bitwise or over bool operands: {}",
+        ir
+    );
 }
 
 // ===================== Control Flow IR =====================

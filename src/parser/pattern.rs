@@ -149,6 +149,49 @@ impl Parser {
                 };
                 Ok(PatternKind::Literal(Lit::Int(val)))
             }
+            TokenKind::Minus => {
+                // P-10 (full-audit 2026-08-05-0656): negative literal
+                // patterns. `match x { -1 => ... }` used to fail with
+                // "unexpected token in pattern -" while parse_expr folds `-`
+                // into integer literals (including i64::MIN) — asymmetric.
+                // Fold the sign into the literal exactly like parse_unary.
+                let (line, col) = (self.peek().line, self.peek().col);
+                self.advance(); // consume `-`
+                let TokenKind::Int(v) = self.peek_kind().clone() else {
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        format!(
+                            "expected integer literal after `-` in pattern, found {}",
+                            tok.kind
+                        ),
+                        tok.line,
+                        tok.col,
+                    ));
+                };
+                self.advance();
+                let cleaned = v.replace('_', "");
+                let abs = if cleaned == "9223372036854775808" {
+                    // i64::MIN: the positive magnitude exceeds i64, so fold
+                    // the sign directly (decimal form only, like parse_expr).
+                    return Ok(
+                        self.pattern_from(start_pos, PatternKind::Literal(Lit::Int(i64::MIN)))
+                    );
+                } else if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+                    i64::from_str_radix(&cleaned[2..], 16)
+                        .map_err(|_| ParseError::new("invalid hex integer", line, col))?
+                } else if cleaned.starts_with("0b") || cleaned.starts_with("0B") {
+                    i64::from_str_radix(&cleaned[2..], 2)
+                        .map_err(|_| ParseError::new("invalid binary integer", line, col))?
+                } else if cleaned.starts_with("0o") || cleaned.starts_with("0O") {
+                    i64::from_str_radix(&cleaned[2..], 8)
+                        .map_err(|_| ParseError::new("invalid octal integer", line, col))?
+                } else {
+                    cleaned
+                        .parse::<i64>()
+                        .map_err(|_| ParseError::new("invalid integer", line, col))?
+                };
+                Ok(PatternKind::Literal(Lit::Int(-abs)))
+            }
             TokenKind::String(v) => {
                 self.advance();
                 Ok(PatternKind::Literal(Lit::String(v)))

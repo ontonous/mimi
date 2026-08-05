@@ -5,7 +5,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_sum(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         // Audit fix 8 (full-audit-2026-08-05): the accumulation is CHECKED —
@@ -14,24 +14,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         // (no silent wrap). The accumulator stays i64, matching the int path
         // of the VM implementation.
         //
-        // TODO(#audit-wave2): element-type dispatch for List<f64>. Codegen
-        // list slots are type-erased i64 (f64 rides in via bitcast) and this
-        // builtin receives no element-type channel — the call-site pending
-        // flags live in expr/call/simple.rs (push/len/to_string style),
-        // outside this fix's file ownership. Until such a channel exists,
-        // sum(List<f64>) still misreads f64 bit patterns here; the VM path
-        // is correct and covered by tests. Mirror then: float accumulator
-        // with the SD-9 finiteness gate (skipped under ieee_depth > 0) plus
-        // the VM's int+float promotion (float_sum + int_sum at the end).
+        // Audit wave2 (D-5a): element-type dispatch landed. Codegen list
+        // slots are type-erased i64 (f64 rides in via bitcast), so the
+        // element type arrives through the `pending_sum_elem_type` channel
+        // set at the call site (mirrors `pending_push_elem_type`): for
+        // List<f64>/List<f32> the slots are interpreted as f64 bit patterns
+        // and accumulated with fadd + a final SD-9 finiteness gate
+        // (ieee_depth-gated via check_float_finite), matching the VM's
+        // float path (float_sum + int_sum promotion; homogeneous typed
+        // lists never mix the two). Without the channel (unknown element
+        // type) the i64 path is retained.
         if args.len() != 1 {
             return Err(CompileError::WrongArgCount(
                 "sum expects 1 argument (list)".to_string(),
             ));
         }
+        let elem_type = self.pending_sum_elem_type.take();
         let list_ptr = self.require_list_pointer(args[0], "sum")?;
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
+        if matches!(elem_type.as_deref(), Some("f64") | Some("f32")) {
+            return self.compile_sum_f64_loop(list_len, data_ptr);
+        }
         // Loop through list elements and sum
         let function = self
             .current_function()
@@ -182,6 +187,79 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, sum_alloca, "result_sum")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
         Ok(result)
+    }
+
+    /// Audit wave2 (D-5a): f64 accumulation for `sum(List<f64>)` /
+    /// `sum(List<f32>)`. Slots hold f64 bit patterns; reinterpreting them
+    /// as i64 (the old path) printed bit-pattern garbage. VM reference
+    /// (builtin_sum): plain float accumulation, result Float. A single
+    /// SD-9 gate after the loop is behaviorally equivalent to per-element
+    /// gating (non-finiteness, once produced by fadd, persists through all
+    /// later fadds — cancellation yields NaN, never a finite value).
+    fn compile_sum_f64_loop(
+        &mut self,
+        list_len: inkwell::values::IntValue<'ctx>,
+        data_ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("codegen: no current function for sum".into())
+        })?;
+        let loop_bb = self.context.append_basic_block(function, "sumf_loop");
+        let body_bb = self.context.append_basic_block(function, "sumf_body");
+        let done_bb = self.context.append_basic_block(function, "sumf_done");
+        let idx_alloca = self.build_alloca(i64_ty, "sfi")?;
+        let sum_alloca = self.build_alloca(f64_ty, "sumf")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        self.build_store(sum_alloca, f64_ty.const_float(0.0))?;
+        self.build_br(loop_bb)?;
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "sfi_val")?
+            .into_int_value();
+        let cmp = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, list_len, "sumf_cmp")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.build_cond_br(cmp, body_bb, done_bb)?;
+        self.builder.position_at_end(body_bb);
+        let elem_ptr = self
+            .gep()
+            .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "sumf_elem")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let raw = self
+            .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "sumf_raw")?
+            .into_int_value();
+        let elem_f = self
+            .build_bit_cast(
+                raw.into(),
+                BasicTypeEnum::FloatType(f64_ty),
+                "sumf_elem_f64",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_float_value();
+        let acc = self
+            .build_load(BasicTypeEnum::FloatType(f64_ty), sum_alloca, "sumf_acc")?
+            .into_float_value();
+        let new_acc = self
+            .builder
+            .build_float_add(acc, elem_f, "sumf_add")
+            .map_err(|e| CompileError::LlvmError(format!("fadd error: {}", e)))?;
+        self.build_store(sum_alloca, new_acc)?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "sumf_next")
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        self.build_store(idx_alloca, next)?;
+        self.build_br(loop_bb)?;
+        self.builder.position_at_end(done_bb);
+        let result = self
+            .build_load(BasicTypeEnum::FloatType(f64_ty), sum_alloca, "sumf_result")?
+            .into_float_value();
+        // SD-9 finiteness gate (E0813), suspended inside ieee_float{}.
+        self.check_float_finite(result, "sum")?;
+        Ok(result.into())
     }
 
     pub(in crate::codegen) fn compile_flatten(

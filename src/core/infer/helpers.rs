@@ -121,10 +121,17 @@ impl<'a> Checker<'a> {
     ) -> Type {
         // P1-29: Validate that the condition is bool. Previously the
         // condition type was inferred and discarded, allowing `if 42 { ... }`.
+        //
+        // T-1 (audit 2026-08-05): a bare TypeVar condition is NOT exempt. The
+        // old exemption let `let f = fn(c: _){ if c {1} else {2} }; f(3.14)`
+        // generalize the unset condition variable and instantiate it to f64
+        // with zero diagnostics. Constrain the condition to bool instead: an
+        // unset variable gets bound to bool (so a later non-bool argument
+        // fails the call-site unify), and a concrete non-bool still fails
+        // here with E0206.
         let cond_ty = self.infer_expr(cond, scopes);
-        if !matches!(cond_ty.unlocated(), Type::Name(n, _) if n == "bool")
-            && !matches!(cond_ty.unlocated(), Type::TypeVar(_))
-        {
+        let bool_ty = Type::Name("bool".into(), vec![]);
+        if self.unification.unify(&bool_ty, &cond_ty).is_err() {
             self.emit_code(
                 crate::diagnostic::codes::E0206,
                 format!("if condition must be bool, found {}", fmt_type(&cond_ty)),

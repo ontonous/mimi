@@ -712,6 +712,29 @@ impl VerifierCtx {
             }
         }
 
+        // V-2 (full-audit-2026-08-05-0656 §3.8): bool and string params also
+        // satisfy old == current on every contract path. Previously only
+        // int_vars/real_vars were walked, so `ensures: old(s) == s` was a
+        // fake Disproven (old_s unconstrained) while the Resolved engine
+        // asserted it — the two engines disagreed. The trusted subset has no
+        // mutation, so equality is exact; Z3 string theory then derives the
+        // length/non-empty consistency for `old_*` snapshots from the axiom.
+        for (i, p) in func.params.iter().enumerate() {
+            let old_name = old_names[i].as_str();
+            if let (Some(pv), Some(ov)) = (
+                vars.get_bool(p.name.as_str()).cloned(),
+                vars.get_bool(old_name).cloned(),
+            ) {
+                session.assert(ov.eq(&pv));
+            }
+            if let (Some(pv), Some(ov)) = (
+                vars.get_string_var(p.name.as_str()).cloned(),
+                vars.get_string_var(old_name).cloned(),
+            ) {
+                session.assert(ov.eq(&pv));
+            }
+        }
+
         // v0.31.6: assert callee ensures for the return expression BEFORE the
         // i32 definedness (overflow) check below. A return such as
         // `(await t1) + (await t2)` — expanded from `let t1 = spawn id(x)` —
@@ -1135,8 +1158,27 @@ impl VerifierCtx {
             return None; // No calls were inlined
         }
 
-        // Prepend injected requires to the body
+        // Prepend injected requires to the body. The injected callee-ensures
+        // assumptions may reference let-bound call arguments (`double(y)`
+        // where `y` is itself a `let`-bound call result). The VIR lowerer
+        // processes the injected Requires BEFORE the let bindings they
+        // mention: an unresolved name resolves to a phantom VarId distinct
+        // from the let's own binding, so the assumption silently references
+        // an unconstrained variable and the proof degrades to a fake
+        // Disproven (VERIFIED on
+        // verifier::tests::verify_callee_ensures_propagation_vir:
+        // counterexample result=0 / x=536870911). Expand the injected
+        // assumptions through the INLINED body's let-substitution — the
+        // inlined let inits carry the `__call_N` fresh vars, so the
+        // assumptions become entry-visible and reference exactly the Z3
+        // variables the lets will bind.
         let mut body = injected;
+        let let_subst = self.build_let_subst(&new_body);
+        for stmt in body.iter_mut() {
+            if let Stmt::Requires(e, _span) = stmt.unlocated_mut() {
+                *e = Self::expand_lets_in_expr(e, &let_subst);
+            }
+        }
         body.extend(new_body);
 
         Some(FuncDef {
@@ -1447,6 +1489,28 @@ impl VerifierCtx {
                     session.assert(z3::ast::Bool::and(&[&param_z3.ge(&lo), &param_z3.le(&hi)]));
                     constraint_count += 1;
                 }
+                // V-6 (full-audit-2026-08-05-0656 §3.8): i64 params get the
+                // machine-range axiom too. Runtime i64 values are by
+                // construction inside [i64::MIN, i64::MAX]; the axiom makes
+                // the new i64 div/mod/MIN÷-1 obligations discharge exactly as
+                // they do for i32 (unbounded Z3 Int otherwise).
+                if vty == crate::verifier::vir::VType::I64 {
+                    let lo = z3::ast::Int::from_i64(i64::MIN);
+                    let hi = z3::ast::Int::from_i64(i64::MAX);
+                    session.assert(z3::ast::Bool::and(&[&param_z3.ge(&lo), &param_z3.le(&hi)]));
+                    constraint_count += 1;
+                }
+            }
+            // V-2 (full-audit-2026-08-05-0656 §3.8): bool params get
+            // old(param) == param too (the trusted subset is immutable, so
+            // old(b) is always b). Previously only int params were asserted;
+            // `ensures: old(b) == b` was unencodable in the VIR path while
+            // the Resolved engine completed it — engine inconsistency.
+            if let (Some(param_z3), Some(old_z3)) =
+                (z3ctx.bool_vars.get(&var), z3ctx.old_bool_vars.get(&var))
+            {
+                session.assert(param_z3.eq(old_z3));
+                constraint_count += 1;
             }
         }
 
@@ -1607,6 +1671,26 @@ impl VerifierCtx {
                     }
                 }
                 VStmt::Let(var, expr) => {
+                    // C-5 (full-audit-2026-08-05-0656 §1): the init
+                    // expression's definedness obligations MUST be checked
+                    // here. Previously obligations were collected ONLY in the
+                    // Return arm — `let y = x / z` with a possible z == 0
+                    // traps E0801 at runtime yet verified Proven because the
+                    // division hides in a Let, and `VStmt::Return(Var(y))`
+                    // carries no CheckedArith node. P0-8 plugged non-tail
+                    // `Stmt::Expr` and missed Let. Trap ≠ Fault.
+                    if let Some(result) = self.vir_check_definedness(
+                        session,
+                        &z3ctx,
+                        expr,
+                        &func.name,
+                        func.meta.span,
+                        start,
+                        constraint_count,
+                        &artifact,
+                    ) {
+                        return Some(result);
+                    }
                     // Register the let-bound variable and assert its value
                     let vty = z3ctx
                         .var_types
@@ -1686,44 +1770,17 @@ impl VerifierCtx {
                         }
                     } else if !returns_f64 {
                         // Check definedness obligations first
-                        let obligations = z3ctx.definedness_obligations(expr);
-                        for (condition, failure) in obligations {
-                            let (proof, _) = session.check_scope(condition.not());
-                            match proof {
-                                SatResult::Unsat => {
-                                    session.assert(&condition);
-                                }
-                                SatResult::Sat => {
-                                    return Some(VerificationResult {
-                                        func_name: func.name.clone(),
-                                        status: VerifStatus::Disproven,
-                                        message: failure.to_string(),
-                                        diagnostic: Some(Diagnostic::error(
-                                            failure.to_string(),
-                                            func.meta.span,
-                                        )),
-                                        duration_us: start.elapsed().as_micros() as u64,
-                                        constraint_count,
-                                        artifact: artifact.clone(),
-                                        trusted_subset_domain: None,
-                                    });
-                                }
-                                SatResult::Unknown => {
-                                    return Some(VerificationResult {
-                                        func_name: func.name.clone(),
-                                        status: VerifStatus::SolverUnknown,
-                                        message: format!(
-                                            "solver could not prove integer definedness (VIR): {}",
-                                            failure
-                                        ),
-                                        diagnostic: None,
-                                        duration_us: start.elapsed().as_micros() as u64,
-                                        constraint_count,
-                                        artifact: artifact.clone(),
-                                        trusted_subset_domain: None,
-                                    });
-                                }
-                            }
+                        if let Some(result) = self.vir_check_definedness(
+                            session,
+                            &z3ctx,
+                            expr,
+                            &func.name,
+                            func.meta.span,
+                            start,
+                            constraint_count,
+                            &artifact,
+                        ) {
+                            return Some(result);
                         }
                         // Bind result to return expression
                         match z3ctx.encode_int(expr) {
@@ -1932,6 +1989,66 @@ impl VerifierCtx {
                 trusted_subset_domain: None,
             })
         }
+    }
+
+    /// C-5 (full-audit-2026-08-05-0656 §1): shared definedness checker for
+    /// the VIR path. Every `VStmt` whose expression can trap at runtime
+    /// (checked div/mod/overflow/neg on machine integers) must discharge its
+    /// obligations against the assumptions established SO FAR — Let arms
+    /// included. Trap ≠ Fault: a body that can E0801-trap must never be
+    /// reported Proven.
+    ///
+    /// Returns `Some(result)` when an obligation is violated (Disproven) or
+    /// the solver is undecided (SolverUnknown); `None` when every obligation
+    /// was proved and asserted back into the session.
+    fn vir_check_definedness(
+        &self,
+        session: &mut SolverSession,
+        z3ctx: &crate::verifier::vir::VirZ3Ctx,
+        expr: &crate::verifier::vir::VExpr,
+        func_name: &str,
+        func_span: Span,
+        start: Instant,
+        constraint_count: usize,
+        artifact: &Option<crate::verifier::ctx::ProofArtifact>,
+    ) -> Option<VerificationResult> {
+        let obligations = z3ctx.definedness_obligations(expr);
+        for (condition, failure) in obligations {
+            let (proof, _) = session.check_scope(condition.not());
+            match proof {
+                SatResult::Unsat => {
+                    session.assert(&condition);
+                }
+                SatResult::Sat => {
+                    return Some(VerificationResult {
+                        func_name: func_name.to_string(),
+                        status: VerifStatus::Disproven,
+                        message: failure.to_string(),
+                        diagnostic: Some(Diagnostic::error(failure.to_string(), func_span)),
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
+                        artifact: artifact.clone(),
+                        trusted_subset_domain: None,
+                    });
+                }
+                SatResult::Unknown => {
+                    return Some(VerificationResult {
+                        func_name: func_name.to_string(),
+                        status: VerifStatus::SolverUnknown,
+                        message: format!(
+                            "solver could not prove integer definedness (VIR): {}",
+                            failure
+                        ),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
+                        artifact: artifact.clone(),
+                        trusted_subset_domain: None,
+                    });
+                }
+            }
+        }
+        None
     }
 
     fn extract_counterexample(
@@ -2883,6 +3000,23 @@ impl VerifierCtx {
             } => {
                 self.check_callee_requires_in_expr(session, init, vars, caller_name, errors);
             }
+            // H-25 (full-audit-2026-08-05-0656): the callee-REQUIRES walker
+            // previously stopped at Let/If/While while the callee-ENSURES
+            // walker already covered Assign/SharedLet/For. `z = pos(y)` /
+            // `shared s = pos(y)` / `for v in [y] { pos(y) }` thus assumed
+            // pos's ensures without ever discharging pos's requires: y > 0 —
+            // a guaranteed-violation trap verified Proven. Unlike the ensures
+            // walker (axioms must be unconditional), the requires walker is a
+            // fail-closed safety check: every statement that CAN execute must
+            // discharge the preconditions of the calls it may perform, so
+            // Assign/SharedLet values AND loop bodies are all walked.
+            Stmt::Assign { target, value } => {
+                self.check_callee_requires_in_expr(session, target, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, value, vars, caller_name, errors);
+            }
+            Stmt::SharedLet { init, .. } => {
+                self.check_callee_requires_in_expr(session, init, vars, caller_name, errors);
+            }
             Stmt::If { cond, then_, else_ } => {
                 self.check_callee_requires_in_expr(session, cond, vars, caller_name, errors);
                 self.check_callee_requires_in_block(session, then_, vars, caller_name, errors);
@@ -2892,6 +3026,14 @@ impl VerifierCtx {
             }
             Stmt::While { cond, body, .. } => {
                 self.check_callee_requires_in_expr(session, cond, vars, caller_name, errors);
+                self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                self.check_callee_requires_in_expr(session, init, vars, caller_name, errors);
+                self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
+            }
+            Stmt::For { iterable, body, .. } => {
+                self.check_callee_requires_in_expr(session, iterable, vars, caller_name, errors);
                 self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
             }
             Stmt::Loop(body)
@@ -2977,6 +3119,15 @@ impl VerifierCtx {
                 self.check_callee_requires_in_expr(session, inner, vars, caller_name, errors);
             }
             Expr::Field(obj, _) => {
+                self.check_callee_requires_in_expr(session, obj, vars, caller_name, errors);
+            }
+            // H-25: index positions execute too (`arr[danger(i)] = 1`,
+            // `xs[danger(i)]`).
+            Expr::Index(obj, index) => {
+                self.check_callee_requires_in_expr(session, obj, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, index, vars, caller_name, errors);
+            }
+            Expr::TupleIndex(obj, _) => {
                 self.check_callee_requires_in_expr(session, obj, vars, caller_name, errors);
             }
             _ => {}
@@ -3086,35 +3237,65 @@ impl VerifierCtx {
 
     /// Recursively expand let-variables in an expression using the substitution map.
     fn expand_lets_in_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
+        let mut expanding: Vec<String> = Vec::new();
+        Self::expand_lets_in_expr_guarded(expr, subst, &mut expanding)
+    }
+
+    /// C-7 family (full-audit-2026-08-05-0656 §1): a shadowing binding
+    /// `let x = x + 1` makes the flat let-substitution SELF-REFERENTIAL
+    /// (`x → x + 1`, whose RHS mentions `x` again). Unrestricted expansion
+    /// recurses forever and overflows the stack — a user-source crash of
+    /// `mimi verify` (VERIFIED: stack-overflow abort on the 90ac9bdc binary).
+    /// The guard stops re-expanding a name already in flight and keeps the
+    /// (still name-flat) substitution conservative instead of cyclic.
+    fn expand_lets_in_expr_guarded(
+        expr: &Expr,
+        subst: &HashMap<String, Expr>,
+        expanding: &mut Vec<String>,
+    ) -> Expr {
         // When a tail identifier expands to its let initializer, the call
         // expression's own source location is authoritative. Do not overwrite
         // it with the identifier's later use-site metadata.
         if let Expr::Ident(name) = expr.unlocated() {
             if let Some(replacement) = subst.get(name) {
-                return Self::expand_lets_in_expr(replacement, subst);
+                if !expanding.iter().any(|n| n == name) {
+                    expanding.push(name.clone());
+                    let expanded = Self::expand_lets_in_expr_guarded(replacement, subst, expanding);
+                    expanding.pop();
+                    return expanded;
+                }
+                // Self-referential cycle: keep the identifier unexpanded.
+                let kept = expr.unlocated().clone();
+                return match expr.meta() {
+                    Some(meta) => kept.with_meta(meta),
+                    None => kept,
+                };
             }
         }
         let transformed = match expr.unlocated() {
             Expr::Ident(_) => expr.unlocated().clone(),
             Expr::Binary(op, lhs, rhs) => Expr::Binary(
                 *op,
-                Box::new(Self::expand_lets_in_expr(lhs, subst)),
-                Box::new(Self::expand_lets_in_expr(rhs, subst)),
+                Box::new(Self::expand_lets_in_expr_guarded(lhs, subst, expanding)),
+                Box::new(Self::expand_lets_in_expr_guarded(rhs, subst, expanding)),
             ),
-            Expr::Unary(op, inner) => {
-                Expr::Unary(*op, Box::new(Self::expand_lets_in_expr(inner, subst)))
-            }
+            Expr::Unary(op, inner) => Expr::Unary(
+                *op,
+                Box::new(Self::expand_lets_in_expr_guarded(inner, subst, expanding)),
+            ),
             Expr::Call(callee, args) => Expr::Call(
-                Box::new(Self::expand_lets_in_expr(callee, subst)),
+                Box::new(Self::expand_lets_in_expr_guarded(callee, subst, expanding)),
                 args.iter()
-                    .map(|a| Self::expand_lets_in_expr(a, subst))
+                    .map(|a| Self::expand_lets_in_expr_guarded(a, subst, expanding))
                     .collect(),
             ),
             Expr::Field(obj, name) => Expr::Field(
-                Box::new(Self::expand_lets_in_expr(obj, subst)),
+                Box::new(Self::expand_lets_in_expr_guarded(obj, subst, expanding)),
                 name.clone(),
             ),
-            Expr::Old(inner) => Expr::Old(Box::new(Self::expand_lets_in_expr(inner, subst))),
+            Expr::Old(inner) => Expr::Old(Box::new(Self::expand_lets_in_expr_guarded(
+                inner, subst, expanding,
+            ))),
             Expr::Block(block) => Expr::Block(
                 block
                     .iter()

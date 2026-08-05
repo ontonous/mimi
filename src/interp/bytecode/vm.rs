@@ -363,6 +363,15 @@ impl<'a> BytecodeVM<'a> {
                 frame.regs[rd as usize] = fault;
             }
         }
+        // B-4 (Wave-2): the transition frame's callee (and with it the callee
+        // that any pending MutateSetup/MutateSetupField in the surviving top
+        // frame was prepared for) never returns normally — the Fault replaced
+        // the return. Clear the residue so the next callee's return cannot
+        // consume stale writeback targets (writing values into wrong registers).
+        if let Some(frame) = self.stack.last_mut() {
+            frame.mutate_writebacks = None;
+            frame.mutate_field_writebacks = None;
+        }
         true
     }
 
@@ -1319,8 +1328,19 @@ impl<'a> BytecodeVM<'a> {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    self.push_frame(func, args, Some(rd))?;
-                    // Continue loop — new frame is now active.
+                    // B-5 (Wave-2): a failed push (requires violation, arity
+                    // mismatch, recursion limit) previously escaped the
+                    // same-frame fault handlers via bare `?` — asymmetric with
+                    // CallBuiltin/CallExtern, which route through them. Route
+                    // symmetrically now. B-4: the callee never runs, so the
+                    // MutateSetup residue prepared for it must be dropped.
+                    match self.push_frame(func, args, Some(rd)) {
+                        Ok(()) => {} // Continue loop — new frame is now active.
+                        Err(e) => {
+                            self.clear_mutate_writebacks();
+                            self.route_fault(e)?;
+                        }
+                    }
                 }
                 Op::MutateSetup { regs_base, count } => {
                     let mut targets = Vec::with_capacity(count as usize);
@@ -1379,15 +1399,10 @@ impl<'a> BytecodeVM<'a> {
                             // FaultRetEarly died with "no fault_reg set" and the
                             // original E08xx was lost. Audit fix #2: pop the TOP
                             // handler from the per-frame stack (nested scopes).
-                            if let Some(handler_pc) =
-                                self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
-                            {
-                                let frame = self.cur_frame_mut();
-                                frame.pending_fault = Some(e);
-                                frame.pc = handler_pc;
-                            } else {
-                                return Err(e);
-                            }
+                            // (Wave-2 H-14 note: the initiating frame is back on
+                            // top here — call_builtin's nested closure exec_loops
+                            // clean up their residual frames on error.)
+                            self.route_fault(e)?;
                         }
                     }
                 }
@@ -1419,9 +1434,21 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::Ret { ra } => {
-                    let v = self.do_return(ra, false, stop)?;
-                    if let Some(v) = v {
-                        return Ok(v);
+                    // B-5 (Wave-2): an ensures-contract violation (E0808) in
+                    // do_return previously escaped the same-frame fault handlers
+                    // via bare `?`. The frame is still on the stack at that point
+                    // (contracts are checked before the pop), so compensation can
+                    // run in it — route symmetrically with CallBuiltin/CallExtern.
+                    // B-4: this frame will now never return normally (the handler
+                    // cascade re-raises), so the caller's writebacks prepared for
+                    // this call are stale and must be dropped.
+                    match self.do_return(ra, false, stop) {
+                        Ok(Some(v)) => return Ok(v),
+                        Ok(None) => {}
+                        Err(e) => {
+                            self.clear_caller_mutate_writebacks();
+                            self.route_fault(e)?;
+                        }
                     }
                 }
                 // ── Quote assembly (0.33 Phase F) ──
@@ -1746,25 +1773,27 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::RetUnit => {
-                    let frame = self.cur_frame();
-                    let return_reg = frame.return_reg;
-                    let wrap_ok = frame.wrap_ok;
+                    // H-10 (Wave-2): valueless returns now share finish_return
+                    // with Op::Ret — the old inline epilogue skipped the ensures
+                    // contract check entirely (E0808 silently unenforced for
+                    // `return` without value / bodies without tail expression).
+                    // B-5/B-4: ensures failures route through the same-frame
+                    // fault handlers and drop the caller's stale writebacks.
+                    let contract_args = self.collect_contract_args(false);
                     let mut_param_vals = self.collect_mut_param_vals();
-                    let v = if wrap_ok {
-                        Value::Variant("Ok".to_string(), vec![Value::Unit])
-                    } else {
-                        Value::Unit
-                    };
-                    self.pop_frame();
-                    self.depth -= 1;
-                    if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
-                        return Ok(v);
-                    }
-                    if let Some(rd) = return_reg {
-                        self.set_reg(rd, v);
-                    }
-                    if !mut_param_vals.is_empty() {
-                        self.apply_mutate_writeback(&mut_param_vals);
+                    match self.finish_return(
+                        Value::Unit,
+                        false,
+                        stop,
+                        contract_args,
+                        mut_param_vals,
+                    ) {
+                        Ok(Some(v)) => return Ok(v),
+                        Ok(None) => {}
+                        Err(e) => {
+                            self.clear_caller_mutate_writebacks();
+                            self.route_fault(e)?;
+                        }
                     }
                 }
 
@@ -1809,12 +1838,16 @@ impl<'a> BytecodeVM<'a> {
                 Op::ListGet { rd, ra, rb } => {
                     let idx_raw = self.get_int(rb)?;
                     // Borrow the collection, extract only the element (avoid cloning entire list).
+                    // B-2 (Wave-2): index-out-of-bounds is constructed as
+                    // IndexOutOfBounds (E0803), not Generic E0800 — E0803 is an
+                    // `is_runtime_panic` member, so flow transitions absorb it into
+                    // Fault("panic:E0803") like codegen; Generic was never absorbed.
                     let v = match self.get_reg(ra) {
                         Value::List(l) => {
                             let idx = if idx_raw < 0 {
                                 let wrapped = l.len() as i64 + idx_raw;
                                 if wrapped < 0 {
-                                    return Err(InterpError::new(format!(
+                                    return Err(InterpError::index_out_of_bounds(format!(
                                         "index {} out of bounds (len {})",
                                         idx_raw,
                                         l.len()
@@ -1825,7 +1858,7 @@ impl<'a> BytecodeVM<'a> {
                                 idx_raw as usize
                             };
                             if idx >= l.len() {
-                                return Err(InterpError::new(format!(
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "index {} out of bounds (len {})",
                                     idx_raw,
                                     l.len()
@@ -1838,7 +1871,7 @@ impl<'a> BytecodeVM<'a> {
                             let idx = if idx_raw < 0 {
                                 let wrapped = chars.len() as i64 + idx_raw;
                                 if wrapped < 0 {
-                                    return Err(InterpError::new(format!(
+                                    return Err(InterpError::index_out_of_bounds(format!(
                                         "string index {} out of bounds (len {})",
                                         idx_raw,
                                         chars.len()
@@ -1849,7 +1882,7 @@ impl<'a> BytecodeVM<'a> {
                                 idx_raw as usize
                             };
                             if idx >= chars.len() {
-                                return Err(InterpError::new(format!(
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "string index {} out of bounds (len {})",
                                     idx_raw,
                                     chars.len()
@@ -1861,7 +1894,7 @@ impl<'a> BytecodeVM<'a> {
                             let idx = if idx_raw < 0 {
                                 let wrapped = s.len() as i64 + idx_raw;
                                 if wrapped < 0 {
-                                    return Err(InterpError::new(format!(
+                                    return Err(InterpError::index_out_of_bounds(format!(
                                         "set index {} out of bounds (len {})",
                                         idx_raw,
                                         s.len()
@@ -1872,7 +1905,7 @@ impl<'a> BytecodeVM<'a> {
                                 idx_raw as usize
                             };
                             if idx >= s.len() {
-                                return Err(InterpError::new(format!(
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "set index {} out of bounds (len {})",
                                     idx_raw,
                                     s.len()
@@ -1891,8 +1924,9 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::ListSet { ra, rb, rc } => {
                     let idx_raw = self.get_int(rb)?;
+                    // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
                     if idx_raw < 0 {
-                        return Err(InterpError::new(format!(
+                        return Err(InterpError::index_out_of_bounds(format!(
                             "negative index {} out of bounds",
                             idx_raw
                         )));
@@ -1903,7 +1937,7 @@ impl<'a> BytecodeVM<'a> {
                     match list {
                         Value::List(l) => {
                             if idx >= l.len() {
-                                return Err(InterpError::new(format!(
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "index {} out of bounds (len {})",
                                     idx,
                                     l.len()
@@ -1946,7 +1980,8 @@ impl<'a> BytecodeVM<'a> {
                     match v {
                         Value::Tuple(t) => {
                             if (idx as usize) >= t.len() {
-                                return Err(InterpError::new(format!(
+                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "tuple index {} out of bounds (arity {})",
                                     idx,
                                     t.len()
@@ -2136,7 +2171,8 @@ impl<'a> BytecodeVM<'a> {
                     match tuple {
                         Value::Tuple(t) => {
                             if idx >= t.len() {
-                                return Err(InterpError::new(format!(
+                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "tuple set: index {} out of bounds (len {})",
                                     idx,
                                     t.len()
@@ -2386,7 +2422,8 @@ impl<'a> BytecodeVM<'a> {
                     match v {
                         Value::Variant(_, fields) => {
                             if (idx as usize) >= fields.len() {
-                                return Err(InterpError::new(format!(
+                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "variant field index {} out of bounds (arity {})",
                                     idx,
                                     fields.len()
@@ -2428,7 +2465,8 @@ impl<'a> BytecodeVM<'a> {
                                 .and_then(|n| n.parse::<usize>().ok())
                                 .unwrap_or(0);
                             if idx >= vals.len() {
-                                return Err(InterpError::new(format!(
+                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "pattern field index {idx} out of bounds (arity {})",
                                     vals.len()
                                 )));
@@ -2462,7 +2500,8 @@ impl<'a> BytecodeVM<'a> {
                     match v {
                         Value::Variant(_, fields) => {
                             if (idx as usize) >= fields.len() {
-                                return Err(InterpError::new(format!(
+                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                return Err(InterpError::index_out_of_bounds(format!(
                                     "variant payload index {} out of bounds (arity {})",
                                     idx,
                                     fields.len()
@@ -2618,6 +2657,16 @@ impl<'a> BytecodeVM<'a> {
                         _ => "unknown trap".to_string(),
                     };
                     return Err(InterpError::new(msg_str));
+                }
+                Op::NonExhaustiveMatch => {
+                    // H-9 (Wave-2): runtime match fall-through is a PANIC, not a
+                    // silent Unit (parity with codegen mimi_match_panic). E0805 is
+                    // an `is_runtime_panic` member, so a flow transition absorbs it
+                    // into Fault("panic:E0805"); elsewhere it propagates. Message
+                    // text mirrors runtime::mimi_match_panic.
+                    return Err(InterpError::non_exhaustive_match(
+                        "non-exhaustive match — all cases must be covered",
+                    ));
                 }
                 Op::Nop => {}
                 Op::IeeeEnter => self.cur_frame_mut().ieee_depth += 1,
@@ -3102,6 +3151,35 @@ impl<'a> BytecodeVM<'a> {
     /// Pushes a closure frame, sets stop_depth, and delegates to exec_loop.
     /// This ensures closures can call user functions, other closures, builtins —
     /// anything the main loop supports. No separate dispatch.
+    /// H-14 (Wave-2): run a nested exec_loop for a sub-call (closure / contract
+    /// mini-function / direct function call). stop_depth is set to the depth of
+    /// the just-pushed frame so exec_loop returns when that frame pops. On
+    /// success the stack is already back to the pre-call state (do_return pops).
+    /// On failure the failed sub-execution may leave RESIDUAL frames (the error
+    /// returned mid-frame without a pop); those are discarded here so the
+    /// INITIATING frame is back on top when the caller's fault handler runs.
+    /// The error is enriched while the faulting frame is still on top (correct
+    /// function/line context) before the residual frames are removed.
+    fn exec_nested(
+        &mut self,
+        stack_len_before: usize,
+        depth_before: usize,
+        enrich: bool,
+    ) -> Result<Value, InterpError> {
+        let prev_stop = self.stop_depth;
+        self.stop_depth = self.depth; // depth already includes the pushed frame
+        let result = self.exec_loop();
+        self.stop_depth = prev_stop;
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let e = if enrich { self.enrich_error(e) } else { e };
+                self.cleanup_failed_subexec(stack_len_before, depth_before);
+                Err(e)
+            }
+        }
+    }
+
     pub(crate) fn call_closure(
         &mut self,
         closure: &Value,
@@ -3112,6 +3190,10 @@ impl<'a> BytecodeVM<'a> {
                 proto: proto_idx,
                 captured,
             } => {
+                // H-14: snapshot the stack so a failed closure run can be cleaned.
+                let stack_len_before = self.stack.len();
+                let depth_before = self.depth;
+
                 // Push a new frame for the closure.
                 self.push_frame(*proto_idx, args.to_vec(), None)?;
 
@@ -3130,11 +3212,7 @@ impl<'a> BytecodeVM<'a> {
                 }
 
                 // Set stop_depth so exec_loop returns when this frame pops.
-                let prev_stop = self.stop_depth;
-                self.stop_depth = self.depth; // depth was incremented by push_frame
-                let result = self.exec_loop();
-                self.stop_depth = prev_stop;
-                result.map_err(|e| self.enrich_error(e))
+                self.exec_nested(stack_len_before, depth_before, true)
             }
             _ => Err(InterpError::new("call_closure: expected BytecodeClosure")),
         }
@@ -3192,12 +3270,11 @@ impl<'a> BytecodeVM<'a> {
         func_idx: FuncIdx,
         args: &[Value],
     ) -> Result<Value, InterpError> {
+        // H-14: snapshot for residual-frame cleanup on failure.
+        let stack_len_before = self.stack.len();
+        let depth_before = self.depth;
         self.push_frame(func_idx, args.to_vec(), None)?;
-        let prev_stop = self.stop_depth;
-        self.stop_depth = self.depth;
-        let result = self.exec_loop();
-        self.stop_depth = prev_stop;
-        result.map_err(|e| self.enrich_error(e))
+        self.exec_nested(stack_len_before, depth_before, true)
     }
 
     /// Call a function by name (convenience wrapper for tests).
@@ -3229,7 +3306,7 @@ impl<'a> BytecodeVM<'a> {
         result
     }
 
-    /// Shared return path for Op::Ret and Op::RetEarly.
+    /// Shared return path for Op::Ret / Op::RetUnit / Op::RetEarly.
     /// Returns Ok(Some(v)) if execution should stop (empty stack or stop_depth),
     /// Ok(None) if execution should continue (caller frame can receive the value).
     fn do_return(
@@ -3238,8 +3315,31 @@ impl<'a> BytecodeVM<'a> {
         is_early_return: bool,
         stop: usize,
     ) -> Result<Option<Value>, InterpError> {
-        // Collect contract args BEFORE mem::replace (ra may alias a param register).
-        let contract_args = if self.verify_contracts && !is_early_return {
+        // VM-B regression fix (H-10 finish_return refactor): collect the
+        // ensures contract args and the mut-param values BEFORE mem::replace
+        // empties the register. When the return register aliases a mut/mutate
+        // param register (the tail expression IS the param, e.g.
+        // `func bump(mut x: i32) -> i32 { x = x + 1; x }`), the post-call
+        // value lives in that slot — replacing it first handed the contract
+        // (and the caller write-back) `Unit`, producing a spurious E0808
+        // "ensures condition failed: false" and/or a silent Unit write-back.
+        let contract_args = self.collect_contract_args(is_early_return);
+        let mut_param_vals = self.collect_mut_param_vals();
+        // Move value out of register (frame is about to be popped — no clone needed).
+        let v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
+        self.finish_return(v, is_early_return, stop, contract_args, mut_param_vals)
+    }
+
+    /// Collect the ensures-contract argument list: the frame's POST-call param
+    /// register values plus its PRE-call snapshots (for `old(x)`). Returns
+    /// None when contract verification is off, the return is early (`?`
+    /// rejection — no postcondition on the wrapped value), or the function
+    /// carries no ensures contract.
+    fn collect_contract_args(
+        &self,
+        is_early_return: bool,
+    ) -> Option<(FuncIdx, Vec<Value>, Vec<Value>)> {
+        if self.verify_contracts && !is_early_return {
             let frame = self.cur_frame();
             let proto = &self.program.functions[frame.proto_idx as usize];
             if proto.has_ensures {
@@ -3255,16 +3355,33 @@ impl<'a> BytecodeVM<'a> {
             }
         } else {
             None
-        };
+        }
+    }
 
-        // v0.34.13: collect mutate-param values BEFORE mem::replace — if the
-        // return register aliases a mutate parameter (e.g. `RET r0` where the
-        // param lives at r0), replace would leave Unit in the param slot and
-        // the write-back would silently store Unit into the caller.
-        let mut_param_vals = self.collect_mut_param_vals();
+    /// Return epilogue shared by valued returns (Op::Ret), valueless returns
+    /// (Op::RetUnit → `v == Value::Unit`) and `?` rejections (Op::RetEarly).
+    ///
+    /// H-10 (Wave-2): RetUnit previously had its own inline epilogue that
+    /// SKIPPED the ensures contract check entirely — both `return` without a
+    /// value and bodies without a tail expression compile to RetUnit, so every
+    /// Unit-returning function's `ensures` was silently unenforced in bytecode
+    /// while codegen reported E0808. Routing RetUnit through this path closes
+    /// the gap (the ensures mini-functions receive `result == Unit`).
+    fn finish_return(
+        &mut self,
+        mut v: Value,
+        is_early_return: bool,
+        stop: usize,
+        contract_args: Option<(FuncIdx, Vec<Value>, Vec<Value>)>,
+        mut_param_vals: Vec<Value>,
+    ) -> Result<Option<Value>, InterpError> {
+        // NOTE: contract_args and mut_param_vals are collected by the call
+        // sites BEFORE any register is released — when the return register
+        // aliases a mut-param register, the post-call param value must still
+        // be visible to the ensures contract / caller write-back (the H-10
+        // refactor that collected them here after do_return's mem::replace
+        // regressed that, feeding Unit into the contract).
 
-        // Move value out of register (frame is about to be popped — no clone needed).
-        let mut v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
         let frame = self.cur_frame();
         let return_reg = frame.return_reg;
         let wrap_ok = frame.wrap_ok;
@@ -3405,6 +3522,66 @@ impl<'a> BytecodeVM<'a> {
                 }
             }
         }
+    }
+
+    /// B-4 (Wave-2): drop a frame's pending mutate writebacks (both register
+    /// and record-field targets). MutateSetup/MutateSetupField and the callee's
+    /// return form a pair; when the pair is broken — the callee is absorbed by
+    /// a Fault, a call fails to push, or a return fails its ensures contract —
+    /// the residue must not survive to be consumed by the NEXT callee's return
+    /// (which would write the wrong values into the stale target registers).
+    pub(crate) fn clear_mutate_writebacks(&mut self) {
+        let frame = self.cur_frame_mut();
+        frame.mutate_writebacks = None;
+        frame.mutate_field_writebacks = None;
+    }
+
+    /// B-4 companion for a failing callee return: the caller (second from top)
+    /// registered writebacks for a callee that will now never return normally.
+    fn clear_caller_mutate_writebacks(&mut self) {
+        let len = self.stack.len();
+        if len >= 2 {
+            let caller = &mut self.stack[len - 2];
+            caller.mutate_writebacks = None;
+            caller.mutate_field_writebacks = None;
+        }
+    }
+
+    /// B-5 (Wave-2): route a same-frame error through the current frame's
+    /// fault-handler stack (mirrors the CallBuiltin/CallExtern contract). Pops
+    /// the TOP handler; when one exists, stashes the error as pending_fault and
+    /// jumps there (compensation runs, FaultRetEarly re-raises afterwards).
+    /// Returns Err(e) when no handler is registered so the caller propagates.
+    fn route_fault(&mut self, e: InterpError) -> Result<(), InterpError> {
+        if let Some(handler_pc) = self.stack.last_mut().and_then(|f| f.fault_handlers.pop()) {
+            let frame = self.cur_frame_mut();
+            frame.pending_fault = Some(e);
+            frame.pc = handler_pc;
+            Ok(())
+        } else {
+            Err(e)
+        }
+    }
+
+    /// H-14 (Wave-2): after a nested exec_loop (closure / contract / direct
+    /// function call) returns Err, discard every frame the sub-execution left
+    /// on the stack and restore the depth counter. Without this, the residual
+    /// frames corrupt fault discipline: the Op::CallBuiltin Err branch pops a
+    /// handler from the RESIDUAL closure frame instead of the initiating frame
+    /// (`on failure` compensation lost, or execution resumes in the wrong frame
+    /// with wrong pc/pending_fault).
+    fn cleanup_failed_subexec(&mut self, stack_len_before: usize, depth_before: usize) {
+        // Recycle register buffers exactly like pop_frame.
+        while self.stack.len() > stack_len_before {
+            let frame = self
+                .stack
+                .pop()
+                .expect("stack length re-checked in loop condition");
+            if frame.regs.capacity() > 0 {
+                self.free_regs.push(frame.regs);
+            }
+        }
+        self.depth = depth_before;
     }
 
     // ── Builtin dispatch (D1: registry, not giant match) ─────

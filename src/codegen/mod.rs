@@ -280,6 +280,11 @@ pub struct CodeGenerator<'ctx> {
     /// Used so that nested lists and other struct elements are heap-copied before
     /// their pointer is stored, preventing stack-use-after-return.
     pending_push_elem_type: Option<String>,
+    /// Audit wave2 (D-5a): inferred element type of the current `sum(list)`
+    /// call argument. List slots are type-erased i64; `sum(List<f64>)` must
+    /// reinterpret slots as f64 bit patterns instead of summing them as i64.
+    /// Set at the call site (push-flag pattern), consumed by compile_sum.
+    pending_sum_elem_type: Option<String>,
     /// When compiling a typed list literal (`let xs: List<T> = [...]`), the
     /// element type `T` so Result/Option constructors can be inflated to a
     /// uniform layout before heap packing.
@@ -594,6 +599,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_print_arg_types: Vec::new(),
             display_frees: std::cell::RefCell::new(Vec::new()),
             pending_push_elem_type: None,
+            pending_sum_elem_type: None,
             pending_list_elem_type: None,
             pending_to_string_is_any: false,
             pending_to_number_is_any: false,

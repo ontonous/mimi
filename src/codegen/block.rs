@@ -1190,7 +1190,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
             // Builtin predicates return i64 booleans; normalize to i1 so the
             // branch instruction is well-typed (br i64 crashes instruction
-            // selection and is invalid IR per the verifier).
+            // selection and is invalid IR per the verifier). H-22: the zero
+            // constant uses the condition's own width (icmp operands must
+            // match; a hard-coded i64 zero against a narrower int is invalid
+            // IR for the same reason).
             if iv.get_type().get_bit_width() == 1 {
                 iv
             } else {
@@ -1198,7 +1201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_int_compare(
                         inkwell::IntPredicate::NE,
                         iv,
-                        self.context.i64_type().const_int(0, false),
+                        iv.get_type().const_int(0, false),
                         "cond_bool",
                     )
                     .map_err(|e| CompileError::LlvmError(format!("cond normalize: {}", e)))?

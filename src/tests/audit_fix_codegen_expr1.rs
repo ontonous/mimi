@@ -49,7 +49,6 @@ macro_rules! dual_eq {
     }};
 }
 
-
 // ============================================================
 // Fix 1 (§7 CRITICAL): `and`/`or` must short-circuit — the VM
 // does (compile_short_circuit); eager codegen evaluated BOTH

@@ -143,27 +143,36 @@ pub func count_char(s: string, target: string) -> i32 {
     cc_cnt
 }
 
-// is_ws_char: True if c is a single ASCII whitespace character
-// (space, tab, newline, carriage return) — the set str_trim strips
-// in both backends. Module-private helper for trim_left/trim_right.
-func is_ws_char(c: string) -> bool {
-    c == " " || c == "\t" || c == "\n" || c == "\r"
-}
-
 // trim_left: Removes leading whitespace (space/tab/newline/CR) from s.
+// The whitespace test is inlined (not a private helper): the std module
+// loader only carries `pub` items across `use std::strings`, so a
+// module-private helper is invisible to consumers (E0401) while pub
+// bodies that call it are not. Loop+break form avoids relying on
+// short-circuit `&&` for the bounds guard.
 pub func trim_left(s: string) -> string {
     let mut tl_idx = 0
-    while tl_idx < len(s) && is_ws_char(char_at(s, tl_idx)) {
-        tl_idx += 1
+    while tl_idx < len(s) {
+        let tl_c = char_at(s, tl_idx)
+        if tl_c == " " || tl_c == "\t" || tl_c == "\n" || tl_c == "\r" {
+            tl_idx += 1
+        } else {
+            break
+        }
     }
     substring(s, tl_idx, len(s))
 }
 
 // trim_right: Removes trailing whitespace (space/tab/newline/CR) from s.
+// Whitespace test inlined for the same loader reason as trim_left.
 pub func trim_right(s: string) -> string {
     let mut tr_end = len(s)
-    while tr_end > 0 && is_ws_char(char_at(s, tr_end - 1)) {
-        tr_end -= 1
+    while tr_end > 0 {
+        let tr_c = char_at(s, tr_end - 1)
+        if tr_c == " " || tr_c == "\t" || tr_c == "\n" || tr_c == "\r" {
+            tr_end -= 1
+        } else {
+            break
+        }
     }
     substring(s, 0, tr_end)
 }

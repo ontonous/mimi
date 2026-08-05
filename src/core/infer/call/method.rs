@@ -250,12 +250,32 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            // Check if it's an actor spawn call (Type.spawn)
-            if method_name == "spawn" {
-                return Type::Name(type_name.clone(), vec![]);
-            }
-            // v0.29.37: Actor.spawn_detached() — returns actor handle
-            if method_name == "spawn_detached" {
+            // Check if it's an actor spawn call (Type.spawn).
+            // H-4 (audit 2026-08-05): the spawn decision previously sat BEFORE
+            // any actor validation, so `"hello".spawn()` / `(1).spawn()` were
+            // silently accepted (the receiver type name was returned as the
+            // handle type). spawn() creates an actor instance and is only valid
+            // on actor types — reject every other receiver with E0221.
+            if method_name == "spawn" || method_name == "spawn_detached" {
+                let is_actor = self
+                    .file
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, Item::Actor(actor) if &actor.name == type_name));
+                if !is_actor {
+                    self.errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0221,
+                            format!(
+                                "type '{}' has no method '{}' — spawn() is only valid on actor types",
+                                type_name, method_name
+                            ),
+                            self.diagnostic_span(),
+                        )
+                        .with_help("declare an `actor` type and spawn it, e.g. `MyActor.spawn()`"),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
                 return Type::Name(type_name.clone(), vec![]);
             }
             // Check module-qualified function call: Module::func(args)
@@ -930,17 +950,33 @@ impl<'a> Checker<'a> {
                     param.clone()
                 };
                 // IF residual: strict unify at call sites.
-                if self.unification.unify(&at, &subst_param).is_err() {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0211,
-                        format!(
-                            "argument {} of '{}' expected {}, found {}",
-                            i + 1,
-                            name,
-                            fmt_type(&subst_param),
-                            fmt_type(&at)
-                        ),
-                    );
+                match self.unification.unify(&at, &subst_param) {
+                    Err(crate::core::unification::UnifyError::LinearContainerEscape(msg)) => {
+                        // C-1 (audit 2026-08-05): bare-container method
+                        // parameters must not accept linear elements.
+                        self.emit_code(
+                            crate::diagnostic::codes::E0432,
+                            format!(
+                                "argument {} of '{}' carries a linear value into a bare container: {}",
+                                i + 1,
+                                name,
+                                msg
+                            ),
+                        );
+                    }
+                    Err(_) => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0211,
+                            format!(
+                                "argument {} of '{}' expected {}, found {}",
+                                i + 1,
+                                name,
+                                fmt_type(&subst_param),
+                                fmt_type(&at)
+                            ),
+                        );
+                    }
+                    Ok(()) => {}
                 }
             }
         }

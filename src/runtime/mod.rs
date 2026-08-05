@@ -194,16 +194,39 @@ impl ListElementKind {
     }
 }
 
+/// Runtime-side list representation.
+///
+/// # Layout / ABI contract (audit 2026-08-05, H-26/H-27)
+///
+/// `#[repr(C)]` field order is frozen: `{len @0, data @8, owns_data @16,
+/// element_kind @17, has_header @18}`. `has_header` was APPENDED at the end;
+/// total size stays 24 bytes (the trailing bool lands in the pre-existing
+/// alignment padding). Native codegen passes its own two-field
+/// `{i64 len, i8* data}` lists through `MimiListAbiPrefix` — never through
+/// this struct — and the Component ABI treats `*mut MimiList` as an opaque
+/// `ListHandle` (component/gen.rs), so the appended field is invisible to
+/// both ABIs.
 #[repr(C)]
 pub struct MimiList {
-    len: i64,
-    data: *mut *mut std::ffi::c_char,
+    // Fields are pub(crate) for regression tests (src/tests/audit_fix_*);
+    // the C ABI sees only the repr(C) layout, which is unchanged.
+    pub(crate) len: i64,
+    pub(crate) data: *mut *mut std::ffi::c_char,
     // FFI-2: Tracks whether data was allocated by Rust (true) or received from C (false).
-    // When true, free(data) uses libc::free. When false, skip free to avoid wrong allocator.
-    owns_data: bool,
+    // When true, the data buffer is freed with libc::free (at `data` when
+    // has_header=false, at `data - 8` when has_header=true). When false, skip
+    // free to avoid wrong allocator.
+    pub(crate) owns_data: bool,
     /// 0.31.23: Element kind for typed storage.
     /// Determines how to interpret the data array elements.
-    element_kind: ListElementKind,
+    pub(crate) element_kind: ListElementKind,
+    /// Audit 2026-08-05 (H-26/H-27, ruling: explicit flag, fail-closed):
+    /// true iff `data` was allocated by `alloc_list_data`/`realloc_list_data`
+    /// and carries the hidden 8-byte capacity header at `data[-8]`.
+    /// Header-less lists (every runtime constructor: str_split, listdir,
+    /// walk_dir, args_list, map_keys/values, all from_json builders) NEVER
+    /// read or write before `data`; growth paths materialize a header first.
+    pub(crate) has_header: bool,
 }
 
 /// Prefix shared with native codegen's by-value `{len, data}` list ABI.
@@ -219,16 +242,23 @@ struct MimiListAbiPrefix {
 
 impl MimiList {
     /// 0.31.23: Create a new empty MimiList with the specified element kind.
+    /// `has_header` starts false (no buffer → no header); growth sets it.
     pub fn new_with_kind(kind: ListElementKind) -> Self {
         MimiList {
             len: 0,
             data: std::ptr::null_mut(),
             owns_data: true,
             element_kind: kind,
+            has_header: false,
         }
     }
 
     /// 0.31.23: Create a MimiList with pre-allocated data and specified element kind.
+    ///
+    /// Audit 2026-08-05 (H-26): `has_header` defaults to FALSE — every
+    /// runtime constructor passes a plain libc::malloc'd array with NO hidden
+    /// capacity header, and `mimi_list_free`/`list_cap` rely on the flag to
+    /// never touch `data[-8]` for these lists.
     pub fn with_data(
         data: *mut *mut std::ffi::c_char,
         len: i64,
@@ -240,6 +270,7 @@ impl MimiList {
             data,
             owns_data,
             element_kind: kind,
+            has_header: false,
         }
     }
 
@@ -604,15 +635,24 @@ fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut
 }
 
 /// Read the hidden capacity from data[-8]. Returns 0 if no header.
-/// H1 fix: only reads header for lists where owns_data is true. For
-/// non-owning lists or null data, returns 0 immediately to avoid
-/// reading garbage that could coincidentally have bit 63 set.
+///
+/// Audit 2026-08-05 (H-26, fail-closed): reads `data[-8]` ONLY when
+/// `has_header` is true (buffer came from `alloc_list_data` /
+/// `realloc_list_data`). The old owns_data-based heuristic was contradicted
+/// by every runtime constructor: str_split, listdir, walk_dir, args_list,
+/// map_keys/values and all from_json builders own libc::malloc'd buffers
+/// with NO hidden header, so each `mimi_list_free` performed two
+/// out-of-bounds reads (ASan/Valgrind/Miri report) — and a coincidentally
+/// negative adjacent byte made `mimi_list_free` free `data - 8` (heap
+/// corruption). Header-less lists now never read before `data`.
 fn list_cap(list: &MimiList) -> i64 {
-    if !list.owns_data || list.data.is_null() {
+    if !list.has_header || list.data.is_null() {
         return 0;
     }
-    // SAFETY: `mut` points to a valid, properly aligned value
+    // SAFETY: `has_header` guarantees `data` came from alloc_list_data /
+    // realloc_list_data, so `data - 1` is the allocation base header.
     let hdr = unsafe { *(list.data as *mut i64).offset(-1) };
+    // Defense in depth: even with the flag, only trust a marked header.
     if hdr < 0 {
         hdr & 0x7FFF_FFFF_FFFF_FFFF
     } else {
@@ -620,8 +660,78 @@ fn list_cap(list: &MimiList) -> i64 {
     }
 }
 
+/// Grow `lst`'s data buffer to hold at least `new_cap` elements (> len).
+///
+/// Audit 2026-08-05 (H-27, fail-closed): typed push on a header-less list
+/// must NOT `realloc(data - 8)` — `data` itself is the allocation base there
+/// (glibc aborts with "realloc(): invalid pointer" on the interior pointer).
+/// Instead a fresh headered buffer is materialized and the existing elements
+/// are copied over; the old buffer is then freed with origin knowledge:
+///   - `has_header`            → free(data - 8)   (alloc_list_data base)
+///   - `owns_data && !header`  → free(data)       (plain malloc'd array —
+///     every header-less runtime constructor allocates via libc::malloc)
+///   - `!owns_data`            → leave it to the C owner
+/// After a successful grow the list owns a headered buffer
+/// (`has_header = true`, `owns_data = true`). Returns the new data pointer,
+/// or null on failure (the list is left unchanged).
+fn grow_list_data(lst: &mut MimiList, new_cap: i64) -> *mut *mut std::ffi::c_char {
+    let old = lst.data;
+    let len = lst.len;
+    if lst.has_header {
+        // Headered buffer: in-place realloc preserves the header contract.
+        let nd = realloc_list_data(old, new_cap);
+        if nd.is_null() {
+            return std::ptr::null_mut();
+        }
+        lst.data = nd;
+        return nd;
+    }
+    // Header-less buffer: allocate a fresh headered buffer and copy over.
+    let nd = alloc_list_data(new_cap);
+    if nd.is_null() {
+        return std::ptr::null_mut();
+    }
+    if !old.is_null() && len > 0 {
+        let copy_size =
+            match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
+                Some(s) => s,
+                None => {
+                    // Cannot bound the copy: unwind the fresh allocation
+                    // (headered → base is nd - 1) and report failure.
+                    // SAFETY: `nd` came from alloc_list_data just above, so
+                    // `nd - 1` is its allocation base.
+                    unsafe {
+                        libc::free((nd as *mut i64).offset(-1) as *mut std::ffi::c_void);
+                    }
+                    return std::ptr::null_mut();
+                }
+            };
+        // SAFETY: `old` is valid for `len` pointer-sized slots (the list's
+        // live elements) and `nd` is a fresh allocation of `new_cap` >= len
+        // slots; the regions cannot overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(old as *const u8, nd as *mut u8, copy_size);
+        }
+    }
+    // Origin-aware free of the old buffer (see function docs).
+    if !old.is_null() && lst.owns_data {
+        // SAFETY: header-less owning data is always a plain libc::malloc
+        // array (all runtime constructors), so `old` is the allocation base.
+        unsafe {
+            libc::free(old as *mut std::ffi::c_void);
+        }
+    }
+    lst.data = nd;
+    lst.has_header = true;
+    // The list now owns the new buffer even if the old one was C-owned.
+    lst.owns_data = true;
+    nd
+}
+
 /// v0.28.13: Push an i64 element into a MimiList with exponential capacity growth.
-/// Uses hidden header (alloc_list_data/realloc_list_data) for O(1) amortized push.
+/// Uses the hidden header (alloc_list_data/realloc_list_data) once present for
+/// O(1) amortized push. Header-less lists (all runtime constructors) get a
+/// headered buffer materialized on first growth (audit 2026-08-05, H-27).
 /// Modifies list in place (data and len are updated).
 /// 0.31.23: Sets element_kind to I64 for typed storage.
 #[no_mangle]
@@ -642,19 +752,21 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     };
     if new_len > cap {
         // MEM-C10: use checked_mul for cap*2 to prevent overflow.
+        // H-27: when cap == 0 (header-less list) the new capacity must cover
+        // the EXISTING elements that get copied over — a flat 4 would
+        // overflow a header-less list with len >= 4 during the copy.
         let nc = if cap <= 0 {
-            4
+            new_len.max(4)
         } else {
             match cap.checked_mul(2) {
                 Some(c) => c,
                 None => return,
             }
         };
-        let nd = realloc_list_data(lst.data, nc);
+        let nd = grow_list_data(lst, nc);
         if nd.is_null() {
             return;
         }
-        lst.data = nd;
         // SAFETY: after growth `nd` has capacity >= `new_len`; writing at index `len` is in bounds.
         unsafe {
             *(nd as *mut i64).add(len as usize) = element;
@@ -669,7 +781,8 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
 }
 
 /// 0.31.23: Push an f64 element into a MimiList with exponential capacity growth.
-/// Sets element_kind to F64 for typed storage.
+/// Header-less lists get a headered buffer materialized on first growth
+/// (audit 2026-08-05, H-27). Sets element_kind to F64 for typed storage.
 #[no_mangle]
 pub extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
     if list.is_null() {
@@ -686,19 +799,19 @@ pub extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
         None => return,
     };
     if new_len > cap {
+        // H-27: header-less growth must cover the existing elements (see push_i64).
         let nc = if cap <= 0 {
-            4
+            new_len.max(4)
         } else {
             match cap.checked_mul(2) {
                 Some(c) => c,
                 None => return,
             }
         };
-        let nd = realloc_list_data(lst.data, nc);
+        let nd = grow_list_data(lst, nc);
         if nd.is_null() {
             return;
         }
-        lst.data = nd;
         // SAFETY: after growth `nd` has capacity >= `new_len`; writing at index `len` is within bounds
         unsafe {
             *(nd as *mut f64).add(len as usize) = element;
@@ -714,7 +827,8 @@ pub extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
 
 /// 0.31.23: Push a string element into a MimiList.
 /// The string is copied into a new allocation (caller retains ownership of the input).
-/// Sets element_kind to String for typed storage.
+/// Header-less lists get a headered buffer materialized on first growth
+/// (audit 2026-08-05, H-27). Sets element_kind to String for typed storage.
 #[no_mangle]
 pub extern "C" fn mimi_list_push_string(list: *mut MimiList, element: *const std::ffi::c_char) {
     if list.is_null() {
@@ -739,20 +853,27 @@ pub extern "C" fn mimi_list_push_string(list: *mut MimiList, element: *const std
         alloc_c_string(&s)
     };
     if new_len > cap {
+        // H-27: header-less growth must cover the existing elements (see push_i64).
         let nc = if cap <= 0 {
-            4
+            new_len.max(4)
         } else {
             match cap.checked_mul(2) {
                 Some(c) => c,
-                None => return,
+                None => {
+                    // SAFETY: `element_copy` came from alloc_c_string just above
+                    // and is not stored anywhere else (growth failed).
+                    mimi_free(element_copy as *mut std::ffi::c_void);
+                    return;
+                }
             }
         };
-        let nd = realloc_list_data(lst.data, nc);
+        let nd = grow_list_data(lst, nc);
         if nd.is_null() {
+            // SAFETY: same as above — the fresh copy never reached a list slot.
+            mimi_free(element_copy as *mut std::ffi::c_void);
             return;
         }
-        lst.data = nd;
-        // SAFETY: `nd` has capacity >= `new_len` after realloc; writing at index `len` is within bounds
+        // SAFETY: `nd` has capacity >= `new_len` after growth; writing at index `len` is within bounds
         unsafe {
             *nd.add(len as usize) = element_copy;
         }
@@ -821,7 +942,14 @@ pub extern "C" fn mimi_list_push_grow(
             let copy_size =
                 match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
                     Some(s) => s,
-                    None => return std::ptr::null_mut(),
+                    None => {
+                        // Unwind the fresh headered buffer (base = new_data - 1).
+                        // SAFETY: `new_data` came from alloc_list_data above.
+                        unsafe {
+                            libc::free((new_data as *mut i64).offset(-1) as *mut std::ffi::c_void);
+                        }
+                        return std::ptr::null_mut();
+                    }
                 };
             // SAFETY: existing elements are copied byte-for-byte from the old buffer to the new buffer.
             unsafe {
@@ -832,22 +960,36 @@ pub extern "C" fn mimi_list_push_grow(
                 );
             }
         }
-        // Free old data if it has a header; otherwise skip (can't verify origin)
-        if cap > 0 {
-            // Has header: free allocation base (data - 8)
-            // SAFETY: `old_data` has a hidden header, so `old_data - 1` is the valid allocation base.
-            let base = unsafe { (old_data as *mut i64).offset(-1) as *mut std::ffi::c_void };
-            unsafe {
-                // SAFETY: `base` is the valid allocation base returned by `alloc_list_data`.
-                libc::free(base);
+        // Audit 2026-08-05 (H-26/H-27): free the old buffer with origin
+        // knowledge instead of the old `cap > 0` heuristic. The explicit
+        // has_header flag removes the uncertainty the H2 guard worked around:
+        //   - headered            → free the allocation base (data - 8)
+        //   - owning header-less  → free(data): every header-less runtime
+        //     constructor allocates a plain libc::malloc array (the old code
+        //     leaked this case because it could not verify the origin)
+        //   - C-owned (!owns_data)→ leave it to the C caller
+        if !old_data.is_null() {
+            if lst.has_header {
+                // SAFETY: `has_header` guarantees `old_data - 1` is the
+                // allocation base written by alloc_list_data.
+                let base = unsafe { (old_data as *mut i64).offset(-1) as *mut std::ffi::c_void };
+                unsafe {
+                    // SAFETY: `base` is the valid allocation base returned by `alloc_list_data`.
+                    libc::free(base);
+                }
+            } else if lst.owns_data {
+                // SAFETY: owning header-less data is a plain libc::malloc
+                // array, so `old_data` itself is the allocation base.
+                unsafe {
+                    libc::free(old_data as *mut std::ffi::c_void);
+                }
             }
         }
-        // H2 fix: when cap <= 0 (no header), old_data may point to a static buffer
-        // or stack-allocated array. We cannot verify it was heap-allocated, so
-        // we skip libc::free to avoid UB (freeing non-heap memory). The old_data
-        // pointer is replaced by new_data; the caller is responsible for the old
-        // allocation's lifetime.
         lst.data = new_data;
+        // The installed buffer carries a header and is runtime-owned, even if
+        // the replaced buffer was C-owned.
+        lst.has_header = true;
+        lst.owns_data = true;
         new_data
     } else {
         old_data
@@ -951,16 +1093,32 @@ pub extern "C" fn mimi_list_element_kind(list: *const MimiList) -> i8 {
     lst.element_kind as i8
 }
 
+/// Crate-visible probe of the explicit header flag (audit 2026-08-05, H-26),
+/// for regression tests in src/tests/. Deliberately NOT `#[no_mangle]` —
+/// it is not part of the Component/runtime ABI surface.
+pub fn mimi_list_has_header_probe(list: *const MimiList) -> bool {
+    if list.is_null() {
+        return false;
+    }
+    // SAFETY: `list` is non-null and points to a valid `MimiList`.
+    unsafe { (*list).has_header }
+}
+
 /// S15/S22: Free a C string allocated by alloc_c_string.
 /// Safe to call with null pointer (no-op).
+///
+/// Audit 2026-08-05 (N-1): free through `mimi_free`, mirroring the
+/// `alloc_c_string` → `mimi_alloc` path. Under cfg(miri) `mimi_alloc` uses
+/// the Rust allocator + an 8-byte size header; a raw `libc::free` was both
+/// the wrong allocator and the wrong base (Miri-detectable UB). In normal
+/// builds `mimi_free` IS `libc::free` — behavior is unchanged.
 #[no_mangle]
 pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
     if !ptr.is_null() {
-        // SAFETY: `ptr` is non-null (checked above) and was allocated by `libc::malloc` via `alloc_c_string` or similar
-        unsafe {
-            // SAFETY: freeing a non-null pointer allocated by the matching `libc::malloc`.
-            libc::free(ptr as *mut std::ffi::c_void);
-        }
+        // SAFETY: `ptr` is non-null (checked above) and was allocated by
+        // `mimi_alloc` via `alloc_c_string`; mimi_free is the matching
+        // deallocator for both miri and normal builds.
+        mimi_free(ptr as *mut std::ffi::c_void);
     }
 }
 
@@ -970,8 +1128,12 @@ pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
 /// FFI-2: Only frees data if `owns_data` is true (Rust-allocated).
 /// C-allocated data (owns_data=false) is skipped to avoid wrong-allocator heap corruption.
 ///
-/// v0.28.13: Detects the hidden capacity header (negative value at data[-8]).
-/// If present, frees the allocation base at data-8. Otherwise original behavior.
+/// v0.28.13 / audit 2026-08-05 (H-26): headered buffers (has_header=true,
+/// from the push/grow paths) free the allocation base at data-8; header-less
+/// buffers (every runtime constructor) free `data` directly and NEVER read
+/// data[-8] — the explicit has_header flag selects the path (the old
+/// "negative value at data[-8]" heuristic performed two out-of-bounds reads
+/// per header-less free and could free data-8 on heap corruption).
 ///
 /// 0.31.23: Uses element_kind to determine whether elements need freeing.
 /// Only String/List/Record elements are heap-allocated pointers; I64/F64/Bool/Map/Set
@@ -1012,28 +1174,32 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
         // 0.31.23: Only free elements if they are pointer types (String/List/Record).
         // I64/F64/Bool/Map/Set are stored directly and don't need freeing.
         let should_free_elements = free_elements && element_kind.is_pointer_kind();
+        // Audit 2026-08-05 (N-1 family): String elements are allocated by
+        // alloc_c_string (mimi_alloc) and must be freed through mimi_free —
+        // under cfg(miri) mimi_alloc uses the Rust allocator + a size header,
+        // so a raw libc::free is both the wrong allocator and the wrong base.
+        // Record/List packs stay on libc::free (they are libc::malloc'd under
+        // every build).
         if owns_data && !data_ptr.is_null() {
-            let cap = list_cap(&*list);
-            if cap > 0 {
-                if should_free_elements {
-                    for i in 0..safe_count {
-                        let e = *data_ptr.add(i);
-                        if !e.is_null() {
+            if should_free_elements {
+                for i in 0..safe_count {
+                    let e = *data_ptr.add(i);
+                    if !e.is_null() {
+                        if element_kind == ListElementKind::String {
+                            mimi_free(e as *mut std::ffi::c_void);
+                        } else {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
+            }
+            let cap = list_cap(&*list);
+            if cap > 0 {
+                // Headered buffer (has_header): free the allocation base.
                 let base = (data_ptr as *mut i64).offset(-1) as *mut std::ffi::c_void;
                 libc::free(base);
             } else {
-                if should_free_elements {
-                    for i in 0..safe_count {
-                        let e = *data_ptr.add(i);
-                        if !e.is_null() {
-                            libc::free(e as *mut std::ffi::c_void);
-                        }
-                    }
-                }
+                // Header-less buffer: `data` itself is the malloc'd base.
                 libc::free(data_ptr as *mut std::ffi::c_void);
             }
         }
@@ -1080,7 +1246,14 @@ pub extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
             for i in 0..safe_count {
                 let e = *lst.data.add(i);
                 if !e.is_null() {
-                    libc::free(e as *mut std::ffi::c_void);
+                    // N-1 family: String elements come from alloc_c_string
+                    // (mimi_alloc) → mimi_free; Record packs are libc::malloc'd
+                    // → libc::free (see mimi_list_free for the full rationale).
+                    if lst.element_kind == ListElementKind::String {
+                        mimi_free(e as *mut std::ffi::c_void);
+                    } else {
+                        libc::free(e as *mut std::ffi::c_void);
+                    }
                 }
             }
             // NOT freeing the data buffer — that is handled by register_heap_slot
@@ -1107,8 +1280,11 @@ fn alloc_c_string_from_bytes(bytes: &[u8]) -> *mut std::ffi::c_char {
     } else {
         payload_len
     };
-    // SAFETY: alloc_len is at least 1 when payload is empty (needs_nul).
-    let ptr = unsafe { libc::malloc(alloc_len) as *mut u8 };
+    // Audit 2026-08-05 (N-1): allocate via mimi_alloc (same as alloc_c_string)
+    // so the pairing deallocator mimi_free / mimi_string_free reverses the
+    // exact allocation path under both normal and miri builds. In normal
+    // builds mimi_alloc IS libc::malloc — behavior is unchanged.
+    let ptr = mimi_alloc(alloc_len) as *mut u8;
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -1138,6 +1314,18 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
     if exp < 0 {
         mimi_runtime_abort(
             b"negative exponent not supported for integers\0".as_ptr() as *const std::ffi::c_char
+        );
+    }
+    // wave1-review §5.17 (audit 2026-08-05): mirror the VM's exact bound.
+    // Bytecode `Op::PowInt` (interp/bytecode/vm.rs) and `builtin_pow`
+    // (interp/bytecode/builtins/math.rs) reject exponents above u32::MAX via
+    // `u32::try_from`. Without this cap the runtime loop still terminates
+    // (O(log exp) squaring) but returns a value for bases in {-1, 0, 1} while
+    // the VM traps — an L1 backend divergence (pow(1, 4294967326): VM error,
+    // old runtime returned 1).
+    if exp > u32::MAX as i64 {
+        mimi_runtime_abort(
+            b"pow: exponent exceeds u32::MAX (integer power)\0".as_ptr() as *const std::ffi::c_char
         );
     }
     if exp == 0 {
@@ -1300,6 +1488,18 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
     }
 }
 
+/// Retain a weak reference.
+///
+/// Audit 2026-08-05 (N-4) — Arc-class caller contract (EXACT): the CAS guard
+/// below only prevents a race against the LAST strong release while the
+/// allocation is still live (strong > 0, or weak > 0 keeping the header
+/// mapped). It does NOT protect a caller that passes a pointer with no live
+/// reference of its own: once both counts reach 0 the header is deallocated,
+/// and a dangling call performs RMW on freed memory (UAF / ABA). This is the
+/// standard `Arc::downgrade` boundary — callers must hold at least one live
+/// strong or weak reference for the duration of this call. There is no
+/// cheaper hardening: RC pointers are bare addresses with no handle registry
+/// (adding one would put a lock on the hot retain/release path).
 #[no_mangle]
 pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
@@ -1331,6 +1531,13 @@ pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
     }
 }
 
+/// Release a weak reference; deallocates the header when the last reference
+/// (strong or weak) is gone.
+///
+/// Audit 2026-08-05 (N-4): same caller contract as `mimi_rc_weak_retain` —
+/// the caller must actually hold the weak reference being released. A call
+/// with no live reference RMWs a freed header (UAF); the guard here is the
+/// count arithmetic, which is only meaningful for a live allocation.
 #[no_mangle]
 pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
@@ -1356,6 +1563,15 @@ pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
     }
 }
 
+/// Upgrade a weak reference to a strong one (returns ptr, or null when the
+/// object is already gone).
+///
+/// Audit 2026-08-05 (N-4): same caller contract as `mimi_rc_weak_retain` —
+/// the caller must hold the weak reference being upgraded for the duration
+/// of the call. The two-phase CAS below (weak increment first, then strong
+/// CAS) is ABA-safe ONLY for a live allocation; a dangling call RMWs freed
+/// memory before any count check can reject it. Standard Arc-class boundary;
+/// no cheaper hardening exists without a handle registry on the hot path.
 #[no_mangle]
 pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
     if ptr.is_null() {
@@ -1574,7 +1790,8 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
                     let byte = *ptr.add(len);
                     if byte == 0 {
                         // Found null terminator within the mapped page — likely a real C string.
-                        let buf = libc::malloc(len + 1) as *mut u8;
+                        // N-1: mimi_alloc pairs with mimi_string_free (see fn docs).
+                        let buf = mimi_alloc(len + 1) as *mut u8;
                         if buf.is_null() {
                             return std::ptr::null_mut();
                         }
@@ -1590,10 +1807,10 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         }
         // C12: no null within 256 bytes — treat as large integer (≥1MB) and
         // format as hex to avoid reading arbitrary memory for 1MB.
-        // SAFETY: malloc(24) returned a valid buffer; null check below
-        // guards against OOM. The buffer is at least 24 bytes and the
-        // format string "0x%lx\0" writes at most ~20 bytes on 64-bit.
-        let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
+        // N-1: mimi_alloc pairs with mimi_string_free (see fn docs); the
+        // buffer is 24 bytes and the format string "0x%lx\0" writes at most
+        // ~20 bytes on 64-bit. Null check below guards against OOM.
+        let buf = mimi_alloc(24) as *mut std::ffi::c_char;
         if buf.is_null() {
             return std::ptr::null_mut();
         }
@@ -1603,10 +1820,9 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         }
         return buf;
     }
-    // SAFETY: `size` is a valid, non-negative allocation size
-
     // Fallback: format as raw decimal integer.
-    let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
+    // N-1: mimi_alloc pairs with mimi_string_free (see fn docs).
+    let buf = mimi_alloc(24) as *mut std::ffi::c_char;
     if buf.is_null() {
         return std::ptr::null_mut();
     }
@@ -1878,8 +2094,10 @@ pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> Valu
         Some(n) => n,
         None => return 0, // overflow — can't allocate
     };
-    // SAFETY: `size` is a valid, non-negative allocation size
-    let buf = unsafe { libc::malloc(alloc_len) as *mut u8 };
+    // N-1: mimi_alloc keeps every runtime-owned C string on the single
+    // mimi_alloc/mimi_free pairing (miri-correct; libc::malloc in normal
+    // builds — behavior unchanged).
+    let buf = mimi_alloc(alloc_len) as *mut u8;
     if buf.is_null() {
         return 0;
     }
@@ -2128,7 +2346,9 @@ pub extern "C" fn mimi_str_split(
     };
 
     // FFI-2: data + string elements are libc-allocated — owns_data: true.
-    // No hidden capacity header (list_cap returns 0 → free data directly).
+    // No hidden capacity header: has_header=false (with_data default) →
+    // list_cap returns 0 without reading data[-8], free(data) is direct
+    // (audit 2026-08-05, H-26).
     // 0.31.23: split produces string elements.
     let list = Box::new(MimiList::with_data(
         data_ptr,
@@ -2331,11 +2551,11 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
                 // Product Map: mode = 20 + arity.
                 let arity = mode - 20;
                 let json_ptr = mimi_map_to_json_product_i64(ok as MapHandle, arity, 0);
-                // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+                // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
                     // SAFETY: `mut` points to a valid, properly aligned value
-                    unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+                    mimi_free(json_ptr as *mut std::ffi::c_void);
                 }
                 parts.push(format!("{{\"Ok\":[{}]}}", s));
             } else if mode >= 10 {
@@ -2346,11 +2566,11 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
                     3 => mimi_map_to_json_f64_serde(ok as MapHandle),
                     _ => mimi_map_to_json_i64(ok as MapHandle),
                 };
-                // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+                // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
                     // SAFETY: `mut` points to a valid, properly aligned value
-                    unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+                    mimi_free(json_ptr as *mut std::ffi::c_void);
                 }
                 parts.push(format!("{{\"Ok\":[{}]}}", s));
             } else {
@@ -2418,11 +2638,11 @@ pub extern "C" fn mimi_list_option_map_to_json(
                     _ => mimi_map_to_json_i64(handle),
                 }
             };
-            // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+            // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
             let s = unsafe { cstr_to_string(json_ptr) };
             if !json_ptr.is_null() {
                 // SAFETY: `mut` points to a valid, properly aligned value
-                unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+                mimi_free(json_ptr as *mut std::ffi::c_void);
             }
             parts.push(format!("{{\"Some\":[{}]}}", s));
         } else {
@@ -2517,11 +2737,11 @@ fn list_map_to_string_impl(
             MapJsonMode::Float | MapJsonMode::FloatJson => mimi_map_to_json_f64_serde(handle),
             MapJsonMode::Int => mimi_map_to_json_i64(handle),
         };
-        // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+        // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+            mimi_free(json_ptr as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -2558,11 +2778,11 @@ pub extern "C" fn mimi_option_map_to_json(
             _ => mimi_map_to_json_i64(handle),
         }
     };
-    // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+    // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
     let s = unsafe { cstr_to_string(json_ptr) };
     if !json_ptr.is_null() {
         // SAFETY: `mut` points to a valid, properly aligned value
-        unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+        mimi_free(json_ptr as *mut std::ffi::c_void);
     }
     alloc_c_string(&format!("{{\"Some\":[{}]}}", s))
 }
@@ -2590,11 +2810,11 @@ pub extern "C" fn mimi_option_set_to_json(
             _ => mimi_set_to_json_i64(handle),
         }
     };
-    // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+    // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
     let s = unsafe { cstr_to_string(json_ptr) };
     if !json_ptr.is_null() {
         // SAFETY: `mut` points to a valid, properly aligned value
-        unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+        mimi_free(json_ptr as *mut std::ffi::c_void);
     }
     alloc_c_string(&format!("{{\"Some\":[{}]}}", s))
 }
@@ -2630,11 +2850,11 @@ pub extern "C" fn mimi_result_map_to_json(
                 _ => mimi_map_to_json_i64(ok_handle),
             }
         };
-        // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+        // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+            mimi_free(json_ptr as *mut std::ffi::c_void);
         }
         alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
     } else {
@@ -2667,11 +2887,11 @@ pub extern "C" fn mimi_result_set_to_json(
                 _ => mimi_set_to_json_i64(ok_handle),
             }
         };
-        // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+        // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+            mimi_free(json_ptr as *mut std::ffi::c_void);
         }
         alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
     } else {
@@ -2707,7 +2927,7 @@ pub extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi:
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+            mimi_free(json_ptr as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -2745,7 +2965,7 @@ pub extern "C" fn mimi_list_set_product_to_json(
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+            mimi_free(json_ptr as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -2783,7 +3003,7 @@ pub extern "C" fn mimi_list_set_product_to_string(
         let s = unsafe { cstr_to_string(disp) };
         if !disp.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(disp as *mut std::ffi::c_void) };
+            mimi_free(disp as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -2818,7 +3038,7 @@ pub extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut std::ff
         let s = unsafe { cstr_to_string(disp) };
         if !disp.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(disp as *mut std::ffi::c_void) };
+            mimi_free(disp as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -3043,12 +3263,12 @@ fn list_list_to_string_impl(
             parts.push(String::from("null"));
         } else {
             let inner_str = elem_to_string(inner);
-            // SAFETY: `inner_str` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+            // SAFETY: `inner_str` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
             let s = unsafe { cstr_to_string(inner_str) };
             // The inner formatter returns a heap-allocated string that we now own.
             if !inner_str.is_null() {
                 // SAFETY: `inner_str` was allocated by `alloc_c_string` in the inner formatter.
-                unsafe { libc::free(inner_str as *mut std::ffi::c_void) };
+                mimi_free(inner_str as *mut std::ffi::c_void);
             }
             parts.push(s);
         }
@@ -3089,11 +3309,11 @@ pub extern "C" fn mimi_list_record_to_json(
             parts.push(String::from("null"));
         } else {
             let elem_json = elem_to_json(elem_ptr);
-            // SAFETY: `elem_json` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+            // SAFETY: `elem_json` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
             let s = unsafe { cstr_to_string(elem_json) };
             if !elem_json.is_null() {
                 // SAFETY: `elem_json` was allocated by `alloc_c_string` in the callback.
-                unsafe { libc::free(elem_json as *mut std::ffi::c_void) };
+                mimi_free(elem_json as *mut std::ffi::c_void);
             }
             parts.push(s);
         }
@@ -3510,6 +3730,16 @@ impl<'a> JsonParser<'a> {
     }
 
     fn parse_full(&mut self) -> Option<String> {
+        // A3 (audit 2026-08-05 wave-2): the old path only did bracket-depth
+        // scanning — `{invalid}` balanced braces returned Some, so
+        // mimi_from_json did NOT return NULL on malformed input and codegen's
+        // NULL guard never fired (VM reference: serde_json rejects it with
+        // "parse error"). Strictly validate FIRST (RFC 8259 recursive
+        // descent), then return the original text like the VM does.
+        if !self.strict_valid_document() {
+            return None;
+        }
+        self.pos = 0;
         let val = self.parse_value()?;
         self.skip_ws();
         if self.pos != self.p.len() {
@@ -3520,6 +3750,210 @@ impl<'a> JsonParser<'a> {
 
     fn is_valid(&mut self) -> bool {
         self.parse_full().is_some()
+    }
+
+    /// Strict RFC 8259 validation, independent of the permissive
+    /// `parse_value`/`parse_object` scanners used by the accessor externs
+    /// (json_get_*). Only the `mimi_from_json`/`mimi_is_valid_json` entry
+    /// points go through this; accessors keep their permissive behavior to
+    /// avoid regressing their (documented) partial-input tolerance.
+    ///
+    /// A3 root cause: parse_object/parse_array count braces/brackets without
+    /// validating member syntax, so `{invalid}` (balanced) was accepted.
+    fn strict_valid_document(&mut self) -> bool {
+        self.pos = 0;
+        if !self.strict_value() {
+            return false;
+        }
+        self.skip_ws();
+        self.pos == self.p.len()
+    }
+
+    /// Recursive descent value validator. Returns true iff the value at the
+    /// current position parses as a strict JSON value (RFC 8259: object keys
+    /// must be strings, colons/commas in the right places, numbers with the
+    /// RFC grammar, no trailing garbage).
+    fn strict_value(&mut self) -> bool {
+        self.skip_ws();
+        match self.peek() {
+            b'{' => self.strict_object(),
+            b'[' => self.strict_array(),
+            b'"' => self.strict_string(),
+            b't' => self.strict_literal("true"),
+            b'f' => self.strict_literal("false"),
+            b'n' => self.strict_literal("null"),
+            b'-' | b'0'..=b'9' => self.strict_number(),
+            _ => false,
+        }
+    }
+
+    fn strict_object(&mut self) -> bool {
+        // consume '{'
+        self.advance();
+        self.skip_ws();
+        if self.peek() == b'}' {
+            self.advance();
+            return true;
+        }
+        loop {
+            // object key must be a string
+            if !self.strict_string() {
+                return false;
+            }
+            self.skip_ws();
+            if self.peek() != b':' {
+                return false;
+            }
+            self.advance(); // consume ':'
+            if !self.strict_value() {
+                return false;
+            }
+            self.skip_ws();
+            match self.peek() {
+                b',' => {
+                    self.advance();
+                    self.skip_ws();
+                }
+                b'}' => {
+                    self.advance();
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn strict_array(&mut self) -> bool {
+        // consume '['
+        self.advance();
+        self.skip_ws();
+        if self.peek() == b']' {
+            self.advance();
+            return true;
+        }
+        loop {
+            if !self.strict_value() {
+                return false;
+            }
+            self.skip_ws();
+            match self.peek() {
+                b',' => {
+                    self.advance();
+                    self.skip_ws();
+                }
+                b']' => {
+                    self.advance();
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn strict_string(&mut self) -> bool {
+        if self.peek() != b'"' {
+            return false;
+        }
+        self.advance();
+        loop {
+            if self.pos >= self.p.len() {
+                return false; // unterminated
+            }
+            match self.p[self.pos] {
+                b'"' => {
+                    self.advance();
+                    return true;
+                }
+                b'\\' => {
+                    self.advance();
+                    if self.pos >= self.p.len() {
+                        return false; // trailing backslash
+                    }
+                    // RFC 8259 escapes: " \ / b f n r t uXXXX
+                    match self.p[self.pos] {
+                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                            self.advance();
+                        }
+                        b'u' => {
+                            self.advance();
+                            for _ in 0..4 {
+                                if self.pos >= self.p.len()
+                                    || !(self.p[self.pos].is_ascii_hexdigit())
+                                {
+                                    return false;
+                                }
+                                self.advance();
+                            }
+                        }
+                        _ => return false, // invalid escape
+                    }
+                }
+                // control characters < 0x20 are not allowed raw in strings
+                c if c < 0x20 => return false,
+                _ => self.advance(),
+            }
+        }
+    }
+
+    fn strict_literal(&mut self, lit: &str) -> bool {
+        let b = lit.as_bytes();
+        if self.pos + b.len() > self.p.len() {
+            return false;
+        }
+        for (i, c) in b.iter().enumerate() {
+            if self.p[self.pos + i] != *c {
+                return false;
+            }
+        }
+        self.pos += b.len();
+        true
+    }
+
+    fn strict_number(&mut self) -> bool {
+        // RFC 8259 number: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+        if self.peek() == b'-' {
+            self.advance();
+        }
+        if self.peek() == b'0' {
+            self.advance();
+            // leading zero: next digit is illegal (01, 00, 0123)
+            if self.pos < self.p.len() && self.p[self.pos].is_ascii_digit() {
+                return false;
+            }
+        } else if matches!(self.peek(), b'1'..=b'9') {
+            while self.pos < self.p.len() && self.p[self.pos].is_ascii_digit() {
+                self.advance();
+            }
+        } else {
+            return false; // "-" alone or non-digit
+        }
+        if self.pos >= self.p.len() {
+            return true;
+        }
+        if self.p[self.pos] == b'.' {
+            self.advance();
+            let frac_start = self.pos;
+            while self.pos < self.p.len() && self.p[self.pos].is_ascii_digit() {
+                self.advance();
+            }
+            if self.pos == frac_start {
+                return false; // "." with no digits
+            }
+        }
+        if self.pos < self.p.len() && (self.p[self.pos] == b'e' || self.p[self.pos] == b'E') {
+            self.advance();
+            if self.pos < self.p.len() && (self.p[self.pos] == b'+' || self.p[self.pos] == b'-') {
+                self.advance();
+            }
+            let exp_start = self.pos;
+            while self.pos < self.p.len() && self.p[self.pos].is_ascii_digit() {
+                self.advance();
+            }
+            if self.pos == exp_start {
+                return false; // "e" with no digits
+            }
+        }
+        true
     }
 }
 
@@ -4632,11 +5066,11 @@ pub extern "C" fn mimi_map_to_json_set_product_i64(
         parts.push(String::from(":"));
         let set_h = **v as SetHandle;
         let set_json = mimi_set_to_json_product_i64(set_h, arity, display_style);
-        // SAFETY: `set_json` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+        // SAFETY: `set_json` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(set_json as *mut std::ffi::c_void) };
+            mimi_free(set_json as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -4756,11 +5190,11 @@ pub extern "C" fn mimi_map_to_json_map_product_i64(
         parts.push(String::from(":"));
         let inner_h = **v as MapHandle;
         let inner_json = mimi_map_to_json_product_i64(inner_h, arity, display_style);
-        // SAFETY: `inner_json` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `libc::free` is the matching deallocation
+        // SAFETY: `inner_json` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
             // SAFETY: `mut` points to a valid, properly aligned value
-            unsafe { libc::free(inner_json as *mut std::ffi::c_void) };
+            mimi_free(inner_json as *mut std::ffi::c_void);
         }
         parts.push(s);
     }
@@ -5121,9 +5555,7 @@ pub extern "C" fn mimi_map_from_json_result_map_product_i64(
             let inner_h = mimi_map_from_json_product_i64(c_obj, arity);
             if !c_obj.is_null() {
                 // SAFETY: `c_obj` was returned by `alloc_c_string` and is non-null (checked by the enclosing `if`); freed to prevent memory leak
-                unsafe {
-                    libc::free(c_obj as *mut _);
-                }
+                mimi_free(c_obj as *mut _);
             }
             // SAFETY: `pack` is non-null with 16 bytes; writing `disc` and `inner_h` at offsets 0 and 8 is within bounds
             unsafe {
@@ -5199,9 +5631,7 @@ pub extern "C" fn mimi_map_to_json_result_map_product_i64(
             // SAFETY: `inner_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(inner_json) };
             if !inner_json.is_null() {
-                unsafe {
-                    libc::free(inner_json as *mut _);
-                }
+                mimi_free(inner_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -5356,9 +5786,7 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
             let tmp_map = mimi_map_from_json_result_product_i64(c_one, arity);
             if !c_one.is_null() {
                 // SAFETY: `c_one` was returned by `alloc_c_string` and is non-null (checked by the enclosing `if`); freed to prevent memory leak
-                unsafe {
-                    libc::free(c_one as *mut _);
-                }
+                mimi_free(c_one as *mut _);
             }
             // Extract the single value handle from tmp_map
             let mut res_h: i64 = 0;
@@ -5444,9 +5872,7 @@ pub extern "C" fn mimi_map_to_json_option_result_product_i64(
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
-                    unsafe {
-                        libc::free(json_ptr as *mut _);
-                    }
+                    mimi_free(json_ptr as *mut _);
                 }
                 // format is {"_":VALUE} — strip only the outer map braces once.
                 let val = if let Some(colon) = s.find(':') {
@@ -5839,9 +6265,7 @@ pub extern "C" fn mimi_list_from_json_option_set_product_i64(
             let set_h = mimi_set_from_json_product_i64(c_arr, arity);
             if !c_arr.is_null() {
                 // SAFETY: `c_arr` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(16)` and checked as non-null, so `pack` and `pack.add(1)` point to valid, aligned memory
             unsafe {
@@ -5928,9 +6352,7 @@ pub extern "C" fn mimi_list_option_set_product_to_json(
             // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(set_json) };
             if !set_json.is_null() {
-                unsafe {
-                    libc::free(set_json as *mut _);
-                }
+                mimi_free(set_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -6026,9 +6448,7 @@ pub extern "C" fn mimi_map_from_json_list_option_set_product_i64(
         let list_ptr = mimi_list_from_json_option_set_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -6075,9 +6495,7 @@ pub extern "C" fn mimi_map_to_json_list_option_set_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -6168,9 +6586,7 @@ pub extern "C" fn mimi_map_from_json_list_option_product_i64(
         let list_ptr = mimi_list_from_json_option_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -6217,9 +6633,7 @@ pub extern "C" fn mimi_map_to_json_list_option_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -6307,9 +6721,7 @@ pub extern "C" fn mimi_set_from_json_option_result_product_i64(
         let tmp = mimi_map_from_json_option_result_product_i64(c_wrap, arity);
         if !c_wrap.is_null() {
             // SAFETY: `c_wrap` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_wrap as *mut _);
-            }
+            mimi_free(c_wrap as *mut _);
         }
         if tmp != 0 {
             // SAFETY: `map_from_handle` is non-null and points to a valid map instance
@@ -6651,9 +7063,7 @@ pub extern "C" fn mimi_set_from_json_list_map_product_i64(
         let list_ptr = mimi_list_from_json_map_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         mimi_set_insert(handle, list_ptr as SetValueHandle);
     }
@@ -6692,9 +7102,7 @@ pub extern "C" fn mimi_set_to_json_list_map_product_i64(
             // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(jp) };
             if !jp.is_null() {
-                unsafe {
-                    libc::free(jp as *mut _);
-                }
+                mimi_free(jp as *mut _);
             }
             (s, *vh as i64)
         })
@@ -6850,9 +7258,7 @@ pub extern "C" fn mimi_set_from_json_result_list_product_i64(
             let tmp = mimi_map_from_json_list_product_i64(c_wrap, arity);
             if !c_wrap.is_null() {
                 // SAFETY: `c_wrap` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-                unsafe {
-                    libc::free(c_wrap as *mut _);
-                }
+                mimi_free(c_wrap as *mut _);
             }
             let mut list_h: i64 = 0;
             if tmp != 0 {
@@ -6944,9 +7350,7 @@ pub extern "C" fn mimi_set_to_json_result_list_product_i64(
                 // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
                 let map_s = unsafe { cstr_to_string(jp) };
                 if !jp.is_null() {
-                    unsafe {
-                        libc::free(jp as *mut _);
-                    }
+                    mimi_free(jp as *mut _);
                 }
                 // Extract value after first ':'
                 let list_s = if let Some(pos) = map_s.find(':') {
@@ -7079,9 +7483,7 @@ pub extern "C" fn mimi_map_from_json_list_map_list_product_i64(
         let list_ptr = mimi_list_from_json_map_list_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -7157,9 +7559,7 @@ pub extern "C" fn mimi_list_from_json_map_list_product_i64(
         let mh = mimi_map_from_json_list_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         handles.push(mh as i64);
     }
@@ -7220,9 +7620,7 @@ pub extern "C" fn mimi_list_map_list_product_to_json(
         // SAFETY: `map_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(map_json) };
         if !map_json.is_null() {
-            unsafe {
-                libc::free(map_json as *mut _);
-            }
+            mimi_free(map_json as *mut _);
         }
         parts.push(s);
     }
@@ -7265,9 +7663,7 @@ pub extern "C" fn mimi_map_to_json_list_map_list_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -7371,9 +7767,7 @@ pub extern "C" fn mimi_map_from_json_option_map_list_product_i64(
             let mh = mimi_map_from_json_list_product_i64(c_obj, arity);
             if !c_obj.is_null() {
                 // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-                unsafe {
-                    libc::free(c_obj as *mut _);
-                }
+                mimi_free(c_obj as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(16)` at line 6951 and confirmed non-null at line 6952; `pack` and `pack.add(1)` point to valid, aligned memory
             unsafe {
@@ -7447,9 +7841,7 @@ pub extern "C" fn mimi_map_to_json_option_map_list_product_i64(
             // SAFETY: `map_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(map_json) };
             if !map_json.is_null() {
-                unsafe {
-                    libc::free(map_json as *mut _);
-                }
+                mimi_free(map_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -7582,9 +7974,7 @@ pub extern "C" fn mimi_set_from_json_result_map_product_i64(
             let mh = mimi_map_from_json_product_i64(c_map, arity);
             if !c_map.is_null() {
                 // SAFETY: `c_map` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-                unsafe {
-                    libc::free(c_map as *mut _);
-                }
+                mimi_free(c_map as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(16)` at line 7139 and confirmed non-null at line 7140; `pack` and `pack.add(1)` point to valid, aligned memory
             unsafe {
@@ -7659,9 +8049,7 @@ pub extern "C" fn mimi_set_to_json_result_map_product_i64(
                 // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
                 let map_s = unsafe { cstr_to_string(jp) };
                 if !jp.is_null() {
-                    unsafe {
-                        libc::free(jp as *mut _);
-                    }
+                    mimi_free(jp as *mut _);
                 }
                 let s = if display_style != 0 {
                     format!("Ok({})", map_s)
@@ -7784,9 +8172,7 @@ pub extern "C" fn mimi_map_from_json_map_result_product_i64(
         let inner = mimi_map_from_json_result_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -7828,9 +8214,7 @@ pub extern "C" fn mimi_map_to_json_map_result_product_i64(
         // SAFETY: `inner_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
-            unsafe {
-                libc::free(inner_json as *mut _);
-            }
+            mimi_free(inner_json as *mut _);
         }
         parts.push(s);
     }
@@ -7904,9 +8288,7 @@ pub extern "C" fn mimi_set_from_json_map_set_product_i64(
         let mh = mimi_map_from_json_set_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         mimi_set_insert(handle, mh as SetValueHandle);
     }
@@ -7945,9 +8327,7 @@ pub extern "C" fn mimi_set_to_json_map_set_product_i64(
             // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(jp) };
             if !jp.is_null() {
-                unsafe {
-                    libc::free(jp as *mut _);
-                }
+                mimi_free(jp as *mut _);
             }
             (s, *vh as i64)
         })
@@ -8061,9 +8441,7 @@ pub extern "C" fn mimi_map_from_json_set_map_list_product_i64(
         let set_h = mimi_set_from_json_map_list_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -8105,9 +8483,7 @@ pub extern "C" fn mimi_map_to_json_set_map_list_product_i64(
         // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
-            unsafe {
-                libc::free(set_json as *mut _);
-            }
+            mimi_free(set_json as *mut _);
         }
         parts.push(s);
     }
@@ -8178,9 +8554,7 @@ pub extern "C" fn mimi_set_from_json_map_list_product_i64(
         let mh = mimi_map_from_json_list_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         mimi_set_insert(handle, mh as SetValueHandle);
     }
@@ -8219,9 +8593,7 @@ pub extern "C" fn mimi_set_to_json_map_list_product_i64(
             // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(jp) };
             if !jp.is_null() {
-                unsafe {
-                    libc::free(jp as *mut _);
-                }
+                mimi_free(jp as *mut _);
             }
             (s, *vh as i64)
         })
@@ -8334,9 +8706,7 @@ pub extern "C" fn mimi_map_from_json_map_list_product_i64(
         let inner = mimi_map_from_json_list_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -8378,9 +8748,7 @@ pub extern "C" fn mimi_map_to_json_map_list_product_i64(
         // SAFETY: `inner_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
-            unsafe {
-                libc::free(inner_json as *mut _);
-            }
+            mimi_free(inner_json as *mut _);
         }
         parts.push(s);
     }
@@ -8471,9 +8839,7 @@ pub extern "C" fn mimi_map_from_json_map_option_product_i64(
         let inner = mimi_map_from_json_option_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -8515,9 +8881,7 @@ pub extern "C" fn mimi_map_to_json_map_option_product_i64(
         // SAFETY: `inner_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
-            unsafe {
-                libc::free(inner_json as *mut _);
-            }
+            mimi_free(inner_json as *mut _);
         }
         parts.push(s);
     }
@@ -8599,9 +8963,7 @@ pub extern "C" fn mimi_set_from_json_option_map_product_i64(
             let mh = mimi_map_from_json_product_i64(c_obj, arity);
             if !c_obj.is_null() {
                 // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-                unsafe {
-                    libc::free(c_obj as *mut _);
-                }
+                mimi_free(c_obj as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(16)` at line 8161 and confirmed non-null at line 8162; `pack` and `pack.add(1)` point to valid, aligned memory
             unsafe {
@@ -8673,9 +9035,7 @@ pub extern "C" fn mimi_set_to_json_option_map_product_i64(
                 // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
                 let map_s = unsafe { cstr_to_string(jp) };
                 if !jp.is_null() {
-                    unsafe {
-                        libc::free(jp as *mut _);
-                    }
+                    mimi_free(jp as *mut _);
                 }
                 if display_style != 0 {
                     format!("Some({})", map_s)
@@ -8810,9 +9170,7 @@ pub extern "C" fn mimi_map_from_json_map_set_product_i64(
         let inner = mimi_map_from_json_set_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `c_obj` was allocated by `alloc_c_string` (which uses `libc::malloc`) and the null check above ensures it is a valid pointer for deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         unsafe {
@@ -8854,9 +9212,7 @@ pub extern "C" fn mimi_map_to_json_map_set_product_i64(
         // SAFETY: `inner_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
-            unsafe {
-                libc::free(inner_json as *mut _);
-            }
+            mimi_free(inner_json as *mut _);
         }
         parts.push(s);
     }
@@ -8927,10 +9283,8 @@ pub extern "C" fn mimi_set_from_json_map_product_i64(
         let c_obj = alloc_c_string(&obj);
         let mh = mimi_map_from_json_product_i64(c_obj, arity);
         if !c_obj.is_null() {
-            // SAFETY: `c_obj` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            // SAFETY: `c_obj` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_obj as *mut _);
         }
         mimi_set_insert(handle, mh as SetValueHandle);
     }
@@ -8969,9 +9323,7 @@ pub extern "C" fn mimi_set_to_json_map_product_i64(
             // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(jp) };
             if !jp.is_null() {
-                unsafe {
-                    libc::free(jp as *mut _);
-                }
+                mimi_free(jp as *mut _);
             }
             (s, *vh as i64)
         })
@@ -9066,9 +9418,7 @@ pub extern "C" fn mimi_list_from_json_set_map_product_i64(
         let set_h = mimi_set_from_json_map_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `std::mem::size_of::<MimiList>(` is a valid, non-negative allocation size; handles null return below
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         handles.push(set_h as i64);
     }
@@ -9129,9 +9479,7 @@ pub extern "C" fn mimi_list_set_map_product_to_json(
         // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
-            unsafe {
-                libc::free(set_json as *mut _);
-            }
+            mimi_free(set_json as *mut _);
         }
         parts.push(s);
     }
@@ -9203,9 +9551,7 @@ pub extern "C" fn mimi_list_from_json_set_product_i64(
         let set_h = mimi_set_from_json_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `std::mem::size_of::<MimiList>(` is a valid, non-negative allocation size; handles null return below
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         handles.push(set_h as i64);
     }
@@ -9302,10 +9648,8 @@ pub extern "C" fn mimi_set_from_json_list_product_i64(
         let c_wrap = alloc_c_string(&wrap);
         let tmp = mimi_map_from_json_list_product_i64(c_wrap, arity);
         if !c_wrap.is_null() {
-            // SAFETY: `c_wrap` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_wrap as *mut _);
-            }
+            // SAFETY: `c_wrap` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_wrap as *mut _);
         }
         if tmp != 0 {
             // SAFETY: `map_from_handle` is non-null and points to a valid map instance
@@ -9359,9 +9703,7 @@ pub extern "C" fn mimi_set_to_json_list_product_i64(
                 // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(jp) };
                 if !jp.is_null() {
-                    unsafe {
-                        libc::free(jp as *mut _);
-                    }
+                    mimi_free(jp as *mut _);
                 }
                 let val = if let Some(colon) = s.find(':') {
                     let mut rest = s[colon + 1..].to_string();
@@ -9468,9 +9810,7 @@ pub extern "C" fn mimi_list_from_json_map_product_i64(
         let mh = mimi_map_from_json_product_i64(c_obj, arity);
         if !c_obj.is_null() {
             // SAFETY: `std::mem::size_of::<MimiList>(` is a valid, non-negative allocation size; handles null return below
-            unsafe {
-                libc::free(c_obj as *mut _);
-            }
+            mimi_free(c_obj as *mut _);
         }
         handles.push(mh as i64);
     }
@@ -9531,9 +9871,7 @@ pub extern "C" fn mimi_list_map_product_to_json(
         // SAFETY: `map_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(map_json) };
         if !map_json.is_null() {
-            unsafe {
-                libc::free(map_json as *mut _);
-            }
+            mimi_free(map_json as *mut _);
         }
         parts.push(s);
     }
@@ -9623,10 +9961,8 @@ pub extern "C" fn mimi_map_from_json_set_list_map_product_i64(
         let c_arr = alloc_c_string(&arr);
         let set_h = mimi_set_from_json_list_map_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -9668,9 +10004,7 @@ pub extern "C" fn mimi_map_to_json_set_list_map_product_i64(
         // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
-            unsafe {
-                libc::free(set_json as *mut _);
-            }
+            mimi_free(set_json as *mut _);
         }
         parts.push(s);
     }
@@ -9760,10 +10094,8 @@ pub extern "C" fn mimi_map_from_json_list_set_map_product_i64(
         let c_arr = alloc_c_string(&arr);
         let list_ptr = mimi_list_from_json_set_map_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -9810,9 +10142,7 @@ pub extern "C" fn mimi_map_to_json_list_set_map_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -9902,10 +10232,8 @@ pub extern "C" fn mimi_map_from_json_set_map_product_i64(
         let c_arr = alloc_c_string(&arr);
         let set_h = mimi_set_from_json_map_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -9947,9 +10275,7 @@ pub extern "C" fn mimi_map_to_json_set_map_product_i64(
         // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
-            unsafe {
-                libc::free(set_json as *mut _);
-            }
+            mimi_free(set_json as *mut _);
         }
         parts.push(s);
     }
@@ -10039,10 +10365,8 @@ pub extern "C" fn mimi_map_from_json_list_map_product_i64(
         let c_arr = alloc_c_string(&arr);
         let list_ptr = mimi_list_from_json_map_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -10089,9 +10413,7 @@ pub extern "C" fn mimi_map_to_json_list_map_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -10181,10 +10503,8 @@ pub extern "C" fn mimi_map_from_json_set_list_product_i64(
         let c_arr = alloc_c_string(&arr);
         let set_h = mimi_set_from_json_list_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -10235,9 +10555,7 @@ pub extern "C" fn mimi_map_to_json_set_list_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -10327,10 +10645,8 @@ pub extern "C" fn mimi_map_from_json_list_set_result_product_i64(
         let c_arr = alloc_c_string(&arr);
         let list_ptr = mimi_list_from_json_set_result_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -10377,9 +10693,7 @@ pub extern "C" fn mimi_map_to_json_list_set_result_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -10469,10 +10783,8 @@ pub extern "C" fn mimi_map_from_json_list_set_option_product_i64(
         let c_arr = alloc_c_string(&arr);
         let list_ptr = mimi_list_from_json_set_option_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -10519,9 +10831,7 @@ pub extern "C" fn mimi_map_to_json_list_set_option_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -10611,10 +10921,8 @@ pub extern "C" fn mimi_map_from_json_list_set_product_i64(
         let c_arr = alloc_c_string(&arr);
         let list_ptr = mimi_list_from_json_set_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -10665,9 +10973,7 @@ pub extern "C" fn mimi_map_to_json_list_set_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -10739,9 +11045,7 @@ pub extern "C" fn mimi_list_from_json_set_option_product_i64(
         let set_h = mimi_set_from_json_option_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `std::mem::size_of::<MimiList>(` is a valid, non-negative allocation size; handles null return below
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         handles.push(set_h as i64);
     }
@@ -10802,9 +11106,7 @@ pub extern "C" fn mimi_list_set_option_product_to_json(
         // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
-            unsafe {
-                libc::free(set_json as *mut _);
-            }
+            mimi_free(set_json as *mut _);
         }
         parts.push(s);
     }
@@ -10876,9 +11178,7 @@ pub extern "C" fn mimi_list_from_json_set_result_product_i64(
         let set_h = mimi_set_from_json_result_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `std::mem::size_of::<MimiList>(` is a valid, non-negative allocation size; handles null return below
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         handles.push(set_h as i64);
     }
@@ -10939,9 +11239,7 @@ pub extern "C" fn mimi_list_set_result_product_to_json(
         // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
-            unsafe {
-                libc::free(set_json as *mut _);
-            }
+            mimi_free(set_json as *mut _);
         }
         parts.push(s);
     }
@@ -11019,10 +11317,8 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
         let c_wrap = alloc_c_string(&wrap);
         let tmp = mimi_map_from_json_result_option_product_i64(c_wrap, arity);
         if !c_wrap.is_null() {
-            // SAFETY: `c_wrap` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_wrap as *mut _);
-            }
+            // SAFETY: `c_wrap` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_wrap as *mut _);
         }
         let mut h: i64 = 0;
         if tmp != 0 {
@@ -11108,9 +11404,7 @@ pub extern "C" fn mimi_list_result_option_product_to_json(
             // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(json_ptr) };
             if !json_ptr.is_null() {
-                unsafe {
-                    libc::free(json_ptr as *mut _);
-                }
+                mimi_free(json_ptr as *mut _);
             }
             let val = if let Some(colon) = s.find(':') {
                 let mut rest = s[colon + 1..].to_string();
@@ -11210,10 +11504,8 @@ pub extern "C" fn mimi_map_from_json_list_result_option_product_i64(
         let c_arr = alloc_c_string(&arr);
         let list_ptr = mimi_list_from_json_result_option_product_i64(c_arr, arity);
         if !c_arr.is_null() {
-            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `libc::free` is the matching deallocation
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            // SAFETY: `c_arr` was allocated by `alloc_c_string` and is non-null (checked above); `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         unsafe {
@@ -11260,9 +11552,7 @@ pub extern "C" fn mimi_map_to_json_list_result_option_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -11443,9 +11733,7 @@ pub extern "C" fn mimi_map_from_json_result_option_list_product_i64(
                 let tmp = mimi_map_from_json_list_product_i64(c_wrap, arity);
                 if !c_wrap.is_null() {
                     // SAFETY: `c_wrap` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 11092)
-                    unsafe {
-                        libc::free(c_wrap as *mut _);
-                    }
+                    mimi_free(c_wrap as *mut _);
                 }
                 let mut list_h: i64 = 0;
                 if tmp != 0 {
@@ -11560,9 +11848,7 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
                         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                         let s = unsafe { cstr_to_string(json_ptr) };
                         if !json_ptr.is_null() {
-                            unsafe {
-                                libc::free(json_ptr as *mut _);
-                            }
+                            mimi_free(json_ptr as *mut _);
                         }
                         let val = if let Some(colon) = s.find(':') {
                             let mut rest = s[colon + 1..].to_string();
@@ -11727,9 +12013,7 @@ pub extern "C" fn mimi_map_from_json_option_set_list_product_i64(
             let set_h = mimi_set_from_json_list_product_i64(c_arr, arity);
             if !c_arr.is_null() {
                 // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 11370)
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
             }
             // SAFETY: `pack` is a valid, non-null pointer from the `libc::malloc(16)` allocation at line 11289 (null-checked at 11290)
             unsafe {
@@ -11797,9 +12081,7 @@ pub extern "C" fn mimi_map_to_json_option_set_list_product_i64(
             // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(set_json) };
             if !set_json.is_null() {
-                unsafe {
-                    libc::free(set_json as *mut _);
-                }
+                mimi_free(set_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -11919,9 +12201,7 @@ pub extern "C" fn mimi_map_from_json_option_result_list_product_i64(
             let tmp = mimi_map_from_json_result_list_product_i64(c_wrap, arity);
             if !c_wrap.is_null() {
                 // SAFETY: `c_wrap` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 11557)
-                unsafe {
-                    libc::free(c_wrap as *mut _);
-                }
+                mimi_free(c_wrap as *mut _);
             }
             let mut res_h: i64 = 0;
             if tmp != 0 {
@@ -12004,9 +12284,7 @@ pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
-                    unsafe {
-                        libc::free(json_ptr as *mut _);
-                    }
+                    mimi_free(json_ptr as *mut _);
                 }
                 let val = if let Some(colon) = s.find(':') {
                     let mut rest = s[colon + 1..].to_string();
@@ -12177,9 +12455,7 @@ pub extern "C" fn mimi_map_from_json_result_list_set_product_i64(
             let list_ptr = mimi_list_from_json_set_product_i64(c_arr, arity);
             if !c_arr.is_null() {
                 // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 11810)
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
             }
             // SAFETY: `pack` is a valid, non-null pointer from the `libc::malloc(16)` allocation at line 11721 (null-checked at 11722)
             unsafe {
@@ -12259,9 +12535,7 @@ pub extern "C" fn mimi_map_to_json_result_list_set_product_i64(
             // SAFETY: `list_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(list_json) };
             if !list_json.is_null() {
-                unsafe {
-                    libc::free(list_json as *mut _);
-                }
+                mimi_free(list_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -12422,9 +12696,7 @@ pub extern "C" fn mimi_map_from_json_result_list_option_product_i64(
             let list_ptr = mimi_list_from_json_option_product_i64(c_arr, arity);
             if !c_arr.is_null() {
                 // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 12050)
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
             }
             // SAFETY: `pack` is a valid, non-null pointer from the `libc::malloc(16)` allocation at line 11961 (null-checked at 11962)
             unsafe {
@@ -12500,9 +12772,7 @@ pub extern "C" fn mimi_map_to_json_result_list_option_product_i64(
             // SAFETY: `list_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(list_json) };
             if !list_json.is_null() {
-                unsafe {
-                    libc::free(list_json as *mut _);
-                }
+                mimi_free(list_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -12598,9 +12868,7 @@ pub extern "C" fn mimi_map_from_json_set_option_product_i64(
         let set_h = mimi_set_from_json_option_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 12223)
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12154) so `map_from_handle(handle)` returns a valid pointer
         unsafe {
@@ -12651,9 +12919,7 @@ pub extern "C" fn mimi_map_to_json_set_option_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -12744,9 +13010,7 @@ pub extern "C" fn mimi_map_from_json_set_result_option_product_i64(
         let set_h = mimi_set_from_json_result_option_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 12367)
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12298) so `map_from_handle(handle)` returns a valid pointer
         unsafe {
@@ -12797,9 +13061,7 @@ pub extern "C" fn mimi_map_to_json_set_result_option_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -12890,9 +13152,7 @@ pub extern "C" fn mimi_map_from_json_set_result_product_i64(
         let set_h = mimi_set_from_json_result_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 12511)
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12442) so `map_from_handle(handle)` returns a valid pointer
         unsafe {
@@ -12943,9 +13203,7 @@ pub extern "C" fn mimi_map_to_json_set_result_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -13037,9 +13295,7 @@ pub extern "C" fn mimi_map_from_json_list_result_product_i64(
         let list_ptr = mimi_list_from_json_result_product_i64(c_arr, arity);
         if !c_arr.is_null() {
             // SAFETY: `c_arr` is non-null and points to memory allocated by `alloc_c_string` (null-checked at line 12656)
-            unsafe {
-                libc::free(c_arr as *mut _);
-            }
+            mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12587) so `map_from_handle(handle)` returns a valid pointer
         unsafe {
@@ -13086,9 +13342,7 @@ pub extern "C" fn mimi_map_to_json_list_result_product_i64(
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
-            unsafe {
-                libc::free(json_ptr as *mut _);
-            }
+            mimi_free(json_ptr as *mut _);
         }
         parts.push(s);
     }
@@ -13390,9 +13644,7 @@ pub extern "C" fn mimi_map_to_json_option_list_product_i64(
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
-                    unsafe {
-                        libc::free(json_ptr as *mut _);
-                    }
+                    mimi_free(json_ptr as *mut _);
                 }
                 let val = if let Some(colon) = s.find(':') {
                     let mut rest = s[colon + 1..].to_string();
@@ -13728,9 +13980,7 @@ pub extern "C" fn mimi_map_to_json_result_list_product_i64(
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
-                    unsafe {
-                        libc::free(json_ptr as *mut _);
-                    }
+                    mimi_free(json_ptr as *mut _);
                 }
                 let val = if let Some(colon) = s.find(':') {
                     let mut rest = s[colon + 1..].to_string();
@@ -13860,10 +14110,10 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
                     unsafe {
                         libc::free(pack as *mut _);
                         if !c_opt.is_null() {
-                            libc::free(c_opt as *mut _);
+                            mimi_free(c_opt as *mut _);
                         }
                         if !c_arr.is_null() {
-                            libc::free(c_arr as *mut _);
+                            mimi_free(c_arr as *mut _);
                         }
                     }
                     break;
@@ -13905,15 +14155,11 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
                 }
                 // SAFETY: `c_opt` was allocated by alloc_c_string (non-null heap pointer); null guard ensures validity
                 if !c_opt.is_null() {
-                    unsafe {
-                        libc::free(c_opt as *mut _);
-                    }
+                    mimi_free(c_opt as *mut _);
                 }
                 // SAFETY: `c_arr` was allocated by alloc_c_string (non-null heap pointer); null guard ensures validity
                 if !c_arr.is_null() {
-                    unsafe {
-                        libc::free(c_arr as *mut _);
-                    }
+                    mimi_free(c_arr as *mut _);
                 }
             // SAFETY: `pack` is a valid heap pointer from checked libc::malloc(16) at line 13421; no other reference exists
             } else {
@@ -14358,9 +14604,7 @@ pub extern "C" fn mimi_map_from_json_result_set_map_product_i64(
             let ok_h = mimi_set_from_json_map_product_i64(c_arr, arity);
             // SAFETY: `c_arr` was allocated by alloc_c_string; null guard ensures validity
             if !c_arr.is_null() {
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 13834
             }
             unsafe {
@@ -14436,9 +14680,7 @@ pub extern "C" fn mimi_map_to_json_result_set_map_product_i64(
             // SAFETY: `ok_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(ok_json) };
             if !ok_json.is_null() {
-                unsafe {
-                    libc::free(ok_json as *mut _);
-                }
+                mimi_free(ok_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -14554,9 +14796,7 @@ pub extern "C" fn mimi_map_from_json_option_set_map_product_i64(
             let some_h = mimi_set_from_json_map_product_i64(c_val, arity);
             // SAFETY: `c_val` was allocated by alloc_c_string; null guard ensures validity
             if !c_val.is_null() {
-                unsafe {
-                    libc::free(c_val as *mut _);
-                }
+                mimi_free(c_val as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 14099
             }
             unsafe {
@@ -14624,9 +14864,7 @@ pub extern "C" fn mimi_map_to_json_option_set_map_product_i64(
             // SAFETY: `some_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(some_json) };
             if !some_json.is_null() {
-                unsafe {
-                    libc::free(some_json as *mut _);
-                }
+                mimi_free(some_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -14816,9 +15054,7 @@ pub extern "C" fn mimi_map_from_json_result_list_map_product_i64(
             let ok_h = mimi_list_from_json_map_product_i64(c_arr, arity);
             // SAFETY: `c_arr` was allocated by alloc_c_string; null guard ensures validity
             if !c_arr.is_null() {
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 14282
             }
             unsafe {
@@ -14894,9 +15130,7 @@ pub extern "C" fn mimi_map_to_json_result_list_map_product_i64(
             // SAFETY: `ok_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(ok_json) };
             if !ok_json.is_null() {
-                unsafe {
-                    libc::free(ok_json as *mut _);
-                }
+                mimi_free(ok_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -15012,9 +15246,7 @@ pub extern "C" fn mimi_map_from_json_option_list_map_product_i64(
             let some_h = mimi_list_from_json_map_product_i64(c_val, arity);
             // SAFETY: `c_val` was allocated by alloc_c_string; null guard ensures validity
             if !c_val.is_null() {
-                unsafe {
-                    libc::free(c_val as *mut _);
-                }
+                mimi_free(c_val as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 14547
             }
             unsafe {
@@ -15082,9 +15314,7 @@ pub extern "C" fn mimi_map_to_json_option_list_map_product_i64(
             // SAFETY: `some_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(some_json) };
             if !some_json.is_null() {
-                unsafe {
-                    libc::free(some_json as *mut _);
-                }
+                mimi_free(some_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -15244,9 +15474,7 @@ pub extern "C" fn mimi_map_from_json_result_set_list_product_i64(
             let set_h = mimi_set_from_json_list_product_i64(c_arr, arity);
             // SAFETY: `c_arr` was allocated by alloc_c_string; null guard ensures validity
             if !c_arr.is_null() {
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 14730
             }
             unsafe {
@@ -15322,9 +15550,7 @@ pub extern "C" fn mimi_map_to_json_result_set_list_product_i64(
             // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(set_json) };
             if !set_json.is_null() {
-                unsafe {
-                    libc::free(set_json as *mut _);
-                }
+                mimi_free(set_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -15486,9 +15712,7 @@ pub extern "C" fn mimi_map_from_json_result_set_product_i64(
             let set_h = mimi_set_from_json_product_i64(c_arr, arity);
             // SAFETY: `c_arr` was allocated by alloc_c_string; null guard ensures validity
             if !c_arr.is_null() {
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 14966
             }
             unsafe {
@@ -15564,9 +15788,7 @@ pub extern "C" fn mimi_map_to_json_result_set_product_i64(
             // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(set_json) };
             if !set_json.is_null() {
-                unsafe {
-                    libc::free(set_json as *mut _);
-                }
+                mimi_free(set_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -15692,9 +15914,7 @@ pub extern "C" fn mimi_map_from_json_option_set_product_i64(
             // SAFETY: `c_arr` was allocated by alloc_c_string; null guard ensures validity
             if !c_arr.is_null() {
                 // SAFETY: `c_arr` is non-null (checked above) and was allocated by `alloc_c_string` which uses `libc::malloc`
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
                 // SAFETY: `pack` is a valid 2-element i64 buffer from checked malloc at line 15212
             }
             // SAFETY: `pack` was allocated by `libc::malloc(16)` at line 15212 and confirmed non-null
@@ -15764,9 +15984,7 @@ pub extern "C" fn mimi_map_to_json_option_set_product_i64(
             // SAFETY: `set_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(set_json) };
             if !set_json.is_null() {
-                unsafe {
-                    libc::free(set_json as *mut _);
-                }
+                mimi_free(set_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -15892,9 +16110,7 @@ pub extern "C" fn mimi_map_from_json_option_map_product_i64(
             let inner_h = mimi_map_from_json_product_i64(c_obj, arity);
             if !c_obj.is_null() {
                 // SAFETY: `c_obj` is non-null (checked above) and was allocated by `alloc_c_string` which uses `libc::malloc`
-                unsafe {
-                    libc::free(c_obj as *mut _);
-                }
+                mimi_free(c_obj as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(16)` at line 15404 and confirmed non-null
             unsafe {
@@ -15962,9 +16178,7 @@ pub extern "C" fn mimi_map_to_json_option_map_product_i64(
             // SAFETY: `inner_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(inner_json) };
             if !inner_json.is_null() {
-                unsafe {
-                    libc::free(inner_json as *mut _);
-                }
+                mimi_free(inner_json as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Some({})", s));
@@ -17153,9 +17367,7 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
             let set_h = mimi_set_from_json_product_i64(c_arr, arity);
             if !c_arr.is_null() {
                 // SAFETY: `c_arr` is non-null (checked above) and was allocated by `alloc_c_string` which uses `libc::malloc`
-                unsafe {
-                    libc::free(c_arr as *mut _);
-                }
+                mimi_free(c_arr as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(24)` at line 16639 and confirmed non-null at line 16640
             unsafe {
@@ -17257,9 +17469,7 @@ pub extern "C" fn mimi_list_result_set_product_to_json(
             // SAFETY: `sj` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(sj) };
             if !sj.is_null() {
-                unsafe {
-                    libc::free(sj as *mut _);
-                }
+                mimi_free(sj as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -17414,9 +17624,7 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
             let mh = mimi_map_from_json_product_i64(c_obj, arity);
             if !c_obj.is_null() {
                 // SAFETY: `c_obj` is non-null (checked above) and was allocated by `alloc_c_string` which uses `libc::malloc`
-                unsafe {
-                    libc::free(c_obj as *mut _);
-                }
+                mimi_free(c_obj as *mut _);
             }
             // SAFETY: `pack` was allocated by `libc::malloc(24)` at line 16909 and confirmed non-null at line 16910
             unsafe {
@@ -17518,9 +17726,7 @@ pub extern "C" fn mimi_list_result_map_product_to_json(
             // SAFETY: `mj` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(mj) };
             if !mj.is_null() {
-                unsafe {
-                    libc::free(mj as *mut _);
-                }
+                mimi_free(mj as *mut _);
             }
             if display_style != 0 {
                 parts.push(format!("Ok({})", s));
@@ -18269,9 +18475,7 @@ pub extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -> SetHa
         // SAFETY: elem is a heap C string from json_get_element_try.
         let es = unsafe { cstr_to_string(elem) };
         let bits = es.trim().parse::<f64>().unwrap_or(0.0).to_bits() as i64;
-        unsafe {
-            libc::free(elem as *mut std::ffi::c_void);
-        }
+        mimi_free(elem as *mut std::ffi::c_void);
         mimi_set_insert(handle, bits as SetValueHandle);
     }
     let _ = s;
@@ -18337,9 +18541,7 @@ pub extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> Se
         // Strip surrounding quotes if present (json_get_element may return quoted).
         let body = es.trim().trim_matches('"');
         let v = mimi_str_clone(body.as_ptr() as *const std::ffi::c_char, body.len() as i64);
-        unsafe {
-            libc::free(elem as *mut std::ffi::c_void);
-        }
+        mimi_free(elem as *mut std::ffi::c_void);
         mimi_set_insert(handle, v as SetValueHandle);
     }
     let _ = s;
@@ -18399,9 +18601,7 @@ pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHa
         let v = mimi_json_as_i64(elem);
         // SAFETY: `elem` is non-null (null-checked above) and was allocated by `json_get_element_try` which uses `libc::malloc`
         // Free the element string allocated by json_get_element_try.
-        unsafe {
-            libc::free(elem as *mut std::ffi::c_void);
-        }
+        mimi_free(elem as *mut std::ffi::c_void);
         mimi_set_insert(handle, v as SetValueHandle);
     }
     let _ = s;
@@ -18819,7 +19019,7 @@ pub extern "C" fn mimi_json_deserialize(
                             if !p.is_null() {
                                 // SAFETY: slot holds a C string allocated by
                                 // alloc_c_string_from_bytes earlier in this loop.
-                                unsafe { libc::free(p as *mut std::ffi::c_void) };
+                                mimi_free(p as *mut std::ffi::c_void);
                             }
                         }
                         if !out_len.is_null() {
@@ -18925,7 +19125,7 @@ pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i6
             for i in 0..count {
                 let p = *ptr.add(i) as *mut std::ffi::c_char;
                 if !p.is_null() {
-                    libc::free(p as *mut std::ffi::c_void);
+                    mimi_free(p as *mut std::ffi::c_void);
                 }
             }
         }
@@ -19120,7 +19320,7 @@ pub extern "C" fn mimi_tuple_deserialize(
                                 };
                                 if !p.is_null() {
                                     // SAFETY: same slot contract as the load above.
-                                    unsafe { libc::free(p as *mut std::ffi::c_void) };
+                                    mimi_free(p as *mut std::ffi::c_void);
                                 }
                             }
                         }
@@ -19822,7 +20022,7 @@ mod audit_wave1_tests {
             let c = unsafe { std::ffi::CStr::from_ptr(*slot as *const std::ffi::c_char) };
             let _ = c.to_string_lossy();
             // SAFETY: same allocation; matches mimi_json_deserialize_free's free.
-            unsafe { libc::free(*slot as *mut std::ffi::c_void) };
+            mimi_free(*slot as *mut std::ffi::c_void);
         }
         // First slot is exactly "".
         // (Re-run to inspect content without use-after-free.)
@@ -19834,7 +20034,7 @@ mod audit_wave1_tests {
         assert_eq!(first.to_string_lossy(), "");
         for slot in out2.iter() {
             // SAFETY: see above.
-            unsafe { libc::free(*slot as *mut std::ffi::c_void) };
+            mimi_free(*slot as *mut std::ffi::c_void);
         }
     }
 
@@ -19852,7 +20052,7 @@ mod audit_wave1_tests {
             .into_owned();
         assert_eq!(s, "\u{1F600}");
         // SAFETY: see above.
-        unsafe { libc::free(out[0] as *mut std::ffi::c_void) };
+        mimi_free(out[0] as *mut std::ffi::c_void);
 
         // Lone surrogate → parse failure (-1).
         let bad = b"[\"\\ud800\"]\0";

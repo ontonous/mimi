@@ -595,59 +595,83 @@ impl Parser {
     }
 
     fn parse_if_inner(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(TokenKind::If, "`if`")?;
-        self.skip_newlines();
-        // v0.34.3: `if let pattern = expr { } else { }` — pattern-match guard
-        // (pattern bindings visible in the then-block).
-        if self.at(&TokenKind::Let) {
-            self.advance();
-            let pat = self.parse_pattern()?;
+        // Wave-2 stress fix (scripts/stress-test.sh big-if-else): `else if`
+        // chains used to recurse one depth-guard level per link
+        // (parse_if → parse_if_inner → parse_if → …), so long FLAT chains
+        // burnt parser stack proportional to chain length and hit the
+        // recursion limit (2000 links ≫ 128 cap). Chains are semantically
+        // flat: collect the links iteratively, then fold right-to-left into
+        // exactly the right-nested AST the recursive form produced. Inner
+        // links still carry no statement metadata (the recursive form never
+        // wrapped them) and parse_stmt still wraps the whole chain once.
+        enum IfHead {
+            Cond(Expr),
+            // v0.34.3: `if let pattern = expr { } else { }` — pattern-match
+            // guard (pattern bindings visible in the then-block).
+            Let { pat: Pattern, init: Expr },
+        }
+        let mut links: Vec<(IfHead, Block)> = Vec::new();
+        let tail: Option<Block>;
+        loop {
+            self.expect(TokenKind::If, "`if`")?;
             self.skip_newlines();
-            self.expect(TokenKind::Eq, "`=`")?;
-            let init = self.parse_expr(0)?;
+            let head = if self.at(&TokenKind::Let) {
+                self.advance();
+                let pat = self.parse_pattern()?;
+                self.skip_newlines();
+                self.expect(TokenKind::Eq, "`=`")?;
+                let init = self.parse_expr(0)?;
+                IfHead::Let { pat, init }
+            } else {
+                IfHead::Cond(self.parse_expr(0)?)
+            };
             self.skip_newlines();
             self.expect(TokenKind::LBrace, "`{`")?;
             let then_ = self.parse_block()?;
+            links.push((head, then_));
             self.skip_newlines();
-            let else_ = if self.at(&TokenKind::Else) {
-                self.advance();
-                self.skip_newlines();
-                if self.at(&TokenKind::If) {
-                    let elif = self.parse_if()?;
-                    Some(vec![elif])
-                } else {
-                    self.expect(TokenKind::LBrace, "`{`")?;
-                    Some(self.parse_block()?)
-                }
-            } else {
-                None
-            };
-            return Ok(Stmt::IfLet {
+            if !self.at(&TokenKind::Else) {
+                tail = None;
+                break;
+            }
+            self.advance(); // consume `else`
+            self.skip_newlines();
+            if self.at(&TokenKind::If) {
+                continue; // next chain link — iterative, no recursion
+            }
+            self.expect(TokenKind::LBrace, "`{`")?;
+            tail = Some(self.parse_block()?);
+            break;
+        }
+        // Fold right-to-left; the loop above guarantees ≥1 link.
+        let mut iter = links.into_iter().rev();
+        let (head, then_) = iter.next().expect("if-chain has at least one link");
+        let mut current = match head {
+            IfHead::Cond(cond) => Stmt::If {
+                cond,
+                then_,
+                else_: tail,
+            },
+            IfHead::Let { pat, init } => Stmt::IfLet {
                 pat,
                 init,
                 then_,
-                else_,
-            });
-        }
-        let cond = self.parse_expr(0)?;
-        self.skip_newlines();
-        self.expect(TokenKind::LBrace, "`{`")?;
-        let then_ = self.parse_block()?;
-        self.skip_newlines();
-        let else_ = if self.at(&TokenKind::Else) {
-            self.advance();
-            self.skip_newlines();
-            if self.at(&TokenKind::If) {
-                let elif = self.parse_if()?;
-                Some(vec![elif])
-            } else {
-                self.expect(TokenKind::LBrace, "`{`")?;
-                Some(self.parse_block()?)
-            }
-        } else {
-            None
+                else_: tail,
+            },
         };
-        Ok(Stmt::If { cond, then_, else_ })
+        for (head, then_) in iter {
+            let else_ = Some(vec![current]);
+            current = match head {
+                IfHead::Cond(cond) => Stmt::If { cond, then_, else_ },
+                IfHead::Let { pat, init } => Stmt::IfLet {
+                    pat,
+                    init,
+                    then_,
+                    else_,
+                },
+            };
+        }
+        Ok(current)
     }
 
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
@@ -1205,6 +1229,7 @@ impl Parser {
                     // PR-H1: sync to block terminator / statement boundary instead
                     // of single-token skip (which causes cascade errors).
                     self.errors.push(e);
+                    let pos_before_recovery = self.pos;
                     let sync = [
                         TokenKind::Semi,
                         TokenKind::Newline,
@@ -1220,6 +1245,21 @@ impl Parser {
                     // Consume the sync token when it is ';' or newline so the
                     // next iteration starts at the following statement.
                     if self.at(&TokenKind::Semi) || self.at(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                    // P-1 (full-audit 2026-08-05-0656): guarantee forward
+                    // progress. When the failed statement leaves the cursor
+                    // ON a sync token that is neither ';'/newline nor this
+                    // block's terminator (an orphan `}` in sketch mode,
+                    // where the terminator is Dedent), recover_to_sync
+                    // returns immediately and nothing above advances — the
+                    // outer loop would retry parse_stmt on the same token
+                    // forever (infinite hang; latent because no production
+                    // caller combined sketch mode with recovery until now).
+                    if self.pos == pos_before_recovery
+                        && !self.at(&terminator)
+                        && !self.at(&TokenKind::Eof)
+                    {
                         self.advance();
                     }
                 }

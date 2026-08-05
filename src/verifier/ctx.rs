@@ -689,14 +689,17 @@ impl SolverSession {
     /// may be violated). Returns Unsat if all constraints are unsatisfiable
     /// (all postconditions hold). Returns Unknown on timeout/crash.
     ///
-    /// If constraints is empty, returns Sat immediately (no-op) — matching
-    /// Z3's behavior that an empty assertion set is trivially satisfiable.
+    /// V-7 (audit 2026-08-05): an EMPTY constraint set means there is no
+    /// potential violation to witness — every postcondition holds vacuously —
+    /// so the violation question is UNSAT. (The previous `(Sat, None)` return
+    /// was semantically inverted: callers interpreting Sat as "a violation is
+    /// satisfiable" would reject obligations that were never generated.)
     pub fn check_scope_multi<T: std::borrow::Borrow<z3::ast::Bool>>(
         &mut self,
         constraints: Vec<T>,
     ) -> (SatResult, Option<z3::Model>) {
         if constraints.is_empty() {
-            return (SatResult::Sat, None);
+            return (SatResult::Unsat, None);
         }
         self.push();
         for c in constraints {
@@ -1814,27 +1817,50 @@ impl Verifier {
             self.session.reset();
 
             let start = std::time::Instant::now();
-            let status = crate::verifier::resolved_expr::verify_contracts_from_resolved(
+            let outcome = crate::verifier::resolved_expr::verify_contracts_from_resolved(
                 callable,
                 program.resolved_types(),
                 &mut self.session,
             );
             let duration_us = start.elapsed().as_micros() as u64;
 
-            let message = match &status {
-                Some(s) => format!("resolved IR verification: {:?}", s),
-                None => continue,
+            let Some((status, message)) = outcome else {
+                continue;
             };
-            let constraint_count = if status.is_some() { 1 } else { 0 };
+
+            // V-7 (audit 2026-08-05): the Resolved engine previously emitted
+            // `artifact: None` for every result — the P1-24 tamper binding was
+            // silently disabled on the LSP / `--dump-z3` paths. Bind what this
+            // engine can bind: solver identity, the semantic model labels, the
+            // source hash and the Resolved IR hash.
+            // KNOWN GAP (documented, wiring out of scope): `vir_hash` stays
+            // empty — this engine verifies from Resolved IR, not VIR, so full
+            // cross-engine proof-cache identity is not achievable until VIR
+            // identities are plumbed through. `source_hash` is also empty on
+            // the LSP path (no source text handed to the Verifier there), so
+            // tamper detection degrades to `resolved_ir_hash` identity only.
+            let artifact = Some(ProofArtifact {
+                semantics_version: ProofArtifact::SEMANTICS_VERSION,
+                // H-24 (audit): i32 definedness VCs are now enforced on this
+                // path, so "checked_i32" is honest here (i64 stays unbounded).
+                integer_model: "checked_i32".to_string(),
+                // H-21 (audit): f64 is rejected fail-closed on this path —
+                // no float model is ever assumed.
+                float_model: "f64_rejected".to_string(),
+                solver_version: format!("z3 {}", z3::full_version()),
+                source_hash: self.ctx.source_hash.clone(),
+                resolved_ir_hash: self.ctx.resolved_ir_hash.clone(),
+                vir_hash: String::new(),
+            });
 
             results.push(VerificationResult {
                 func_name,
-                status: status.unwrap_or(VerifStatus::NoObligations),
+                status,
                 message,
                 diagnostic: None,
                 duration_us,
-                constraint_count,
-                artifact: None,
+                constraint_count: 1,
+                artifact,
                 trusted_subset_domain: None,
             });
         }
@@ -1858,29 +1884,59 @@ impl Verifier {
     }
 }
 
+/// V-3 (audit 2026-08-05): join a module prefix and an item name into the
+/// qualified name used as the `func_defs` / `func_status` key.
+fn qualified_item_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}::{}", prefix, name)
+    }
+}
+
 impl VerifierCtx {
     pub fn collect_func_defs(&mut self, items: &[Item]) {
+        self.collect_func_defs_prefixed(items, "");
+    }
+
+    /// V-3 (audit 2026-08-05): functions are keyed by QUALIFIED name
+    /// (`module::…::func`). The checker rejects duplicate definitions per
+    /// qualified name, so keying by bare name let two same-named functions
+    /// in different modules (or a module function and a top-level function)
+    /// silently overwrite each other — a call to the top-level function then
+    /// picked up the unrelated module function's ensures as axioms and
+    /// produced fake Proven. Module-nested callees are not reachable through
+    /// bare identifiers anyway; qualified keys keep their axioms inert until
+    /// a qualified call mechanism exists.
+    fn collect_func_defs_prefixed(&mut self, items: &[Item], prefix: &str) {
         for item in items {
             match item {
                 Item::Func(f) => {
-                    self.func_defs.insert(f.name.clone(), f.clone());
+                    let qualified = qualified_item_name(prefix, &f.name);
+                    self.func_defs.insert(qualified, f.clone());
                 }
-                Item::Module(m) => self.collect_func_defs(&m.items),
-                // V-H6: register actor/impl/flow methods for call-site ensures lookup.
+                Item::Module(m) => {
+                    let qualified = qualified_item_name(prefix, &m.name);
+                    self.collect_func_defs_prefixed(&m.items, &qualified);
+                }
+                // V-H6: register actor/impl/flow methods for call-site ensures
+                // lookup. V-3: qualified keys only — the previous bare-name
+                // insertion let same-named methods across actors pollute each
+                // other identically to the module case.
                 Item::Actor(a) => {
                     for m in &a.methods {
                         let mut f = m.clone();
                         f.name = format!("{}::{}", a.name, m.name);
-                        self.func_defs.insert(f.name.clone(), f);
-                        self.func_defs.insert(m.name.clone(), m.clone());
+                        let qualified = qualified_item_name(prefix, &f.name);
+                        self.func_defs.insert(qualified, f);
                     }
                 }
                 Item::Impl(i) => {
                     for m in &i.methods {
                         let mut f = m.clone();
                         f.name = format!("{}::{}::{}", i.type_name, i.trait_name, m.name);
-                        self.func_defs.insert(f.name.clone(), f);
-                        self.func_defs.insert(m.name.clone(), m.clone());
+                        let qualified = qualified_item_name(prefix, &f.name);
+                        self.func_defs.insert(qualified, f);
                     }
                 }
                 Item::Flow(flow) => {
@@ -1908,7 +1964,8 @@ impl VerifierCtx {
                                 has_ensures: false,
                                 has_mutate_params: false,
                             };
-                            self.func_defs.insert(f.name.clone(), f);
+                            let qualified = qualified_item_name(prefix, &f.name);
+                            self.func_defs.insert(qualified, f);
                         }
                     }
                 }

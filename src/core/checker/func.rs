@@ -311,7 +311,15 @@ impl<'a> Checker<'a> {
                     return true;
                 }
                 Stmt::Loop(body) => {
-                    if self.block_returns_on_all_paths(body) {
+                    // T-3 (audit 2026-08-05): an infinite loop whose body
+                    // returns on all paths only guarantees a function return
+                    // if the loop can never exit via `break`. The top-level
+                    // bare break/continue scan above misses CONDITIONAL breaks
+                    // (`if cond { break }`), so the body was wrongly judged
+                    // all-paths-returning and E0255 was missed. Require
+                    // break-unreachability as well (conservative over-
+                    // approximation of break reachability — fail-closed).
+                    if self.block_returns_on_all_paths(body) && !self.loop_body_can_break(body) {
                         return true;
                     }
                 }
@@ -326,5 +334,60 @@ impl<'a> Checker<'a> {
             }
         }
         false
+    }
+
+    /// T-3 (audit 2026-08-05): conservative over-approximation of "`some`
+    /// path through this loop body reaches a `break` of THIS loop". Breaks
+    /// nested inside an inner Loop/While/For target that inner loop and do
+    /// not exit the analyzed loop, so nested loop bodies are not descended.
+    /// Any conditional break (`if cond { break }`) counts: fail-closed for
+    /// E0255 is accepting an extra warning, not missing a real missing
+    /// return. Local walk — deliberately not a full CFG.
+    fn loop_body_can_break(&self, block: &Block) -> bool {
+        block.iter().any(|stmt| self.stmt_can_break(stmt))
+    }
+
+    fn stmt_can_break(&self, stmt: &Stmt) -> bool {
+        match stmt.unlocated() {
+            Stmt::Break(_) => true,
+            // continue re-iterates; return exits the function — neither
+            // exits the loop via break.
+            Stmt::Continue | Stmt::Return(_) => false,
+            Stmt::If { then_, else_, .. } | Stmt::IfLet { then_, else_, .. } => {
+                self.loop_body_can_break(then_)
+                    || else_
+                        .as_ref()
+                        .map(|e| self.loop_body_can_break(e))
+                        .unwrap_or(false)
+            }
+            Stmt::Block(inner)
+            | Stmt::Arena(inner)
+            | Stmt::Unsafe(inner)
+            | Stmt::IeeeFloat(inner)
+            | Stmt::Defer(inner) => self.loop_body_can_break(inner),
+            Stmt::Alloc { body, .. } => self.loop_body_can_break(body),
+            Stmt::Expr(expr) => self.expr_can_break(expr),
+            // Breaks inside nested loops target the INNER loop; a nested
+            // loop statement cannot by itself exit the analyzed loop.
+            Stmt::Loop(_) | Stmt::While { .. } | Stmt::WhileLet { .. } | Stmt::For { .. } => false,
+            _ => false,
+        }
+    }
+
+    fn expr_can_break(&self, expr: &Expr) -> bool {
+        match expr.unlocated() {
+            Expr::Block(block) | Expr::Arena(block) | Expr::Comptime(block) => {
+                self.loop_body_can_break(block)
+            }
+            Expr::If { then_, else_, .. } => {
+                self.loop_body_can_break(then_)
+                    || else_
+                        .as_ref()
+                        .map(|e| self.loop_body_can_break(e))
+                        .unwrap_or(false)
+            }
+            Expr::Match(_subject, arms) => arms.iter().any(|arm| self.expr_can_break(&arm.body)),
+            _ => false,
+        }
     }
 }

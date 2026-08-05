@@ -495,7 +495,11 @@ mod tests {
                 prim_bool.clone(),
             ),
             // capability.rs:61
-            ("mimi_cap_drop", std::slice::from_ref(&prim_i64), void.clone()),
+            (
+                "mimi_cap_drop",
+                std::slice::from_ref(&prim_i64),
+                void.clone(),
+            ),
             // mod.rs:18534
             (
                 "mimi_json_deserialize",

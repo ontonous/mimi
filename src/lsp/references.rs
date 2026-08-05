@@ -33,14 +33,28 @@ impl LspServer {
                 match item {
                     Item::Func(f) if f.name == word => {
                         // Use AST position (line, col) of the func keyword.
-                        // f.pos is 1-indexed, LSP expects 0-indexed.
+                        // X-7 (full audit 2026-08-05 §3.10): span columns are
+                        // 1-indexed lexer CHAR counts; feeding them directly as
+                        // LSP `character` was an off-by-one plus a non-ASCII
+                        // drift. Mirror the AU-LSP-2 conversion used by
+                        // compute_references below: char column → byte offset →
+                        // UTF-16 units.
                         let def_line = f.meta.span.start_line.saturating_sub(1);
+                        let def_line_text = text.lines().nth(def_line).unwrap_or("");
                         let func_keyword_len = "func ".len();
+                        let start_byte = crate::lsp::util::char_col_to_byte(
+                            def_line_text,
+                            f.meta.span.start_col.saturating_sub(1),
+                        );
+                        // `func ` and identifiers are ASCII (the lexer rejects
+                        // non-ASCII idents — V-10), so byte addition from the
+                        // anchor is exact.
+                        let end_byte = start_byte + func_keyword_len + f.name.len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": f.meta.span.start_col },
-                                "end": { "line": def_line, "character": f.meta.span.start_col + func_keyword_len + f.name.len() }
+                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, start_byte) },
+                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, end_byte) }
                             }
                         }));
                     }
@@ -81,19 +95,28 @@ impl LspServer {
                 if let Item::Func(f) = item {
                     // Check function parameters
                     if f.params.iter().any(|p| p.name == word) {
-                        // Parameter definition is at the function signature
+                        // Parameter definition is at the function signature.
+                        // X-7: same conversion as the func arm above — the
+                        // 1-indexed char column must become a 0-indexed UTF-16
+                        // character before it is emitted as LSP `character`.
                         let def_line = f.meta.span.start_line.saturating_sub(1);
+                        let def_line_text = text.lines().nth(def_line).unwrap_or("");
+                        let start_byte = crate::lsp::util::char_col_to_byte(
+                            def_line_text,
+                            f.meta.span.start_col.saturating_sub(1),
+                        );
                         let param_offset = f
                             .params
                             .iter()
                             .take_while(|p| p.name != word)
                             .map(|p| p.name.len() + 2) // "name, " per param
                             .sum::<usize>();
+                        // Parameter names are ASCII (V-10), so byte addition is exact.
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": f.meta.span.start_col + param_offset },
-                                "end": { "line": def_line, "character": f.meta.span.start_col + param_offset + word.len() }
+                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, start_byte + param_offset) },
+                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, start_byte + param_offset + word.len()) }
                             }
                         }));
                     }

@@ -237,6 +237,15 @@ extern "C" {
         assert!(funcs[0].no_panic);
     }
 
+    /// Wave-2 2026-08-05 (wave1-review §2-C): this test used to assert that
+    /// `resolved_extern_funcs` rejects duplicate projected symbols after the
+    /// input passed the checker. Wave-1's K-fix6 (checker/items.rs extern
+    /// registration, E0402) moved the rejection upstream: extern functions
+    /// are keyed by bare symbol name, so cross-module leaf-name collisions
+    /// are now caught during type checking — checker-valid input can no
+    /// longer reach the catalog with a collision. Pin the checker-level
+    /// rejection (the catalog-level check in `resolved_extern_funcs` remains
+    /// as defense-in-depth, but is unreachable from source-level input).
     #[test]
     fn resolved_extern_catalog_rejects_duplicate_projected_symbols() {
         let file = parse(
@@ -245,9 +254,16 @@ module a { extern "C" { func collide(x: i32) -> i32 } }
 module b { extern "C" { func collide(x: i32) -> i32 } }
 "#,
         );
-        let checked = checked_component_input(&file).expect("checked component");
-        let error = resolved_extern_funcs(&checked).expect_err("duplicate symbols must fail");
-        assert!(error.contains("collide"));
+        let error = checked_component_input(&file)
+            .expect_err("duplicate projected extern symbols must be rejected by the checker");
+        assert!(
+            error.contains("collide"),
+            "rejection must name the colliding symbol, got: {error}"
+        );
+        assert!(
+            error.contains("type checking"),
+            "rejection must come from the checker stage, got: {error}"
+        );
     }
 
     /// Audit fix 2026-08-05 (full audit §12): the checked catalog carries

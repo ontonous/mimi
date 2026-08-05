@@ -588,10 +588,15 @@ impl std::fmt::Display for ResolvedBodyError {
 impl std::error::Error for ResolvedBodyError {}
 
 impl ResolvedBody {
-    pub fn validate(&self, types: &ResolvedTypeTable) -> Result<(), Vec<ResolvedBodyError>> {
+    pub fn validate(
+        &self,
+        types: &ResolvedTypeTable,
+        type_targets: &std::collections::BTreeMap<crate::core::NodeId, crate::core::ResolvedTypeId>,
+    ) -> Result<(), Vec<ResolvedBodyError>> {
         let mut validator = BodyValidator {
             body: self,
             types,
+            type_targets,
             nodes: BTreeSet::new(),
             pending_nodes: Vec::new(),
             errors: Vec::new(),
@@ -663,6 +668,11 @@ impl ResolvedBody {
 struct BodyValidator<'a> {
     body: &'a ResolvedBody,
     types: &'a ResolvedTypeTable,
+    /// Alias/newtype target resolution (NodeId → canonical target type id),
+    /// needed to validate `ContainerAliasErase` on alias-equivalent payloads
+    /// (E0830: `Option<Pair>` where `Pair = (i32, i32)` — the payload ids
+    /// differ but unwrap to the same target).
+    type_targets: &'a std::collections::BTreeMap<crate::core::NodeId, crate::core::ResolvedTypeId>,
     nodes: BTreeSet<NodeId>,
     pending_nodes: Vec<(NodeId, NodeId, &'static str)>,
     errors: Vec<ResolvedBodyError>,
@@ -1274,12 +1284,45 @@ impl BodyValidator<'_> {
                     _ => None,
                 }
             }
+            // E0830 (audit 2026-08-05 wave-2): `Option<Pair>` vs
+            // `Option<(i32,i32)>` where `Pair = (i32, i32)` — the container
+            // shapes match and the payloads are ALIAS-EQUIVALENT (unwrap to
+            // the same canonical target) even though their canonical ids
+            // differ. The lowering (lower.rs implicit_conversion) emits
+            // ContainerAliasErase for exactly this case; validate it by
+            // comparing the ALIAS-UNWRAPPED payload ids.
+            fn effective_payload<'x>(
+                ty: &'x crate::core::ResolvedTypeId,
+                types: &'x ResolvedTypeTable,
+                type_targets: &'x std::collections::BTreeMap<
+                    crate::core::NodeId,
+                    crate::core::ResolvedTypeId,
+                >,
+            ) -> &'x crate::core::ResolvedTypeId {
+                let mut cur = ty;
+                // Bound the peel so cyclic aliases cannot loop.
+                for _ in 0..8 {
+                    match types.get(cur) {
+                        Some(ResolvedType::Nominal { item, .. }) => {
+                            let owner = crate::core::NodeId(item.as_str().to_string());
+                            match type_targets.get(&owner) {
+                                Some(target) => cur = target,
+                                None => break,
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                cur
+            }
             let shape_equal = match (
                 transparent_container_payload(self.types.get(&conversion.from)),
                 transparent_container_payload(self.types.get(&conversion.to)),
             ) {
                 (Some((from_container, from_payload)), Some((to_container, to_payload))) => {
-                    from_container == to_container && from_payload == to_payload
+                    from_container == to_container
+                        && effective_payload(from_payload, self.types, self.type_targets)
+                            == effective_payload(to_payload, self.types, self.type_targets)
                 }
                 _ => false,
             };
@@ -1454,7 +1497,9 @@ mod tests {
     fn structured_body_validates_without_surface_ast() {
         let (types, i32_ty, unit_ty) = types();
         let body = valid_body(&i32_ty, &unit_ty);
-        assert!(body.validate(&types).is_ok());
+        assert!(body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .is_ok());
     }
 
     #[test]
@@ -1463,7 +1508,9 @@ mod tests {
         let mut body = valid_body(&i32_ty, &unit_ty);
         body.parameters
             .push(ResolvedLocalId(node("missing.parameter.local")));
-        let errors = body.validate(&types).expect_err("missing parameter local");
+        let errors = body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .expect_err("missing parameter local");
         assert!(errors
             .iter()
             .any(|error| error.message.contains("absent from the local catalog")));
@@ -1474,7 +1521,9 @@ mod tests {
         let (types, i32_ty, unit_ty) = types();
         let mut body = valid_body(&i32_ty, &unit_ty);
         body.root.result.as_mut().unwrap().node_id = body.root.node_id.clone();
-        let errors = body.validate(&types).unwrap_err();
+        let errors = body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .unwrap_err();
         assert!(errors
             .iter()
             .any(|error| error.message.contains("more than once")));
@@ -1498,7 +1547,9 @@ mod tests {
                 }),
             },
         });
-        let errors = body.validate(&types).unwrap_err();
+        let errors = body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .unwrap_err();
         assert!(errors
             .iter()
             .any(|error| error.message.contains("conversion source disagrees")));
@@ -1516,7 +1567,9 @@ mod tests {
             index: ResolvedIndex::Dynamic(node("expr.missing-index")),
             ty: i32_ty,
         });
-        let errors = body.validate(&types).unwrap_err();
+        let errors = body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .unwrap_err();
         assert!(errors
             .iter()
             .any(|error| error.message.contains("dynamic index references missing")));
@@ -1537,7 +1590,8 @@ mod tests {
             index: ResolvedIndex::Dynamic(index.node_id),
             ty: i32_ty,
         });
-        body.validate(&types).expect("dynamic index is owned");
+        body.validate(&types, &std::collections::BTreeMap::new())
+            .expect("dynamic index is owned");
     }
 
     #[test]
@@ -1576,7 +1630,9 @@ mod tests {
                 }),
             }),
         });
-        let errors = body.validate(&types).unwrap_err();
+        let errors = body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .unwrap_err();
         assert!(errors
             .iter()
             .any(|error| error.message.contains("duplicate resolved parameter")));
@@ -1619,7 +1675,7 @@ mod tests {
                 }),
             },
         });
-        body.validate(&types)
+        body.validate(&types, &std::collections::BTreeMap::new())
             .expect("shape-equal container erasure is admitted");
     }
 
@@ -1649,7 +1705,9 @@ mod tests {
                 }),
             },
         });
-        let errors = body.validate(&types).unwrap_err();
+        let errors = body
+            .validate(&types, &std::collections::BTreeMap::new())
+            .unwrap_err();
         assert!(errors
             .iter()
             .any(|error| error.message.contains("shape-equal")));

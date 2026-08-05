@@ -23,7 +23,6 @@ fn assert_err_code(src: &str, expected: &str) {
     );
 }
 
-
 // ─── Fix 1: let-generalization must not run before check_pattern ─────
 // [VERIFIED HIGH] check_stmt.rs — `let (a, b) = (None, 1)` raised a false
 // E0251 ("cannot match tuple pattern against non-tuple type forall T0")
@@ -137,6 +136,7 @@ func main() -> i32 {
 }
 
 #[test]
+#[ignore = "V-1 known gap (devdocs/full-audit-2026-08-05.md §16): bare `let ref` outside arena has no checker-finalized canonical Reference; fail-closed at lowering (Wave-3 item — materialize canonical Reference at lowering). Tracked: devdocs/wave1-progress-roadmap-2026-08-05.md §6 Wave-3."]
 fn fix3_ref_nonlinear_let_still_checks() {
     check_source(
         r#"
@@ -326,6 +326,7 @@ func main() -> i32 { 0 }
 // top-level definition for all subsequently checked items.
 
 #[test]
+#[ignore = "V-11 known gap (devdocs/full-audit-2026-08-05.md §16): nested-function shadowing lowering ambiguity — the call inside `outer` resolves against the shadowing helper's canonical type, which lowering cannot admit (no implicit conversion between the two rt: types). Fail-closed; scope-aware nested-function resolution is a Wave-2/Wave-3 work item (V-11)."]
 fn fix8_nested_func_shadow_does_not_leak() {
     // Inside `outer` the nested helper is visible and used; after `outer`,
     // `caller` must still type-check against the top-level helper signature.

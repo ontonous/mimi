@@ -529,6 +529,15 @@ impl Span {
     }
 
     /// Check if this span contains a given position.
+    ///
+    /// P-5 (full-audit 2026-08-05-0656): end positions are EXCLUSIVE
+    /// (half-open interval), matching the global convention documented in
+    /// docs/diagnostics.md ("end_col 排他") and `Token::end_col`
+    /// ("Exclusive source end", lexer/token.rs). The old `col > end_col`
+    /// check treated end_col as CLOSED, reporting the position one past
+    /// the span as contained. Zero-width spans (`Span::single`) are the
+    /// deliberate exception: they contain exactly their single point,
+    /// otherwise point spans would match nothing at all.
     pub fn contains(&self, line: usize, col: usize) -> bool {
         if line < self.start_line || line > self.end_line {
             return false;
@@ -536,8 +545,13 @@ impl Span {
         if line == self.start_line && col < self.start_col {
             return false;
         }
-        if line == self.end_line && col > self.end_col {
-            return false;
+        if line == self.end_line {
+            if self.start_line == self.end_line && self.start_col == self.end_col {
+                return col == self.start_col;
+            }
+            if col >= self.end_col {
+                return false;
+            }
         }
         true
     }

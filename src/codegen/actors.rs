@@ -502,17 +502,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else if fbits < 64 {
                         // fbits in {16, 32} for real floats — nonzero.
                         let nz = std::num::NonZeroU32::new(fbits as u32).ok_or_else(|| {
-                            CompileError::LlvmError(format!(
-                                "float slot width: {} is zero",
-                                fbits
-                            ))
+                            CompileError::LlvmError(format!("float slot width: {} is zero", fbits))
                         })?;
-                        let int_ty = self
-                            .context
-                            .custom_width_int_type(nz)
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("float slot width: {}", e))
-                            })?;
+                        let int_ty = self.context.custom_width_int_type(nz).map_err(|e| {
+                            CompileError::LlvmError(format!("float slot width: {}", e))
+                        })?;
                         let as_int = self
                             .builder
                             .build_bit_cast(fv, int_ty, "ret_f2i_narrow")
@@ -935,6 +929,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })?,
             )?;
             vars.insert(param.name.clone(), (alloca, ty));
+            // Register the parameter's TYPE NAME so infer_object_type can
+            // resolve `p.x` field access on record-typed actor params.
+            // func/export.rs does this for regular function params
+            // (export.rs:206-209); actor methods were missing it, so
+            // `p.x` resolved the base to the variable name "p" instead of
+            // "Point" → E0707 "cannot access field on type 'p'"
+            // (actor_mailbox_record_param regression, audit 2026-08-05 wave-2).
+            match param.ty.unlocated() {
+                crate::ast::Type::Name(n, args) if args.is_empty() => {
+                    self.var_type_names.insert(param.name.clone(), n.clone());
+                }
+                crate::ast::Type::Name(n, _) => {
+                    self.var_type_names.insert(param.name.clone(), n.clone());
+                }
+                other => {
+                    if let Some(tn) = self.get_full_type_name(other) {
+                        self.var_type_names.insert(param.name.clone(), tn);
+                    }
+                }
+            }
         }
 
         Ok((ret_llvm, vars))

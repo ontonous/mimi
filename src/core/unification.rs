@@ -7,6 +7,12 @@ pub enum UnifyError {
     Mismatch(String),
     OccurCheck(u32, String),
     Resolve(ResolveError),
+    /// C-1 (audit 2026-08-05): the bare-container arm would let a linear
+    /// element (`List<cap>` etc.) flow into a bare `List`/`Set`/`Map`
+    /// annotation. The callee then sees a non-linear bare container and the
+    /// capability silently escapes exactly-once enforcement. Fail-closed;
+    /// call sites map this to E0432.
+    LinearContainerEscape(String),
 }
 
 impl std::fmt::Display for UnifyError {
@@ -17,6 +23,9 @@ impl std::fmt::Display for UnifyError {
                 write!(f, "infinite type: T{} occurs in {}", var, ty)
             }
             UnifyError::Resolve(error) => error.fmt(f),
+            UnifyError::LinearContainerEscape(msg) => {
+                write!(f, "linear container escape: {}", msg)
+            }
         }
     }
 }
@@ -52,6 +61,12 @@ pub struct UnificationTable {
     /// outermost transaction commits so an outer failure can undo inner success.
     trail: Vec<Undo>,
     transaction_depth: usize,
+    /// C-1 (audit 2026-08-05): flow-state type names seeded by the checker.
+    /// Program-level knowledge (never cleared by `reset()`): together with the
+    /// syntactic `Cap`/`CapAtom` markers and the `SessionChan` name convention
+    /// it lets the bare-container arm decide linearity without callback access
+    /// to the checker.
+    linear_type_names: HashSet<String>,
 }
 
 impl Default for UnificationTable {
@@ -105,6 +120,44 @@ impl UnificationTable {
             next_var: 0,
             trail: Vec::new(),
             transaction_depth: 0,
+            linear_type_names: HashSet::new(),
+        }
+    }
+
+    /// C-1 (audit 2026-08-05): seed a flow-state type name so the
+    /// bare-container arm can treat it as a linear element. Program-level
+    /// knowledge: intentionally NOT cleared by `reset()`.
+    pub fn note_linear_type_name(&mut self, name: String) {
+        self.linear_type_names.insert(name);
+    }
+
+    /// C-1 (audit 2026-08-05): conservative deep linearity predicate for the
+    /// bare-container arm. Mirrors `Checker::is_linear_surface_type`
+    /// (checker.rs:493) — Cap/CapAtom markers, the `SessionChan` name
+    /// convention, seeded flow-state names, and recursion through type
+    /// arguments and structural wrappers. A bare container that accepted a
+    /// type containing any of these would drop the element out of
+    /// exactly-once tracking (callee sees `Nominal(List, [])` → non-linear),
+    /// so the arm fails closed instead.
+    fn contains_linear_surface(&self, ty: &Type) -> bool {
+        match ty.unlocated() {
+            Type::Cap(_) | Type::CapAtom(_) => true,
+            Type::Name(name, args) => {
+                self.linear_type_names.contains(name)
+                    || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())
+                    || args.iter().any(|arg| self.contains_linear_surface(arg))
+            }
+            Type::Option(inner)
+            | Type::CBuffer(inner)
+            | Type::Slice(inner)
+            | Type::Newtype(_, inner) => self.contains_linear_surface(inner),
+            Type::Array(inner, _) => self.contains_linear_surface(inner),
+            Type::Result(ok, err) => {
+                self.contains_linear_surface(ok) || self.contains_linear_surface(err)
+            }
+            Type::Tuple(items) => items.iter().any(|item| self.contains_linear_surface(item)),
+            Type::Located { ty, .. } => self.contains_linear_surface(ty),
+            _ => false,
         }
     }
 
@@ -534,14 +587,34 @@ impl UnificationTable {
             }
             // C3 (audit 2026-08-03): bare container annotations (`List`/`Set`/
             // `Map` without arguments, as spelled in std/set.mimi signatures)
-            // accept any element parameterization. The stdlib set API is
-            // heterogeneous (`insert(value: Any)`), so `Set<i32>` from a set
-            // literal must flow into `Set` parameters without an E0211.
+            // accept any NON-LINEAR element parameterization. The stdlib set
+            // API is heterogeneous (`insert(value: Any)`), so `Set<i32>` from
+            // a set literal must flow into `Set` parameters without an E0211.
+            //
+            // C-1 (audit 2026-08-05): the pass-through is NOT legal when the
+            // parameterized side carries a linear element. A bare `List`
+            // callee judges the container non-linear (cfg resource_lower
+            // sees `Nominal(List, [])`), so a `List<cap>` flowing through
+            // this arm discards the capability with zero diagnostics —
+            // contradicting the AGENTS.md §0 H2 ruling that containers with
+            // linear elements stay fail-closed. Reject here; call sites map
+            // `LinearContainerEscape` to E0432.
             (Type::Name(na, aa), Type::Name(nb, ab))
                 if na == nb
                     && (aa.is_empty() || ab.is_empty())
                     && matches!(na.as_str(), "List" | "Set" | "Map") =>
             {
+                if self.contains_linear_surface(&a_resolved)
+                    || self.contains_linear_surface(&b_resolved)
+                {
+                    return Err(UnifyError::LinearContainerEscape(format!(
+                        "linear elements cannot flow through bare container annotation '{}' \
+                         ('{}' vs '{}'); bare containers are not linearly tracked",
+                        na,
+                        crate::core::helpers::fmt_type(&a_resolved),
+                        crate::core::helpers::fmt_type(&b_resolved)
+                    )));
+                }
                 Ok(())
             }
             // Same constructors — unify structurally

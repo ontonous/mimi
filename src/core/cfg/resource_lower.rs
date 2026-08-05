@@ -28,10 +28,22 @@ struct ActionEmitter<'a> {
     signature: &'a ResolvedSignature,
     types: &'a ResolvedTypeTable,
     locations: BTreeMap<NodeId, CfgLocation>,
-    resources: BTreeMap<ResolvedLocalId, ResourceId>,
+    /// Resource catalog: linear local → the resource identities it currently
+    /// owns. A single binding may own SEVERAL resources after an aggregate
+    /// merge (`let x = (a, b)` moves both atoms into `x`), so the value is a
+    /// vector in construction order. Wave-2 (audit G-1): single-valued
+    /// identity stranded every source past the first and could never be
+    /// re-keyed by reassignment.
+    resources: BTreeMap<ResolvedLocalId, Vec<ResourceId>>,
     actions: Vec<CanonicalResourceAction>,
     loans: Vec<Loan>,
     errors: Vec<Diagnostic>,
+    /// Audit 2026-08-05 (wave-2, H-6): anonymous temporary borrows
+    /// (`inc(&mut x)`) have no named reference, so loan liveness cannot end
+    /// them. They are parked here and receive a synthesized BorrowEnd at the
+    /// enclosing statement's terminating CFG point (mirroring named-borrow
+    /// NLL). Entries are (loan id, borrowed resource).
+    pending_anonymous_loans: Vec<(LoanId, ResourceId)>,
     /// 0.31.22 Drop/Transition IR 防漏网断言：跟踪已消费的资源
     /// 用于 debug_assert 检测二次消费 bug
     /// P2/P1-6: Double-consumption debug assertion infrastructure.
@@ -80,6 +92,7 @@ impl<'a> ActionEmitter<'a> {
             actions: Vec::new(),
             loans: Vec::new(),
             errors: Vec::new(),
+            pending_anonymous_loans: Vec::new(),
             consumed_resources: BTreeSet::new(),
         }
     }
@@ -105,7 +118,7 @@ impl<'a> ActionEmitter<'a> {
                         .get(local)
                         .is_some_and(|l| self.is_linear(&l.ty) && self.is_droppable_type(&l.ty))
                 })
-                .map(|(_, resource)| resource.clone())
+                .flat_map(|(_, resources)| resources.iter().cloned())
                 .collect();
             analyze_canonical(
                 self.cfg,
@@ -211,7 +224,7 @@ impl<'a> ActionEmitter<'a> {
             let local = ResolvedLocalId(NodeId(format!("{}/local", parameter.id.0 .0)));
             if self.body.locals.contains_key(&local) {
                 self.resources
-                    .insert(local.clone(), ResourceId(local.0.clone()));
+                    .insert(local.clone(), vec![ResourceId(local.0.clone())]);
             }
         }
         self.catalog_block(&self.body.root);
@@ -282,14 +295,16 @@ impl<'a> ActionEmitter<'a> {
                             // that place's resource identity so a later
                             // Drop/Move on the binding resolves the same fact
                             // the Move retargeted (P1-10 alignment).
-                            let sources = self.capability_places(value);
-                            if sources.len() == 1 {
-                                let resource = self.resource_for_place(&sources[0]);
-                                self.resources.entry(binding.clone()).or_insert(resource);
+                            let expanded = self.expand_sources(&self.capability_places(value));
+                            if expanded.len() == 1 {
+                                let resource = expanded.into_iter().next().expect("len == 1");
+                                self.resources
+                                    .entry(binding.clone())
+                                    .or_insert(vec![resource]);
                             } else {
                                 self.resources
                                     .entry(binding.clone())
-                                    .or_insert_with(|| ResourceId(binding.0.clone()));
+                                    .or_insert_with(|| vec![ResourceId(binding.0.clone())]);
                             }
                         }
                     }
@@ -324,36 +339,63 @@ impl<'a> ActionEmitter<'a> {
         let sources = initializer
             .map(|value| self.capability_places(value))
             .unwrap_or_default();
+        let expanded = self.expand_sources(&sources);
         let mut bindings = Vec::new();
         self.linear_bindings(pattern, &mut bindings);
-        // P1-10: Positional matching only works when sources and bindings
-        // have the same length. For tuple destructuring of a single source
-        // (e.g., `let (r, w) = c.split()`, sources=[c] (1) vs bindings=[r,w]
-        // (2)), visit_stmt's Bind Move gives the FIRST binding the source
-        // resource (r ← c) and introduces the rest (w). The catalog must
-        // mirror that split so later Drop(r)/Drop(w) resolve the same
-        // ResourceIds the dataflow facts were keyed by. 0.34.23 §12 capability
-        // decision: previously every binding got its own id while the Move
-        // used the source id → Drop(r) missed the c-keyed fact → E0256.
-        if sources.len() == bindings.len() {
-            for (index, local) in bindings.into_iter().enumerate() {
-                let resource = self.resource_for_place(&sources[index]);
-                self.resources.insert(local, resource);
-            }
-        } else if let Some(source) = sources.first() {
+        // Wave-2 (audit C-2/G-1/G-2 + review §1.3): the catalog mirrors the
+        // Move/Introduce actions visit_stmt emits so later Drop/Move resolve
+        // the exact ResourceIds the dataflow facts are keyed by.
+        //
+        // * split() shape — a single-element Tuple([receiver]) with one
+        //   linear source and >=2 bindings: the first binding inherits the
+        //   receiver's resource (visit_stmt Moves receiver → binding₀); the
+        //   remaining bindings are the split-out atoms and are cataloged as
+        //   fresh introductions (P1-10 capability decision).
+        // * equal counts — positional pairing, one resource per binding.
+        // * one binding, several resources — an aggregate merge such as
+        //   `let x = (a, b)`: the single binding inherits EVERY source
+        //   resource (visit_stmt Moves each into it), so a later `drop(x)`
+        //   expands into one Drop per owned resource.
+        // * anything else — first binding takes the first resource, the rest
+        //   are fresh; visit_stmt fail-closes the mismatch (E0304) whenever
+        //   obligations would be stranded or mispaired.
+        let split_shape = sources.len() == 1
+            && bindings.len() >= 2
+            && matches!(initializer, Some(value)
+                if matches!(&value.kind, ResolvedExprKind::Tuple(values) if values.len() == 1));
+        if split_shape {
             let mut bindings = bindings.into_iter();
             if let Some(first) = bindings.next() {
-                let resource = self.resource_for_place(source);
-                self.resources.insert(first, resource);
+                let resource = expanded
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| self.resource_for_place(&sources[0]));
+                self.resources.insert(first, vec![resource]);
             }
             for local in bindings {
-                let resource = ResourceId(local.0.clone());
-                self.resources.insert(local, resource);
+                self.resources
+                    .insert(local.clone(), vec![ResourceId(local.0.clone())]);
+            }
+        } else if !expanded.is_empty() && expanded.len() == bindings.len() {
+            for (index, local) in bindings.into_iter().enumerate() {
+                self.resources.insert(local, vec![expanded[index].clone()]);
+            }
+        } else if self.single_binding(pattern).is_some() && expanded.len() > 1 {
+            let binding = bindings.into_iter().next().expect("bindings.len() == 1");
+            self.resources.insert(binding, expanded);
+        } else if let Some(resource) = expanded.first() {
+            let mut bindings = bindings.into_iter();
+            if let Some(first) = bindings.next() {
+                self.resources.insert(first, vec![resource.clone()]);
+            }
+            for local in bindings {
+                self.resources
+                    .insert(local.clone(), vec![ResourceId(local.0.clone())]);
             }
         } else {
             for local in bindings {
-                let resource = ResourceId(local.0.clone());
-                self.resources.insert(local, resource);
+                self.resources
+                    .insert(local.clone(), vec![ResourceId(local.0.clone())]);
             }
         }
     }
@@ -445,16 +487,31 @@ impl<'a> ActionEmitter<'a> {
         self.consumed_resources.clear();
         for statement in &block.statements {
             self.visit_stmt(statement);
+            // Audit 2026-08-05 (wave-2, H-6): an anonymous temporary borrow
+            // created anywhere in this statement (`inc(&mut x)`, including
+            // nested call arguments) ends at the statement boundary — mirror
+            // of named-borrow NLL. The flush resolves against the statement's
+            // terminating CFG point; statements without their own point keep
+            // the loans pending until the next flush site.
+            self.flush_pending_loans(&statement.node_id, &statement.origin);
         }
         if let Some(result) = &block.result {
             self.visit_expr(result, None);
             if return_result {
-                self.emit_consumes(
-                    CanonicalActionKind::Return,
-                    self.capability_places(result),
-                    &result.node_id,
-                    &result.origin,
-                );
+                // Audit 2026-08-05 (wave-2, C-2): a function whose RESULT is
+                // a branch expression over distinct linear resources leaks
+                // every arm not taken at runtime — reject like every other
+                // consumption position.
+                if let Some(distinct) = self.xor_branch_violation(result) {
+                    self.push_xor_diagnostic(&distinct, &result.origin);
+                } else {
+                    self.emit_consumes(
+                        CanonicalActionKind::Return,
+                        self.capability_places(result),
+                        &result.node_id,
+                        &result.origin,
+                    );
+                }
             }
         }
     }
@@ -468,59 +525,109 @@ impl<'a> ActionEmitter<'a> {
                 if let Some(initializer) = initializer {
                     let reference = self.single_binding(pattern);
                     self.visit_expr(initializer, reference.as_ref());
+                    // Audit 2026-08-05 (wave-2, C-2/G-2): If/Match are XOR —
+                    // exactly one arm's value flows at runtime. Consuming a
+                    // branch expression that carries SEVERAL distinct linear
+                    // resources (into a binding here, into a call/return/
+                    // break below) can discharge at most one obligation; the
+                    // rest leak on every path that does not take their arm.
+                    // Fail-closed with E0840 at every consumption point so
+                    // the rule is position-invariant. Design call: a single
+                    // binding is one consumer; XOR of distinct resources
+                    // needs one consumer per resource, which straight-line
+                    // ownership facts cannot grant (the surviving resource
+                    // differs per path). A branch duplicating ONE place
+                    // (`if f { t } else { t }`) stays legal — one distinct
+                    // resource, one obligation.
+                    if let Some(distinct) = self.xor_branch_violation(initializer) {
+                        self.push_xor_diagnostic(&distinct, &statement.origin);
+                        return;
+                    }
                     let sources = self.capability_places(initializer);
+                    let pairs = self.expand_source_pairs(&sources);
                     let mut bindings = Vec::new();
                     self.linear_bindings(pattern, &mut bindings);
-                    // Audit 2026-08-05 (wave-1 fix 1): positional pairing
-                    // (`sources.get(index)`) is only sound when every linear
-                    // source is matched by a linear binding. Wildcards and
-                    // length mismatches mispair or strand sources:
-                    // `let (_, y) = (a, b)` emits a Move for the FIRST source
-                    // (a → y) while the untouched source b stays Available →
-                    // `drop(b); drop(y)` was accepted (verified use-after-move
-                    // + silent leak of a). Fail-closed: reject every mismatch
-                    // except the two shapes where no obligation is stranded:
+                    // Audit 2026-08-05 (wave-1 fix 1, extended wave-2 review
+                    // §1.3): positional pairing is only sound when every
+                    // linear source is matched by a linear binding. Wildcards
+                    // and length mismatches mispair or strand sources:
+                    // `let (_, y) = (a, b)` would Move a → y while untouched
+                    // b stays Available → `drop(b); drop(y)` accepted
+                    // (verified use-after-move + silent leak of a).
+                    // Fail-closed: reject every mismatch EXCEPT:
+                    // * one binding receiving several resources — a legal
+                    //   aggregate merge (`let x = (a, b)`); the binding
+                    //   inherits every resource and a later drop expands to
+                    //   all of them;
                     // * the sanctioned split() lowering — a single-element
-                    //   Tuple([receiver]) with one source and >=2 bindings
-                    //   (the first binding moves the receiver, the rest are
-                    //   the split-out atoms, see catalog_pattern P1-10);
+                    //   Tuple([receiver]) with one source and >=2 bindings —
+                    //   but ONLY when the pattern binds every position: a
+                    //   wildcard in a split pattern silently discards a
+                    //   capability atom (review §1.3 fifth hole:
+                    //   `let (_, w) = c.split()` checked green while the
+                    //   read atom leaked), so any split shape with a wildcard
+                    //   is rejected;
                     // * sources.len() == 0 — the initializer contributes no
                     //   linear place (e.g. a call result), so every binding
                     //   is a fresh introduction and nothing can be mispaired.
-                    // Source count is deduplicated by resource identity: an
-                    // if-expression duplicates its branch places
-                    // (`if f { c } else { c }`) but carries one obligation.
-                    let mut unique_source_resources = BTreeSet::new();
-                    for source in &sources {
-                        unique_source_resources.insert(self.resource_for_place(source));
-                    }
+                    // RED LINE (wave1-review §1.3, verified PoC): the split
+                    // shape is identified by the pattern's SLOT count, not
+                    // the surviving linear-binding count. Counting bindings
+                    // lets `_` eat one slot: `(_, w)` compresses to one
+                    // binding, balances the single source 1==1 in the generic
+                    // pairing arm below, and the discarded read atom escapes
+                    // with zero obligation (`mimi check` returned Ok). The
+                    // slot count stays 2, so the wildcard rejection below
+                    // cannot be vacated by binding compression.
                     let split_shape = sources.len() == 1
-                        && bindings.len() >= 2
-                        && matches!(&initializer.kind, ResolvedExprKind::Tuple(values) if values.len() == 1);
-                    if unique_source_resources.len() != bindings.len()
-                        && !split_shape
-                        && !unique_source_resources.is_empty()
+                        && matches!(&initializer.kind, ResolvedExprKind::Tuple(values) if values.len() == 1)
+                        && self.pattern_slot_count(pattern) >= 2;
+                    if split_shape && self.pattern_has_wildcard(pattern) {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0304,
+                                "split() capability atoms cannot be discarded with `_`: every atom \
+                                     of a split must be bound and consumed explicitly"
+                                    .to_string(),
+                                statement.origin.user_span(),
+                            )
+                            .with_help(
+                                "bind every split atom (e.g. `let (r, w) = c.split()`) and \
+                                     consume each one; `_` silently leaks the unbound atom",
+                            ),
+                        );
+                        return;
+                    }
+                    if !split_shape
+                        && !pairs.is_empty()
+                        && pairs.len() != bindings.len()
+                        && self.single_binding(pattern).is_none()
                     {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0304,
                                 format!(
-                                    "destructuring with wildcards consumes linear values ambiguously: \
+                                    "destructuring consumes linear values ambiguously: \
                                      {} linear source(s) cannot be paired positionally with {} linear binding(s)",
-                                    unique_source_resources.len(),
+                                    pairs.len(),
                                     bindings.len()
                                 ),
                                 statement.origin.user_span(),
                             )
                             .with_help(
                                 "bind every linear element explicitly; wildcard `_` positions and \
-                                 shortened patterns strand or mispair linear sources (only `split()` tuples are exempt)",
+                                 shortened patterns strand or mispair linear sources \
+                                 (only `split()` tuples and single-binding aggregates are exempt)",
                             ),
                         );
+                        return;
                     }
-                    for (index, binding) in bindings.into_iter().enumerate() {
-                        let target = self.place_from_local(&binding);
-                        if let Some(source) = sources.get(index) {
+                    if split_shape {
+                        // Sanctioned split() lowering: binding₀ MOVES the
+                        // receiver (consuming the receiver's fact); the rest
+                        // are fresh atom introductions.
+                        let mut bindings = bindings.into_iter();
+                        if let (Some(first), Some(source)) = (bindings.next(), sources.first()) {
                             self.push_action(
                                 &statement.node_id,
                                 &statement.origin,
@@ -528,11 +635,63 @@ impl<'a> ActionEmitter<'a> {
                                     kind: CanonicalActionKind::Move,
                                     resource: self.resource_for_place(source),
                                     source: Some(source.clone()),
+                                    target: Some(self.place_from_local(&first)),
+                                    loan: None,
+                                },
+                            );
+                        }
+                        for local in bindings {
+                            let target = self.place_from_local(&local);
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Introduce,
+                                    resource: self.resource_for_local(&local),
+                                    source: Some(target.clone()),
                                     target: Some(target),
                                     loan: None,
                                 },
                             );
-                        } else {
+                        }
+                    } else if !pairs.is_empty() && pairs.len() == bindings.len() {
+                        for (binding, (resource, source)) in
+                            bindings.into_iter().zip(pairs.into_iter())
+                        {
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Move,
+                                    resource,
+                                    source: Some(source),
+                                    target: Some(self.place_from_local(&binding)),
+                                    loan: None,
+                                },
+                            );
+                        }
+                    } else if bindings.len() == 1 && !pairs.is_empty() {
+                        // Aggregate merge into one binding (`let x = (a,b)`):
+                        // every source resource moves into the binding, which
+                        // becomes the owner of all of them.
+                        let binding = bindings.into_iter().next().expect("bindings.len() == 1");
+                        let target = self.place_from_local(&binding);
+                        for (resource, source) in pairs {
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Move,
+                                    resource,
+                                    source: Some(source),
+                                    target: Some(target.clone()),
+                                    loan: None,
+                                },
+                            );
+                        }
+                    } else {
+                        for binding in bindings {
+                            let target = self.place_from_local(&binding);
                             self.push_action(
                                 &statement.node_id,
                                 &statement.origin,
@@ -551,24 +710,85 @@ impl<'a> ActionEmitter<'a> {
             ResolvedStmtKind::Assign { target, value, .. } => {
                 self.visit_expr(value, None);
                 if self.place_is_linear(target) {
-                    if let Some(source) = self.capability_places(value).first() {
-                        self.push_action(
-                            &statement.node_id,
-                            &statement.origin,
-                            ActionDraft {
-                                kind: CanonicalActionKind::Move,
-                                resource: self.resource_for_place(source),
-                                source: Some(source.clone()),
-                                target: Some(self.canonical_place(target)),
-                                loan: None,
-                            },
-                        );
+                    // Audit 2026-08-05 (wave-2, C-2): assigning a branch
+                    // expression with distinct linear resources into one
+                    // place is the same XOR violation as consuming it.
+                    if let Some(distinct) = self.xor_branch_violation(value) {
+                        self.push_xor_diagnostic(&distinct, &statement.origin);
+                        return;
+                    }
+                    let pairs = self.expand_source_pairs(&self.capability_places(value));
+                    let target_place = self.canonical_place(target);
+                    if pairs.is_empty() {
+                        // Audit 2026-08-05 (wave-2, review §5.5): a linear
+                        // RESULT (typically a call) assigned into a linear
+                        // place establishes a fresh obligation owned by the
+                        // target — previously no action was emitted at all,
+                        // so `x = make_token()` created no fact and the
+                        // obligation vanished.
+                        if self.is_linear(&value.ty) && !self.is_droppable_type(&value.ty) {
+                            let resource =
+                                ResourceId(NodeId(format!("{}/assigned", statement.node_id.0)));
+                            if target.projections.is_empty() {
+                                self.resources
+                                    .insert(target.base.clone(), vec![resource.clone()]);
+                            }
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Introduce,
+                                    resource,
+                                    source: Some(target_place.clone()),
+                                    target: Some(target_place),
+                                    loan: None,
+                                },
+                            );
+                        }
+                    } else {
+                        // Audit 2026-08-05 (wave-2, G-1): move EVERY linear
+                        // source into the target (the old `.first()` stranded
+                        // every element past the first: `x = (c, d)` parked
+                        // d → false E0256), then re-establish the target's
+                        // resource identity so a later `drop(x)` resolves the
+                        // facts the assignment just retargeted. Without the
+                        // re-key, `drop(x); x = b; drop(x)` reported the
+                        // second drop as a double-consume of x's ORIGINAL
+                        // (already consumed) identity — a false E0304.
+                        // Re-keying only happens for root targets; projected
+                        // targets (`x.field = a`) keep the base's catalog.
+                        for (resource, source) in &pairs {
+                            self.push_action(
+                                &statement.node_id,
+                                &statement.origin,
+                                ActionDraft {
+                                    kind: CanonicalActionKind::Move,
+                                    resource: resource.clone(),
+                                    source: Some(source.clone()),
+                                    target: Some(target_place.clone()),
+                                    loan: None,
+                                },
+                            );
+                        }
+                        if target.projections.is_empty() {
+                            self.resources.insert(
+                                target.base.clone(),
+                                pairs.into_iter().map(|(resource, _)| resource).collect(),
+                            );
+                        }
                     }
                 }
             }
             ResolvedStmtKind::Return { value, .. } => {
                 if let Some(value) = value {
                     self.visit_expr(value, None);
+                    // Audit 2026-08-05 (wave-2, C-2): `return if/match` with
+                    // distinct linear arms leaks every arm that is not taken
+                    // at runtime while the analysis consumed all of them.
+                    if let Some(distinct) = self.xor_branch_violation(value) {
+                        self.push_xor_diagnostic(&distinct, &statement.origin);
+                        return;
+                    }
                     self.emit_consumes(
                         CanonicalActionKind::Return,
                         self.capability_places(value),
@@ -582,7 +802,13 @@ impl<'a> ActionEmitter<'a> {
                     self.visit_expr(value, None);
                     // P1-4: break value must emit consume actions, symmetric
                     // with Return. `loop { break token }` must track token
-                    // as consumed.
+                    // as consumed. Audit 2026-08-05 (wave-2, C-2): with the
+                    // same XOR guard — `break if f { a } else { b }` leaks
+                    // the arm not taken.
+                    if let Some(distinct) = self.xor_branch_violation(value) {
+                        self.push_xor_diagnostic(&distinct, &statement.origin);
+                        return;
+                    }
                     self.emit_consumes(
                         CanonicalActionKind::Move,
                         self.capability_places(value),
@@ -592,7 +818,33 @@ impl<'a> ActionEmitter<'a> {
                 }
             }
             ResolvedStmtKind::Continue | ResolvedStmtKind::NestedCallable(_) => {}
-            ResolvedStmtKind::Expr(expression) => self.visit_expr(expression, None),
+            ResolvedStmtKind::Expr(expression) => {
+                self.visit_expr(expression, None);
+                // Audit 2026-08-05 (wave-2, review §5.5): statement-style
+                // discard of a call returning a linear value used to
+                // establish NO obligation — the result was never introduced,
+                // so `make_token();` leaked silently (no fact, no E0256).
+                // Introduce the discarded result as a fresh obligation at the
+                // call site; the return gate then reports it like any other
+                // unconsumed resource. Droppable results (flow states) are
+                // exempt, mirroring the return gate.
+                if let Some(call_expr) = self.discarded_linear_call(expression) {
+                    let resource = ResourceId(NodeId(format!("{}/discarded", call_expr.node_id.0)));
+                    let place =
+                        Place::root(LocalId(resource.0.clone()), "<discarded linear result>");
+                    self.push_action(
+                        &statement.node_id,
+                        &statement.origin,
+                        ActionDraft {
+                            kind: CanonicalActionKind::Introduce,
+                            resource,
+                            source: Some(place.clone()),
+                            target: Some(place),
+                            loan: None,
+                        },
+                    );
+                }
+            }
             ResolvedStmtKind::While { condition, body } => {
                 self.visit_expr(condition, None);
                 self.visit_block(body, false);
@@ -606,6 +858,17 @@ impl<'a> ActionEmitter<'a> {
                 ..
             } => {
                 self.visit_expr(initializer, None);
+                // Audit 2026-08-05 (wave-2, G-4): the for/while-let iterable
+                // is evaluated EXACTLY ONCE before the loop (hoisted into the
+                // CFG pre-header), so its anonymous temporary borrows end at
+                // the loop statement's terminating point — BEFORE the body
+                // runs. Without this explicit flush, the body's FIRST
+                // statement boundary grabs the iterable's pending loan and
+                // ends it at ITS point inside the body, co-located with the
+                // first write (which ranks before the BorrowEnd) — a false
+                // E0415. Keying on the loop statement's node resolves the
+                // pre-header location added by resolved_lower's hoist.
+                self.flush_pending_loans(&statement.node_id, &statement.origin);
                 self.visit_block(body, false);
             }
             ResolvedStmtKind::IfLet {
@@ -630,17 +893,27 @@ impl<'a> ActionEmitter<'a> {
                     .map(|place| self.canonical_place(place))
                     .collect::<Vec<_>>();
                 for place in places {
-                    self.push_action(
-                        &statement.node_id,
-                        &statement.origin,
-                        ActionDraft {
-                            kind: CanonicalActionKind::Drop,
-                            resource: self.resource_for_place(&place),
-                            source: Some(place),
-                            target: None,
-                            loan: None,
-                        },
-                    );
+                    // Audit 2026-08-05 (wave-2, G-1): dropping an aggregate
+                    // owner (`let x = (a, b); drop(x)`) consumes EVERY
+                    // resource the place currently owns — one Drop per
+                    // identity. Dropping a single-identity place is unchanged.
+                    let mut seen = BTreeSet::new();
+                    for resource in self.resources_for_place(&place) {
+                        if !seen.insert(resource.clone()) {
+                            continue;
+                        }
+                        self.push_action(
+                            &statement.node_id,
+                            &statement.origin,
+                            ActionDraft {
+                                kind: CanonicalActionKind::Drop,
+                                resource,
+                                source: Some(place.clone()),
+                                target: None,
+                                loan: None,
+                            },
+                        );
+                    }
                 }
             }
             ResolvedStmtKind::Contract { condition, .. } => self.visit_expr(condition, None),
@@ -673,21 +946,21 @@ impl<'a> ActionEmitter<'a> {
                         .is_some_and(|local| self.is_linear(&local.ty))
                     {
                         let target = self.place_from_local(binding);
-                        let sources = self.capability_places(value);
-                        if sources.len() == 1 {
-                            let source = sources.into_iter().next().expect("len == 1");
+                        let pairs = self.expand_source_pairs(&self.capability_places(value));
+                        if pairs.len() == 1 {
+                            let (resource, source) = pairs.into_iter().next().expect("len == 1");
                             self.push_action(
                                 &statement.node_id,
                                 &statement.origin,
                                 ActionDraft {
                                     kind: CanonicalActionKind::Move,
-                                    resource: self.resource_for_place(&source),
-                                    source: Some(source.clone()),
+                                    resource,
+                                    source: Some(source),
                                     target: Some(target),
                                     loan: None,
                                 },
                             );
-                        } else if sources.is_empty() {
+                        } else if pairs.is_empty() {
                             self.push_action(
                                 &statement.node_id,
                                 &statement.origin,
@@ -706,7 +979,7 @@ impl<'a> ActionEmitter<'a> {
                                     format!(
                                         "pinned binding consumes linear values ambiguously: \
                                          {} linear sources cannot be paired with one binding",
-                                        sources.len()
+                                        pairs.len()
                                     ),
                                     statement.origin.user_span(),
                                 )
@@ -767,13 +1040,14 @@ impl<'a> ActionEmitter<'a> {
                 let reference = borrow_reference.map(|local| LocalId(local.0.clone()));
                 let reference_name = borrow_reference.map(|local| self.local_name(local));
                 let location = self.location(&expression.node_id, &expression.origin);
+                let resource = self.resource_for_place(&source);
                 self.loans.push(Loan {
                     id: loan_id.clone(),
                     parent: parent_id,
                     kind,
                     place: source.clone(),
                     reference,
-                    reference_name,
+                    reference_name: reference_name.clone(),
                     start: location.clone(),
                     end_edges: Vec::new(),
                     span: expression.origin.user_span(),
@@ -783,14 +1057,20 @@ impl<'a> ActionEmitter<'a> {
                         LoanKind::Shared => CanonicalActionKind::BorrowShared,
                         LoanKind::Mutable => CanonicalActionKind::BorrowMut,
                     },
-                    resource: self.resource_for_place(&source),
+                    resource: resource.clone(),
                     source: Some(source),
                     target: None,
-                    loan: Some(loan_id),
+                    loan: Some(loan_id.clone()),
                     location,
                     span: expression.origin.user_span(),
                     origin: expression.origin.clone(),
                 });
+                // Audit 2026-08-05 (wave-2, H-6): anonymous borrows have no
+                // reference binding whose liveness could end the loan — park
+                // them for statement-boundary termination in visit_block.
+                if reference_name.is_none() {
+                    self.pending_anonymous_loans.push((loan_id, resource));
+                }
             }
             ResolvedExprKind::Call(call) => {
                 for argument in &call.arguments {
@@ -806,6 +1086,15 @@ impl<'a> ActionEmitter<'a> {
                             _ => false,
                         };
                         if transferred_endpoint {
+                            continue;
+                        }
+                        // Audit 2026-08-05 (wave-2, C-2):
+                        // `sink(if flag { a } else { b })` consumed BOTH arms
+                        // under AND semantics while XOR runtime moves exactly
+                        // one — the other arm's resource leaks on every run.
+                        // Reject branch arguments carrying distinct resources.
+                        if let Some(distinct) = self.xor_branch_violation(&argument.value) {
+                            self.push_xor_diagnostic(&distinct, &expression.origin);
                             continue;
                         }
                         self.emit_consumes(
@@ -893,21 +1182,25 @@ impl<'a> ActionEmitter<'a> {
     ) {
         let mut seen = BTreeSet::new();
         for place in places {
-            let resource = self.resource_for_place(&place);
-            if !seen.insert(resource.clone()) {
-                continue;
+            // Audit 2026-08-05 (wave-2, G-1): a place may own several
+            // resource identities after an aggregate merge (`let x = (a, b);
+            // return x`); consuming it discharges every one of them.
+            for resource in self.resources_for_place(&place) {
+                if !seen.insert(resource.clone()) {
+                    continue;
+                }
+                self.push_action(
+                    node,
+                    origin,
+                    ActionDraft {
+                        kind,
+                        resource,
+                        source: Some(place.clone()),
+                        target: None,
+                        loan: None,
+                    },
+                );
             }
-            self.push_action(
-                node,
-                origin,
-                ActionDraft {
-                    kind,
-                    resource,
-                    source: Some(place),
-                    target: None,
-                    loan: None,
-                },
-            );
         }
     }
 
@@ -1061,6 +1354,207 @@ impl<'a> ActionEmitter<'a> {
         }
     }
 
+    /// True when the pattern contains a wildcard anywhere (nested included).
+    /// Audit 2026-08-05 (wave-2, review §1.3): wildcard positions in a
+    /// split() pattern silently discard capability atoms.
+    fn pattern_has_wildcard(&self, pattern: &ResolvedPattern) -> bool {
+        match &pattern.kind {
+            ResolvedPatternKind::Wildcard => true,
+            ResolvedPatternKind::Constructor { fields, .. } => fields
+                .iter()
+                .any(|(_, pattern)| self.pattern_has_wildcard(pattern)),
+            ResolvedPatternKind::Tuple(patterns) | ResolvedPatternKind::Array(patterns) => patterns
+                .iter()
+                .any(|pattern| self.pattern_has_wildcard(pattern)),
+            ResolvedPatternKind::Slice { prefix, rest } => {
+                prefix
+                    .iter()
+                    .any(|pattern| self.pattern_has_wildcard(pattern))
+                    || rest
+                        .as_deref()
+                        .is_some_and(|pattern| self.pattern_has_wildcard(pattern))
+            }
+            ResolvedPatternKind::Literal(_) | ResolvedPatternKind::Binding { .. } => false,
+        }
+    }
+
+    /// Number of top-level pattern positions. A split() destructure reports
+    /// its tuple arity even when a wildcard ate one binding — the slot
+    /// count, not the surviving linear-binding count, identifies the split
+    /// shape so the wildcard rejection cannot be vacated by compression
+    /// (`let (_, w) = c.split()` still counts 2 slots, 1 binding).
+    fn pattern_slot_count(&self, pattern: &ResolvedPattern) -> usize {
+        match &pattern.kind {
+            ResolvedPatternKind::Tuple(patterns) | ResolvedPatternKind::Array(patterns) => {
+                patterns.len()
+            }
+            ResolvedPatternKind::Constructor { fields, .. } => fields.len(),
+            _ => 1,
+        }
+    }
+
+    /// Audit 2026-08-05 (wave-2, G-1): every resource identity currently
+    /// owned by the source places, in construction order, deduplicated.
+    /// Aggregate owners (`let x = (a, b)`) expand to all owned identities.
+    fn resources_for_place(&self, place: &Place) -> Vec<ResourceId> {
+        if place.projections.is_empty() {
+            if let Some(resources) = self.resources.get(&ResolvedLocalId(place.base.0.clone())) {
+                return resources.clone();
+            }
+        }
+        vec![self.resource_for_place(place)]
+    }
+
+    fn expand_sources(&self, sources: &[Place]) -> Vec<ResourceId> {
+        self.expand_source_pairs(sources)
+            .into_iter()
+            .map(|(resource, _)| resource)
+            .collect()
+    }
+
+    /// (resource, originating place) pairs for the sources, deduplicated by
+    /// resource with the first originating place kept. The place is the
+    /// action source — the owner-validation target of dataflow (H-5).
+    fn expand_source_pairs(&self, sources: &[Place]) -> Vec<(ResourceId, Place)> {
+        let mut pairs = Vec::new();
+        let mut seen = BTreeSet::new();
+        for source in sources {
+            for resource in self.resources_for_place(source) {
+                if seen.insert(resource.clone()) {
+                    pairs.push((resource, source.clone()));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// Audit 2026-08-05 (wave-2, C-2): If/Match are XOR — exactly one arm's
+    /// value flows at runtime. When a consumed value is (or contains, in
+    /// value position) a branch expression whose arms carry SEVERAL distinct
+    /// linear resources, consuming it can discharge at most one obligation;
+    /// the others leak on every path not taking their arm. Returns one
+    /// representative place per distinct resource when the value violates.
+    /// AND aggregates are NOT violations: `(a, b)` moves every element.
+    fn xor_branch_violation(&self, value: &ResolvedExpr) -> Option<Vec<Place>> {
+        match &value.kind {
+            ResolvedExprKind::If { .. } | ResolvedExprKind::Match { .. } => {
+                let mut representatives: Vec<Place> = Vec::new();
+                let mut seen = BTreeSet::new();
+                for place in self.capability_places(value) {
+                    for resource in self.resources_for_place(&place) {
+                        if seen.insert(resource) {
+                            representatives.push(place.clone());
+                        }
+                    }
+                }
+                (representatives.len() > 1).then_some(representatives)
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => block
+                .result
+                .as_ref()
+                .and_then(|result| self.xor_branch_violation(result)),
+            ResolvedExprKind::Scope { body, .. } => body
+                .result
+                .as_ref()
+                .and_then(|result| self.xor_branch_violation(result)),
+            ResolvedExprKind::Cast { value, .. }
+            | ResolvedExprKind::Try { value, .. }
+            | ResolvedExprKind::Spawn(value)
+            | ResolvedExprKind::Await(value) => self.xor_branch_violation(value),
+            ResolvedExprKind::Tuple(values)
+            | ResolvedExprKind::List(values)
+            | ResolvedExprKind::Set(values) => values
+                .iter()
+                .find_map(|value| self.xor_branch_violation(value)),
+            ResolvedExprKind::Record { fields, .. } => fields
+                .iter()
+                .find_map(|field| self.xor_branch_violation(&field.value)),
+            ResolvedExprKind::Map(pairs) => pairs.iter().find_map(|(key, value)| {
+                self.xor_branch_violation(key)
+                    .or_else(|| self.xor_branch_violation(value))
+            }),
+            ResolvedExprKind::Project { value, .. } => self.xor_branch_violation(value),
+            _ => None,
+        }
+    }
+
+    fn push_xor_diagnostic(&mut self, representatives: &[Place], origin: &crate::core::Origin) {
+        let names = representatives
+            .iter()
+            .map(Place::display)
+            .collect::<Vec<_>>()
+            .join("', '");
+        self.errors.push(
+            Diagnostic::error_code(
+                crate::diagnostic::codes::E0840,
+                format!(
+                    "branch expression carries {} distinct linear resources ('{}') but exactly \
+                     one flows at runtime — consuming it leaks every arm that is not taken",
+                    representatives.len(),
+                    names
+                ),
+                origin.user_span(),
+            )
+            .with_help(
+                "consume each capability on its own control-flow path, or bind the branches to \
+                 distinct places and consume them separately",
+            ),
+        );
+    }
+
+    /// Audit 2026-08-05 (wave-2, review §5.5): the call whose linear result a
+    /// statement-style expression discards (through any number of plain
+    /// block/scope wrappers). Used to establish the dropped obligation.
+    fn discarded_linear_call<'b>(
+        &self,
+        mut expression: &'b ResolvedExpr,
+    ) -> Option<&'b ResolvedExpr> {
+        loop {
+            match &expression.kind {
+                ResolvedExprKind::Call(_) => {
+                    return (self.is_linear(&expression.ty)
+                        && !self.is_droppable_type(&expression.ty))
+                    .then_some(expression);
+                }
+                ResolvedExprKind::Block(block)
+                | ResolvedExprKind::Comptime(block)
+                | ResolvedExprKind::Quote(block) => {
+                    expression = block.result.as_ref()?;
+                }
+                ResolvedExprKind::Scope { body, .. } => {
+                    expression = body.result.as_ref()?;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Audit 2026-08-05 (wave-2, H-6): terminate anonymous loans parked
+    /// during statement visits at the statement's terminating CFG point.
+    fn flush_pending_loans(&mut self, node: &NodeId, origin: &crate::core::Origin) {
+        if self.pending_anonymous_loans.is_empty() {
+            return;
+        }
+        let Some(location) = self.locations.get(node).cloned() else {
+            return; // no CFG point here — keep them for the next flush site
+        };
+        let pending = std::mem::take(&mut self.pending_anonymous_loans);
+        for (loan_id, resource) in pending {
+            self.actions.push(CanonicalResourceAction {
+                kind: CanonicalActionKind::BorrowEnd,
+                resource,
+                source: None,
+                target: None,
+                loan: Some(loan_id),
+                location: location.clone(),
+                span: origin.user_span(),
+                origin: origin.clone(),
+            });
+        }
+    }
+
     fn capability_places(&self, expression: &ResolvedExpr) -> Vec<Place> {
         let mut places = Vec::new();
         self.collect_capability_places(expression, &mut places);
@@ -1148,9 +1642,9 @@ impl<'a> ActionEmitter<'a> {
                 self.collect_capability_places(inner, places);
             }
             // NOTE: Call arguments are NOT collected here — they are already
-            // handled at the call-site level (lower_expr, line ~622) which
-            // calls capability_places on each argument directly. Adding Call
-            // here would double-count and cause false E0304 diagnostics.
+            // handled at the call-site level (visit_expr's Call arm above),
+            // which calls capability_places on each argument directly. Adding
+            // Call here would double-count and cause false E0304 diagnostics.
             ResolvedExprKind::Map(pairs) => {
                 for (key, value) in pairs {
                     self.collect_capability_places(key, places);
@@ -1199,7 +1693,7 @@ impl<'a> ActionEmitter<'a> {
                 }
             }
             // Leaf / non-place expressions: no linear resources to track.
-            // Call is handled at the call-site level (lower_expr ~line 622),
+            // Call is handled at the call-site level (visit_expr's Call arm),
             // NOT here — recursing into arguments would double-count.
             ResolvedExprKind::Literal(_)
             | ResolvedExprKind::FString(_)
@@ -1216,17 +1710,21 @@ impl<'a> ActionEmitter<'a> {
         }
     }
 
+    /// Primary resource identity of a local (the first owned identity).
+    /// Introduced obligations and session endpoints always carry a single
+    /// identity; aggregate owners are consumed through
+    /// `resources_for_place`, which expands every owned identity.
     fn resource_for_local(&self, local: &ResolvedLocalId) -> ResourceId {
         self.resources
             .get(local)
-            .cloned()
+            .and_then(|resources| resources.first().cloned())
             .unwrap_or_else(|| ResourceId(local.0.clone()))
     }
 
     fn resource_for_place(&self, place: &Place) -> ResourceId {
         self.resources
             .get(&ResolvedLocalId(place.base.0.clone()))
-            .cloned()
+            .and_then(|resources| resources.first().cloned())
             .unwrap_or_else(|| ResourceId(place.base.0.clone()))
     }
 
@@ -1552,8 +2050,15 @@ func main() -> i32 { 0 }
 
     #[test]
     fn linear_lambda_capture_transfers_resource_to_child() {
-        // RESOURCE-LINEAR-001: closure construction is an explicit ownership
-        // transfer from the enclosing callable's resource state.
+        // RESOURCE-LINEAR-001 + T-2 (audit 2026-08-05 wave-2): closure
+        // capture of a LINEAR resource (cap/session/flow state) is rejected
+        // at the checker with E0427 — a closure can be invoked more than
+        // once, so a captured capability would be consumed on EVERY call,
+        // escaping exactly-once enforcement. The old (pre-T-2) behavior
+        // TransferChild'd the token at construction time and let the child
+        // drop it, which double-consumes on a twice-called lambda.
+        // The resource analysis still supports TransferChild for non-linear
+        // captures; this test now pins the checker-level rejection.
         let file = parse(
             r#"
 cap Token
@@ -1564,17 +2069,14 @@ func capture(token: cap Token) -> i32 {
 func main() -> i32 { 0 }
 "#,
         );
-        let program = crate::core::check_program(&file).expect("closure capture transfers token");
-        let analysis = program
-            .resource_analysis(&NodeId("function:capture".into()))
-            .expect("capture resource analysis");
-        assert!(analysis.actions.iter().any(|action| {
-            action.kind == CanonicalActionKind::TransferChild
-                && action
-                    .source
-                    .as_ref()
-                    .is_some_and(|place| place.display() == "token")
-        }));
+        let program = crate::core::check_program(&file)
+            .expect_err("closure capture of a linear capability must be rejected (E0427)");
+        assert!(
+            program
+                .iter()
+                .any(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0427)),
+            "expected E0427 for linear capture, got: {program:?}"
+        );
     }
 
     #[test]

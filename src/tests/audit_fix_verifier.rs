@@ -15,7 +15,14 @@
 //! conditions, For iterables, WhileLet/IfLet, Match, Alloc bodies, Defer
 //! bodies — extern calls in those positions were never checked by
 //! `--verify-ffi`. Fix: exhaustive recursive walker (no catch-all arm).
-
+//!
+//! Wave-2 (VER-A) — full-audit-2026-08-05-0656 §1/§2.7/§3.8:
+//! C-5 (VIR Let definedness), C-6 (extract_body_return tail swallowing),
+//! C-7 VIR half (scoped name_map / shadowed locals + the AST-path
+//! self-referential let-substitution stack overflow), H-25 (callee-requires
+//! walker missing arms), V-2 (old() parity for bool/string), V-6 (i64
+//! div/mod/MIN÷-1 definedness), FFI walker module descent. Audit axiom:
+//! Trap ≠ Fault — a body that can trap (E0801 etc.) must never be Proven.
 
 /// Mirrors the `require_z3!` guard in src/verifier/tests.rs: verification
 /// regressions are meaningless without a solver, so skip loudly instead of
@@ -184,6 +191,12 @@ func main() -> i32 { 0 }
 
 /// AU-V2 regression: extern call inside an if-condition. Before the walker
 /// fix the call was never discovered → zero results → silent pass.
+///
+/// Wave-2 fixture fix (wave1-review §2-B): the original fixture used
+/// `return 1;` / tail `0` in an `-> i64` function — bare literals are i32,
+/// so `check_program` rejected the fixture with "return type mismatch:
+/// expected i64, found i32" and `verify_ffi_source` returned Err before the
+/// walker ever ran. The walker fix was thus never actually tested.
 #[test]
 fn audit_fix_ffi_extern_call_in_if_condition_discovered() {
     if !z3_or_skip() {
@@ -196,12 +209,13 @@ extern "C" {
 }
 func caller(x: i64) -> i64 {
     if danger(x) > 0 {
-        return 1;
+        return x;
     }
-    0
+    x
 }
 "#;
-    let results = crate::verifier::verify_ffi_source(src).expect("verify_ffi_source");
+    let results = crate::verifier::verify_ffi_source(src)
+        .expect("fixture must type-check (wave1-review §2-B fix)");
     assert!(
         results.iter().any(|r| r.func_name.contains("calls danger")),
         "extern call inside an if-condition must be discovered: {:?}",
@@ -218,6 +232,10 @@ func caller(x: i64) -> i64 {
 
 /// AU-V2 regression: extern call inside a while-condition — the headline
 /// hole (`while dangerous(ptr) { ... }`).
+///
+/// Wave-2 fixture fix (wave1-review §2-B): same i64/i32 literal mismatch as
+/// the if-condition test above; the fixture now type-checks so the walker is
+/// genuinely exercised.
 #[test]
 fn audit_fix_ffi_extern_call_in_while_condition_discovered() {
     if !z3_or_skip() {
@@ -230,12 +248,13 @@ extern "C" {
 }
 func poller(s: i64) -> i64 {
     while step(s) > 0 {
-        return 0;
+        return s;
     }
     s
 }
 "#;
-    let results = crate::verifier::verify_ffi_source(src).expect("verify_ffi_source");
+    let results = crate::verifier::verify_ffi_source(src)
+        .expect("fixture must type-check (wave1-review §2-B fix)");
     assert!(
         results.iter().any(|r| r.func_name.contains("calls step")),
         "extern call inside a while-condition must be discovered: {:?}",
@@ -279,6 +298,441 @@ func cleaner(h: i64) -> i64 {
         results.iter().any(|r| r.func_name.contains("calls release")
             && r.status == crate::verifier::VerifStatus::Failed),
         "unguarded release(h) in defer body should be Disproven: {:?}",
+        results
+    );
+}
+
+// ── Wave-2 VER-A: VIR engine false-Proven cluster ────────────────────────
+// full-audit-2026-08-05-0656. Every test asserts the VERDICT. Arithmetic
+// axiom: Trap ≠ Fault — any body that can runtime-trap (E0801 div-zero,
+// E08xx overflow/MIN÷-1, callee requires violation) must NOT be Proven.
+
+/// C-5 (CRITICAL): VIR-path `let y = x / z` skipped definedness — the z≠0
+/// obligation was collected ONLY in the Return arm, and `Return(Var(y))`
+/// carries no CheckedArith. With z possibly 0 the body traps E0801 at
+/// runtime yet verified Proven. Fix: VStmt::Let checks definedness too.
+#[test]
+fn audit2_vera_c5_vir_let_div_zero_disproven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(x: i32, z: i32) -> i32 {
+    ensures: result == result
+    let y = x / z
+    y
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "let-bound division with an unconstrained divisor must Disprove \
+         (E0801 trap at z == 0): {:?}",
+        results
+    );
+}
+
+/// C-5 control: with a strict-positive divisor the same body is fully
+/// defined and the postcondition must still prove (no over-correction).
+#[test]
+fn audit2_vera_c5_vir_let_div_guarded_proven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(x: i32, z: i32) -> i32 {
+    requires: z > 0
+    ensures: result == result
+    let y = x / z
+    y
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "z > 0 excludes zero-divisor and MIN/-1, so the let division is \
+         defined and the trivial postcondition proves: {:?}",
+        results
+    );
+}
+
+/// C-6 (CRITICAL): `extract_body_return` met the first `Stmt::If`, and when
+/// no return-expression was extractable from its branches the `None`
+/// propagated as the OVERALL result — subsequent tail statements were never
+/// examined and func.rs bound result to 0. `ensures: result == 0` became a
+/// fake Proven although the runtime always returns the tail `y`.
+#[test]
+fn audit2_vera_c6_tail_not_swallowed_by_valueless_if() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(c: bool, y: i32) -> i32 {
+    ensures: result == 0
+    if c { let y2 = y + 1 }
+    y
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "the tail `y` must survive the value-less if; y = 1 violates \
+         result == 0. Proven means extract_body_return swallowed the tail: {:?}",
+        results
+    );
+}
+
+/// C-6 control: once extraction reaches the tail, `result == y` proves.
+#[test]
+fn audit2_vera_c6_tail_survives_and_proves() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(c: bool, y: i32) -> i32 {
+    ensures: result == y
+    if c { let y2 = y + 1 }
+    y
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "runtime returns y on every path; ensures result == y must prove: {:?}",
+        results
+    );
+}
+
+/// C-7 (CRITICAL, VIR half): block-level shadowing aliased the shadow to the
+/// PARAMETER's Z3 variable through the flat name map.
+/// `if c { let x = x + 1; x } else { x }` returns x+1 when c holds, yet
+/// `ensures: result == x` verified Proven. Fix: scoped name map — the shadow
+/// gets a fresh VarId and branch lets are lowered (substituted) instead of
+/// discarded by block_tail_expr.
+#[test]
+fn audit2_vera_c7_shadowed_let_is_not_the_parameter() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(c: bool, x: i32) -> i32 {
+    ensures: result == x
+    if c { let x = x + 1
+        x } else { x }
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "c = true returns x + 1, violating result == x. Proven means the \
+         shadow `let x` was aliased to the parameter's Z3 variable: {:?}",
+        results
+    );
+}
+
+/// C-7 control: under `!c` only the else branch runs, so result == x holds.
+#[test]
+fn audit2_vera_c7_shadow_else_branch_proves() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(c: bool, x: i32) -> i32 {
+    requires: !c
+    ensures: result == x
+    if c { let x = x + 1
+        x } else { x }
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "with !c the else branch (plain x) always runs: {:?}",
+        results
+    );
+}
+
+/// C-7 family (VERIFIED crash on the 90ac9bdc binary): the shadowing binding
+/// `let x = x + 1` makes the AST-path let-substitution self-referential and
+/// `expand_lets_in_expr` recursed until stack overflow — `mimi verify`
+/// aborted on user source. This test pins the crash fix; any verdict other
+/// than an explicit solver outcome would have aborted the process before.
+#[test]
+fn audit2_vera_c7_self_referential_let_no_stack_overflow() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func pos(v: i32) -> i32 {
+    requires: v > 0
+    ensures: result > 0
+    v
+}
+func f(c: bool, x: i32) -> i32 {
+    requires: x > 0
+    ensures: result == pos(x)
+    if c { let x = pos(x)
+        x } else { pos(x) }
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    // The point is reaching a verdict at all (pre-fix: stack overflow abort).
+    assert!(
+        status_of(&results, "f").is_some(),
+        "self-referential let substitution must terminate: {:?}",
+        results
+    );
+}
+
+/// H-25 (HIGH): the callee-requires walker lacked Assign/SharedLet/For/
+/// WhileLet arms while callee ENSURES axioms were asserted at those
+/// positions. `z = pos(y)` assumed pos(y) > 0 yet never discharged pos's
+/// `requires: y > 0` — a guaranteed-violation trap proving Proven.
+#[test]
+fn audit2_vera_h25_assign_requires_checked() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func pos(v: i32) -> i32 {
+    requires: v > 0
+    ensures: result > 0
+    v
+}
+func caller(y: i32) -> i32 {
+    ensures: result == 42
+    let mut z = 0
+    z = pos(y)
+    42
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    let caller = results
+        .iter()
+        .find(|r| r.func_name == "caller")
+        .expect("caller result present");
+    assert_eq!(
+        caller.status,
+        crate::verifier::VerifStatus::Disproven,
+        "z = pos(y) must discharge pos's requires: y > 0. Proven means the \
+         Assign arm is still missing from the requires walker: {:?}",
+        results
+    );
+    assert!(
+        caller.message.contains("may violate precondition"),
+        "expected the callee-requires failure message, got: {}",
+        caller.message
+    );
+}
+
+/// H-25: For-body calls must be checked too (walker arm was missing).
+#[test]
+fn audit2_vera_h25_for_body_requires_checked() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func pos(v: i32) -> i32 {
+    requires: v > 0
+    ensures: result > 0
+    v
+}
+func caller(y: i32) -> i32 {
+    ensures: result == 0
+    for v in [y] {
+        pos(y)
+    }
+    0
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "caller"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "pos(y) inside a for body must discharge requires: y > 0: {:?}",
+        results
+    );
+}
+
+/// H-25: SharedLet initializers must be checked too (walker arm missing).
+#[test]
+fn audit2_vera_h25_sharedlet_requires_checked() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func pos(v: i32) -> i32 {
+    requires: v > 0
+    ensures: result > 0
+    v
+}
+func caller(y: i32) -> i32 {
+    ensures: result == 0
+    shared s = pos(y)
+    0
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "caller"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "shared s = pos(y) must discharge requires: y > 0: {:?}",
+        results
+    );
+}
+
+/// V-2 (MED): bool/string params' old() was never asserted old == current in
+/// the AST path (int/real only), while the Resolved engine completed all
+/// three — engine inconsistency. `ensures: old(s) == s` was a fake Disproven
+/// (old_s unconstrained → counterexample s = "A").
+#[test]
+fn audit2_vera_v2_old_string_equality_proven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func keeps(s: string) -> i32 {
+    ensures: old(s) == s
+    0
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "keeps"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "old(s) == s is an identity on immutable parameters; Disproven means \
+         old_s was never equated with s: {:?}",
+        results
+    );
+}
+
+/// V-2 (VIR half): bool params get old snapshots now. Before the fix,
+/// `ensures: old(b) == b` on a pure-bool (trusted-subset) function was
+/// unencodable in VIR → NotInTrustedSubset.
+#[test]
+fn audit2_vera_v2_old_bool_vir_proven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func keep(b: bool) -> bool {
+    ensures: old(b) == b
+    b
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "keep"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "old(b) == b must prove on the VIR path: {:?}",
+        results
+    );
+}
+
+/// V-6 (LOW→fail-closed): i64 was modeled as unbounded Int with NO
+/// definedness, contradicting SD-7/SD-8 trap semantics. Minimal fix mirrors
+/// the i32 machinery for div/mod (zero divisor + MIN÷-1) and neg (MIN).
+#[test]
+fn audit2_vera_v6_i64_div_zero_disproven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func g(x: i64, z: i64) -> i64 {
+    ensures: result == result
+    x / z
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "g"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "i64 division by an unconstrained divisor traps E0801 at z == 0; \
+         Proven means i64 definedness is still missing: {:?}",
+        results
+    );
+}
+
+/// V-6 control: a strict-positive divisor discharges both the zero-divisor
+/// and the MIN÷-1 obligations.
+#[test]
+fn audit2_vera_v6_i64_div_guarded_proven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func g(x: i64, z: i64) -> i64 {
+    requires: z > 0
+    ensures: result == result
+    x / z
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "g"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "z > 0 makes the i64 division defined everywhere: {:?}",
+        results
+    );
+}
+
+/// V-6: negation of i64::MIN traps — must Disprove without an excludes-MIN
+/// precondition.
+#[test]
+fn audit2_vera_v6_i64_neg_min_disproven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func n(x: i64) -> i64 {
+    ensures: result == result
+    -x
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "n"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "negating an unconstrained i64 can hit MIN (runtime trap): {:?}",
+        results
+    );
+}
+
+/// Wave-2 item 7 (wave1-review §5.8): ffi.rs call-site discovery must
+/// descend into Item::Module inner functions — modules were a blind spot for
+/// `--verify-ffi` even after Wave-1 exhausted the statement/expr positions.
+#[test]
+fn audit2_vera_ffi_walker_descends_into_modules() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+extern "C" {
+    func danger(p: i64) -> i64
+        requires: p > 0;
+}
+module inner {
+    func caller(x: i64) -> i64 {
+        danger(x)
+    }
+}
+"#;
+    let results = crate::verifier::verify_ffi_source(src).expect("verify_ffi_source");
+    assert!(
+        results.iter().any(|r| r.func_name.contains("calls danger")),
+        "extern call inside a module function must be discovered: {:?}",
+        results
+    );
+    assert!(
+        results.iter().any(|r| r.func_name.contains("calls danger")
+            && r.status == crate::verifier::VerifStatus::Failed),
+        "unguarded danger(x) inside the module should be Disproven: {:?}",
         results
     );
 }

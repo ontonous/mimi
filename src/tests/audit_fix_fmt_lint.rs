@@ -415,6 +415,199 @@ fn audit_cli_fmt_overwrites_atomically_and_fixes_operators() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Wave-2 (full audit 2026-08-05-0656) — H-29 / X-9
+// ═══════════════════════════════════════════════════════════════
+
+/// Parse a fixture into an AST File (for Linter tests); fail loudly if the
+/// fixture itself is unparseable.
+fn audit2_parse_source(src: &str) -> crate::ast::File {
+    let tokens = crate::lexer::Lexer::new(src)
+        .tokenize()
+        .expect("fixture must tokenize");
+    let (file, errors) = crate::parser::Parser::new(tokens).parse_file_with_recovery();
+    assert!(errors.is_empty(), "fixture must parse: {:?}", errors);
+    file
+}
+
+/// H-29 PoC program: multi-space runs inside a string literal and inside a
+/// comment, adjacent to code that genuinely needs spacing normalization.
+const H29_PROGRAM: &str = "func main() -> i32 {
+let s = \"a    b\"
+// note:    aligned    columns
+let t = \"x  y,  z:  w\"
+if s==t {println(s)}
+0
+}
+";
+
+#[test]
+fn audit2_tool_fmt_preserves_string_literal_spacing() {
+    // H-29 (HIGH, silent corruption): normalize_spacing's collapse pass used
+    // to walk the flattened line output including string bodies, rewriting
+    // `"a    b"` to `"a b"` — and `mimi fmt` wrote that back to disk.
+    let formatted = crate::fmt::Formatter::new().format(H29_PROGRAM);
+    assert!(
+        formatted.contains("\"a    b\""),
+        "string literal spacing corrupted:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("\"x  y,  z:  w\""),
+        "string literal with punct-like runs corrupted:\n{}",
+        formatted
+    );
+    // Code around the literal must still be normalized (fix is region-aware,
+    // not a wholesale collapse disable).
+    assert!(
+        formatted.contains("if s == t { println(s) }"),
+        "code spacing not normalized:\n{}",
+        formatted
+    );
+    // The formatted output must still parse + type-check.
+    check_source(&formatted)
+        .unwrap_or_else(|diags| panic!("H-29 fix output fails type check: {:?}", diags));
+}
+
+#[test]
+fn audit2_tool_fmt_preserves_comment_body_spacing() {
+    // H-29 comment half: `// a    b` must not collapse to `// a b`.
+    let src = "func main() -> i32 {\n    // col1      col2      col3\n    let x = 1\n    let y = 2\n    x + y\n}\n";
+    let formatted = crate::fmt::Formatter::new().format(src);
+    assert!(
+        formatted.contains("// col1      col2      col3"),
+        "comment body spacing corrupted:\n{}",
+        formatted
+    );
+    // Block comment on the opening-code line keeps its inner spacing too.
+    let src = "func main() -> i32 {\n    let x = 1 /* keep   spaces   here */\n    x\n}\n";
+    let formatted = crate::fmt::Formatter::new().format(src);
+    assert!(
+        formatted.contains("/* keep   spaces   here */"),
+        "block comment body spacing corrupted:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn audit2_tool_fmt_idempotent_round_trip_with_strings() {
+    // Required discipline: fmt(fmt(x)) == fmt(x) AND string literals survive
+    // both passes, on input mixing operators, multi-space strings, comments,
+    // escapes and char-braces in literals.
+    let src = "func f(a:i32,b:i32)->i32 {
+let s = \"pad    me\"
+let esc = \"q  \\\"hi\\\"  q\"
+let brace = \"{\"
+// tail    spaces    kept
+if a>=b{a+b}else{a-b}
+}
+func main() -> i32 { f(1,2) }
+";
+    let formatter = crate::fmt::Formatter::new();
+    let once = formatter.format(src);
+    let twice = formatter.format(&once);
+    assert_eq!(once, twice, "formatter must be idempotent");
+    for literal in ["\"pad    me\"", "\"q  \\\"hi\\\"  q\"", "\"{\""] {
+        assert!(
+            once.contains(literal),
+            "string literal {} lost in round-trip:\n{}",
+            literal,
+            once
+        );
+    }
+    assert!(
+        once.contains("// tail    spaces    kept"),
+        "comment body lost in round-trip:\n{}",
+        once
+    );
+    check_source(&once)
+        .unwrap_or_else(|diags| panic!("round-trip output fails type check: {:?}", diags));
+}
+
+#[test]
+fn audit2_tool_cli_fmt_preserves_string_content() {
+    // End-to-end guard for the H-29 corruption: the exact PoC from the audit
+    // (run `mimi fmt` on a COPY, string content must survive the write-back).
+    let Some(bin) = mimi_bin() else {
+        eprintln!("skip: mimi binary not built");
+        return;
+    };
+    let dir = unique_temp_dir("fmt_h29");
+    let file = dir.join("h29.mimi");
+    std::fs::write(
+        &file,
+        "func main() -> i32 {\n    let s = \"a    b\"\n    // note:    aligned    columns\n    println(s)\n    0\n}\n",
+    )
+    .expect("write source");
+    let out = std::process::Command::new(&bin)
+        .arg("fmt")
+        .arg(&file)
+        .output()
+        .expect("spawn mimi fmt");
+    assert!(
+        out.status.success(),
+        "mimi fmt failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let content = std::fs::read_to_string(&file).expect("read formatted file");
+    assert!(
+        content.contains("\"a    b\""),
+        "mimi fmt corrupted the string literal on disk:\n{}",
+        content
+    );
+    assert!(
+        content.contains("// note:    aligned    columns"),
+        "mimi fmt corrupted the comment body on disk:\n{}",
+        content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn audit2_tool_lint_w007_survives_escaped_backslash_string() {
+    // X-9 PoC (LINE-CONFIRMED pre-fix via `mimi lint`): after a line ending
+    // in `"a\\"` the old state machine stayed "in string" forever and never
+    // reported W007 again. The escaped backslash does NOT escape the quote.
+    let src = "func main() -> i64 {\n    let s = \"a\\\\\"\n    let y = ((1 + 2))\n    let z = y + len(s)\n    z\n}\n";
+    let file = audit2_parse_source(src);
+    let result = crate::lint::Linter::new().lint(&file, src);
+    let w007: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("W007"))
+        .collect();
+    assert_eq!(
+        w007.len(),
+        1,
+        "W007 must survive a preceding `\"a\\\\\"` literal: {:?}",
+        result.diagnostics
+    );
+    // The report must point at the FIRST paren of the code `((` (line 3).
+    assert_eq!(w007[0].span.start_line, 3, "W007 span misplaced");
+}
+
+#[test]
+fn audit2_tool_lint_w007_skips_string_and_comment_content() {
+    // Negative control for the X-9 rewrite: `((` inside strings and comments
+    // must stay silent; exactly the one code `((` reports.
+    let src = "func main() -> i64 {\n    let s = \"(( not code ))\"\n    // (( line comment\n    /* (( block comment */\n    let y = ((len(s)))\n    y\n}\n";
+    let file = audit2_parse_source(src);
+    let result = crate::lint::Linter::new().lint(&file, src);
+    let w007: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("W007"))
+        .collect();
+    assert_eq!(
+        w007.len(),
+        1,
+        "only the code `((` may report W007: {:?}",
+        result.diagnostics
+    );
+    assert_eq!(w007[0].span.start_line, 5, "W007 span on wrong line");
+}
+
+// ═══════════════════════════════════════════════════════════════
 // §13 LOW — disasm must use the capped read helper
 // ═══════════════════════════════════════════════════════════════
 

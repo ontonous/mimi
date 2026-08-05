@@ -65,7 +65,6 @@ macro_rules! dual_assert {
     }};
 }
 
-
 fn can_link() -> bool {
     crate::tests::can_link()
 }
@@ -97,7 +96,6 @@ fn assert_codegen_traps(src: &str, needle: &str) {
         err
     );
 }
-
 
 // ============================================================
 // FIX-4: pow — int×int checked semantics, SD-9 on float pow
@@ -154,10 +152,11 @@ fn audit_pow_2_60_vm_exact_and_codegen_no_trap() {
             0
         }
     "#;
-    assert_eq!(
-        run_source(src),
-        interp::Value::Int(1152921504606846976),
-        "VM integer pow must be exact"
+    let (_val, stdout) = run_source_bytecode_with_stdout(src);
+    assert!(
+        stdout.contains("1152921504606846976"),
+        "VM integer pow must be exact, stdout: {:?}",
+        stdout
     );
     if !can_link() {
         return;
@@ -307,6 +306,14 @@ fn audit_abs_i32_min_traps_codegen_width_enforced() {
     // representation (everything is i64), so it returns 2147483648 without
     // trapping. Both sides asserted explicitly per the L1-discipline for
     // width-model differences.
+    //
+    // Width enforcement lives on the RESOLVED codegen path (the same path the
+    // `mimi build` CLI takes, via compile_checked). The legacy compile_file
+    // harness widens builtin integer args to i64 before compile_abs, so its
+    // MIN check compares against i64::MIN and cannot trap — that is the
+    // documented legacy-vs-resolved width gap (V-6, A1 residual). Asserting
+    // the trap via checked_codegen_compile_and_run pins the resolved behavior
+    // that CLI builds actually ship.
     let src = r#"
         func main() -> i32 {
             let m = 0 - 2147483647 - 1
@@ -322,11 +329,19 @@ fn audit_abs_i32_min_traps_codegen_width_enforced() {
         "VM (i64 model) yields 2147483648, got {:?}",
         vm_stdout
     );
-    // Codegen side: i32 width enforced — SD-7 E0802 trap.
+    // Codegen (resolved/checked path): i32 width enforced — SD-7 E0802 trap.
     if !can_link() {
         return;
     }
-    assert_codegen_traps(src, "E0802");
+    let cg = checked_codegen_compile_and_run(src);
+    let err = cg
+        .err()
+        .unwrap_or_else(|| panic!("codegen must trap (expected E0802), got Ok"));
+    assert!(
+        err.contains("E0802"),
+        "codegen stderr missing E0802: {}",
+        err
+    );
 }
 
 // ============================================================

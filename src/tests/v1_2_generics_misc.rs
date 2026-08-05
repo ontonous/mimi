@@ -304,7 +304,7 @@ func main() -> i32 {
     let err = check_source(src).unwrap_err();
     assert!(err
         .iter()
-        .any(|d| d.message.contains("expects 1") && d.message.contains("got 2")));
+        .any(|d| d.message.contains("expects 1") && d.message.contains("got more")));
 }
 
 #[test]

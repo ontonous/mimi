@@ -2,10 +2,106 @@ use super::super::call_try_basic_value;
 use super::super::CallSiteValueExt;
 use super::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
+    // ── Audit wave2 (red line §1.4, ruling §1.1.1): net NULL contract ──
+    //
+    // Runtime `mimi_recv` / `mimi_http_get` / `mimi_http_post` return NULL
+    // on error and do NOT abort (runtime/net.rs). The VM builtins are clean:
+    // they raise `Err(InterpError)` → the program fails loud with the error
+    // message (interp/bytecode/builtins/net.rs). Old codegen packed
+    // {NULL, 0} into a Mimi string (recv) or substituted an empty string
+    // (http), turning real network errors (ECONNRESET, refused, …) into
+    // Ok(dangling/empty string) on the compiled path — the exact blind spot
+    // that shipped in Wave-1's stdlib net change. Fix: NULL → trap with a
+    // VM-shaped message. KNOWN LIMITATION (escalated to agent RT):
+    // `mimi_recv` also returns NULL for the n == 0 case (peer closed /
+    // EOF), which the VM maps to Ok(""); until the runtime distinguishes
+    // EOF from error, compiled `recv` traps on EOF too. The `Err` shape
+    // contract (deliverable for STDLIB's codegen-side assertions):
+    //   recv:     "recv: buf_size must be positive"            (buf_size<=0)
+    //   recv:     "recv() failed: fd=%ld, buf_size=%ld (network error)"
+    //   http_get: "http_get: request failed"
+    //   http_post:"http_post: request failed"
+
+    /// Trap with a static message via `mimi_runtime_abort` (noreturn), then
+    /// mark the block unreachable. Caller arranges control flow around it.
+    fn emit_net_trap(&self, message: &str, label: &str) -> MimiResult<()> {
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(message, &format!("{}_msg", label))
+            .map_err(|e| format!("global string error: {}", e))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            &format!("{}_abort", label),
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| format!("unreachable error: {}", e))?;
+        Ok(())
+    }
+
+    /// Trap with a message formatted from two i64 values (recv fd/buf_size).
+    fn emit_net_trap_2i(
+        &self,
+        fmt_str: &str,
+        a: inkwell::values::IntValue<'ctx>,
+        b: inkwell::values::IntValue<'ctx>,
+        label: &str,
+    ) -> MimiResult<()> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let buf = self.build_alloca(i64_ty.array_type(16), &format!("{}_msg", label))?;
+        let fmt_global = self
+            .builder
+            .build_global_string_ptr(fmt_str, &format!("{}_fmt", label))
+            .map_err(|e| format!("global string error: {}", e))?;
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            self.module.add_function(
+                "snprintf",
+                i32_ty.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64_ty),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    ],
+                    true,
+                ),
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        self.builder
+            .build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(128, false)),
+                    BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
+                    BasicMetadataValueEnum::IntValue(a),
+                    BasicMetadataValueEnum::IntValue(b),
+                ],
+                &format!("{}_snprintf", label),
+            )
+            .map_err(|e| format!("snprintf error: {}", e))?;
+        let abort_fn = self.get_or_declare_abort_fn();
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(buf)],
+            &format!("{}_abort", label),
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| format!("unreachable error: {}", e))?;
+        Ok(())
+    }
+
     pub(super) fn compile_socket(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -296,6 +392,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("recv: no enclosing function".to_string()))?;
+        // VM parity (interp builtin_recv): buf_size <= 0 is a loud error
+        // BEFORE any fd use — "recv: buf_size must be positive".
+        let fd64 = if fd.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(fd, i64_ty, "recv_fd_sext")
+                .map_err(|e| format!("sext error: {}", e))?
+        } else {
+            fd
+        };
+        let bs64 = if buf_size.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(buf_size, i64_ty, "recv_bs_sext")
+                .map_err(|e| format!("sext error: {}", e))?
+        } else {
+            buf_size
+        };
+        let bs_bad = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLE,
+                bs64,
+                i64_ty.const_zero(),
+                "recv_bs_bad",
+            )
+            .map_err(|e| format!("icmp error: {}", e))?;
+        let bs_ok_bb = self.context.append_basic_block(function, "recv_bs_ok_bb");
+        let bs_trap_bb = self.context.append_basic_block(function, "recv_bs_trap_bb");
+        self.builder
+            .build_conditional_branch(bs_bad, bs_trap_bb, bs_ok_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+        self.builder.position_at_end(bs_trap_bb);
+        self.emit_net_trap("recv: buf_size must be positive", "recv_bs")?;
+        self.builder.position_at_end(bs_ok_bb);
+
         // Allocate an i64 on stack to receive out_len
         let out_len_alloca = self
             .builder
@@ -310,8 +444,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::IntValue(fd),
-                    BasicMetadataValueEnum::IntValue(buf_size),
+                    BasicMetadataValueEnum::IntValue(fd64),
+                    BasicMetadataValueEnum::IntValue(bs64),
                     BasicMetadataValueEnum::PointerValue(out_len_alloca),
                 ],
                 "recv_call",
@@ -320,6 +454,32 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_recv returned void")?
             .into_pointer_value();
+        // Audit wave2 (red line §1.4): mimi_recv returns NULL on error and
+        // does NOT abort; the old code packed {NULL, 0} into a Mimi string
+        // so ECONNRESET-style failures surfaced as Ok(dangling string).
+        // The VM raises Err("recv() failed: …") instead — trap loud. NOTE:
+        // the runtime also NULLs on n == 0 (peer EOF), which the VM maps to
+        // Ok(""); EOF parity needs a runtime contract change (agent RT) and
+        // is escalated in the deliverable.
+        let is_null = self
+            .builder
+            .build_is_null(result, "recv_is_null")
+            .map_err(|e| format!("is_null error: {}", e))?;
+        let ok_bb = self.context.append_basic_block(function, "recv_ok_bb");
+        let null_trap_bb = self
+            .context
+            .append_basic_block(function, "recv_null_trap_bb");
+        self.builder
+            .build_conditional_branch(is_null, null_trap_bb, ok_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+        self.builder.position_at_end(null_trap_bb);
+        self.emit_net_trap_2i(
+            "recv() failed: fd=%ld, buf_size=%ld (network error)",
+            fd64,
+            bs64,
+            "recv_null",
+        )?;
+        self.builder.position_at_end(ok_bb);
         // NOTE: not registered — returned value owns the allocation
         // Build Mimi string struct {i8*, i64} value directly (not pointer to struct)
         let string_ty = self.context.struct_type(
@@ -386,6 +546,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let url_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("http_get: no enclosing function".to_string())
+        })?;
         let func = self
             .module
             .get_function("mimi_http_get")
@@ -401,37 +564,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_http_get returned void")?
             .into_pointer_value();
-        // audit (MEDIUM): mimi_http_get returns null on error. If null,
-        // substitute a static empty string so downstream strlen doesn't
-        // dereference null (UB). The user-visible behavior matches the
-        // interpreter: empty string on failure.
-        // Reuse the global if it already exists to avoid creating duplicate
-        // globals on repeated http_get calls.
-        let empty_str = if let Some(g) = self.module.get_global("http_empty_str") {
-            g.as_pointer_value()
-        } else {
-            self.builder
-                .build_global_string_ptr("", "http_empty_str")
-                .map_err(|e| format!("global str error: {}", e))?
-                .as_pointer_value()
-        };
+        // Audit wave2 (red line §1.4): mimi_http_get returns NULL on error
+        // (resolve failure, refused, send/recv error, HTTPS unsupported).
+        // The old code substituted an empty string — ECONNRESET & friends
+        // surfaced as Ok("") instead of failing loud like the VM. NULL →
+        // trap; a genuine empty response BODY still arrives as a non-NULL
+        // allocated "" (runtime distinguishes body from failure).
         let is_null = self
             .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                result,
-                self.context
-                    .ptr_type(inkwell::AddressSpace::default())
-                    .const_null(),
-                "http_is_null",
-            )
-            .map_err(|e| format!("icmp error: {}", e))?;
-        let safe_ptr = self
-            .builder
-            .build_select(is_null, empty_str, result, "http_safe_ptr")
-            .map_err(|e| format!("select error: {}", e))?
-            .into_pointer_value();
-        let result = safe_ptr;
+            .build_is_null(result, "http_is_null")
+            .map_err(|e| format!("is_null error: {}", e))?;
+        let ok_bb = self.context.append_basic_block(function, "http_get_ok_bb");
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "http_get_null_trap_bb");
+        self.builder
+            .build_conditional_branch(is_null, trap_bb, ok_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+        self.builder.position_at_end(trap_bb);
+        self.emit_net_trap("http_get: request failed", "http_get_null")?;
+        self.builder.position_at_end(ok_bb);
         // NOTE: not registered — returned value owns the allocation
         // Build Mimi string struct {i8*, i64}
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -493,6 +645,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let url_ptr = self.extract_raw_str_ptr(&args[0])?;
         let body_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("http_post: no enclosing function".to_string())
+        })?;
         let func = self
             .module
             .get_function("mimi_http_post")
@@ -511,33 +666,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_http_post returned void")?
             .into_pointer_value();
-        // audit (MEDIUM): null-safe substitution (same as http_get)
-        // Reuse the global if it already exists to avoid duplicates.
-        let empty_str = if let Some(g) = self.module.get_global("http_post_empty_str") {
-            g.as_pointer_value()
-        } else {
-            self.builder
-                .build_global_string_ptr("", "http_post_empty_str")
-                .map_err(|e| format!("global str error: {}", e))?
-                .as_pointer_value()
-        };
+        // Audit wave2 (red line §1.4): NULL means failure — trap loud like
+        // the VM (old code substituted an empty string → silent Ok("")).
         let is_null = self
             .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                result,
-                self.context
-                    .ptr_type(inkwell::AddressSpace::default())
-                    .const_null(),
-                "http_post_is_null",
-            )
-            .map_err(|e| format!("icmp error: {}", e))?;
-        let safe_ptr = self
-            .builder
-            .build_select(is_null, empty_str, result, "http_post_safe_ptr")
-            .map_err(|e| format!("select error: {}", e))?
-            .into_pointer_value();
-        let result = safe_ptr;
+            .build_is_null(result, "http_post_is_null")
+            .map_err(|e| format!("is_null error: {}", e))?;
+        let ok_bb = self.context.append_basic_block(function, "http_post_ok_bb");
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "http_post_null_trap_bb");
+        self.builder
+            .build_conditional_branch(is_null, trap_bb, ok_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+        self.builder.position_at_end(trap_bb);
+        self.emit_net_trap("http_post: request failed", "http_post_null")?;
+        self.builder.position_at_end(ok_bb);
         // NOTE: not registered — returned value owns the allocation
         // Build Mimi string struct {i8*, i64}
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());

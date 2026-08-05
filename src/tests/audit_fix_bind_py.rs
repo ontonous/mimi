@@ -16,7 +16,6 @@ use crate::ast::{AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Type};
 use crate::ffi::contract::ERRNO_CHECK_FUNC_NAMES;
 use crate::ffi::py_bind::PyBindGenerator;
 
-
 fn fixture_meta() -> AstNodeMeta {
     AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("test.audit_bind_py"))
 }

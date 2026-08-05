@@ -220,6 +220,71 @@ fn collect_i32_definedness(
                 collect_i32_definedness(&tail, vars, obligations)?;
             }
         }
+        Expr::Match(scrutinee, arms) => {
+            // V-1 (audit 2026-08-05): this arm was missing entirely — a
+            // division inside a match arm body generated no obligation and
+            // `ensures` that hold under Z3's uninterpreted `div x 0` verified
+            // Proven while the runtime traps with E0801.
+            collect_i32_definedness(scrutinee, vars, obligations)?;
+            // The scrutinee term drives pattern-condition gating; when it is
+            // not int-encodable, arm obligations fall back to unconditional
+            // (conservative — never weaker than the runtime semantics).
+            let matched = expr_to_z3_int(scrutinee, vars);
+            for arm in arms {
+                let pattern_cond = matched
+                    .as_ref()
+                    .and_then(|m| pattern_matches_z3(m, &arm.pat, vars));
+
+                // The guard is evaluated whenever the pattern matched, so its
+                // definedness is gated by the pattern condition alone.
+                if let Some(guard) = &arm.guard {
+                    let mut guard_obligations = Vec::new();
+                    collect_i32_definedness(guard, vars, &mut guard_obligations)?;
+                    for obligation in &mut guard_obligations {
+                        if let Some(pc) = &pattern_cond {
+                            obligation.condition = pc.implies(&obligation.condition);
+                        }
+                    }
+                    obligations.extend(guard_obligations);
+                }
+
+                // The body runs only when the pattern matched AND the guard
+                // (if any) evaluated true.
+                let mut body_obligations = Vec::new();
+                collect_i32_definedness(&arm.body, vars, &mut body_obligations)?;
+                let guard_cond = arm.guard.as_ref().and_then(|g| expr_to_z3_bool(g, vars));
+                for obligation in &mut body_obligations {
+                    let mut antecedents: Vec<&Z3Bool> = Vec::new();
+                    if let Some(pc) = &pattern_cond {
+                        antecedents.push(pc);
+                    }
+                    if let Some(gc) = &guard_cond {
+                        antecedents.push(gc);
+                    }
+                    if !antecedents.is_empty() {
+                        obligation.condition =
+                            Z3Bool::and(&antecedents).implies(&obligation.condition);
+                    }
+                }
+                obligations.extend(body_obligations);
+            }
+        }
+        Expr::Call(callee, call_args) => {
+            // V-1 (audit 2026-08-05): this arm was missing entirely — a
+            // division inside a call argument generated no obligation
+            // (arguments are evaluated before the call).
+            collect_i32_definedness(callee, vars, obligations)?;
+            for arg in call_args {
+                collect_i32_definedness(arg, vars, obligations)?;
+            }
+        }
+        Expr::Field(obj, _) | Expr::TupleIndex(obj, _) => {
+            collect_i32_definedness(obj, vars, obligations)?;
+        }
+        // Note: Lambda bodies intentionally generate no obligations here —
+        // their divisions execute in the (unknown) higher-order call context,
+        // not at lambda construction. Modeling that requires HOF semantics the
+        // AST path does not have (conservative gap, same as pre-audit).
         Expr::Spawn(inner) | Expr::Await(inner) => {
             collect_i32_definedness(inner, vars, obligations)?;
         }
@@ -249,6 +314,13 @@ fn field_var_name(expr: &Expr) -> String {
 
 /// 0.31.28: Check if an expression is f64-typed (Float literal or f64 variable).
 /// Used to reject f64 arithmetic in the AST path (NotInTrustedSubset).
+///
+/// H-23 (audit 2026-08-05): recognition is RECURSIVE, mirroring
+/// `is_real_expr`. The leaf-only version let composite f64 expressions
+/// (match/if/block tails, call results, nested fields) bypass the P0-2
+/// rejection guard in `expr_to_z3_bool` and get encoded as exact Z3 Reals
+/// (`invariant` statements force the AST path, where this guard is the only
+/// f64 defense). Any composite whose sub-expression is f64 is treated as f64.
 fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
     match expr.unlocated() {
         Expr::Literal(Lit::Float(_)) => true,
@@ -262,9 +334,45 @@ fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
                 let old_name = format!("old_{}", name);
                 vars.get_real(&old_name).is_some() && vars.get_int(&old_name).is_none()
             } else {
+                // old(p.x) — mirror is_real_expr's nested-access handling.
+                let old_name = format!("old_{}", field_var_name(inner));
+                vars.is_real(&old_name)
+            }
+        }
+        Expr::Field(obj, field) => {
+            let key = format!("{}_{}", field_var_name(obj), field);
+            vars.is_real(&key)
+        }
+        Expr::TupleIndex(obj, idx) => {
+            let key = format!("{}_t{}", field_var_name(obj), idx);
+            vars.is_real(&key)
+        }
+        Expr::Binary(_, lhs, rhs) => is_f64_expr(lhs, vars) || is_f64_expr(rhs, vars),
+        Expr::Unary(_, inner) => is_f64_expr(inner, vars),
+        Expr::Block(stmts) => block_tail_expr(stmts).is_some_and(|e| is_f64_expr(&e, vars)),
+        // Beyond is_real_expr (which has no If arm): closing the If tail here
+        // pre-empts the exact-Real encoding of f64 values wrapped in if-exprs.
+        Expr::If { then_, else_, .. } => {
+            block_tail_expr(then_).is_some_and(|e| is_f64_expr(&e, vars))
+                || else_
+                    .as_ref()
+                    .and_then(|b| block_tail_expr(b))
+                    .is_some_and(|e| is_f64_expr(&e, vars))
+        }
+        Expr::Match(expr, arms) => {
+            is_f64_expr(expr, vars) || arms.iter().any(|a| is_f64_expr(&a.body, vars))
+        }
+        Expr::Call(callee, args) => {
+            if let Expr::Ident(name) = callee.unlocated() {
+                if name == "len" {
+                    return false; // len() always returns int
+                }
+                args.iter().any(|a| is_f64_expr(a, vars))
+            } else {
                 false
             }
         }
+        Expr::Spawn(inner) | Expr::Await(inner) => is_f64_expr(inner, vars),
         _ => false,
     }
 }

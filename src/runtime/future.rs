@@ -167,20 +167,31 @@ pub extern "C" fn mimi_future_alloc(result_size: u64) -> *mut std::ffi::c_void {
 /// Mark a freed intent and release the owner ref. The allocation is
 /// deallocated when the refcount reaches zero (see `future_release`).
 ///
-/// SAFETY precondition (unchanged by the audit fix): `fut` must point at a
-/// live future allocation (not yet fully freed); a double-free dereferences
-/// the header before the retain check can reject it.
+/// Audit 2026-08-05 (N-3): the retain check now runs BEFORE the header
+/// write. The old code stored the freed-intent first, so a double-free
+/// WROTE to the already-freed header (UAF write) before the refcount could
+/// reject it — every other future API has the retain precheck; free was the
+/// exception. Standard Arc-class boundary remains: a double-free of a FULLY
+/// deallocated pointer still touches freed memory to read the refcount (no
+/// live registry exists for bare pointers), but it is now a rejected read,
+/// never a write.
 #[no_mangle]
 pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
-    // SAFETY: non-null pointer from mimi_future_alloc (precondition above).
+    // SAFETY: non-null pointer from mimi_future_alloc (precondition above);
+    // the retain below rejects already-freed futures before any write.
     unsafe {
         let fut = fut as *mut MimiFutureHeader;
-        // Mark freed-intent so set_completed CAS fails; then drop owner ref.
+        if !future_try_retain(fut) {
+            return; // already fully freed — reject before touching the header
+        }
+        // SAFETY: successfully retained → the allocation is live for the
+        // store. Mark freed-intent so a concurrent set_completed CAS fails.
         (*fut).completed.store(-1, Ordering::Release);
-        future_release(fut);
+        future_release(fut); // drop the ref taken above
+        future_release(fut); // drop the owner ref that free() releases
     }
 }
 

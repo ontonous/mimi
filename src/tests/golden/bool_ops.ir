@@ -752,13 +752,40 @@ entry:
   store i1 true, ptr %t, align 1
   store i1 false, ptr %f, align 1
   %t1 = load i1, ptr %t, align 1
+  br i1 %t1, label %sc_rhs, label %sc_const
+
+sc_rhs:                                           ; preds = %entry
   %f2 = load i1, ptr %f, align 1
-  %and = and i1 %t1, %f2
-  %t3 = load i1, ptr %t, align 1
-  %f4 = load i1, ptr %f, align 1
-  %or = or i1 %t3, %f4
-  %or5 = or i1 %and, %or
-  ret i1 %or5
+  br label %sc_merge
+
+sc_const:                                         ; preds = %entry
+  br label %sc_merge
+
+sc_merge:                                         ; preds = %sc_const, %sc_rhs
+  %sc_result = phi i1 [ %f2, %sc_rhs ], [ false, %sc_const ]
+  br i1 %sc_result, label %sc_const4, label %sc_rhs3
+
+sc_rhs3:                                          ; preds = %sc_merge
+  %t6 = load i1, ptr %t, align 1
+  br i1 %t6, label %sc_const8, label %sc_rhs7
+
+sc_const4:                                        ; preds = %sc_merge
+  br label %sc_merge5
+
+sc_merge5:                                        ; preds = %sc_const4, %sc_merge9
+  %sc_result12 = phi i1 [ %sc_result11, %sc_merge9 ], [ true, %sc_const4 ]
+  ret i1 %sc_result12
+
+sc_rhs7:                                          ; preds = %sc_rhs3
+  %f10 = load i1, ptr %f, align 1
+  br label %sc_merge9
+
+sc_const8:                                        ; preds = %sc_rhs3
+  br label %sc_merge9
+
+sc_merge9:                                        ; preds = %sc_const8, %sc_rhs7
+  %sc_result11 = phi i1 [ %f10, %sc_rhs7 ], [ true, %sc_const8 ]
+  br label %sc_merge5
 }
 
 define {} @Main__run__from_Single({} %0) {

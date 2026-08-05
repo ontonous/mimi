@@ -104,6 +104,14 @@ impl Formatter {
     ///
     /// A7: Uses `source_scan::SourceScanner` for correct string/comment tracking.
     /// String literals and comments are copied verbatim.
+    ///
+    /// H-29 (full audit 2026-08-05 §2.9): every emitted char carries a
+    /// `collapsible` flag (true only for Code-region chars). The final
+    /// space-collapse pass runs over that tagged stream, so consecutive spaces
+    /// are collapsed in CODE only. The old code collapsed over the flattened
+    /// output, silently rewriting string-literal and comment bodies
+    /// (`let s = "a    b"` → `"a b"`), which `mimi fmt` then wrote back to
+    /// disk — silent corruption of user source.
     fn normalize_spacing(line: &str) -> String {
         // Quick check: if no known punctuation needing normalization, skip
         if !line.contains(&['{', ',', ':', '-', '=', '+', '*', '<', '>', '|', '&'][..]) {
@@ -114,17 +122,19 @@ impl Formatter {
         let scanned = scanner.scan();
         let chars: Vec<char> = scanned.iter().map(|(c, _)| *c).collect();
         let regions: Vec<crate::source_scan::Region> = scanned.iter().map(|(_, r)| *r).collect();
-        let mut out = String::with_capacity(line.len() + 8);
+        // (char, collapsible) — see H-29 note above.
+        let mut out: Vec<(char, bool)> = Vec::with_capacity(line.len() + 8);
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
             let region = regions[i];
 
             // Inside string/char/comment: copy verbatim and handle escapes.
+            // Verbatim chars are NOT collapsible — their spaces are data.
             if region != crate::source_scan::Region::Code {
-                out.push(c);
+                out.push((c, false));
                 if c == '\\' && i + 1 < chars.len() {
-                    out.push(chars[i + 1]);
+                    out.push((chars[i + 1], false));
                     i += 1;
                 }
                 i += 1;
@@ -142,13 +152,13 @@ impl Formatter {
                         && chars[i - 1] != ' '
                         && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
                     {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
-                    out.push_str(op);
+                    out.extend(op.chars().map(|ch| (ch, true)));
                     // Space after (unless at end / already spaced / closing punct)
                     if let Some(&after) = chars.get(i + 2) {
                         if after != ' ' && !matches!(after, ')' | ']' | '}' | ',' | ';') {
-                            out.push(' ');
+                            out.push((' ', true));
                         }
                     }
                     i += 2;
@@ -163,39 +173,40 @@ impl Formatter {
                 '{' => {
                     // Ensure space before `{` (unless at start or preceded by space)
                     if i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '(' {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
-                    out.push('{');
+                    out.push(('{', true));
                     // Ensure space after `{` (unless at end or followed by space/})
                     if i + 1 < chars.len() && chars[i + 1] != ' ' && chars[i + 1] != '}' {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
                 }
                 '}' => {
-                    // Normalize `}` to have space before if needed
-                    if i > 0 && chars[i - 1] == '{' {
-                        // single-line block: already handled
+                    // Ensure space before `}` (unless at start or preceded by
+                    // space or `{` — `{}` empty block stays tight).
+                    if i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '{' {
+                        out.push((' ', true));
                     }
-                    out.push('}');
+                    out.push(('}', true));
                 }
                 ',' => {
-                    out.push(',');
+                    out.push((',', true));
                     // Ensure space after `,` (unless at end or already space)
                     if i + 1 < chars.len() && chars[i + 1] != ' ' {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
                 }
                 ':' => {
                     // Avoid double colon ::
                     if i + 1 < chars.len() && chars[i + 1] == ':' {
-                        out.push(':');
-                        out.push(':');
+                        out.push((':', true));
+                        out.push((':', true));
                         i += 1;
                     } else {
-                        out.push(':');
+                        out.push((':', true));
                         // Space after `:`  (e.g. `a: i32`, not `a:i32`)
                         if i + 1 < chars.len() && chars[i + 1] != ' ' && chars[i + 1] != ':' {
-                            out.push(' ');
+                            out.push((' ', true));
                         }
                     }
                 }
@@ -205,36 +216,39 @@ impl Formatter {
                         || (chars[i - 1] != ' '
                             && !matches!(chars.get(i - 1), Some('<' | '>' | '!' | '=')))
                     {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
-                    out.push('=');
+                    out.push(('=', true));
                     // Space after `=`
                     if i + 1 < chars.len() && chars[i + 1] != ' ' {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
                 }
                 '-' => {
                     // FMT-OP1: `->` and `-=` are consumed by the multi-char
                     // pre-match above; a bare `-` is copied verbatim
                     // (existing behavior: subtraction is not re-spaced).
-                    out.push('-');
+                    out.push(('-', true));
                 }
                 '/' => {
                     // DAT-C1 (deep audit): don't insert spaces inside // or /* or */
                     // comments — this corrupts the comment syntax.
+                    // (Defensive: SourceScanner normally classifies `//` / `/*`
+                    // into comment regions before this arm can see them, so the
+                    // verbatim region branch above handles the content.)
                     if i + 1 < chars.len() && chars[i + 1] == '/' {
                         // Line comment: copy rest of line verbatim
-                        out.push('/');
-                        out.push('/');
+                        out.push(('/', false));
+                        out.push(('/', false));
                         i += 1;
                         while i + 1 < chars.len() {
                             i += 1;
-                            out.push(chars[i]);
+                            out.push((chars[i], false));
                         }
                     } else if i + 1 < chars.len() && chars[i + 1] == '*' {
                         // Block comment start: copy verbatim
-                        out.push('/');
-                        out.push('*');
+                        out.push(('/', false));
+                        out.push(('*', false));
                         i += 1;
                     } else {
                         // Division operator: normal spacing
@@ -242,14 +256,14 @@ impl Formatter {
                             && chars[i - 1] != ' '
                             && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
                         {
-                            out.push(' ');
+                            out.push((' ', true));
                         }
-                        out.push('/');
+                        out.push(('/', true));
                         if i + 1 < chars.len()
                             && chars[i + 1] != ' '
                             && !matches!(chars.get(i + 1), Some(')' | ']' | '}' | ',' | ';'))
                         {
-                            out.push(' ');
+                            out.push((' ', true));
                         }
                     }
                 }
@@ -259,34 +273,40 @@ impl Formatter {
                         && chars[i - 1] != ' '
                         && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
                     {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
-                    out.push(c);
+                    out.push((c, true));
                     // Space after operator
                     if i + 1 < chars.len()
                         && chars[i + 1] != ' '
                         && !matches!(chars.get(i + 1), Some(')' | ']' | '}' | ',' | ';'))
                     {
-                        out.push(' ');
+                        out.push((' ', true));
                     }
                 }
-                _ => out.push(c),
+                _ => out.push((c, true)),
             }
             i += 1;
         }
-        // Collapse multiple spaces
+        // H-29: collapse consecutive spaces in CODE regions only. Non-code
+        // spaces (string/char/comment bodies) are preserved verbatim and also
+        // break a collapsing run. Inserted whitespace is always code-region.
         let mut result = String::with_capacity(out.len());
-        let mut prev_space = false;
-        for c in out.chars() {
+        let mut prev_code_space = false;
+        for (c, collapsible) in out {
             if c == ' ' {
-                if !prev_space {
-                    result.push(c);
+                if collapsible {
+                    if prev_code_space {
+                        continue;
+                    }
+                    prev_code_space = true;
+                } else {
+                    prev_code_space = false;
                 }
-                prev_space = true;
             } else {
-                result.push(c);
-                prev_space = false;
+                prev_code_space = false;
             }
+            result.push(c);
         }
         result.trim().to_string()
     }
