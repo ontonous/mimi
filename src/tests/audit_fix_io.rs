@@ -184,6 +184,59 @@ func main() -> i32 {
     );
 }
 
+// ── FIX 2b [CRITICAL]: input() shape — VM must return `string`, not Result ──
+// §8-#86 (audit-2026-08-05): the checker types `input()` as `string` and
+// std/io.mimi's `input_line` consumes it with "" as the EOF sentinel. The VM
+// builtin returned an Ok/Err variant, so `line == ""` compared a variant
+// against a string → never fired → input_line always Ok on EOF. The codegen
+// backend already returned a bare string; the VM now aligns.
+
+#[test]
+fn io_fix_input_vm_eof_is_empty_string() {
+    // VM path with the test runner's stdin (non-tty → read_line returns
+    // 0 bytes → EOF → ""). Pre-fix the value was an Ok("") variant and the
+    // `s == ""` comparison fell to the else arm.
+    let src = r#"
+func main() -> i32 {
+    let s = input()
+    if s == "" {
+        1
+    } else {
+        2
+    }
+}
+"#;
+    let val = run_source(src);
+    assert_eq!(
+        val,
+        interp::Value::Int(1),
+        "EOF input() must yield the empty string sentinel"
+    );
+}
+
+#[test]
+fn io_fix_input_line_vm_eof_returns_err() {
+    // std/io.mimi `input_line` wraps input() with the "" sentinel → Err on
+    // EOF. Pre-fix the VM gave input() a Result shape, so `line == ""`
+    // compared variant vs string and input_line returned Ok("") on EOF.
+    let src = r#"
+func main() -> i32 {
+    let r = input_line()
+    if r.is_err() {
+        1
+    } else {
+        2
+    }
+}
+"#;
+    let val = run_with_stdlib("io.mimi", src);
+    assert_eq!(
+        val,
+        interp::Value::Int(1),
+        "EOF input_line() must be Err via the empty-string sentinel"
+    );
+}
+
 // ── FIX 3 [HIGH]: assert(cond, msg) — message is data, not a format ──
 
 #[test]

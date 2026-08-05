@@ -864,16 +864,15 @@ fn builtin_eprintln(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 }
 
 fn builtin_input(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+    // §8-#86 (audit-2026-08-05): align with the checker type and the codegen
+    // backend — `input()` is typed `string`, and std/io.mimi's `input_line`
+    // consumes it as a plain string with "" as the EOF sentinel. The VM used
+    // to return a Result<string,string> variant, so `line == ""` never fired
+    // on EOF (variant vs string compare) and input_line always returned Err.
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
-        Ok(_) => Ok(Value::Variant(
-            "Ok".into(),
-            vec![Value::String(input.trim_end().to_string())],
-        )),
-        Err(e) => Ok(Value::Variant(
-            "Err".into(),
-            vec![Value::String(e.to_string())],
-        )),
+        Ok(_) => Ok(Value::String(input.trim_end().to_string())),
+        Err(_) => Ok(Value::String(String::new())),
     }
 }
 
