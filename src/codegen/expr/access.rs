@@ -592,7 +592,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(list_ty, pv, 0, "list.len_check")
             .is_ok()
         {
-            self.check_list_bounds(pv, idx_iv, "index read")?;
+            // §7-#74: reads wrap negative indices (VM parity).
+            let idx_iv = self.check_list_bounds(pv, idx_iv, true, "index read")?;
             let elem_int = self.load_list_element_i64(pv, idx_iv)?;
             if let Some(converted) = self.try_convert_list_element(elem_int, obj, vars)? {
                 return Ok(converted);
@@ -620,7 +621,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_alloca = self.build_alloca(sv_ty, "list_tmp")?;
         self.build_store(list_alloca, sv)?;
         let idx_iv = require_int_index(idx_val)?;
-        self.check_list_bounds(list_alloca, idx_iv, "index read")?;
+        // §7-#74: reads wrap negative indices (VM parity).
+        let idx_iv = self.check_list_bounds(list_alloca, idx_iv, true, "index read")?;
         let elem_int = self.load_list_element_i64(list_alloca, idx_iv)?;
         if let Some(converted) = self.try_convert_list_element(elem_int, obj, vars)? {
             return Ok(converted);
@@ -695,7 +697,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
-        self.check_list_bounds(list_ptr, idx_iv, "borrowed index")?;
+        // §7-#74: borrowed index reads wrap negative indices (VM parity).
+        let idx_iv = self.check_list_bounds(list_ptr, idx_iv, true, "borrowed index")?;
 
         let list_ty = self.standard_list_type();
         let data_gep = self

@@ -248,6 +248,91 @@ func main() -> i32 {
     assert_eq!(native.trim(), "42", "codegen: shared deref");
 }
 
+// ─── §7-#74 — legacy list index: negative reads must wrap (VM parity) ───────
+
+#[test]
+fn audit_h74_negative_index_read_wraps_both_backends() {
+    // CRITICAL: legacy check_list_bounds compared with UGE, so a negative
+    // index (huge unsigned) ALWAYS aborted — while the VM and the resolved
+    // emitter wrap reads (Python-style: xs[-1] is the last element) and trap
+    // only when the wrap stays negative or lands >= len. Now aligned.
+    let src = r#"
+func main() -> i32 {
+    let xs = [10, 20, 30]
+    println(xs[0 - 1])
+    println(xs[0 - 3])
+    0
+}
+"#;
+    check_source(src).expect("negative index read checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "30\n10", "bytecode: negative reads wrap");
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src).expect("codegen negative index read");
+    assert_eq!(native.trim(), "30\n10", "codegen: negative reads wrap");
+}
+
+#[test]
+fn audit_h74_negative_index_write_traps_both_backends() {
+    // VM ListSet parity: writes do NOT wrap — a negative index is a hard
+    // bounds error (E0803), on both backends.
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    xs[0 - 1] = 99
+    println(xs[2])
+    0
+}
+"#;
+    check_source(src).expect("negative index write checks");
+    let vm_res = run_source_result(src);
+    assert!(
+        vm_res.is_err(),
+        "VM: negative write must trap, got {:?}",
+        vm_res
+    );
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src);
+    assert!(
+        native.is_err(),
+        "codegen: negative write must trap, got {:?}",
+        native
+    );
+}
+
+#[test]
+fn audit_h74_wrap_past_front_traps_both_backends() {
+    // A negative read that stays negative after the wrap (|idx| > len) is
+    // still OOB and must trap, not read garbage.
+    let src = r#"
+func main() -> i32 {
+    let xs = [10, 20, 30]
+    println(xs[0 - 4])
+    0
+}
+"#;
+    check_source(src).expect("wrap-past-front checks");
+    let vm_res = run_source_result(src);
+    assert!(
+        vm_res.is_err(),
+        "VM: wrap past front must trap, got {:?}",
+        vm_res
+    );
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src);
+    assert!(
+        native.is_err(),
+        "codegen: wrap past front must trap, got {:?}",
+        native
+    );
+}
+
 // ─── #3 — nested func inside `defer` ─────────────────────────────────────────
 
 #[test]
