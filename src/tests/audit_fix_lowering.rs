@@ -993,3 +993,110 @@ func main() -> i32 {
         "legacy: loop var i64 arithmetic"
     );
 }
+
+// ─── H-11 — ieee_float{} finiteness divergence for `**` and unary `-` ───────
+// codegen authority: Pow routes through check_float_finite (ieee-aware,
+// operator.rs:1378); unary float negation is a bare `0.0 - x` with NO
+// finiteness guard (operator.rs:256). The bytecode VM had Nyet: PowFloat and
+// the NegInt float branch hardcoded is_nan/is_infinite (ignoring ieee_depth,
+// over-strict inside ieee_float{}, divergent vs codegen in both directions),
+// and the resolved scope emitter dropped the scope kind so ieee_float{} did
+// not suspend the trap on the resolved path at all.
+
+#[test]
+fn audit_h11_pow_suspended_inside_ieee_float_both_backends() {
+    // L1: `(-1.0) ** 0.5` is NaN under IEEE 754 — inside `ieee_float { }` it
+    // must pass through on every backend. Pre-fix: VM (PowFloat) and resolved
+    // (scope kind dropped) both trapped E0813; VM's error was "pow", resolved
+    // emitted `mimi_trap_float_not_finite` at the call site.
+    let src = r#"
+func main() -> i32 {
+    let mut p = 0.0
+    ieee_float {
+        p = (-1.0) ** 0.5
+    }
+    if is_nan(p) { println(1) } else { println(0) }
+    0
+}
+"#;
+    check_source(src).expect("ieee_float pow checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "1", "bytecode: pow NaN inside ieee_float");
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved ieee_float pow");
+    assert_eq!(
+        resolved.trim(),
+        "1",
+        "resolved codegen: pow NaN inside ieee_float (was E0813: scope kind dropped)"
+    );
+    let legacy = compile_and_run(src).expect("legacy ieee_float pow");
+    assert_eq!(
+        legacy.trim(),
+        "1",
+        "legacy codegen: pow NaN inside ieee_float"
+    );
+}
+
+#[test]
+fn audit_h11_pow_traps_outside_ieee_float_both_backends() {
+    // Reverse guard: the finiteness trap is still ACTIVE outside the escape
+    // hatch, on all three executors.
+    let src = r#"
+func main() -> i32 {
+    let p = (-1.0) ** 0.5
+    if is_nan(p) { println(1) } else { println(0) }
+    0
+}
+"#;
+    check_source(src).expect("pow outside ieee checks");
+    let vm_res = run_source_result(src);
+    assert!(vm_res.is_err(), "bytecode pow must trap outside ieee_float");
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src);
+    assert!(
+        resolved.is_err(),
+        "resolved codegen pow must trap outside ieee_float"
+    );
+    let legacy = compile_and_run(src);
+    assert!(
+        legacy.is_err(),
+        "legacy codegen pow must trap outside ieee_float"
+    );
+}
+
+#[test]
+fn audit_h11_unary_neg_nan_suspended_inside_ieee_float_both_backends() {
+    // Unary float negation cannot turn a finite value non-finite, and codegen
+    // compiles it to a bare `0.0 - x` (no guard). So `-nan` must pass through
+    // both inside and outside `ieee_float { }`. Pre-fix the VM's NegInt float
+    // branch hard-trapped it inside the block (diverging from codegen).
+    let src = r#"
+func main() -> i32 {
+    let mut n = 0.0
+    ieee_float {
+        let nan = 0.0 / 0.0
+        n = -nan
+    }
+    if is_nan(n) { println(1) } else { println(0) }
+    0
+}
+"#;
+    check_source(src).expect("ieee_float unary neg checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "1",
+        "bytecode: -NaN inside ieee_float must pass through"
+    );
+    if !can_link() {
+        return;
+    }
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved -NaN inside ieee");
+    assert_eq!(resolved.trim(), "1", "resolved: -NaN inside ieee_float");
+    let legacy = compile_and_run(src).expect("legacy -NaN inside ieee");
+    assert_eq!(legacy.trim(), "1", "legacy: -NaN inside ieee_float");
+}

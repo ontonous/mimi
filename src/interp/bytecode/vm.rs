@@ -747,13 +747,16 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame_mut();
                     let result = match &frame.regs[ra as usize] {
                         Value::Float(a) => {
-                            let r = -*a;
-                            if r.is_nan() || r.is_infinite() {
-                                return Err(InterpError::float_error(
-                                    "invalid floating-point result from neg",
-                                ));
-                            }
-                            Value::Float(r)
+                            // H-11 (2026-08-06): unary float negation cannot
+                            // turn a finite value non-finite, and codegen
+                            // compiles it to a bare `0.0 - x` with no
+                            // finiteness guard (operator.rs:256, "fneg"). The
+                            // old hardcoded NaN/Inf trap fired even inside
+                            // `ieee_float { }` where IEEE 754 permits -NaN —
+                            // over-strict and divergent in both directions
+                            // (and inconsistent with NegFloat below). Match
+                            // NegFloat/codegen: no check.
+                            Value::Float(-*a)
                         }
                         other => {
                             let a = match other {
@@ -1193,28 +1196,39 @@ impl<'a> BytecodeVM<'a> {
                     frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::PowFloat { rd, ra, rb } => {
-                    let frame = self.cur_frame_mut();
-                    let a = match &frame.regs[ra as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
-                    };
-                    let b = match &frame.regs[rb as usize] {
-                        Value::Float(v) => *v,
-                        Value::Int(v) => *v as f64,
-                        other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
-                        }
+                    let (a, b) = {
+                        let frame = self.cur_frame();
+                        (
+                            match &frame.regs[ra as usize] {
+                                Value::Float(v) => *v,
+                                Value::Int(v) => *v as f64,
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "expected Float, got {}",
+                                        other
+                                    )))
+                                }
+                            },
+                            match &frame.regs[rb as usize] {
+                                Value::Float(v) => *v,
+                                Value::Int(v) => *v as f64,
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "expected Float, got {}",
+                                        other
+                                    )))
+                                }
+                            },
+                        )
                     };
                     let r = a.powf(b);
-                    if r.is_nan() || r.is_infinite() {
-                        return Err(InterpError::float_error(
-                            "invalid floating-point result from pow",
-                        ));
-                    }
-                    frame.regs[rd as usize] = Value::Float(r);
+                    // H-11 (2026-08-06): route through check_float so
+                    // `ieee_float { }` suspends the finiteness trap for `**`
+                    // too — the old hardcoded is_nan/is_infinite ignored
+                    // ieee_depth, diverging from codegen's check_float_finite
+                    // (operator.rs:1378), which is ieee-aware.
+                    self.check_float(r, "pow")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::BitNot { rd, ra } => {
                     let frame = self.cur_frame_mut();

@@ -710,10 +710,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 Ok(None)
             }
             ResolvedStmtKind::Scope {
-                body: scope_block, ..
+                body: scope_block,
+                kind: scope_kind,
             } => {
-                // Lexical scope: emit the inner block inline.
-                self.emit_block(body, scope_block, frame)?;
+                // H-11 (2026-08-06): `ResolvedScopeKind::IeeeFloat` must mirror
+                // legacy func.rs/block.rs and bump `generator.ieee_depth` so
+                // check_float_finite suspends the finiteness trap inside. The
+                // old `..` unconditionally inline-emitted the block with
+                // ieee_depth stuck at 0, so `(-1.0) ** 0.5` (NaN) trapped
+                // E0813 inside `ieee_float { }` on the resolved path while the
+                // legacy path honored it — an L1/codegen divergence.
+                if matches!(scope_kind, crate::core::ir::ResolvedScopeKind::IeeeFloat) {
+                    self.generator.ieee_depth += 1;
+                    let r = self.emit_block(body, scope_block, frame);
+                    self.generator.ieee_depth -= 1;
+                    r?;
+                } else {
+                    // Lexical scope: emit the inner block inline.
+                    self.emit_block(body, scope_block, frame)?;
+                }
                 Ok(None)
             }
             ResolvedStmtKind::Loop(loop_body) => {
