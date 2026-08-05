@@ -1,9 +1,11 @@
+#[cfg(test)]
 use crate::ast::*;
 
 use super::Checker;
 
 impl<'a> Checker<'a> {
     /// Collect variable names for the test-only raw-AST CFG oracle.
+    #[cfg(test)]
     pub(crate) fn collect_uses_in_expr(expr: &Expr, uses: &mut Vec<String>) {
         match expr.unlocated() {
             Expr::Ident(name) => uses.push(name.clone()),
@@ -126,6 +128,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Collect all variable names used in a statement
+    #[cfg(test)]
     pub(crate) fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut Vec<String>) {
         match stmt.unlocated() {
             Stmt::Expr(e) => Self::collect_uses_in_expr(e, uses),
