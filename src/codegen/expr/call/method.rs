@@ -207,7 +207,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // VM routes the impl body through runtime DynMethodCall with builtin
         // precedence and ran fine). Builtin semantics win for the fixed
         // Set method table (size/len/is_empty/contains/insert/remove/to_list).
-        if obj_type == "set" || obj_type.starts_with("Set") || obj_type.starts_with("set") {
+        // D-2 (audit-2026-08-05): the predicate used `starts_with("Set")` /
+        // `starts_with("set")`, which hijacked ANY user type whose name merely
+        // STARTS with "Set" (e.g. `Settings`, `SetConfig`) into
+        // compile_set_method once a method name collided with the builtin set
+        // table (size/len/is_empty/contains/insert/remove/to_list) and the
+        // checker accepted it. The real set type is boxed as `Set<T>`, so the
+        // guard is now exact: bare `set`/`Set`, or a `Set<` instantiation.
+        if obj_type == "set" || obj_type == "Set" || obj_type.starts_with("Set<") {
             return self.compile_set_method(obj, method_name, args, vars);
         }
 
