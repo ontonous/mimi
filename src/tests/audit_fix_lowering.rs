@@ -122,6 +122,72 @@ func main() -> i32 {
     );
 }
 
+// ─── H-8 — tail bare/wrapper blocks keep their implicit value ───────────────
+
+#[test]
+fn audit_h8_tail_bare_block_implicit_return_both_backends() {
+    // H-8 (full-audit-2026-08-05): a tail bare block (or unsafe/ieee_float/
+    // arena wrapper) carries the function's implicit return value. lowering
+    // dropped it: check passed, build failed (native) / VM returned a wrong
+    // value. Now both backends must agree on 6 + 20 = 26.
+    let src = r#"
+func f() -> i32 {
+    {
+        let x = 5
+        x + 1
+    }
+}
+
+func g() -> i32 {
+    unsafe {
+        let y = 10
+        y * 2
+    }
+}
+
+func main() -> i32 {
+    println(f() + g())
+    0
+}
+"#;
+    check_source(src).expect("tail wrapper blocks check");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "26", "bytecode: tail values must flow");
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src).expect("codegen tail wrapper blocks");
+    assert_eq!(native.trim(), "26", "codegen: tail values must flow");
+}
+
+#[test]
+fn audit_h8_statement_position_wrapper_still_discards_value() {
+    // A wrapper block in statement position (not the tail) must keep
+    // discarding its value — only the tail contributes the implicit return.
+    let src = r#"
+func f() -> i32 {
+    unsafe {
+        let x = 99
+        x
+    }
+    42
+}
+
+func main() -> i32 {
+    println(f())
+    0
+}
+"#;
+    check_source(src).expect("statement-position wrapper checks");
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "42", "bytecode: statement value discarded");
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src).expect("codegen statement-position wrapper");
+    assert_eq!(native.trim(), "42", "codegen: statement value discarded");
+}
+
 // ─── #3 — nested func inside `defer` ─────────────────────────────────────────
 
 #[test]

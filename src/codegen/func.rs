@@ -1566,7 +1566,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let mut last_val: BasicValueEnum<'ctx> = default_val;
-        for stmt in &func.body {
+        for (stmt_index, stmt) in func.body.iter().enumerate() {
+            // H-8 (full-audit-2026-08-05): a tail bare/wrapper block carries
+            // the implicit return value. compile_block() discards it; the
+            // tail position must extract it (mirror of compile_block_last_val).
+            let is_tail = stmt_index + 1 == func.body.len();
             // Run compensations before exit()
             if let Stmt::Expr(expr) = stmt.unlocated() {
                 if let Expr::Call(callee, _) = expr.unlocated() {
@@ -2770,28 +2774,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_comp(block);
                 }
                 Stmt::Arena(block) => {
-                    self.compile_arena_block(block, vars, "arena")?;
+                    // H-8: tail arena wrapper contributes the implicit value.
+                    if is_tail {
+                        let inner_vars = &mut vars.clone();
+                        last_val = self.compile_block_last_val(block, inner_vars)?;
+                        last_val = self.adjust_int_val(last_val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                        vars.extend(std::mem::take(inner_vars));
+                    } else {
+                        self.compile_arena_block(block, vars, "arena")?;
+                    }
                 }
                 Stmt::Unsafe(block) => {
-                    // Unsafe: execute block (no restrictions in codegen)
-                    self.compile_block(block, vars)?;
+                    // H-8: tail unsafe wrapper contributes the implicit value.
+                    if is_tail {
+                        let inner_vars = &mut vars.clone();
+                        last_val = self.compile_block_last_val(block, inner_vars)?;
+                        last_val = self.adjust_int_val(last_val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                        vars.extend(std::mem::take(inner_vars));
+                    } else {
+                        // Unsafe: execute block (no restrictions in codegen)
+                        self.compile_block(block, vars)?;
+                    }
                 }
                 Stmt::IeeeFloat(block) => {
                     // v0.34.10a (SD-9): suspend finiteness trap inside.
                     self.ieee_depth += 1;
-                    let r = self.compile_block(block, vars);
-                    self.ieee_depth -= 1;
-                    r?;
+                    if is_tail {
+                        let inner_vars = &mut vars.clone();
+                        let r = self.compile_block_last_val(block, inner_vars);
+                        self.ieee_depth -= 1;
+                        let val = r?;
+                        last_val = self.adjust_int_val(val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                        vars.extend(std::mem::take(inner_vars));
+                    } else {
+                        let r = self.compile_block(block, vars);
+                        self.ieee_depth -= 1;
+                        r?;
+                    }
                 }
                 Stmt::Alloc {
                     kind: AllocKind::Arena,
                     body,
                 } => {
-                    self.compile_arena_block(body, vars, "alloc(Arena)")?;
+                    if is_tail {
+                        let inner_vars = &mut vars.clone();
+                        last_val = self.compile_block_last_val(body, inner_vars)?;
+                        last_val = self.adjust_int_val(last_val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                        vars.extend(std::mem::take(inner_vars));
+                    } else {
+                        self.compile_arena_block(body, vars, "alloc(Arena)")?;
+                    }
                 }
                 Stmt::Alloc { body, .. } => {
-                    // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
-                    self.compile_block(body, vars)?;
+                    if is_tail {
+                        let inner_vars = &mut vars.clone();
+                        last_val = self.compile_block_last_val(body, inner_vars)?;
+                        last_val = self.adjust_int_val(last_val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                        vars.extend(std::mem::take(inner_vars));
+                    } else {
+                        // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
+                        self.compile_block(body, vars)?;
+                    }
                 }
                 Stmt::Func(f) => {
                     if f.is_comptime {
@@ -2813,7 +2861,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Skip contract-related statements in codegen
                 }
                 Stmt::Block(block) => {
-                    self.compile_block(block, vars)?;
+                    // H-8: a tail bare block contributes the implicit return
+                    // value; statement-position blocks discard it.
+                    if is_tail {
+                        let inner_vars = &mut vars.clone();
+                        last_val = self.compile_block_last_val(block, inner_vars)?;
+                        last_val = self.adjust_int_val(last_val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                        vars.extend(std::mem::take(inner_vars));
+                    } else {
+                        self.compile_block(block, vars)?;
+                    }
                 }
                 Stmt::Pinned { expr, var, body } => {
                     // v0.34.3: synchronous pinned timeout abolished (clause 10);

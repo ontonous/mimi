@@ -848,9 +848,24 @@ impl BodyLowerer<'_> {
             .then(|| block.len().checked_sub(1))
             .flatten()
             .filter(|index| {
+                let tail = block[*index].unlocated();
+                // H-8 (full-audit-2026-08-05): tail bare blocks (including
+                // unsafe/ieee_float/arena/alloc wrapper blocks) carry an
+                // implicit return value. Discarding it produced a block with
+                // ty=i32 but result=None — check passed (checker sees the
+                // return), build failed (native) or the VM returned a wrong
+                // value. Mirror the verifier's C-6 extraction: treat such
+                // wrappers as value-producing tails.
                 matches!(
-                    block[*index].unlocated(),
+                    tail,
                     Stmt::Expr(_) | Stmt::If { else_: Some(_), .. }
+                ) || matches!(
+                    tail,
+                    Stmt::Block(_)
+                        | Stmt::Unsafe(_)
+                        | Stmt::IeeeFloat(_)
+                        | Stmt::Arena(_)
+                        | Stmt::Alloc { .. }
                 )
             });
         let mut statements = Vec::with_capacity(block.len());
@@ -876,6 +891,62 @@ impl BodyLowerer<'_> {
                             has_tail_result: true,
                         })?
                     }
+                    // H-8: a tail bare block / wrapper block (unsafe,
+                    // ieee_float, arena, alloc) contributes its own implicit
+                    // value. Lower it as a value-producing Block/Scope
+                    // expression instead of dropping the tail.
+                    Stmt::Block(body) => {
+                        let statement_id = self.stmt_id(&block[index], &stmt_role)?;
+                        let statement_origin = self.origin(&statement_id)?;
+                        ResolvedExpr {
+                            node_id: NodeId(format!("{}/tail-block", statement_id.0)),
+                            origin: statement_origin,
+                            ty: block_ty.clone(),
+                            effects: Vec::new(),
+                            backend_requirements: Vec::new(),
+                            kind: ResolvedExprKind::Block(Box::new(self.lower_block(
+                                body,
+                                &format!("{stmt_role}.tail"),
+                                block_ty.clone(),
+                                true,
+                            )?)),
+                        }
+                    }
+                    Stmt::Unsafe(body) => self.lower_tail_wrapper_block(
+                        &block[index],
+                        &stmt_role,
+                        block_ty.clone(),
+                        body,
+                        super::ResolvedScopeKind::Unsafe,
+                    )?,
+                    Stmt::IeeeFloat(body) => self.lower_tail_wrapper_block(
+                        &block[index],
+                        &stmt_role,
+                        block_ty.clone(),
+                        body,
+                        super::ResolvedScopeKind::IeeeFloat,
+                    )?,
+                    Stmt::Arena(body) => self.lower_tail_wrapper_block(
+                        &block[index],
+                        &stmt_role,
+                        block_ty.clone(),
+                        body,
+                        super::ResolvedScopeKind::Arena,
+                    )?,
+                    Stmt::Alloc { kind, body } => {
+                        let scope_kind = super::ResolvedScopeKind::Allocator(match kind {
+                            crate::ast::AllocKind::System => super::AllocatorKind::System,
+                            crate::ast::AllocKind::Arena => super::AllocatorKind::Arena,
+                            crate::ast::AllocKind::Bump => super::AllocatorKind::Bump,
+                        });
+                        self.lower_tail_wrapper_block(
+                            &block[index],
+                            &stmt_role,
+                            block_ty.clone(),
+                            body,
+                            scope_kind,
+                        )?
+                    }
                     _ => {
                         self.scopes.pop();
                         return Err(vec![ResolvedBodyError::new(
@@ -897,6 +968,40 @@ impl BodyLowerer<'_> {
             ty: block_ty,
             statements,
             result,
+        })
+    }
+
+    /// H-8 (full-audit-2026-08-05): lower a tail wrapper block
+    /// (unsafe / ieee_float / arena / alloc) as a value-producing Scope
+    /// expression, preserving its implicit tail value as the enclosing
+    /// block's result. Previously the wrapper was lowered as a plain Scope
+    /// statement with `has_tail_result=false`, discarding the tail and
+    /// producing `ty=i32, result=None` — check passed, build failed.
+    fn lower_tail_wrapper_block(
+        &mut self,
+        stmt: &Stmt,
+        role: &str,
+        block_ty: ResolvedTypeId,
+        body: &[Stmt],
+        scope_kind: super::ResolvedScopeKind,
+    ) -> Result<ResolvedExpr, Vec<ResolvedBodyError>> {
+        let node_id = self.stmt_id(stmt, role)?;
+        let origin = self.origin(&node_id)?;
+        Ok(ResolvedExpr {
+            node_id: NodeId(format!("{}/tail-scope", node_id.0)),
+            origin,
+            ty: block_ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Scope {
+                kind: scope_kind,
+                body: Box::new(self.lower_block(
+                    body,
+                    &format!("{role}.tail"),
+                    block_ty,
+                    true,
+                )?),
+            },
         })
     }
 
