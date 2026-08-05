@@ -10193,13 +10193,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "input expects 0 or 1 argument".to_string(),
             ));
         }
-        // TODO(#audit-wave2): the VM backend's `input()` returns
-        // `Result<string, string>` (`Ok(line)` / `Err(msg)`) while codegen
-        // returns a bare `string`. Full `Result` shape alignment with the VM
-        // is decided for Wave 2. Wave-1 scope: make the codegen read
-        // memory-safe and deterministic — check the fgets result and return
-        // an EMPTY string on EOF/error instead of strlen-ing an
-        // uninitialized 4096-byte buffer.
+        // §8-#86 (fixed): three-side `input()` shape is now aligned on
+        // `string` — checker types it `string` (infer/call/simple.rs:572),
+        // the bytecode VM returns a bare `Value::String` (trimmed, io.rs
+        // builtin_input_line), and codegen returns the {ptr,len} string
+        // with the trailing newline trimmed. On EOF/error codegen returns
+        // an EMPTY string (deterministic, matching VM's empty read), instead
+        // of strlen-ing an uninitialized 4096-byte buffer (the pre-audit UB).
         let i64_ty = self.context.i64_type();
         let i8_ty = self.context.i8_type();
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
