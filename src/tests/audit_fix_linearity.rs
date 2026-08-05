@@ -994,3 +994,64 @@ func main() -> i32 {
         check_source(src)
     );
 }
+
+// ─── Audit §2-#12: generic parameter names shadowing builtin types ───
+// VERIFIED 2026-08-05: `func f<i32>(x: i32)` — the generic param `i32`
+// hijacks every same-named type in the signature at instantiation; the
+// declared `-> i32` actually returns string (call-site E0209) or slips to
+// resolved TOOL-RESOLUTION-001. Fix: E0436 up front, function + type
+// generics.
+#[test]
+fn audit2_gen_builtin_shadow_func_rejected() {
+    let src = r#"
+func f<i32>(x: i32) -> i32 {
+    return x
+}
+func main() -> i32 {
+    let s = "hello"
+    let y = f(s)
+    0
+}
+"#;
+    let codes = rejection_codes(src);
+    assert!(
+        codes.iter().any(|c| c == crate::diagnostic::codes::E0436),
+        "builtin-shadowing func generic must reject with E0436, got: {codes:?}"
+    );
+}
+
+#[test]
+fn audit2_gen_builtin_shadow_type_rejected() {
+    let src = r#"
+type Box<string> = string
+func main() -> i32 {
+    let b: Box<i32> = 1
+    0
+}
+"#;
+    let codes = rejection_codes(src);
+    assert!(
+        codes.iter().any(|c| c == crate::diagnostic::codes::E0436),
+        "builtin-shadowing type generic must reject with E0436, got: {codes:?}"
+    );
+}
+
+#[test]
+fn audit2_gen_normal_generics_still_ok() {
+    let src = r#"
+func id<T>(x: T) -> T {
+    return x
+}
+func main() -> i32 {
+    let a = id(42)
+    let b = id("hi")
+    drop(b)
+    a
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "normal generics must still check: {:?}",
+        check_source(src)
+    );
+}

@@ -171,6 +171,7 @@
 | E0433 | fails E combined with a multi-target transition — not yet supported (fail-closed) |
 | E0434 | mutate argument is not a valid place (must be Ident or single-level Ident.field) |
 | E0435 | two mutate arguments alias the same place (exclusive borrow violation) |
+| E0436 | generic parameter name shadows a builtin type name |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |

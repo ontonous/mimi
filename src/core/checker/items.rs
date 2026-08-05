@@ -352,6 +352,24 @@ impl<'a> Checker<'a> {
                 }
                 let generic_names: Vec<String> =
                     f.generics.iter().map(|g| g.name.clone()).collect();
+                // Audit §2-#12 (VERIFIED 2026-08-05): generic parameter names
+                // shadowing concrete types (`func f<i32>(x: i32)`) hijack every
+                // same-named type in the signature at instantiation — the
+                // declared `-> i32` actually returns string (E0209 surfaces at
+                // the call site) or, unannotated, slips through to resolved's
+                // TOOL-RESOLUTION-001. Reject builtin-type collisions up front.
+                for gp in &f.generics {
+                    if Self::is_builtin_type(&gp.name) {
+                        self.set_span(gp.meta.span);
+                        self.emit_code(
+                            crate::diagnostic::codes::E0436,
+                            format!(
+                                "generic parameter '{}' shadows the builtin type '{}' — rename the type parameter",
+                                gp.name, gp.name
+                            ),
+                        );
+                    }
+                }
                 self.generic_scope.extend(generic_names.iter().cloned());
                 let params: Vec<Type> = f.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
                 let mut ret = f
@@ -440,6 +458,20 @@ impl<'a> Checker<'a> {
                 }
                 let generic_names: Vec<String> =
                     t.generics.iter().map(|g| g.name.clone()).collect();
+                // Audit §2-#12: same builtin-shadowing hole in type generics
+                // (`type Box<i32> = i32`). Reject up front.
+                for gp in &t.generics {
+                    if Self::is_builtin_type(&gp.name) {
+                        self.set_span(gp.meta.span);
+                        self.emit_code(
+                            crate::diagnostic::codes::E0436,
+                            format!(
+                                "generic parameter '{}' shadows the builtin type '{}' — rename the type parameter",
+                                gp.name, gp.name
+                            ),
+                        );
+                    }
+                }
                 self.generic_scope.extend(generic_names.iter().cloned());
                 // For Record/Union/Enum (structural types), insert into self.types before
                 // checking fields to allow recursive self-references (e.g. type Expr { Call(name: string, args: List<Expr>) }).
