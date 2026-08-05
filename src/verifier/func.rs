@@ -1347,16 +1347,12 @@ impl VerifierCtx {
                     let req_conj = callee_requires
                         .iter()
                         .map(|r| self.substitute_call(r, &callee_params, &new_args, &fresh_name))
-                        .reduce(|acc, r| {
-                            Expr::Binary(BinOp::And, Box::new(acc), Box::new(r))
-                        })
+                        .reduce(|acc, r| Expr::Binary(BinOp::And, Box::new(acc), Box::new(r)))
                         .expect("callee_requires is non-empty here");
                     let ens_conj = callee_ensures
                         .iter()
                         .map(|e| self.substitute_call(e, &callee_params, &new_args, &fresh_name))
-                        .reduce(|acc, e| {
-                            Expr::Binary(BinOp::And, Box::new(acc), Box::new(e))
-                        })
+                        .reduce(|acc, e| Expr::Binary(BinOp::And, Box::new(acc), Box::new(e)))
                         .expect("callee_ensures is non-empty here");
                     let implication = Expr::Binary(
                         BinOp::Or,
