@@ -39,7 +39,7 @@ use std::collections::HashMap;
 /// Structs > 16 bytes go through memory: C passes large PARAM structs by
 /// hidden pointer (in a register) and returns large structs via sret
 /// (caller-provided buffer as hidden first argument).
-enum SysVCoerce<'ctx> {
+pub(crate) enum SysVCoerce<'ctx> {
     /// <= 16B: pass/return in registers. The boundary type is a scalar
     /// (i64 / double) for one eightbyte or a 2-element struct for two.
     Reg(BasicTypeEnum<'ctx>),
@@ -269,7 +269,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// If `ty` names a repr(C) record, return (name, fields, SysV coercion).
-    fn reprc_record_info(
+    pub(crate) fn reprc_record_info(
         &self,
         ty: &Type,
     ) -> MimiResult<Option<(String, Vec<Field>, SysVCoerce<'ctx>)>> {
@@ -287,7 +287,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// C-layout LLVM struct type for a repr(C) record.
-    fn c_sty_for_reprc_record(&self, name: &str) -> MimiResult<inkwell::types::StructType<'ctx>> {
+    pub(crate) fn c_sty_for_reprc_record(
+        &self,
+        name: &str,
+    ) -> MimiResult<inkwell::types::StructType<'ctx>> {
         let td = self.type_defs.get(name).ok_or_else(|| {
             CompileError::LlvmError(format!("repr(C) record '{}' not found", name))
         })?;
