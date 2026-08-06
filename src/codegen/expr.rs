@@ -1076,7 +1076,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             | "read_file" | "listdir" | "is_dir" | "is_file" | "walk_dir" | "exec"
             | "exec_pipe" | "file_stat" | "read_file_bytes" | "read_file_partial" | "path_ext"
             | "path_basename" | "path_dirname" | "mkdir_p" | "remove_file" | "getenv"
-            | "exec_safe" => Some(&[0]),
+            | "exec_safe" | "lexer" => Some(&[0]),
             // Network: connect(fd, host, port) / send(fd, data) — string at
             // position 1 (fd/port are ints).
             "connect" | "send" => Some(&[1]),
