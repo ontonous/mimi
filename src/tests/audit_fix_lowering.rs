@@ -1261,3 +1261,38 @@ func main() -> i32 {
         );
     }
 }
+
+// D-6 (audit 2026-08-05): `.is_ok()/.is_err()/.is_some()/.is_none()` loaded
+// the discriminator as i1 then ran `trunc i1 to i1` — an ILLEGAL instruction.
+// Release LLVM tolerated it as a no-op; the stale i8→i1 comment masked the
+// bug. The predicate now extends the i1 discriminator straight to i64.
+#[test]
+fn audit_d6_is_predicate_no_illegal_trunc_i1_to_i1() {
+    let src = r#"
+func main() -> i32 {
+    let a: Option<i32> = Some(7)
+    let b: Option<i32> = None
+    let r: Result<i32, string> = Ok(9)
+    let e: Result<i32, string> = Err("no")
+    println(a.is_some()) // true
+    println(b.is_some()) // false
+    println(a.is_none()) // false
+    println(b.is_none()) // true
+    println(r.is_ok())   // true
+    println(e.is_ok())   // false
+    println(r.is_err())  // false
+    println(e.is_err())  // true
+    0
+}
+"#;
+    let expected = "true\nfalse\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM is_ok/is_err/is_some/is_none predicates");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen is_* predicates");
+        assert_eq!(native, expected, "native must match VM after D-6 trunc removal");
+        let resolved =
+            checked_codegen_compile_and_run(src).expect("resolved is_* predicates");
+        assert_eq!(resolved, expected, "resolved must match VM after D-6 trunc removal");
+    }
+}
