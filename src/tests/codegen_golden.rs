@@ -148,8 +148,8 @@ fn golden_extern_call() {
     check_golden(
         "extern_call",
         r#"
-        extern "C" { func strlen(s: string) -> i32 }
-        func main() -> i32 { strlen("hi") }
+        extern "C" { func cstrlen(s: string) -> i32 }
+        func main() -> i32 { cstrlen("hi") }
     "#,
     );
 }

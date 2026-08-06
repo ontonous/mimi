@@ -376,6 +376,30 @@ impl<'a> LexerPos<'a> {
                     pos = next!(pos);
                     let mut depth = 1;
                     while let Some(c) = pos.peek() {
+                        // §1-#10 (audit 2026-08-05, closed 2026-08-07):
+                        // braces INSIDE quoted literals within the
+                        // interpolation must not count toward depth — the
+                        // old raw scan saw `"}"` and closed the interpolation
+                        // early (loud failure at a wrong position). Skip the
+                        // whole quoted literal, honoring backslash escapes.
+                        if c == '"' || c == '\'' {
+                            let quote = c;
+                            s.push(c);
+                            pos = next!(pos);
+                            while let Some(qc) = pos.peek() {
+                                s.push(qc);
+                                pos = next!(pos);
+                                if qc == '\\' {
+                                    if let Some(escaped) = pos.peek() {
+                                        s.push(escaped);
+                                        pos = next!(pos);
+                                    }
+                                } else if qc == quote {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
                         if c == '{' {
                             depth += 1;
                         } else if c == '}' {

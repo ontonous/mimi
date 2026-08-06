@@ -939,7 +939,11 @@ fn encode_match_real(matched: &Z3Real, arms: &[MatchArm], vars: &mut Z3VarMap) -
 }
 
 /// Build a Z3 ite chain for match expression with bool result type.
-fn encode_match_bool(matched: &Z3Int, arms: &[MatchArm], vars: &mut Z3VarMap) -> Option<Z3Bool> {
+pub(crate) fn encode_match_bool(
+    matched: &Z3Int,
+    arms: &[MatchArm],
+    vars: &mut Z3VarMap,
+) -> Option<Z3Bool> {
     let mut result: Option<Z3Bool> = None;
     for (i, arm) in arms.iter().rev().enumerate() {
         let arm_val = expr_to_z3_bool(&arm.body, vars)?;
@@ -959,7 +963,15 @@ fn encode_match_bool(matched: &Z3Int, arms: &[MatchArm], vars: &mut Z3VarMap) ->
         };
         result = Some(match result {
             Some(prev) => cond.ite(&arm_val, &prev),
-            None => cond.ite(&arm_val, &Z3Bool::from_bool(false)),
+            None => {
+                // §11-#48 (audit 2026-08-05, closed 2026-08-07): mirror the
+                // int path's E2 fix — non-exhaustive bool match without a
+                // wildcard used to hardcode the fallback to `false`, silently
+                // assuming the result when no arm matches (fake proofs both
+                // ways). Use an unconstrained variable instead.
+                let fallback = vars.get_or_create_bool("_match_fallback_bool");
+                cond.ite(&arm_val, &fallback)
+            }
         });
     }
     result

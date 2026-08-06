@@ -285,7 +285,13 @@ fn require_resolved_native_callable_with_source(
         }
         require_scalar_type(program, &callable.owner, &parameter.ty)?;
     }
-    require_block(program, &callable.owner, &callable.body.root, entry_source)
+    require_block(
+        program,
+        &callable.owner,
+        &callable.body.root,
+        entry_source,
+        &callable.body.locals,
+    )
 }
 
 fn require_scalar_type(
@@ -401,6 +407,7 @@ fn require_block(
     owner: &NodeId,
     block: &ResolvedBlock,
     entry_source: Option<crate::span::SourceId>,
+    locals: &std::collections::BTreeMap<crate::core::ResolvedLocalId, crate::core::ResolvedLocal>,
 ) -> Result<(), UnsupportedResolvedNode> {
     for statement in &block.statements {
         if !statement.backend_requirements.is_empty() {
@@ -416,7 +423,7 @@ fn require_block(
                 initializer: Some(initializer),
             } => {
                 require_binding_pattern(owner, pattern)?;
-                require_expr(program, owner, initializer, entry_source)?;
+                require_expr(program, owner, initializer, entry_source, locals)?;
             }
             ResolvedStmtKind::Assign {
                 target,
@@ -425,18 +432,18 @@ fn require_block(
             } => {
                 require_root_place(owner, &statement.node_id, target)?;
                 require_conversion(owner, &statement.node_id, conversion.kind)?;
-                require_expr(program, owner, value, entry_source)?;
+                require_expr(program, owner, value, entry_source, locals)?;
             }
             ResolvedStmtKind::Return { value, conversion } => {
                 if let Some(value) = value {
-                    require_expr(program, owner, value, entry_source)?;
+                    require_expr(program, owner, value, entry_source, locals)?;
                 }
                 if let Some(conversion) = conversion {
                     require_conversion(owner, &statement.node_id, conversion.kind)?;
                 }
             }
             ResolvedStmtKind::Expr(expression) => {
-                require_expr(program, owner, expression, entry_source)?
+                require_expr(program, owner, expression, entry_source, locals)?
             }
             ResolvedStmtKind::Bind {
                 pattern,
@@ -445,8 +452,8 @@ fn require_block(
                 require_binding_pattern(owner, pattern)?;
             }
             ResolvedStmtKind::While { condition, body } => {
-                require_condition(program, owner, condition, entry_source)?;
-                require_block(program, owner, body, entry_source)?;
+                require_condition(program, owner, condition, entry_source, locals)?;
+                require_block(program, owner, body, entry_source, locals)?;
             }
             ResolvedStmtKind::For {
                 pattern,
@@ -456,8 +463,8 @@ fn require_block(
                 require_binding_pattern(owner, pattern)?;
                 match &iterable.kind {
                     ResolvedExprKind::Range { start, end } => {
-                        require_integer_expr(program, owner, start, entry_source)?;
-                        require_integer_expr(program, owner, end, entry_source)?;
+                        require_integer_expr(program, owner, start, entry_source, locals)?;
+                        require_integer_expr(program, owner, end, entry_source, locals)?;
                     }
                     // 0.32.14: `range(start, end)` builtin call — same
                     // semantics as Range { start, end }.
@@ -470,12 +477,14 @@ fn require_block(
                             owner,
                             &call.arguments[0].value,
                             entry_source,
+                            locals,
                         )?;
                         require_integer_expr(
                             program,
                             owner,
                             &call.arguments[1].value,
                             entry_source,
+                            locals,
                         )?;
                     }
                     // 0.32.8–0.32.9: List iteration — `for x in expr` where
@@ -483,11 +492,11 @@ fn require_block(
                     // Project, etc.) whose canonical type is List<T> with
                     // scalar element type.
                     _ => {
-                        require_expr(program, owner, iterable, entry_source)?;
+                        require_expr(program, owner, iterable, entry_source, locals)?;
                         require_list_iterable_type(program, owner, &iterable.ty)?;
                     }
                 }
-                require_block(program, owner, body, entry_source)?;
+                require_block(program, owner, body, entry_source, locals)?;
             }
             ResolvedStmtKind::Break(value) => {
                 if value.is_some() {
@@ -507,19 +516,31 @@ fn require_block(
                 // wrapper blocks stay on the resolved native slice; float
                 // semantics inside IeeeFloat are still gated by the recursive
                 // require_block below.
-                require_block(program, owner, body, entry_source)?;
+                require_block(program, owner, body, entry_source, locals)?;
             }
             ResolvedStmtKind::Loop(body) => {
-                require_block(program, owner, body, entry_source)?;
+                require_block(program, owner, body, entry_source, locals)?;
             }
-            // Specification-level statements: no codegen output, accept unconditionally.
-            ResolvedStmtKind::Drop(_) => {}
+            // K-5 (audit 2026-08-05, closed 2026-08-07): Drop is a codegen
+            // no-op ONLY for non-linear places. Legacy emits mimi_cap_drop
+            // for capability variables; the resolved emitter has no cap
+            // registry, so a Capability-typed place must fall back to legacy
+            // (fail-closed) instead of silently leaking the handle.
+            // Non-cap drops are pure no-ops on all three backends (VM/legacy/
+            // resolved) — verified empirically.
+            ResolvedStmtKind::Drop(places) => {
+                for place in places {
+                    if let Some(local) = locals.get(&place.base) {
+                        require_scalar_type(program, owner, &local.ty)?;
+                    }
+                }
+            }
             ResolvedStmtKind::Contract { condition, .. } => {
-                require_expr(program, owner, condition, entry_source)?;
+                require_expr(program, owner, condition, entry_source, locals)?;
             }
             ResolvedStmtKind::Math(conditions) => {
                 for condition in conditions {
-                    require_expr(program, owner, condition, entry_source)?;
+                    require_expr(program, owner, condition, entry_source, locals)?;
                 }
             }
             // NestedCallable: declaration marker for nested functions. The nested
@@ -536,7 +557,7 @@ fn require_block(
         }
     }
     if let Some(result) = &block.result {
-        require_expr(program, owner, result, entry_source)?;
+        require_expr(program, owner, result, entry_source, locals)?;
     }
     Ok(())
 }
@@ -621,6 +642,7 @@ fn require_expr(
     owner: &NodeId,
     expression: &ResolvedExpr,
     entry_source: Option<crate::span::SourceId>,
+    locals: &std::collections::BTreeMap<crate::core::ResolvedLocalId, crate::core::ResolvedLocal>,
 ) -> Result<(), UnsupportedResolvedNode> {
     if !expression.backend_requirements.is_empty() {
         return Err(UnsupportedResolvedNode::new(
@@ -636,35 +658,35 @@ fn require_expr(
         ResolvedExprKind::Load(place) => require_root_place(owner, &expression.node_id, place),
         ResolvedExprKind::Tuple(elements) => {
             for element in elements {
-                require_expr(program, owner, element, entry_source)?;
+                require_expr(program, owner, element, entry_source, locals)?;
             }
             Ok(())
         }
         // 0.32.2: List literals.
         ResolvedExprKind::List(elements) => {
             for element in elements {
-                require_expr(program, owner, element, entry_source)?;
+                require_expr(program, owner, element, entry_source, locals)?;
             }
             Ok(())
         }
         // 0.32.3: Map/Set literals.
         ResolvedExprKind::Map(entries) => {
             for (key, value) in entries {
-                require_expr(program, owner, key, entry_source)?;
-                require_expr(program, owner, value, entry_source)?;
+                require_expr(program, owner, key, entry_source, locals)?;
+                require_expr(program, owner, value, entry_source, locals)?;
             }
             Ok(())
         }
         ResolvedExprKind::Set(elements) => {
             for element in elements {
-                require_expr(program, owner, element, entry_source)?;
+                require_expr(program, owner, element, entry_source, locals)?;
             }
             Ok(())
         }
         // 0.32.5: Record construction.
         ResolvedExprKind::Record { fields, .. } => {
             for field in fields {
-                require_expr(program, owner, &field.value, entry_source)?;
+                require_expr(program, owner, &field.value, entry_source, locals)?;
             }
             Ok(())
         }
@@ -674,7 +696,7 @@ fn require_expr(
                 // 0.32.2: Index value projections for List element access
                 // on rvalues (e.g. get_list()[0]).
                 crate::core::ir::ResolvedValueProjection::Index(index_expr) => {
-                    require_expr(program, owner, index_expr, entry_source)?;
+                    require_expr(program, owner, index_expr, entry_source, locals)?;
                 }
                 // 0.32.5: Field value projections for record rvalue access.
                 crate::core::ir::ResolvedValueProjection::Field(_) => {}
@@ -686,11 +708,11 @@ fn require_expr(
                     ))
                 }
             }
-            require_expr(program, owner, value, entry_source)
+            require_expr(program, owner, value, entry_source, locals)
         }
         ResolvedExprKind::Binary { left, right, .. } => {
-            require_expr(program, owner, left, entry_source)?;
-            require_expr(program, owner, right, entry_source)
+            require_expr(program, owner, left, entry_source, locals)?;
+            require_expr(program, owner, right, entry_source, locals)
         }
         ResolvedExprKind::Unary { op, operand }
             if matches!(
@@ -698,17 +720,17 @@ fn require_expr(
                 crate::core::ir::ResolvedUnaryOp::Negate | crate::core::ir::ResolvedUnaryOp::Not
             ) =>
         {
-            require_expr(program, owner, operand, entry_source)
+            require_expr(program, owner, operand, entry_source, locals)
         }
         ResolvedExprKind::Cast { value, conversion } => {
             require_conversion(owner, &expression.node_id, conversion.kind)?;
-            require_expr(program, owner, value, entry_source)
+            require_expr(program, owner, value, entry_source, locals)
         }
         // 0.32.16: LocalClosure calls — indirect call through closure struct.
         ResolvedExprKind::Call(call) if matches!(call.callee, ResolvedCallee::LocalClosure(_)) => {
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
-                require_expr(program, owner, &argument.value, entry_source)?;
+                require_expr(program, owner, &argument.value, entry_source, locals)?;
             }
             Ok(())
         }
@@ -767,7 +789,7 @@ fn require_expr(
             }
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
-                require_expr(program, owner, &argument.value, entry_source)?;
+                require_expr(program, owner, &argument.value, entry_source, locals)?;
             }
             Ok(())
         }
@@ -776,27 +798,29 @@ fn require_expr(
             then_block,
             else_block,
         } => {
-            require_condition(program, owner, condition, entry_source)?;
-            require_block(program, owner, then_block, entry_source)?;
-            require_block(program, owner, else_block, entry_source)
+            require_condition(program, owner, condition, entry_source, locals)?;
+            require_block(program, owner, then_block, entry_source, locals)?;
+            require_block(program, owner, else_block, entry_source, locals)
         }
-        ResolvedExprKind::Block(block) => require_block(program, owner, block, entry_source),
+        ResolvedExprKind::Block(block) => {
+            require_block(program, owner, block, entry_source, locals)
+        }
         ResolvedExprKind::FString(parts) => {
             for part in parts {
                 if let crate::core::ir::ResolvedFStringPart::Interpolation(expr) = part {
-                    require_expr(program, owner, expr, entry_source)?;
+                    require_expr(program, owner, expr, entry_source, locals)?;
                 }
             }
             Ok(())
         }
         ResolvedExprKind::Match { scrutinee, arms } => {
-            require_expr(program, owner, scrutinee, entry_source)?;
+            require_expr(program, owner, scrutinee, entry_source, locals)?;
             for arm in arms {
                 require_match_pattern(owner, &arm.pattern)?;
                 if let Some(guard) = &arm.guard {
-                    require_condition(program, owner, guard, entry_source)?;
+                    require_condition(program, owner, guard, entry_source, locals)?;
                 }
-                require_expr(program, owner, &arm.body, entry_source)?;
+                require_expr(program, owner, &arm.body, entry_source, locals)?;
             }
             Ok(())
         }
@@ -804,14 +828,14 @@ fn require_expr(
             // H-8: scope kind does not change codegen lowering; accept all
             // wrapper kinds so tail wrapper blocks (unsafe/ieee_float/arena/
             // alloc) keep their implicit value on the resolved native slice.
-            require_block(program, owner, body, entry_source)
+            require_block(program, owner, body, entry_source, locals)
         }
         // 0.32.10: Try expression (`?` operator). The inner value must be
         // Result<T, E> or Option<T>. The Try expression itself has type T
         // (the Ok/Some payload), already checked by require_scalar_type at
         // the top of require_expr.
         ResolvedExprKind::Try { value, .. } => {
-            require_expr(program, owner, value, entry_source)?;
+            require_expr(program, owner, value, entry_source, locals)?;
             // The inner expression's type must be Result or Option.
             match program.resolved_types().get(&value.ty) {
                 Some(ResolvedType::Result { .. } | ResolvedType::Option(_)) => Ok(()),
@@ -836,24 +860,24 @@ fn require_expr(
                     "capturing lambda is not in the resolved native slice",
                 ));
             }
-            require_block(program, owner, &lambda.body, entry_source)
+            require_block(program, owner, &lambda.body, entry_source, locals)
         }
         // 0.32.31: Slice expressions (xs[start:end]). Target must be a List.
         // Start/end are optional (default 0/len). Indices must be integers.
         ResolvedExprKind::Slice { target, start, end } => {
-            require_expr(program, owner, target, entry_source)?;
+            require_expr(program, owner, target, entry_source, locals)?;
             if let Some(start_expr) = start {
-                require_integer_expr(program, owner, start_expr, entry_source)?;
+                require_integer_expr(program, owner, start_expr, entry_source, locals)?;
             }
             if let Some(end_expr) = end {
-                require_integer_expr(program, owner, end_expr, entry_source)?;
+                require_integer_expr(program, owner, end_expr, entry_source, locals)?;
             }
             Ok(())
         }
         // 0.32.32: Old expression (contract `old(x)`). In codegen this is
         // identity — the runtime value IS the "old" value since contracts
         // are erased. Only the verifier gives old() distinct semantics.
-        ResolvedExprKind::Old(inner) => require_expr(program, owner, inner, entry_source),
+        ResolvedExprKind::Old(inner) => require_expr(program, owner, inner, entry_source, locals),
         // 0.32.33: Comprehension ([value for pattern in iterable if guard]).
         // Pattern must be a simple binding. Guard (if present) must be bool.
         ResolvedExprKind::Comprehension {
@@ -876,16 +900,16 @@ fn require_expr(
                     "comprehension pattern must be a simple binding",
                 ));
             }
-            require_expr(program, owner, iterable, entry_source)?;
+            require_expr(program, owner, iterable, entry_source, locals)?;
             if let Some(guard_expr) = guard {
-                require_condition(program, owner, guard_expr, entry_source)?;
+                require_condition(program, owner, guard_expr, entry_source, locals)?;
             }
-            require_expr(program, owner, value, entry_source)
+            require_expr(program, owner, value, entry_source, locals)
         }
         // 0.32.34: OptionalChain (receiver?.field). Receiver must be Option/Result.
         // The field is projected from the payload record. Result is Option<FieldType>.
         ResolvedExprKind::OptionalChain { receiver, .. } => {
-            require_expr(program, owner, receiver, entry_source)?;
+            require_expr(program, owner, receiver, entry_source, locals)?;
             // Receiver must be Option or Result.
             match program.resolved_types().get(&receiver.ty) {
                 Some(ResolvedType::Option(_) | ResolvedType::Result { .. }) => Ok(()),
@@ -971,8 +995,9 @@ fn require_condition(
     owner: &NodeId,
     condition: &ResolvedExpr,
     entry_source: Option<crate::span::SourceId>,
+    locals: &std::collections::BTreeMap<crate::core::ResolvedLocalId, crate::core::ResolvedLocal>,
 ) -> Result<(), UnsupportedResolvedNode> {
-    require_expr(program, owner, condition, entry_source)?;
+    require_expr(program, owner, condition, entry_source, locals)?;
     match program.resolved_types().get(&condition.ty) {
         Some(ResolvedType::Primitive(PrimitiveType::Bool)) => Ok(()),
         Some(other) => Err(UnsupportedResolvedNode::new(
@@ -994,8 +1019,9 @@ fn require_integer_expr(
     owner: &NodeId,
     expression: &ResolvedExpr,
     entry_source: Option<crate::span::SourceId>,
+    locals: &std::collections::BTreeMap<crate::core::ResolvedLocalId, crate::core::ResolvedLocal>,
 ) -> Result<(), UnsupportedResolvedNode> {
-    require_expr(program, owner, expression, entry_source)?;
+    require_expr(program, owner, expression, entry_source, locals)?;
     match program.resolved_types().get(&expression.ty) {
         Some(ResolvedType::Primitive(
             PrimitiveType::I8

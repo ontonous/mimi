@@ -7,14 +7,22 @@
 # 阈值依据：0.34.33 实测全量 32 线程 23.3s；最重的 Z3 单测试也在 10s 内。
 # 60s 是充裕的上界，正常测试不可能碰到；30s 先标黄两次再杀。
 #
-# 聚合套件例外（2026-08-05，wave1-review §2-D）：real_world 双套件各是
+# wave1-review §5.12（closed 2026-08-07）：实测发现旧配置的 `test-timeout`
+# 键被 nextest 0.9.140 静默忽略（"ignoring unknown configuration keys"）——
+# nextest 根本不存在 per-test timeout 键，单测硬上限的唯一机制就是
+# slow-timeout 的 period × terminate-after。已删除幽灵键，硬上限全部由
+# slow-timeout 承载：
+#   default      30s × 2  = 60s 上限
+#   聚合套件     60s × 3  = 180s 上限（约 3x 实测 56s 余量）
+#   CI profile   60s × 2  = 120s 上限
+#   CI 聚合套件  120s × 3 = 360s 上限
+# `cargo nextest list` 验证无 unknown-key 警告（2026-08-07）。
+#
+# 聚合套件背景（2026-08-05，wave1-review §2-D）：real_world 双套件各是
 # "一个 #[test] 顺序跑完 tests/real_world/ 全部程序"的聚合测试，实测单跑
-# 56s 通过（非挂起，勿追查幻影）——60s 上限太紧。per-test override 提到
-# 180s（约 3x 实测余量），slow-timeout 同步放宽（否则 terminate-after
-# 到点仍会杀）；CI 2 vCPU profile 按比例放宽到 360s。
+# 56s 通过（非挂起，勿追查幻影）——60s 上限太紧，故 override 放宽。
 
 [profile.default]
-test-timeout = "60s"
 slow-timeout = { period = "30s", terminate-after = 2 }
 # 测试退出后若有泄漏的子进程/线程残留，判 leak 而非静默放过。
 leak-timeout = "200ms"
@@ -24,19 +32,16 @@ fail-fast = false
 [[profile.default.overrides]]
 # real_world Flow 双后端聚合套件（tests/real_world.rs::real_world_flow_dual_backend_suite）。
 filter = 'test(real_world_flow_dual_backend_suite)'
-test-timeout = "180s"
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 [[profile.default.overrides]]
 # real_world CLI 聚合套件（tests/real_world_cli.rs::real_world_cli_suite）。
 filter = 'test(real_world_cli_suite)'
-test-timeout = "180s"
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 [profile.ci]
 # CI runner（2 vCPU）对齐 --test-threads=2 纪律。
 test-threads = 2
-test-timeout = "120s"
 slow-timeout = { period = "60s", terminate-after = 2 }
 leak-timeout = "200ms"
 fail-fast = false
@@ -44,5 +49,4 @@ fail-fast = false
 [[profile.ci.overrides]]
 # 聚合套件在 2 vCPU runner 上比本机 32 核慢，按比例放宽（default 的 2 倍）。
 filter = 'test(real_world_flow_dual_backend_suite) or test(real_world_cli_suite)'
-test-timeout = "360s"
 slow-timeout = { period = "120s", terminate-after = 3 }

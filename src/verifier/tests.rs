@@ -1999,6 +1999,12 @@ func main() -> i32 { 0 }
 /// Previously, `let_subst` was only applied to body_return, so `assert_callee_ensures_in_block`
 /// saw bare identifiers (e.g. `d`) instead of expanded calls (e.g. `double(y)`), causing
 /// callee ensures to be silently dropped.
+///
+/// §11-#46 (2026-08-07): double's ensures must carry an UPPER bound too —
+/// `d + 1` now gets an i64 overflow obligation (VIR infer_expr_type types
+/// let-bound call results as I64), and an unbounded-above d disproves it.
+/// The propagation property under test is unchanged: caller's proof still
+/// depends on double's ensures reaching the non-tail `d + 1` use.
 #[test]
 fn verify_let_bound_call_ensures_propagated() {
     require_z3!();
@@ -2006,6 +2012,7 @@ fn verify_let_bound_call_ensures_propagated() {
 func double(x: i32) -> i32 {
     requires: x >= 0 && x <= 1000000000
     ensures: result >= 0
+    ensures: result <= 2000000000
     x * 2
 }
 

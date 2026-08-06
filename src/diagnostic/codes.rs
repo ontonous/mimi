@@ -120,7 +120,7 @@ pub const E0418: &str = "E0418"; // conservative projection failure (subflow →
 pub const E0419: &str = "E0419"; // RETIRED (ADR-002 v0.34.15): incompatible payload layouts in a multi-target transition — rejection inverted; runtime dispatches by state tag. Code preserved (never reused).
 pub const E0420: &str = "E0420"; // multi-target transition result must be exhaustively matched
 pub const E0421: &str = "E0421"; // flow state forgery: non-root state constructed outside transition
-pub const E0422: &str = "E0422"; // flow state nominal distinctness: unqualified name shadowed by another flow
+pub const E0422: &str = "E0422"; // RETIRED (§3-诊断卫生 2026-08-07): flow-state unqualified-name shadowing is advisory-only — migrated to W0402 (warnings must not wear E codes). Code preserved (never reused).
 pub const E0423: &str = "E0423"; // flow state use-after-transition (linear generation)
 pub const E0424: &str = "E0424"; // ? in transition body without `fails E` declaration
 pub const E0425: &str = "E0425"; // session endpoint with non-end residual leaves scope
@@ -135,6 +135,8 @@ pub const E0433: &str = "E0433"; // fails E combined with a multi-target transit
 pub const E0434: &str = "E0434"; // mutate argument is not a valid place (must be Ident or single-level Ident.field)
 pub const E0435: &str = "E0435"; // two mutate arguments alias the same place (exclusive borrow violation)
 pub const E0436: &str = "E0436"; // generic parameter name shadows a builtin type name
+pub const E0437: &str = "E0437"; // trait method call on a bounded generic parameter (no monomorphization pre-1.0)
+pub const E0438: &str = "E0438"; // generic type argument count mismatch (§3-诊断卫生: split from polysemous E0231)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -157,6 +159,7 @@ pub const W012: &str = "W012"; // type escape hatch (`_` or `Any`) at let-bindin
 pub const W013: &str = "W013"; // newtype used interchangeably with its inner type (transparent-newtype mix)
 pub const W0400: &str = "W0400"; // flow state unreachable (no transition targets to it)
 pub const W0401: &str = "W0401"; // flow state has no outgoing transitions (terminal state)
+pub const W0402: &str = "W0402"; // flow state unqualified name shadowed by another flow (qualified name required)
 
 /// Warning codes (E06xx) — kept for backward compatibility
 pub const E0600: &str = "E0600"; // variable shadows outer variable
@@ -372,6 +375,8 @@ pub fn describe(code: &str) -> &'static str {
         E0434 => "mutate argument is not a valid place (must be Ident or single-level Ident.field)",
         E0435 => "two mutate arguments alias the same place (exclusive borrow violation)",
         E0436 => "generic parameter name shadows a builtin type name",
+        E0437 => "trait method call on a bounded generic parameter is not supported (monomorphization deferred to 1.x)",
+        E0438 => "generic type argument count mismatch",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -587,6 +592,8 @@ mod tests {
             super::E0434,
             super::E0435,
             super::E0436,
+            super::E0437,
+            super::E0438,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,
@@ -649,6 +656,7 @@ mod tests {
             super::W012,
             super::W0400,
             super::W0401,
+            super::W0402,
         ];
 
         let mut seen = HashSet::new();

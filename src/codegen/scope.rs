@@ -207,6 +207,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .current_function()
             .map(|f| {
                 let name = f.get_name().to_string_lossy().into_owned();
+                // 0.34.35b (M-001): extern wrapper 显式命名 `{name}.extern_wrapper`,
+                // 用户诊断里应显示声明名而非内部 wrapper 名。
+                let name = name
+                    .strip_suffix(".extern_wrapper")
+                    .unwrap_or(&name)
+                    .to_string();
                 match name.strip_suffix("__method") {
                     Some(stripped) => stripped.replace("__", "::"),
                     None => name,

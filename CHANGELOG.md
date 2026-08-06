@@ -2,6 +2,36 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.36 — 审计台账收尾战役：audit-unfixed-2026-08-05 收尾包 A–F 全闭
+
+> 依据 `devdocs/audit-unfixed-2026-08-05.md`（单一事实源）。纪律：冻结期不加新语法，
+> 只让报错说真话（fail-closed / fail-loud），每项修复带回归测试。全量 lib 测试
+> 5228 → 5260 全绿（+7 登记 ignored 不变）。
+
+- **收尾包 B（checker/codegen/VM）**：K-4 数值强制双门禁复核闭合（防回归测试）；
+  K-5 resolved Drop 对 Capability place 从静默 no-op 改 fail-closed（E0830）；
+  H-9 match 落空分支发射 `Op::NonExhaustiveMatch`（E0805，与 codegen 对齐）；
+- **收尾包 A/C**：§2-#19 bound-generic trait 方法分发诚实拒绝（新诊断码 E0437，
+  单态化延 1.x，Clone 特化保留）；§11-#46/47/48/50 verifier 四项——i64 算术溢出
+  definedness 义务、f64 let 绑定编码、match 无约束 fallback、Unknown→Timeout 分流；
+- **收尾包 E（诊断卫生/CLI）**：§13-#67 `--verify-contracts` 真接线 + `--allocator`
+  非 system 拒绝 + `--verify-ffi` VM 未实现警告披露；X-5 loader is_dep 子串判定改
+  结构化（stdlib_dir 前缀 + [".mimi","deps"] 组件窗口）；E0830 入 Diagnostic.code；
+  E0231→E0438 拆分、E0422→W0402 降级（retired 码不复用）；§1-#10 f-string 插值
+  双层引号感知扫描；
+- **收尾包 D（runtime 安全）**：§10-#27 ReDoS 时间预算——`REGEX_MAX_WORK`（1M 步/次）
+  贯穿两个回溯引擎全 5 入口，耗尽失败 + 每进程一次警告；§10-#31 product 序列化器
+  4 处裸 `from_raw_parts` + list 头解引用改 mincore 探针（不可读句柄零值 + 警告，
+  不再 SIGSEGV）；§10-#35 `mimi_map_destroy` 回收 map 自持 value 缓冲（Pack/
+  ListOfPacks 形状登记，balance 归零可观测）；§10-#22 mailbox 动态化裁决延 1.x
+  （dispatch ABI 契约变更）；
+- **收尾包 F（语义/工具链）**：V-7 pow 类型契约裁决——checker 按实参推 pow
+  （int×int→i64），codegen 删 sitofp 强制转换，pow(2,60) 双端精确渲染；
+  `__mimi_pow_i64` exp>u32::MAX 双端回归补齐；stress 套件改双向契约（守卫内必过 +
+  越界必响亮报 recursion limit）；nextest 幽灵键 `test-timeout` 清除（被 0.9.140
+  静默忽略，硬上限由 slow-timeout period×terminate-after 承载）；stdlib JSON 与
+  serde 语义对齐（1e999 f64 溢出拒绝，双端等价）。
+
 ### 0.34.35 — FFI 审计闭环：repr(C) 导出 SysV ABI 修复 + fn 字段调用 L1 修复（进行中）
 
 > 依据 2026-08-05 Jupitune dogfood 外部评估审计（`devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md`，
@@ -30,10 +60,11 @@
   dlopen 探针 5 参数形状 + 2 返回形状 + 混合 SSE 全通过；顺带消除旧堆指针返回的
   per-call malloc 泄漏；
 - **测试纪律：nextest 每测试硬超时**（`.config/nextest.toml`）：每测试独立进程 +
-  `test-timeout 60s` + 30s 标黄两次即杀 + leak 检测。动机：全量 `cargo test` 遇
+  60s 硬上限（slow-timeout 30s 标黄两次即杀）+ leak 检测。动机：全量 `cargo test` 遇
   死锁/死循环会无声挂起只能肉眼盯进度；独立进程使段错误/死锁被单独报失败而非拖死
   全场。default 60s / ci profile 120s（对齐 2 vCPU runner）。全量 nextest 复跑绿：
-  4623 passed / 0 failed / 7 skipped。
+  4623 passed / 0 failed / 7 skipped。（0.34.36 补记：原 `test-timeout` 键为
+  nextest 不识别的幽灵键，硬上限实际由 slow-timeout 承载，已清理。）
 
 ### 0.34.34 — i32 算术语义钉死：SD-7 trap 对等 + O1 毒值修复（L1 双后端等价闭环）
 

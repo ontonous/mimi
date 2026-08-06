@@ -157,7 +157,7 @@
 | E0419 | retired — ADR-002 (v0.34.15): incompatible payload layouts no longer rejected (see retired-code table) |
 | E0420 | multi-target transition result must be exhaustively matched |
 | E0421 | flow state forgery: non-root state constructed outside transition |
-| E0422 | flow state nominal distinctness: unqualified name shadowed by another flow |
+| E0422 | RETIRED (§3-诊断卫生 2026-08-07): flow-state unqualified-name shadowing migrated to W0402 (warnings must not wear E codes) |
 | E0423 | flow state use-after-transition (linear generation) |
 | E0424 | ? in transition body without fails E declaration |
 | E0425 | session endpoint with non-end residual leaves scope |
@@ -172,6 +172,8 @@
 | E0434 | mutate argument is not a valid place (must be Ident or single-level Ident.field) |
 | E0435 | two mutate arguments alias the same place (exclusive borrow violation) |
 | E0436 | generic parameter name shadows a builtin type name |
+| E0437 | trait method call on a bounded generic parameter (monomorphization deferred to 1.x; Clone is the supported exception) |
+| E0438 | generic type argument count mismatch (split from E0231, §3-诊断卫生 2026-08-07) |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |
@@ -232,6 +234,7 @@
 |------|-------------|
 | W0400 | flow state unreachable (no transition targets to it) |
 | W0401 | flow state has no outgoing transitions (terminal state) |
+| W0402 | flow state unqualified name shadowed by another flow (qualified name required) |
 
 ## Type Inference Leak Detector
 

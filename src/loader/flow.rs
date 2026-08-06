@@ -1262,6 +1262,29 @@ fn resolve_import_path(from: &Path, import_path: &[String], acc: &Acc) -> Result
 
 // ── merge_all — same logic as legacy, operates on &Acc ─────────────────
 
+/// X-5 (audit 2026-08-05): structural dependency classification for merged
+/// modules. A module is a dependency when:
+/// 1. its path lies under the resolved stdlib directory (component-based
+///    `Path::starts_with`, immune to user directories merely named `std`), or
+/// 2. its path contains the consecutive component window `[".mimi", "deps"]`
+///    (the package cache layout; component matching, not string substring).
+/// Workspace modules (including custom stdlib layouts and monorepo siblings)
+/// keep their non-pub items.
+pub(crate) fn module_is_dependency(path: &Path) -> bool {
+    if let Some(std_dir) = super::stdlib_dir() {
+        if path.starts_with(&std_dir) {
+            return true;
+        }
+    }
+    let components: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    components
+        .windows(2)
+        .any(|w| w[0] == ".mimi" && w[1] == "deps")
+}
+
 pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, String> {
     let mut all_items = Vec::new();
     let mut seen_imports = HashSet::new();
@@ -1283,13 +1306,14 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
 
     for (module, file) in normalized {
         // P-H6: dependency modules only contribute `pub` items.
-        let is_dep = {
-            let p = module.path.to_string_lossy();
-            p.contains("/std/")
-                || p.contains("\\std\\")
-                || p.contains("/.mimi/deps/")
-                || p.contains("\\.mimi\\deps\\")
-        };
+        // X-5 (audit 2026-08-05, closed 2026-08-07): the old predicate was a
+        // raw path-substring scan (`"/std/"` / `"/.mimi/deps/"`), so any user
+        // directory named `std` (custom stdlib layouts, monorepos) was
+        // misclassified as a dependency and its non-pub items silently
+        // dropped. Now: stdlib modules are anchored to the resolved
+        // stdlib_dir() prefix (component-based starts_with), and cached deps
+        // require the exact consecutive component window [".mimi", "deps"].
+        let is_dep = module_is_dependency(&module.path);
         for item in &file.items {
             if is_dep && !item_is_pub(item) {
                 continue;
@@ -2032,6 +2056,37 @@ mod tests {
         let file = flow_merge_all(&modules).unwrap();
         assert!(file.imports.is_empty());
         assert!(file.items.is_empty());
+    }
+
+    /// X-5 (audit 2026-08-05): dependency classification must be structural
+    /// (stdlib prefix + [".mimi", "deps"] component window), never a raw
+    /// path substring — user directories merely NAMED `std` (custom stdlib
+    /// layouts, monorepos) are workspace modules, not dependencies.
+    #[test]
+    fn test_module_is_dependency_structural_not_substring() {
+        // User directory named `std` is NOT a dependency (the old substring
+        // scan `/std/` misclassified these).
+        assert!(!module_is_dependency(Path::new(
+            "/home/user/std/myproject/module.mimi"
+        )));
+        // Directory whose name merely CONTAINS "std" is not a dependency.
+        assert!(!module_is_dependency(Path::new(
+            "/home/user/stdx/module.mimi"
+        )));
+        // The package cache layout IS a dependency (component window).
+        assert!(module_is_dependency(Path::new(
+            "/home/user/proj/.mimi/deps/foo/lib.mimi"
+        )));
+        // A file literally named ".mimi" next to a "deps"-like name without
+        // the window order is not a dependency.
+        assert!(!module_is_dependency(Path::new(
+            "/home/user/deps/.mimi/module.mimi"
+        )));
+        // Real stdlib files ARE dependencies when stdlib_dir() resolves.
+        if let Some(std_dir) = super::super::stdlib_dir() {
+            let std_file = std_dir.join("io.mimi");
+            assert!(module_is_dependency(&std_file));
+        }
     }
 
     #[test]

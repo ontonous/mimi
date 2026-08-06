@@ -760,12 +760,37 @@ impl<'ctx> CodeGenerator<'ctx> {
         inkwell::values::FunctionValue<'ctx>,
         inkwell::values::FunctionValue<'ctx>,
     )> {
-        let extern_name = format!("__mimi_extern_{}", ef.name);
-        let extern_fn = self.module.add_function(
-            &extern_name,
-            sig.extern_fn_type,
-            Some(inkwell::module::Linkage::External),
-        );
+        // 0.34.35b (M-001): 真实 C 符号名为默认——extern 符号直接使用声明名
+        // （`func strlen` 链接 C 库的 `strlen`，与 VM 侧 `lib.get(name)` 查找一致）。
+        // 内部测试桩经显式机制保留：声明名写完整符号（`__mimi_extern_test_*`）。
+        let extern_name = ef.name.clone();
+        // LLVMAddFunction 对同名符号总是新建并加后缀 mangle（strlen → strlen.39），
+        // 链接时找不到真实 C 符号。先查模块：已有同名符号且签名兼容 → 复用（链接
+        // 到真实符号，如 libc strlen/puts 或 runtime 桩）；签名不兼容 → fail-loud
+        // 报错（诚实拒绝——不复用错符号，也不静默 mangle 成连不上的名字）。
+        let extern_fn = if let Some(existing) = self.module.get_function(&extern_name) {
+            let e_ty = existing.get_type();
+            let w_ty = sig.extern_fn_type;
+            let sig_matches = e_ty.count_param_types() == w_ty.count_param_types()
+                && e_ty.is_var_arg() == w_ty.is_var_arg()
+                && e_ty.get_return_type() == w_ty.get_return_type()
+                && e_ty.get_param_types() == w_ty.get_param_types();
+            if sig_matches {
+                existing
+            } else {
+                return Err(CompileError::LlvmError(format!(
+                    "extern '{}': symbol '{}' already exists in the module with an incompatible \
+                     signature (existing {:?} vs declared {:?})",
+                    ef.name, extern_name, e_ty, w_ty
+                )));
+            }
+        } else {
+            self.module.add_function(
+                &extern_name,
+                sig.extern_fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        };
         let cc = crate::ffi::abi_to_llvm_call_conv(abi);
         extern_fn.set_call_conventions(cc);
 
@@ -785,8 +810,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 extern_fn.add_attribute(AttributeLoc::Param(param_idx + arg_offset), attr);
             }
         }
+        // 0.34.35b (M-001): wrapper 必须与 extern 符号（现为声明名）区分开——
+        // LLVM add_function 同名会返回同一函数，导致 wrapper 逻辑写进 extern。
+        // 内部链接名 {name}.extern_wrapper 不与任何 C 符号冲突；调用点经
+        // extern_wrapper_fns map（按声明名）查找，不受名字影响。
+        let wrapper_name = format!("{}.extern_wrapper", ef.name);
         let wrapper_fn = self.module.add_function(
-            &ef.name,
+            &wrapper_name,
             sig.wrapper_fn_type,
             Some(inkwell::module::Linkage::Internal),
         );

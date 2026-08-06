@@ -1940,9 +1940,10 @@ impl VirZ3Ctx {
                 // with a possible z == 0 traps E0801 at runtime yet verified
                 // Proven. Minimal fail-closed fix mirroring the i32
                 // machinery: i64 div/mod now generate zero-divisor + MIN÷-1
-                // obligations. i64 add/sub/mul OVERFLOW obligations still
-                // need operand range axioms to be meaningful and remain a
-                // documented gap (i32 overflow obligations are unchanged).
+                // obligations. §11-#46 (2026-08-07): i64 add/sub/mul
+                // overflow obligations added as well — unbounded operands
+                // without bounding preconditions reject fail-closed, same
+                // as i32 (bounded contracts empirically still Proven).
                 // Coordinated with V-1 (AST/Resolved engine parity).
                 let min_bound: i64 = match ty {
                     VType::I32 => i32::MIN as i64,
@@ -1966,21 +1967,25 @@ impl VirZ3Ctx {
                 {
                     match op {
                         VArithOp::Add | VArithOp::Sub | VArithOp::Mul => {
-                            // V-6 scope: overflow obligations for i32 only.
-                            // i64 add/sub/mul stay unbounded (documented gap,
-                            // see the V-6 note above — the Proven message
-                            // discloses the assumption).
-                            if *ty != VType::I32 {
-                                return;
-                            }
+                            // §11-#46/V-6 (audit 2026-08-05, closed 2026-08-07):
+                            // i64 add/sub/mul now carry the same overflow
+                            // obligations as i32 (SD-7 trap parity). Unbounded
+                            // operands that preconditions do not bound are
+                            // rejected fail-closed, matching i32 behavior
+                            // (empirically: bounded requires still Proven).
+                            let (lo_v, hi_v) = match ty {
+                                VType::I32 => (i32::MIN as i64, i32::MAX as i64),
+                                VType::I64 => (i64::MIN, i64::MAX),
+                                VType::F64Opaque | VType::Bool => return,
+                            };
                             let result = match op {
                                 VArithOp::Add => z3::ast::Int::add(&[&l, &r]),
                                 VArithOp::Sub => z3::ast::Int::sub(&[&l, &r]),
                                 VArithOp::Mul => z3::ast::Int::mul(&[&l, &r]),
                                 _ => unreachable!(),
                             };
-                            let lo = z3::ast::Int::from_i64(i32::MIN as i64);
-                            let hi = z3::ast::Int::from_i64(i32::MAX as i64);
+                            let lo = z3::ast::Int::from_i64(lo_v);
+                            let hi = z3::ast::Int::from_i64(hi_v);
                             obligations.push((
                                 z3::ast::Bool::and(&[&result.ge(&lo), &result.le(&hi)]),
                                 "integer overflow is not excluded by preconditions",

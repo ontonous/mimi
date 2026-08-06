@@ -1649,8 +1649,76 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
 // Map (hash table via std::collections::HashMap)
 // ---------------------------------------------------------------------------
 
+/// §10-#35 (audit 2026-08-05, closed 2026-08-07): shape of a value buffer
+/// the MAP ITSELF allocated (from_json builders). destroy() frees these;
+/// caller-supplied values (mimi_map_set / mimi_map_from_list) are never
+/// registered and thus never freed by the map — the map cannot know their
+/// layout or sharing, and freeing on a guess would trade a leak for UB.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapOwnedValueKind {
+    /// malloc'd flat i64 pack (product tuple / option / result tagged pack).
+    Pack,
+    /// malloc'd 16-byte list header `{i64 len, ptr data}` where `data` is a
+    /// malloc'd array of `len` owned Pack pointers.
+    ListOfPacks,
+}
+
+/// Live count of map-owned value buffers (registered − freed). Observable
+/// so tests can prove destroy() actually reclaims; near-zero runtime cost.
+static MAP_OWNED_VALUE_BALANCE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Test/observability hook: number of map-owned value buffers still live.
+pub(crate) fn mimi_runtime_map_owned_value_balance() -> i64 {
+    MAP_OWNED_VALUE_BALANCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test hook: number of value buffers this specific map owns (race-free,
+/// per-map — unlike the global balance).
+pub(crate) fn mimi_map_owned_value_count(handle: MapHandle) -> i64 {
+    if handle == 0 || !map_is_live(handle) {
+        return 0;
+    }
+    // SAFETY: handle validated live; read in a single scope.
+    unsafe { (*map_from_handle(handle)).owned.len() as i64 }
+}
+
+/// Free a map-owned value buffer according to its recorded shape.
+fn free_map_owned_value(vh: ValueHandle, kind: MapOwnedValueKind) {
+    if vh == 0 {
+        return;
+    }
+    match kind {
+        MapOwnedValueKind::Pack => {
+            // SAFETY: `vh` was recorded as a libc::malloc'd pack base pointer.
+            unsafe { libc::free(vh as *mut std::ffi::c_void) };
+        }
+        MapOwnedValueKind::ListOfPacks => {
+            // SAFETY: `vh` was recorded as a malloc'd 16-byte {len, data}
+            // header built by mimi_map_from_json_list_product_i64.
+            unsafe {
+                let base = vh as *const u8;
+                let len = *(base as *const i64);
+                let data = *(base.add(8) as *const *const i64);
+                if len > 0 && len <= 1_000_000 && !data.is_null() {
+                    for j in 0..len as isize {
+                        let elem = *data.offset(j);
+                        if elem != 0 {
+                            libc::free(elem as *mut std::ffi::c_void);
+                        }
+                    }
+                    libc::free(data as *mut std::ffi::c_void);
+                }
+                libc::free(vh as *mut std::ffi::c_void);
+            }
+        }
+    }
+    MAP_OWNED_VALUE_BALANCE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 struct MimiMap {
     inner: HashMap<String, ValueHandle>,
+    /// §10-#35: value buffers this map allocated itself (from_json builders).
+    owned: HashMap<ValueHandle, MapOwnedValueKind>,
 }
 
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
@@ -1669,6 +1737,7 @@ unsafe fn map_from_handle(handle: MapHandle) -> *mut MimiMap {
 pub extern "C" fn mimi_map_new() -> MapHandle {
     let map = Box::new(MimiMap {
         inner: HashMap::new(),
+        owned: HashMap::new(),
     });
     let h = Box::into_raw(map) as MapHandle;
     map_register_live(h);
@@ -1682,9 +1751,16 @@ pub extern "C" fn mimi_map_destroy(handle: MapHandle) {
         return;
     }
     // SAFETY: handle was live and removed under lock; exclusive ownership restored.
-    unsafe {
-        drop(Box::from_raw(handle as *mut MimiMap));
+    let map = unsafe { Box::from_raw(handle as *mut MimiMap) };
+    // §10-#35: reclaim the value buffers this map allocated itself
+    // (from_json builders). remove()/set()-overwrite intentionally do NOT
+    // free: a caller may still hold the handle obtained via map_get, and
+    // freeing on a guess would trade a bounded (process-exit-reclaimed)
+    // leak for a use-after-free.
+    for (vh, kind) in map.owned.iter() {
+        free_map_owned_value(*vh, *kind);
     }
+    drop(map);
 }
 
 #[no_mangle]
@@ -1956,6 +2032,68 @@ fn safe_c_string_from_handle(handle: ValueHandle) -> Option<String> {
         }
     }
     None
+}
+
+/// §10-#31 (audit 2026-08-05, closed 2026-08-07): true when every page
+/// covering `[addr, addr + len)` passes mincore (i.e. is resident-mapped).
+/// `addr` need not be page-aligned; each covering page is probed from its
+/// aligned start. Zero-length spans are vacuously mapped.
+fn pages_mapped(addr: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let end = match addr.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    // SAFETY: `libc::sysconf` is async-signal-safe with a valid POSIX constant
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let page_size = if page_size == 0 { 4096 } else { page_size };
+    let mut page = (addr / page_size) * page_size;
+    while page < end {
+        let mut mvec: u8 = 0;
+        // SAFETY: `libc::mincore` is async-signal-safe; `page` is page-aligned
+        let mapped = unsafe { libc::mincore(page as *mut std::ffi::c_void, page_size, &mut mvec) };
+        if mapped != 0 {
+            return false;
+        }
+        page += page_size;
+    }
+    true
+}
+
+static PRODUCT_HANDLE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// §10-#31: read a heap-packed product tuple of `n` i64 fields from a
+/// ValueHandle ONLY after alignment + mincore probing. The product
+/// serializers previously called `from_raw_parts` on any non-null handle,
+/// segfaulting on corrupt/foreign handles. Returns None when the handle is
+/// not a plausible mapped heap pointer (warns once per process, fail-loud).
+fn safe_read_product_fields(handle: ValueHandle, n: usize) -> Option<Vec<i64>> {
+    const MIN_HEAP: usize = 1_048_576;
+    if n == 0 || handle < MIN_HEAP || handle % 8 != 0 {
+        if !PRODUCT_HANDLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "[mimi runtime] product value handle {:#x} is not a plausible heap pointer — serialized as zeros",
+                handle
+            );
+        }
+        return None;
+    }
+    let byte_len = n * std::mem::size_of::<i64>();
+    if !pages_mapped(handle, byte_len) {
+        if !PRODUCT_HANDLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "[mimi runtime] product value handle {:#x} points at unmapped memory — serialized as zeros",
+                handle
+            );
+        }
+        return None;
+    }
+    // SAFETY: mincore confirmed every page covering [handle, handle+byte_len)
+    // is mapped and `handle` is 8-aligned, so `n` i64 reads are in bounds.
+    Some(unsafe { std::slice::from_raw_parts(handle as *const i64, n).to_vec() })
 }
 
 #[no_mangle]
@@ -3613,6 +3751,15 @@ impl<'a> JsonParser<'a> {
         if is_float {
             // Format float: trim trailing zeros
             let val: f64 = s.parse().ok()?;
+            // stdlib JSON 与 serde 语义统一（audit 2026-08-07）：serde_json
+            // rejects exponents that overflow f64 (1e999 → "number out of
+            // range"); `str::parse::<f64>` silently returns inf instead.
+            // The bytecode VM validates via serde_json, so the runtime parser
+            // must reject non-finite parses too — otherwise json_is_valid
+            // diverges between backends (was: VM false / codegen true).
+            if !val.is_finite() {
+                return None;
+            }
             let mut formatted = format!("{}", val);
             if formatted.contains('.') {
                 formatted = formatted
@@ -3911,6 +4058,7 @@ impl<'a> JsonParser<'a> {
 
     fn strict_number(&mut self) -> bool {
         // RFC 8259 number: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+        let num_start = self.pos;
         if self.peek() == b'-' {
             self.advance();
         }
@@ -3951,6 +4099,21 @@ impl<'a> JsonParser<'a> {
             }
             if self.pos == exp_start {
                 return false; // "e" with no digits
+            }
+        }
+        // stdlib JSON 与 serde 语义统一（audit 2026-08-07）：serde_json
+        // rejects float literals whose value overflows f64 ("number out of
+        // range": 1e999, -1e999); the bytecode VM validates via serde_json,
+        // so the grammar-only scan must add the same range check for tokens
+        // containing '.' or 'e'. Huge INTEGERS stay valid (serde_json parses
+        // them via arbitrary precision).
+        let tok = &self.p[num_start..self.pos];
+        if tok.contains(&b'.') || tok.contains(&b'e') || tok.contains(&b'E') {
+            if let Ok(s) = std::str::from_utf8(tok) {
+                match s.parse::<f64>() {
+                    Ok(v) if v.is_finite() => {}
+                    _ => return false,
+                }
             }
         }
         true
@@ -4769,17 +4932,13 @@ pub extern "C" fn mimi_map_to_json_product_i64(
         parts.push(String::from(":"));
         let vh = **v;
         let n = arity as usize;
-        // SAFETY: map_set product path heap-packs an i64[n] struct and stores ptrtoint.
+        // §10-#31: probe alignment + mapping before reading the heap-packed
+        // i64[n] struct (previously a bare from_raw_parts — segfault on
+        // corrupt handles). vh == 0 is the legitimate empty-value sentinel.
         let fields: Vec<i64> = if vh == 0 {
             vec![0; n]
         } else {
-            let ptr = vh as *const i64;
-            if ptr.is_null() {
-                vec![0; n]
-            } else {
-                // SAFETY: `ptr` is non-null (checked above) and points to at least `n` valid, properly aligned `i64` values
-                unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
-            }
+            safe_read_product_fields(vh, n).unwrap_or_else(|| vec![0; n])
         };
         if display_style != 0 {
             // Display: (1, 2)
@@ -4829,7 +4988,19 @@ pub extern "C" fn mimi_map_to_json_list_product_i64(
             continue;
         }
         // SAFETY: map_set packs List as heap {i64 len, ptr data}.
+        // §10-#31: probe the 16-byte list header before dereferencing it.
         let list_base = vh as *const u8;
+        if !pages_mapped(vh, 16) {
+            if !PRODUCT_HANDLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "[mimi runtime] list-product value handle {:#x} points at unmapped memory — serialized as []",
+                    vh
+                );
+            }
+            parts.push(String::from("[]"));
+            continue;
+        }
+        // SAFETY: pages_mapped confirmed the 16-byte header is mapped.
         let len = unsafe { *(list_base as *const i64) };
         let data = unsafe { *(list_base.add(8) as *const *const i64) };
         if len <= 0 || data.is_null() || len > 1_000_000 {
@@ -4844,16 +5015,12 @@ pub extern "C" fn mimi_map_to_json_list_product_i64(
             }
             // SAFETY: the offset is within bounds of `data`'s allocated buffer
             let prod_h = unsafe { *data.offset(j) };
+            // §10-#31: mincore-probed read (bare from_raw_parts segfaulted
+            // on corrupt product handles).
             let fields: Vec<i64> = if prod_h == 0 {
                 vec![0; n]
             } else {
-                let ptr = prod_h as *const i64;
-                if ptr.is_null() {
-                    vec![0; n]
-                } else {
-                    // SAFETY: `ptr` is non-null (checked above) and points to at least `n` valid, properly aligned `i64` values
-                    unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
-                }
+                safe_read_product_fields(prod_h as ValueHandle, n).unwrap_or_else(|| vec![0; n])
             };
             if display_style != 0 {
                 let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
@@ -4873,16 +5040,11 @@ pub extern "C" fn mimi_map_to_json_list_product_i64(
                 }
                 // SAFETY: the offset is within bounds of `data`'s allocated buffer
                 let prod_h = unsafe { *data.offset(j) };
+                // §10-#31: mincore-probed read.
                 let fields: Vec<i64> = if prod_h == 0 {
                     vec![0; n]
                 } else {
-                    let ptr = prod_h as *const i64;
-                    if ptr.is_null() {
-                        vec![0; n]
-                    } else {
-                        // SAFETY: `ptr` is non-null (checked above) and points to at least `n` valid, properly aligned `i64` values
-                        unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
-                    }
+                    safe_read_product_fields(prod_h as ValueHandle, n).unwrap_or_else(|| vec![0; n])
                 };
                 let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
                 list_parts.push(format!("[{}]", body.join(",")));
@@ -5032,8 +5194,13 @@ pub extern "C" fn mimi_map_from_json_list_product_i64(
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, vh);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: the list header + data array + element packs were all
+            // malloc'd above — register so destroy() can reclaim them.
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListOfPacks);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -5382,8 +5549,12 @@ pub extern "C" fn mimi_map_from_json_product_i64(
         let vh = ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; `key` is a valid `String` and `vh` is a heap-packed product pointer
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, vh);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: register the malloc'd pack so destroy() reclaims it.
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -16343,8 +16514,12 @@ pub extern "C" fn mimi_map_from_json_option_product_i64(
         let vh = ptr as ValueHandle;
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, vh);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: register the malloc'd option pack so destroy() reclaims it.
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -16595,8 +16770,14 @@ pub extern "C" fn mimi_map_from_json_result_product_i64(
         let vh = ptr as ValueHandle;
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, vh);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: register the malloc'd result pack so destroy() reclaims it.
+            // Residual: an Err pack's embedded C string (ptr[1]) is not
+            // separately reclaimed — documented known boundary (LOW item).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -16986,13 +17167,9 @@ pub extern "C" fn mimi_set_to_json_product_i64(
             if *vh == 0 {
                 vec![0; n]
             } else {
-                let ptr = *vh as *const i64;
-                if ptr.is_null() {
-                    vec![0; n]
-                } else {
-                    // SAFETY: `ptr` is non-null and points to a valid heap allocation of at least `n * 8` bytes (stored as product-tuple handle from `mimi_set_from_json_product_i64` or similar)
-                    unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
-                }
+                // §10-#31: mincore-probed read (bare from_raw_parts segfaulted
+                // on corrupt product handles).
+                safe_read_product_fields(*vh as ValueHandle, n).unwrap_or_else(|| vec![0; n])
             }
         })
         .collect();
@@ -20158,5 +20335,113 @@ mod audit_wave1_tests {
         //   json_array_length("{\"a\":1}")       → "value is not an array"
         //   json_has_key("{bad", "k")           → "json_has_key parse error"
         //   mimi_inject_fault("S")              → abort (fix #10)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// audit-unfixed-2026-08-05 收尾包 D regression tests
+// §10-#27 (ReDoS time budget — tests in runtime/regex.rs),
+// §10-#31 (product serializer mincore), §10-#35 (map destroy reclaims).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod audit_pkgd_tests {
+    use super::*;
+
+    fn owned_str(ptr: *mut std::ffi::c_char) -> String {
+        assert!(!ptr.is_null());
+        // SAFETY: alloc_c_string results are NUL-terminated heap strings.
+        let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        mimi_string_free(ptr);
+        s
+    }
+
+    // ── §10-#31: product serializers must mincore-probe, never segfault ──
+
+    #[test]
+    fn product_serializer_unmapped_handle_serializes_zeros_not_segfault() {
+        // Same unmapped canonical-userspace hole used by audit_wave1_tests.
+        let garbage: ValueHandle = 0x0000_7000_0000_0000;
+        let h = mimi_map_new();
+        let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+        mimi_map_set(h, key, garbage);
+        // Pre-fix this dereferenced the handle blind (SIGSEGV).
+        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        assert_eq!(out, "{\"k\":[0,0]}");
+        mimi_map_destroy(h);
+    }
+
+    #[test]
+    fn product_serializer_small_handle_serializes_zeros_not_segfault() {
+        // Below MIN_HEAP: provably not a heap pointer.
+        let h = mimi_map_new();
+        let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+        mimi_map_set(h, key, 8);
+        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 1));
+        assert_eq!(out, "{\"k\":(0, 0)}");
+        mimi_map_destroy(h);
+    }
+
+    #[test]
+    fn product_serializer_real_packs_still_round_trip() {
+        // The probe must not perturb legitimate heap-packed values.
+        let json = b"{\"a\":[1,2],\"b\":[3,4]}\0";
+        let h = mimi_map_from_json_product_i64(json.as_ptr() as _, 2);
+        assert_ne!(h, 0);
+        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        assert_eq!(out, "{\"a\":[1,2],\"b\":[3,4]}");
+        mimi_map_destroy(h);
+    }
+
+    // ── §10-#35: destroy() must reclaim map-owned value buffers ────────
+    // Registration is asserted EXACTLY via the per-map owned count (race-free).
+    // Reclamation is asserted on the global balance with retries: concurrent
+    // tests (audit_fix_runtime_core) allocate/free through the same builders,
+    // so a single sample can be transiently skewed; a real leak pins the
+    // buffers forever and fails every attempt.
+
+    fn attempt_reclaim_check(json: &[u8], arity: i64, list: bool) -> bool {
+        let baseline = mimi_runtime_map_owned_value_balance();
+        let h = if list {
+            mimi_map_from_json_list_product_i64(json.as_ptr() as _, arity)
+        } else {
+            mimi_map_from_json_product_i64(json.as_ptr() as _, arity)
+        };
+        if h == 0 {
+            return false;
+        }
+        // Race-free exact registration proof.
+        let registered = mimi_map_owned_value_count(h) == 2;
+        mimi_map_destroy(h);
+        registered && mimi_runtime_map_owned_value_balance() <= baseline
+    }
+
+    #[test]
+    fn map_destroy_reclaims_owned_product_packs() {
+        let json = b"{\"a\":[1,2],\"b\":[3,4]}\0";
+        let ok = (0..5).any(|_| attempt_reclaim_check(json, 2, false));
+        assert!(
+            ok,
+            "destroy must free every owned pack (leak pins the balance)"
+        );
+    }
+
+    #[test]
+    fn map_destroy_reclaims_owned_list_of_packs() {
+        let json = b"{\"a\":[[1,2],[3,4]],\"b\":[[5,6]]}\0";
+        // Serialization must still work while live (frees nothing).
+        let h = mimi_map_from_json_list_product_i64(json.as_ptr() as _, 2);
+        assert_ne!(h, 0);
+        assert_eq!(mimi_map_owned_value_count(h), 2);
+        let out = owned_str(mimi_map_to_json_list_product_i64(h, 2, 0));
+        assert_eq!(out, "{\"a\":[[1,2],[3,4]],\"b\":[[5,6]]}");
+        assert_eq!(mimi_map_owned_value_count(h), 2, "serialize must not free");
+        mimi_map_destroy(h);
+        let ok = (0..5).any(|_| attempt_reclaim_check(json, 2, true));
+        assert!(
+            ok,
+            "destroy must free headers + data arrays + element packs"
+        );
     }
 }

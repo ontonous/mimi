@@ -761,6 +761,29 @@ impl Parser {
                 let mut expr_str = String::new();
                 let mut depth = 1;
                 while let Some(&c) = chars.peek() {
+                    // §1-#10 (audit 2026-08-05, closed 2026-08-07): mirror
+                    // the lexer's quote-aware interpolation scan — braces
+                    // inside quoted literals (`f"{ "}" }"`) must not close
+                    // the interpolation. Skip the whole literal, honoring
+                    // backslash escapes.
+                    if c == '"' || c == '\'' {
+                        let quote = c;
+                        expr_str.push(c);
+                        chars.next();
+                        while let Some(&qc) = chars.peek() {
+                            expr_str.push(qc);
+                            chars.next();
+                            if qc == '\\' {
+                                if let Some(&escaped) = chars.peek() {
+                                    expr_str.push(escaped);
+                                    chars.next();
+                                }
+                            } else if qc == quote {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                     if c == '{' {
                         depth += 1;
                     } else if c == '}' {

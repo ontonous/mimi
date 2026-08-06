@@ -251,16 +251,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .map_err(|e| format!("pow error: {}", e))?;
             let r64 = self.expect_basic_value(&call, "pow")?.into_int_value();
-            // The checker types pow(_, _) -> f64 (core/infer/call/simple.rs:838),
-            // so keep the value-type contract: convert the exact i64 result to
-            // f64. The trap semantics (overflow / negative exponent) are fully
-            // decided by the runtime call above; results with |v| <= 2^53
-            // round-trip exactly through f64.
-            let rf = self
-                .builder
-                .build_signed_int_to_float(r64, f64_ty, "pow_i64_to_f64")
-                .map_err(|e| format!("pow int_to_float error: {}", e))?;
-            return Ok(rf.into());
+            // V-7 (closed 2026-08-07): the checker now types int×int pow as
+            // i64 (core/infer/call/simple.rs), so return the EXACT i64 — the
+            // old sitofp-to-f64 (justified by the old f64 static type) rounded
+            // pow(2, 60) to …847000 while the VM printed the exact integer.
+            // Trap semantics (overflow / negative exponent / exp > u32::MAX)
+            // are fully decided by the runtime call above.
+            return Ok(r64.into());
         }
         // Float path (float×float and int×float mixes): coerce to f64, libc
         // pow, then the SD-9 finiteness invariant — the bytecode VM runs
