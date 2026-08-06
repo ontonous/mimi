@@ -4096,8 +4096,11 @@ impl BytecodeCompiler {
             }
         }
 
-        // Non-exhaustive match: return Unit (or could emit an error).
-        fc.emit(Op::LoadUnit { rd });
+        // H-9 (Wave-2, closed 2026-08-07): match fall-through is a runtime
+        // PANIC (E0805), not a silent Unit — parity with codegen
+        // mimi_match_panic (expr/match.rs). Reachable only when every arm's
+        // pattern test failed (always-matching arms make this dead code).
+        fc.emit(Op::NonExhaustiveMatch);
 
         // Patch all end jumps.
         for j in end_jumps {

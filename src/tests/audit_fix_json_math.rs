@@ -142,9 +142,9 @@ fn audit_pow_int_exact_large_no_precision_loss() {
 #[test]
 fn audit_pow_2_60_vm_exact_and_codegen_no_trap() {
     // FIX-4: pow(2, 60) fits in i64 — must NOT trap. VM computes exact i64.
-    // (Display diverges — the checker types pow as f64, so codegen shows the
-    // f64 rendering while the VM shows the exact integer; the load-bearing
-    // assertions are: VM value is exact, codegen does not trap.)
+    // V-7 (closed 2026-08-07): the checker now types int×int pow as i64, so
+    // BOTH backends print the exact integer (the old f64 static type made
+    // codegen render a float — L1 display divergence).
     let src = r#"
         func main() -> i32 {
             let v = pow(2, 60)
@@ -163,9 +163,48 @@ fn audit_pow_2_60_vm_exact_and_codegen_no_trap() {
     }
     let out = compile_and_run(src).expect("pow(2, 60) must not trap in codegen");
     assert!(
-        !out.trim().is_empty(),
-        "pow(2, 60) codegen produced no output"
+        out.contains("1152921504606846976"),
+        "V-7: codegen must now render the exact integer (checker types int pow as i64), got: {:?}",
+        out
     );
+}
+
+#[test]
+fn audit_v7_pow_float_args_stay_f64() {
+    // V-7: a float argument keeps the f64 contract (stdlib power() relies
+    // on it; display shows the float rendering on both backends).
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(pow(2.0, 10.0))
+            0
+        }
+    "#,
+        "1024"
+    );
+}
+
+#[test]
+fn audit_pow_exp_above_u32_max_traps_both_backends() {
+    // wave1-review §5.17: the VM rejects exponents above u32::MAX via
+    // u32::try_from; the runtime's __mimi_pow_i64 mirrors the cap (abort).
+    // Pre-fix, pow(1, 4294967326) returned 1 in codegen while the VM
+    // trapped — an L1 divergence. Both sides must now fail loud.
+    let src = r#"
+        func main() -> i32 {
+            let v = pow(1, 4294967326)
+            println(v)
+            0
+        }
+    "#;
+    assert_vm_traps(src, "exponent");
+    if !can_link() {
+        return;
+    }
+    assert_codegen_traps(src, "exponent exceeds u32::MAX");
 }
 
 #[test]
@@ -712,4 +751,70 @@ fn audit_from_json_null_guard_and_valid_dual() {
         "{\"a\":1}"
     );
     assert_codegen_traps(malformed, "from_json parse error");
+}
+
+// ============================================================
+// stdlib JSON parser 与 serde 语义统一（audit 2026-08-07）
+// ============================================================
+// 台账 Wave-3：runtime JsonParser 的 strict_number 只做 RFC 8259 语法扫描，
+// 不查数值范围；而 bytecode VM 用 serde_json 验证。serde_json 拒绝 f64 溢出
+// 的浮点字面量（"number out of range"：1e999），导致双后端分歧：
+//   json_is_valid("{\"a\":1e999}") → VM false / codegen true
+// 修复：strict_number 对含 '.'/'e' 的字面量补上 f64 有限性检查；大整数
+// （任意精度）保持合法。前导零（01）双端本已一致拒绝。
+
+#[test]
+fn audit_json_is_valid_serde_float_range_parity() {
+    // 1e999 / -1e999 溢出 f64 → 双端都必须 false（serde "number out of range"）。
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(json_is_valid("{\"a\":1e999}"))
+            println(json_is_valid("{\"a\":-1e999}"))
+            println(json_is_valid("[1e999]"))
+            0
+        }
+    "#,
+        "false\nfalse\nfalse"
+    );
+}
+
+#[test]
+fn audit_json_is_valid_serde_finite_and_bigint_parity() {
+    // 有限浮点、下溢（1e-999→0.0 有限）、大整数（任意精度）双端都 true。
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(json_is_valid("{\"a\":1e-999}"))
+            println(json_is_valid("{\"a\":99999999999999999999999999}"))
+            println(json_is_valid("{\"a\":1.5e3}"))
+            0
+        }
+    "#,
+        "true\ntrue\ntrue"
+    );
+}
+
+#[test]
+fn audit_json_is_valid_leading_zero_still_rejected() {
+    // 前导零（01）修复前后双端都拒绝——守护既有行为不回退。
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(json_is_valid("{\"a\":01}"))
+            println(json_is_valid("{\"a\":0}"))
+            0
+        }
+    "#,
+        "false\ntrue"
+    );
 }

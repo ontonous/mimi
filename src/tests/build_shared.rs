@@ -49,6 +49,226 @@ fn link_shared(obj_path: &std::path::Path, output_so: &std::path::Path, no_std: 
     assert!(status.success(), "linking should succeed");
 }
 
+/// 0.34.35b (M-006): dlopen round-trip ABI probe — compile a Mimi shared
+/// library, dlopen it from a C program, call the exported function through
+/// dlsym, and assert the C-observed output.
+///
+/// This is the missing ABI correctness coverage the 0.34.35 FFI audit flagged:
+/// static `-L -l` linking exercises the same symbol table but dlopen forces the
+/// runtime loader path (and catches struct-by-value parameter/return slot
+/// mismatches that static linking can silently paper over).
+fn dlopen_roundtrip(mimi_src: &str, c_probe: &str, expected: &str, tag: &str) {
+    let tmp = std::env::temp_dir().join(format!("mimi_dlopen_{}_{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("dlopen: mkdir");
+
+    let obj_path = tmp.join(format!("{}.o", tag));
+    let so_path = tmp.join(format!("lib{}.so", tag));
+    compile_to_object(mimi_src, tag, &obj_path);
+    link_shared(&obj_path, &so_path, false);
+
+    // C probe: dlopen + dlsym + call + print.
+    let c_path = tmp.join("probe.c");
+    let c_bin = tmp.join("probe");
+    std::fs::write(&c_path, c_probe).expect("dlopen: write probe.c");
+    let so_abs = so_path.canonicalize().expect("dlopen: canonicalize so");
+    let cc_status = std::process::Command::new("cc")
+        .arg("-no-pie")
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&c_bin)
+        .arg("-ldl")
+        .status()
+        .expect("dlopen: cc probe");
+    assert!(cc_status.success(), "dlopen: probe compilation failed");
+
+    let output = std::process::Command::new(&c_bin)
+        .arg(&so_abs)
+        .output()
+        .expect("dlopen: run probe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "dlopen: probe failed, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout.trim(),
+        expected,
+        "dlopen: ABI mismatch for {} (stdout={:?})",
+        tag,
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// 0.34.35b (M-006) shape matrix: 8-byte INTEGER-class record, both
+/// parameter and return direction through dlopen.
+#[test]
+fn dlopen_reprc_s8_roundtrip() {
+    let mimi_src = r#"
+        #[repr(C)]
+        type S8 { a: i32, b: i32 }
+        extern "C" func make_s8(a: i32, b: i32) -> S8 {
+            S8 { a, b }
+        }
+        extern "C" func sum_s8(s: S8) -> i32 {
+            s.a + s.b
+        }
+    "#;
+    let c_probe = r#"
+        #include <dlfcn.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        typedef struct { int a; int b; } S8;
+        typedef S8 (*make_fn)(int, int);
+        typedef int (*sum_fn)(S8);
+        int main(int argc, char** argv) {
+            void* h = dlopen(argv[1], RTLD_NOW);
+            if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
+            make_fn make = (make_fn)dlsym(h, "make_s8");
+            sum_fn sum = (sum_fn)dlsym(h, "sum_s8");
+            if (!make || !sum) { fprintf(stderr, "dlsym: %s\n", dlerror()); return 1; }
+            S8 r = make(3, 4);
+            printf("%d %d %d\n", r.a, r.b, sum(r));
+            dlclose(h);
+            return 0;
+        }
+    "#;
+    dlopen_roundtrip(mimi_src, c_probe, "3 4 7", "s8");
+}
+
+/// 0.34.35b (M-006): 16-byte two-INTEGER record (SysV: two GP registers).
+#[test]
+fn dlopen_reprc_s16_roundtrip() {
+    let mimi_src = r#"
+        #[repr(C)]
+        type S16 { a: i64, b: i64 }
+        extern "C" func make_s16(a: i64, b: i64) -> S16 {
+            S16 { a, b }
+        }
+        extern "C" func diff_s16(s: S16) -> i64 {
+            s.b - s.a
+        }
+    "#;
+    let c_probe = r#"
+        #include <dlfcn.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        typedef struct { long long a; long long b; } S16;
+        typedef S16 (*make_fn)(long long, long long);
+        typedef long long (*diff_fn)(S16);
+        int main(int argc, char** argv) {
+            void* h = dlopen(argv[1], RTLD_NOW);
+            if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
+            make_fn make = (make_fn)dlsym(h, "make_s16");
+            diff_fn diff = (diff_fn)dlsym(h, "diff_s16");
+            if (!make || !diff) { fprintf(stderr, "dlsym: %s\n", dlerror()); return 1; }
+            S16 r = make(10, 25);
+            printf("%lld %lld %lld\n", r.a, r.b, diff(r));
+            dlclose(h);
+            return 0;
+        }
+    "#;
+    dlopen_roundtrip(mimi_src, c_probe, "10 25 15", "s16");
+}
+
+/// 0.34.35b (M-006): 24-byte MEMORY-class record — byval parameter AND sret
+/// return (the M-010/N-1 root-case shape that SIGSEGV'd the debug compiler).
+#[test]
+fn dlopen_reprc_s24_byval_sret_roundtrip() {
+    let mimi_src = r#"
+        #[repr(C)]
+        type S24 { id: i32, value: f64, flag: i32 }
+        extern "C" func make_s24(id: i32, value: f64, flag: i32) -> S24 {
+            S24 { id, value, flag }
+        }
+        extern "C" func total_s24(s: S24) -> f64 {
+            (s.id + s.flag) as f64 + s.value
+        }
+    "#;
+    let c_probe = r#"
+        #include <dlfcn.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        typedef struct { int id; double value; int flag; } S24;
+        typedef S24 (*make_fn)(int, double, int);
+        typedef double (*total_fn)(S24);
+        int main(int argc, char** argv) {
+            void* h = dlopen(argv[1], RTLD_NOW);
+            if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
+            make_fn make = (make_fn)dlsym(h, "make_s24");
+            total_fn total = (total_fn)dlsym(h, "total_s24");
+            if (!make || !total) { fprintf(stderr, "dlsym: %s\n", dlerror()); return 1; }
+            S24 r = make(10, 3.5, 1);
+            printf("%d %.1f %d %.1f\n", r.id, r.value, r.flag, total(r));
+            dlclose(h);
+            return 0;
+        }
+    "#;
+    dlopen_roundtrip(mimi_src, c_probe, "10 3.5 1 14.5", "s24");
+}
+
+/// 0.34.35b (M-006): 16-byte SSE-class record (two f64 — SysV: two SSE regs).
+#[test]
+fn dlopen_reprc_sse16_roundtrip() {
+    let mimi_src = r#"
+        #[repr(C)]
+        type SSE16 { a: f64, b: f64 }
+        extern "C" func make_sse16(a: f64, b: f64) -> SSE16 {
+            SSE16 { a, b }
+        }
+        extern "C" func mul_sse16(s: SSE16) -> f64 {
+            s.a * s.b
+        }
+    "#;
+    let c_probe = r#"
+        #include <dlfcn.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        typedef struct { double a; double b; } SSE16;
+        typedef SSE16 (*make_fn)(double, double);
+        typedef double (*mul_fn)(SSE16);
+        int main(int argc, char** argv) {
+            void* h = dlopen(argv[1], RTLD_NOW);
+            if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
+            make_fn make = (make_fn)dlsym(h, "make_sse16");
+            mul_fn mul = (mul_fn)dlsym(h, "mul_sse16");
+            if (!make || !mul) { fprintf(stderr, "dlsym: %s\n", dlerror()); return 1; }
+            SSE16 r = make(2.5, 4.0);
+            printf("%.1f %.1f %.1f\n", r.a, r.b, mul(r));
+            dlclose(h);
+            return 0;
+        }
+    "#;
+    dlopen_roundtrip(mimi_src, c_probe, "2.5 4.0 10.0", "sse16");
+}
+
+/// 0.34.35b (M-006): f32 缺位负测试——f32 未注册（M-008），checker 必须
+/// fail-loud 拒绝（E0407），不允许静默按 f64/i64 编组产生错误 ABI。
+#[test]
+fn dlopen_f32_unsupported_rejected() {
+    let src = "extern \"C\" func f32_identity(x: f32) -> f32 { x }";
+    let tokens = lexer::Lexer::new(src).tokenize().expect("f32 test: lex");
+    let file = parser::Parser::new(tokens)
+        .parse_file()
+        .expect("f32 test: parse");
+    let check = crate::core::check(&file);
+    assert!(check.is_err(), "f32 export must be rejected at check time");
+    let diags = check.expect_err("f32 diags");
+    let msg = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        msg.contains("E0407"),
+        "f32 rejection should carry E0407, got: {}",
+        msg
+    );
+}
+
 #[test]
 fn parse_exported_func() {
     let src = "extern \"C\" func add(a: i64, b: i64) -> i64 { a + b }";

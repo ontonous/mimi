@@ -273,8 +273,11 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(generics) = self.type_generics.get(name) {
                     if args.len() != generics.len() {
+                        // §3-诊断卫生 (audit 2026-08-05, closed 2026-08-07):
+                        // generic arity mismatch wore the polysemous E0231
+                        // (FFI context gate). Dedicated code E0438.
                         self.emit_code(
-                            crate::diagnostic::codes::E0231,
+                            crate::diagnostic::codes::E0438,
                             format!(
                                 "type '{}' expects {} generic argument{}, found {} in {}",
                                 name,

@@ -736,3 +736,137 @@ module inner {
         results
     );
 }
+
+/// §11-#46/V-6 (audit 2026-08-05, closed 2026-08-07): i64 add/sub/mul 现与
+/// i32 同等携带溢出义务（SD-7 trap 对齐）。无界操作数且前置条件不约束
+/// 范围 → fail-closed Disproven（此前静默 Proven，披露语掩盖假设）。
+#[test]
+fn audit2_vera_46_i64_add_unbounded_disproven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func add(a: i64, b: i64) -> i64 {
+    ensures: result == a + b
+    a + b
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "add"),
+        Some(crate::verifier::VerifStatus::Disproven),
+        "unbounded i64 add may overflow (SD-7 trap); Proven means the \
+         overflow obligation is still missing: {:?}",
+        results
+    );
+}
+
+/// §11-#46 对侧：前置条件约束操作数范围 → 溢出义务可解除，Proven。
+#[test]
+fn audit2_vera_46_i64_add_bounded_proven() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func add(a: i64, b: i64) -> i64 {
+    requires: a > -100 && a < 100
+    requires: b > -100 && b < 100
+    ensures: result == a + b
+    a + b
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "add"),
+        Some(crate::verifier::VerifStatus::Proven),
+        "bounded operands discharge the i64 overflow obligation: {:?}",
+        results
+    );
+}
+
+/// §11-#47 (audit 2026-08-05, closed 2026-08-07): f64 let 绑定此前静默跳过
+/// （变量不断言到初始化表达式）。现经 encode_f64 断言恒等——可编码形状
+/// （变量/常量/Result）登记为约束；不可编码形状诚实 NotInTrustedSubset。
+/// 回归钉死：f64 let 不再静默丢失（constraint_count 含绑定项），且可证
+/// 契约不被绑定改动破坏。
+#[test]
+fn audit2_vera_47_f64_let_binding_registered() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(x: f64) -> f64 {
+    math: { 2 + 2 == 4 }
+    let y = x
+    y
+}
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    let f = results.iter().find(|r| r.func_name == "f");
+    assert!(f.is_some(), "f should be verified: {:?}", results);
+    let f = f.unwrap();
+    assert_eq!(
+        f.status,
+        crate::verifier::VerifStatus::Proven,
+        "math obligation must still prove with the f64 let bound: {:?}",
+        f.message
+    );
+    // math(1) + let-binding(1) — pre-§11-#47 the let contributed nothing.
+    assert!(
+        f.constraint_count >= 2,
+        "f64 let binding must be registered as a constraint, got {} ({})",
+        f.constraint_count,
+        f.message
+    );
+}
+
+/// §11-#48 (audit 2026-08-05, closed 2026-08-07): AST 引擎 encode_match_bool
+/// 的非穷尽落空分支此前硬编 `false`——scrutinee 编码为无界 Int 时落空分支
+/// 可达，verifier 凭空假设结果为 false（双向假证）。镜像 int 路径 E2 修复：
+/// 落空用无约束变量。回归钉死：非穷尽 bool match 编码后 fallback 变量已
+/// 登记（而非硬编常量）。
+#[test]
+fn audit2_vera_48_match_bool_fallback_unconstrained() {
+    if !z3_or_skip() {
+        return;
+    }
+    let file = crate::tests::parse(
+        r#"
+func f(x: i32) -> bool {
+    match x {
+        1 => true
+        2 => false
+    }
+}
+"#,
+    );
+    let function = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(f) if f.name == "f" => Some(f),
+            _ => None,
+        })
+        .expect("func f parsed");
+    let arms = function
+        .body
+        .iter()
+        .find_map(|stmt| match stmt.unlocated() {
+            crate::ast::Stmt::Expr(e) => match e.unlocated() {
+                crate::ast::Expr::Match(_, arms) => Some(arms.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("match expression parsed");
+    let mut vars = crate::verifier::Z3VarMap::new();
+    let matched = vars.get_or_create_int("x");
+    let encoded = crate::verifier::encode_match_bool(&matched, &arms, &mut vars)
+        .expect("non-exhaustive bool match must encode");
+    let _ = encoded;
+    assert!(
+        vars.get_bool("_match_fallback_bool").is_some(),
+        "non-exhaustive bool match fallback must be an unconstrained \
+         variable, not a hardcoded `false` (pre-§11-#48)"
+    );
+}

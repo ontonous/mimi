@@ -1,4 +1,4 @@
-use crate::ast::{Expr, File, Item};
+use crate::ast::{File, Item};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 use z3::ast::String as Z3String;
@@ -512,6 +512,15 @@ impl Z3VarMap {
             .or_insert_with(|| Z3Real::new_const(name))
             .clone()
     }
+
+    /// Get or create a Bool variable (§11-#48: unconstrained fallbacks for
+    /// non-exhaustive match encoding must not hardcode a truth value).
+    pub(crate) fn get_or_create_bool(&mut self, name: &str) -> Z3Bool {
+        self.bool_vars
+            .entry(name.to_string())
+            .or_insert_with(|| Z3Bool::new_const(name))
+            .clone()
+    }
 }
 
 /// Wraps a Z3 Solver with crash-recovery tracking.
@@ -530,6 +539,11 @@ pub struct SolverSession {
     /// Only cleared by reset() which starts a completely fresh verification.
     pub(crate) poisoned: bool,
     pub(crate) timeout_ms: u64,
+    /// §11-#50 (audit 2026-08-05, closed 2026-08-07): set when check()
+    /// observes a real Z3 unknown (timeout budget exhausted). Consumers
+    /// report `VerifStatus::Timeout` instead of the generic SolverUnknown
+    /// via `unknown_status()`. Only cleared by reset().
+    pub(crate) timeout_observed: bool,
 }
 
 impl SolverSession {
@@ -544,6 +558,7 @@ impl SolverSession {
             replaced: false,
             poisoned: false,
             timeout_ms,
+            timeout_observed: false,
         })
     }
 
@@ -591,6 +606,7 @@ impl SolverSession {
                 std::mem::forget(old);
                 self.replaced = true; // skip next pop() — push was on old solver
                 self.poisoned = true; // B6: assertions lost, future checks unreliable
+                self.timeout_observed = true; // §11-#50: real Z3 unknown (timeout)
                 SatResult::Unknown
             }
             Err(panic_payload) => {
@@ -629,6 +645,19 @@ impl SolverSession {
         self.solver.reset();
         self.replaced = false;
         self.poisoned = false;
+        self.timeout_observed = false;
+    }
+
+    /// §11-#50: map an inconclusive solver outcome to the honest status —
+    /// `Timeout` when the timeout budget was actually exhausted, generic
+    /// `SolverUnknown` otherwise. Kills the dead-status leak where real
+    /// timeouts were reported as plain SolverUnknown.
+    pub(crate) fn unknown_status(&self) -> VerifStatus {
+        if self.timeout_observed {
+            VerifStatus::Timeout
+        } else {
+            VerifStatus::SolverUnknown
+        }
     }
 
     pub fn push(&mut self) {
@@ -725,7 +754,7 @@ impl SolverSession {
     }
 }
 
-/// Context for verification lookups (func_defs, let_subst).
+/// Context for verification lookups (func_defs, func_status).
 /// Owned by VerifierState in the Flow path — contains no Z3 solver state.
 #[derive(Default)]
 pub struct VerifierCtx {
@@ -740,17 +769,10 @@ pub struct VerifierCtx {
     /// P1-24: BLAKE3 hash of the Resolved IR (semantic identity).
     /// Computed from CheckedProgram ResolvedFunction signatures.
     pub(crate) resolved_ir_hash: String,
-    /// Mapping from let-variable names to their init expressions.
-    /// Populated during verify_func to enable substitution of local variables
-    /// when encoding body-return expressions. Fixes P0.1 for let-binding calls:
-    /// `let y = double(x); y` now correctly resolves `y` to `double(x)`.
-    // TODO(#issue-TBD): this field is written but never read — see §21 red
-    // line 3 (escape hatch). The current let-substitution logic uses local
-    // variables in verify_func (func.rs:393); the ctx-level field is a
-    // vestigial design. Either remove it or wire it into the Z3 encoding
-    // path so the substitution survives function boundaries.
-    #[allow(dead_code)]
-    pub(crate) let_subst: HashMap<String, Expr>,
+    // §11-#50 (audit 2026-08-05, closed 2026-08-07): the vestigial ctx-level
+    // `let_subst` field was removed — it was never written nor read; the
+    // live let-substitution logic uses locals inside verify_func (func.rs
+    // build_let_subst).
     /// Function names materialised from CheckedProgram (qualified).
     pub(crate) checked_function_names: std::collections::HashSet<String>,
     pub(crate) checked_function_returns: std::collections::HashMap<String, String>,

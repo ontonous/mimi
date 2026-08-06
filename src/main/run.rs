@@ -50,12 +50,20 @@ pub(crate) fn run(
 
 fn run_once(
     path: &Path,
-    _verify_contracts: bool,
-    _verify_ffi: bool,
-    _allocator: &str,
+    verify_contracts: bool,
+    verify_ffi: bool,
+    allocator: &str,
     strict: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
+    // §13-#67 (audit 2026-08-05, closed 2026-08-07): --allocator was a dead
+    // flag on every backend. Fail loud instead of silently accepting a
+    // selection no backend implements; the default "system" passes.
+    if allocator != "system" {
+        return Err(format!(
+            "--allocator '{allocator}' is not implemented (arena/bump allocation is not wired into any backend); use 'system' or omit the flag"
+        ));
+    }
     // CL-H1: size-capped source load (shared with other CLI entry points).
     let source = mimi::path_safety::read_source_capped(path)?;
     if is_sketch(path) {
@@ -139,6 +147,26 @@ fn run_once(
             .compile_file(&merged_file)
             .map_err(|e| format!("bytecode compile error: {}", e))?;
         let mut vm = BytecodeVM::new(&prog).with_cli_args(extra_args.to_vec());
+        // §13-#67: --verify-contracts was silently ignored. Wire it: the CLI
+        // flag is opt-in (default false), matching the documented semantics
+        // ("Enable runtime contract verification"). The VM's internal default
+        // (true) is overridden so the flag actually controls behavior.
+        vm.verify_contracts = verify_contracts;
+        // §13-#67: --verify-ffi (default true) was silently ignored — the VM
+        // hardcodes ffi_runtime.verify_ffi = false until the bytecode engine
+        // implements contract-expression eval. Fail loud when the user
+        // expects FFI contract checking on a program that declares externs.
+        if verify_ffi
+            && merged_file
+                .items
+                .iter()
+                .any(|item| matches!(item, mimi::ast::Item::ExternBlock(_)))
+        {
+            eprintln!(
+                "warning: --verify-ffi is not yet supported by the bytecode VM; \
+                 FFI contract verification is disabled (pass --skip-verify-ffi to silence)"
+            );
+        }
         match vm.run() {
             Ok(exit_code) => {
                 if exit_code != 0 {

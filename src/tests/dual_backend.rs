@@ -5032,10 +5032,10 @@ fn dual_ffi_reprc_struct() {
         #[repr(C)]
         type TestPoint { x: i32, y: i32 }
         extern "C" {
-            func test_struct_by_val(p: TestPoint) -> i32
+            func __mimi_extern_test_struct_by_val(p: TestPoint) -> i32
         }
         func main() -> i32 {
-            println(test_struct_by_val(TestPoint { x: 10, y: 20 }))
+            println(__mimi_extern_test_struct_by_val(TestPoint { x: 10, y: 20 }))
             0
         }
     "#;
@@ -5078,10 +5078,10 @@ fn dual_ffi_struct_multiple_fields() {
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
         extern "C" {
-            func test_mixed_struct(s: MixedStruct) -> f64
+            func __mimi_extern_test_mixed_struct(s: MixedStruct) -> f64
         }
         func main() -> i32 {
-            println(test_mixed_struct(MixedStruct { id: 10, value: 3.5, flag: 1 }))
+            println(__mimi_extern_test_mixed_struct(MixedStruct { id: 10, value: 3.5, flag: 1 }))
             0
         }
     "#;
@@ -5124,10 +5124,10 @@ fn dual_ffi_struct_return_complex() {
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
         extern "C" {
-            func test_make_mixed(id: i32, value: f64, flag: i32) -> MixedStruct
+            func __mimi_extern_test_make_mixed(id: i32, value: f64, flag: i32) -> MixedStruct
         }
         func main() -> i32 {
-            let p = test_make_mixed(10, 3.5, 1)
+            let p = __mimi_extern_test_make_mixed(10, 3.5, 1)
             println(p.id)
             println(p.value)
             println(p.flag)

@@ -321,8 +321,8 @@ pub struct CodeGenerator<'ctx> {
     /// ABI per extern function name (e.g., "C", "stdcall").
     extern_block_abis: HashMap<String, String>,
     /// Generated extern wrapper functions, keyed by the original extern name.
-    /// Needed because LLVM may mangle the wrapper name (e.g., `strlen` → `strlen.11`)
-    /// when a C library function with the same name already exists in the module.
+    /// 0.34.35b (M-001): wrapper 显式命名 `{name}.extern_wrapper`（内部链接），
+    /// 不再依赖 LLVM 对与 C 符号同名函数名的 mangle；调用点一律经此 map 查找。
     extern_wrapper_fns: HashMap<String, inkwell::values::FunctionValue<'ctx>>,
     /// TLS callback globals that need clearing after the current extern call.
     /// Stores pointers to the fn_ptr and env_ptr TLS globals so they can be
@@ -802,6 +802,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_extern_abis
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
+    }
+
+    /// 0.34.35b (M-001): 按声明名查找已生成的 extern wrapper 函数。
+    /// wrapper 显式命名 `{name}.extern_wrapper`（可能与声明名不同），
+    /// 调用点（legacy emit_named_call / resolved ResolvedCallee::Extern）
+    /// 必须经此 map 而非 `module.get_function(name)`——后者会命中 extern
+    /// 原符号（跳过 wrapper 的 ABI 参数转换）。
+    pub(crate) fn extern_wrapper_fn(
+        &self,
+        name: &str,
+    ) -> Option<inkwell::values::FunctionValue<'ctx>> {
+        self.extern_wrapper_fns.get(name).copied()
     }
 
     pub(crate) fn resolved_function_params(&self, name: &str) -> Option<Vec<(String, String)>> {

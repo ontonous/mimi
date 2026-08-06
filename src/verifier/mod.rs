@@ -13,6 +13,8 @@ pub use ctx::{
     Counterexample, ProofArtifact, TrustedSubsetDomain, VerifStatus, VerificationResult, Verifier,
 };
 pub(crate) use ctx::{SolverSession, VerifierCtx};
+#[cfg(test)] // §11-#48 regression tests (audit_fix_verifier.rs)
+pub(crate) use expr::encode_match_bool;
 pub use flow::{
     flow_verify_ffi_call_sites, flow_verify_ffi_call_sites_or_mock, FlowAcc, FlowEvent,
     VerifierState,

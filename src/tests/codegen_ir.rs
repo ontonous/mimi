@@ -458,7 +458,7 @@ fn ir_extern_declare() {
     );
     assert!(ir.contains("declare"), "extern func should have declare");
     assert!(
-        ir.contains("@__mimi_extern_my_func"),
+        ir.contains("@my_func"),
         "extern func name should be declared"
     );
 }
@@ -472,7 +472,7 @@ fn ir_extern_multiple_funcs() {
     "#,
     );
     assert!(
-        ir.contains("@__mimi_extern_my_add") && ir.contains("@__mimi_extern_my_sub"),
+        ir.contains("@my_add") && ir.contains("@my_sub"),
         "multiple extern funcs should be declared"
     );
 }

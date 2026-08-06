@@ -351,10 +351,33 @@ impl<'a> Checker<'a> {
                 return self.check_call(&qualified_func, args, scopes);
             }
             // Check record field access (field is a closure/function)
+            // 0.34.35b (M-011③): record 的 fn 字段带参数直接调用不支持——
+            // 此前参数被静默吞掉（返回字段类型，args 不检查），最终以
+            // lowering 的 TOOL-RESOLUTION-001 内部标志拒绝，诊断误导。
+            // 冻结纪律：不加新语法，只让报错说真话。`let f = vt.add; f(1,2)`
+            // 是支持的取值路径（N-2 已修）；`vt.add(1,2)` 明确指导先绑定。
             if let Some(tdef) = self.types.get(type_name) {
                 if let TypeDefKind::Record(fields) = &tdef.kind {
                     if let Some(f) = fields.iter().find(|f| f.name == method_name) {
-                        return self.resolve_type(&f.ty);
+                        let field_ty = self.resolve_type(&f.ty);
+                        if matches!(field_ty.unlocated(), Type::Func(..) | Type::ExternFunc(..)) {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0223,
+                                    format!(
+                                        "callee must be a function name: field '{}' of '{}' is a function value and cannot be invoked directly on the record",
+                                        method_name, type_name
+                                    ),
+                                    self.diagnostic_span(),
+                                )
+                                .with_help(format!(
+                                    "bind the field first, then call it: let f = obj.{0}; f(...)",
+                                    method_name
+                                )),
+                            );
+                            return Type::Name("unknown".into(), vec![]);
+                        }
+                        return field_ty;
                     }
                 }
                 if let TypeDefKind::Enum(variants) = &tdef.kind {
@@ -409,6 +432,26 @@ impl<'a> Checker<'a> {
                             .get(&(bound.clone(), method_name.to_string()))
                             .cloned()
                         {
+                            // §2-#19 (audit 2026-08-05, closed 2026-08-07):
+                            // bound-generic 用户 trait 方法调用没有后端支撑——
+                            // lowering 无法为泛型接收者选 impl（需单态化，
+                            // 1.x 评估），此前以内部 TOOL-RESOLUTION-001 拒绝
+                            // 连正确调用也拒，诊断误导。冻结纪律：checker
+                            // 前置诚实拒绝（E0437），Clone 例外（lower 拷贝
+                            // 语义特化，端到端可用）。返回推断类型避免下游
+                            // 级联错报。
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0437,
+                                    format!(
+                                        "trait method '{method_name}' cannot be dispatched on generic parameter '{type_name}' (bound '{bound}'): monomorphization is deferred to 1.x"
+                                    ),
+                                    self.diagnostic_span(),
+                                )
+                                .with_help(
+                                    "call the trait method on a concrete type, or take the concrete type as parameter instead of a bounded generic",
+                                ),
+                            );
                             let ret = if let Some(tg) = self.trait_generics.get(bound) {
                                 if !tg.is_empty() && tg.len() == type_args.len() {
                                     let type_map: HashMap<String, Type> = tg

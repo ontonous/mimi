@@ -831,9 +831,20 @@ impl CheckedProgram {
                                 .get(&error.node_id)
                                 .map(|meta| meta.origin.user_span())
                                 .unwrap_or(Span::UNKNOWN);
-                            Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), span)
+                            // wave1-review §5.16 (closed 2026-08-07): E0830
+                            // used to live only inside the message text with
+                            // Diagnostic.code = None, so tooling routing on
+                            // codes never saw it. Bridge embedded codes into
+                            // the structured field.
+                            let message = format!("TOOL-RESOLUTION-001: {error}");
+                            let diagnostic = Diagnostic::error(message, span);
+                            if error.message.contains("[E0830]") {
+                                diagnostic.with_code(crate::diagnostic::codes::E0830)
+                            } else {
+                                diagnostic
+                            }
                         })
-                        .collect())
+                        .collect());
                 }
             };
         validate_resolved_callable_bodies(&program)?;

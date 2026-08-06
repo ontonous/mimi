@@ -43,7 +43,9 @@ mimi bindgen math.mimi -o bindings
 
 | Mimi 类型 | C ABI | Rust 绑定 | Go 绑定 | Python 绑定 |
 |---|---|---|---|---|
-| `i32` / `i64` / `bool` | `int64_t` | `i64` / `c_longlong` | `int64` | `int` |
+| `i32` | `int32_t` | `i32` / `c_int` | `int32` | `int` |
+| `i64` | `int64_t` | `i64` / `c_longlong` | `int64` | `int` |
+| `bool` | `int` (0/1) | `bool` | `bool` | `bool` |
 | `f64` | `double` | `f64` / `c_double` | `float64` | `float` |
 | `string` | `char*` | `String` / `*mut c_char` | `string` | `str` |
 | `#[repr(C)] record` | `struct X` | `MimiX` | `X` | `X` |

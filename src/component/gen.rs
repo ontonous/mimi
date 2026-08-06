@@ -576,6 +576,22 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         // real: (msg: *const c_char) -> ! — noreturn (mod.rs:19089)
         f.param("msg", ptr(prim(U8))).unsafe_fn().effect("noreturn")
     });
+    gen.export("mimi_trap_overflow", |f| {
+        // real: (op: *const c_char) -> ! — SD-7 trap (mod.rs:19508)
+        f.param("op", ptr(prim(U8))).effect("noreturn")
+    });
+    gen.export("mimi_trap_div_by_zero", |f| {
+        // real: () -> ! (mod.rs:19540)
+        f.effect("noreturn")
+    });
+    gen.export("mimi_trap_div_overflow", |f| {
+        // real: () -> ! (mod.rs:19555)
+        f.effect("noreturn")
+    });
+    gen.export("mimi_trap_float_not_finite", |f| {
+        // real: (op: *const c_char) -> ! — SD-9 finiteness trap (mod.rs:19571)
+        f.param("op", ptr(prim(U8))).effect("noreturn")
+    });
     gen.export("mimi_runtime_set_error_handler", |f| {
         // real: (handler: Option<ErrorHandler>) — fn-pointer-sized (mod.rs:19080)
         f.param("handler", prim(IntPtr))

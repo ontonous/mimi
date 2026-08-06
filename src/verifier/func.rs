@@ -169,7 +169,9 @@ impl VerifierCtx {
             },
             SatResult::Unknown => {
                 let elapsed = start.elapsed();
-                let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
+                let timed_out =
+                    elapsed.as_millis() >= session.timeout_ms as u128 || session.timeout_observed;
+                let msg = if timed_out {
                     format!(
                         "extern precondition check timed out after {}ms for '{}'",
                         elapsed.as_millis(),
@@ -183,7 +185,11 @@ impl VerifierCtx {
                 };
                 VerificationResult {
                     func_name: format!("extern {}", func.name),
-                    status: VerifStatus::SolverUnknown,
+                    status: if timed_out {
+                        VerifStatus::Timeout
+                    } else {
+                        session.unknown_status()
+                    }, // §11-#50
                     message: msg,
                     diagnostic: None,
                     duration_us: elapsed.as_micros() as u64,
@@ -608,7 +614,7 @@ impl VerifierCtx {
                 SatResult::Unknown => {
                     return VerificationResult {
                         func_name: func.name.clone(),
-                        status: VerifStatus::SolverUnknown,
+                        status: session.unknown_status(), // §11-#50
                         message: format!(
                             "solver could not prove math obligation: {}",
                             format_expr(math)
@@ -805,7 +811,7 @@ impl VerifierCtx {
                         SatResult::Unknown => {
                             return VerificationResult {
                                 func_name: func.name.clone(),
-                                status: VerifStatus::SolverUnknown,
+                                status: session.unknown_status(), // §11-#50
                                 message: format!(
                                     "solver could not prove integer definedness: {}",
                                     obligation.failure
@@ -1024,7 +1030,9 @@ impl VerifierCtx {
                         }
                     } else if found_unknown {
                         let elapsed = start.elapsed();
-                        let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
+                        let timed_out = elapsed.as_millis() >= session.timeout_ms as u128
+                            || session.timeout_observed;
+                        let msg = if timed_out {
                             format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
                                     elapsed.as_millis(), func.name, constraint_count)
                         } else {
@@ -1033,7 +1041,11 @@ impl VerifierCtx {
                         };
                         VerificationResult {
                             func_name: func.name.clone(),
-                            status: VerifStatus::SolverUnknown,
+                            status: if timed_out {
+                                VerifStatus::Timeout
+                            } else {
+                                session.unknown_status()
+                            }, // §11-#50
                             message: msg,
                             diagnostic: annotate_parse_errors(None, &parse_errors),
                             duration_us: elapsed.as_micros() as u64,
@@ -1120,7 +1132,9 @@ impl VerifierCtx {
             }
             SatResult::Unknown => {
                 let elapsed = start.elapsed();
-                let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
+                let timed_out =
+                    elapsed.as_millis() >= session.timeout_ms as u128 || session.timeout_observed;
+                let msg = if timed_out {
                     format!("precondition check timed out after {}ms for '{}' — try simplifying requires or reducing constraint count ({})",
                         elapsed.as_millis(), func.name, constraint_count)
                 } else {
@@ -1131,7 +1145,11 @@ impl VerifierCtx {
                 };
                 VerificationResult {
                     func_name: func.name.clone(),
-                    status: VerifStatus::SolverUnknown,
+                    status: if timed_out {
+                        VerifStatus::Timeout
+                    } else {
+                        session.unknown_status()
+                    }, // §11-#50
                     message: msg,
                     diagnostic: annotate_parse_errors(None, &parse_errors),
                     duration_us: elapsed.as_micros() as u64,
@@ -1699,7 +1717,7 @@ impl VerifierCtx {
                                 SatResult::Unknown => {
                                     return Some(VerificationResult {
                                         func_name: func.name.clone(),
-                                        status: VerifStatus::SolverUnknown,
+                                        status: session.unknown_status(), // §11-#50
                                         message: "solver could not prove math obligation (VIR)"
                                             .into(),
                                         diagnostic: None,
@@ -1776,7 +1794,32 @@ impl VerifierCtx {
                             }
                         },
                         crate::verifier::vir::VType::F64Opaque => {
-                            // f64 let: opaque, no arithmetic binding
+                            // §11-#47 (audit 2026-08-05, closed 2026-08-07):
+                            // f64 let 绑定此前静默跳过（变量不绑定到初始化
+                            // 表达式，后续契约对它的约束凭空成立/失效）。
+                            // 现经 encode_f64 断言恒等（opaque 无算术语义，
+                            // 仅 equality/ordering）；f64 算术表达式不在受信
+                            // 子集（lowering 返 None）→ 诚实 NotInTrustedSubset。
+                            match z3ctx.encode_f64(expr) {
+                                Some(body_z3) => {
+                                    if let Some(v) = z3ctx.f64_vars.get(var) {
+                                        session.assert(v.eq(&body_z3));
+                                        constraint_count += 1;
+                                    }
+                                }
+                                None => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::NotInTrustedSubset,
+                                        message: "cannot encode let binding (f64) in VIR".into(),
+                                        diagnostic: None,
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: artifact.clone(),
+                                        trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                    });
+                                }
+                            }
                         }
                         _ => match z3ctx.encode_int(expr) {
                             Some(body_z3) => {
@@ -1909,7 +1952,7 @@ impl VerifierCtx {
             SatResult::Unknown => {
                 return Some(VerificationResult {
                     func_name: func.name.clone(),
-                    status: VerifStatus::SolverUnknown,
+                    status: session.unknown_status(), // §11-#50
                     message: "precondition satisfiability unknown (VIR)".into(),
                     diagnostic: None,
                     duration_us: start.elapsed().as_micros() as u64,
@@ -2007,7 +2050,7 @@ impl VerifierCtx {
         } else if found_unknown {
             Some(VerificationResult {
                 func_name: func.name.clone(),
-                status: VerifStatus::SolverUnknown,
+                status: session.unknown_status(), // §11-#50
                 message: "verification inconclusive (VIR)".into(),
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
@@ -2027,7 +2070,11 @@ impl VerifierCtx {
             let (status, message) = if has_arith {
                 (
                     VerifStatus::Proven,
-                    "postconditions verified (VIR, assumes no overflow/div-by-zero — i64 modeled as unbounded Int)"
+                    // §11-#46 (2026-08-07): body arithmetic definedness
+                    // (overflow/div-by-zero, i32 + i64) is obligation-checked;
+                    // only POSTCONDITION arithmetic stays assumed-defined
+                    // under the unbounded Int model.
+                    "postconditions verified (VIR; postcondition arithmetic assumed defined — integers modeled as unbounded Int)"
                         .into(),
                 )
             } else {

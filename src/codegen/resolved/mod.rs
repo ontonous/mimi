@@ -1931,15 +1931,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             .ok_or_else(|| CompileError::LlvmError(format!(
                                 "resolved extern callee '{callee_id:?}' not found in any extern block"
                             )))?;
+                        // 0.34.35b (M-001): wrapper 显式命名 `{name}.extern_wrapper`，
+                        // 必须经 extern_wrapper_fns map 查找——module.get_function(声明名)
+                        // 现会命中 extern 原符号（跳过 wrapper 的 ABI 参数转换）。
                         let callee =
-                            self.generator
-                                .module
-                                .get_function(ext_name)
-                                .ok_or_else(|| {
-                                    CompileError::LlvmError(format!(
-                                        "resolved extern wrapper '{ext_name}' is undeclared"
-                                    ))
-                                })?;
+                            self.generator.extern_wrapper_fn(ext_name).ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved extern wrapper '{ext_name}' is undeclared"
+                                ))
+                            })?;
                         // Coerce arguments to match the wrapper's parameter types.
                         let params = callee.get_params();
                         for (i, arg) in arguments.iter_mut().enumerate() {
@@ -3313,6 +3313,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             | CheckedConversionKind::NewtypeUnwrap
             | CheckedConversionKind::ContainerErase => Ok(value),
             CheckedConversionKind::NumericWiden | CheckedConversionKind::NumericNarrowChecked => {
+                // K-4 复核（2026-08-07）：NumericNarrowChecked 只来自显式 cast
+                // （lower.rs checked_explicit_conversion，仅 Expr::Cast 调用），
+                // 保持 wrap 语义（0.34.34 裁决）。隐式收窄在两道门禁处拒绝：
+                // checker E0209/E0211 + lower implicit_conversion 仅允许 widen
+                // （I32→I64/F64），故此处无需再区分 Bind/Assign/call 实参——
+                // 它们不会产生 NumericNarrowChecked conversion。
                 let target = self.lower_type(&conversion.to)?;
                 self.numeric_convert(value, target)
             }

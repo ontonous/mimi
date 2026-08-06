@@ -415,12 +415,12 @@ fn e2e_closure_extern_callback() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_callback(x: i32, cb: func(i32) -> i32) -> i32
+            func __mimi_extern_test_callback(x: i32, cb: func(i32) -> i32) -> i32
         }
         func main() -> i32 {
             let factor = 2
             let cb = fn(n: i32) -> i32 { n * factor }
-            let result = test_callback(5, cb)
+            let result = __mimi_extern_test_callback(5, cb)
             println(result)
             0
         }
@@ -439,11 +439,11 @@ fn e2e_extern_float_identity() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_float_identity(x: f64) -> f64
+            func __mimi_extern_test_float_identity(x: f64) -> f64
         }
         func main() -> i32 {
             let x: f64 = 3.14
-            println(test_float_identity(x))
+            println(__mimi_extern_test_float_identity(x))
             0
         }
     "#,
@@ -580,11 +580,11 @@ fn e2e_extern_ensures_pass() {
     let stdout = compile_and_verify_contracts(
         r#"
         extern "C" {
-            func test_positive(x: i32) -> i32
+            func __mimi_extern_test_positive(x: i32) -> i32
                 ensures: result > 0;
         }
         func main() -> i32 {
-            println(test_positive(5))
+            println(__mimi_extern_test_positive(5))
             0
         }
     "#,
@@ -602,11 +602,11 @@ fn e2e_extern_ensures_fail() {
     let result = compile_and_verify_contracts(
         r#"
         extern "C" {
-            func test_positive(x: i32) -> i32
+            func __mimi_extern_test_positive(x: i32) -> i32
                 ensures: result > 0;
         }
         func main() -> i32 {
-            println(test_positive(0))
+            println(__mimi_extern_test_positive(0))
             0
         }
     "#,
@@ -628,10 +628,10 @@ fn e2e_extern_strlen() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_strlen(s: string) -> i32
+            func __mimi_extern_test_strlen(s: string) -> i32
         }
         func main() -> i32 {
-            println(test_strlen("hello world"))
+            println(__mimi_extern_test_strlen("hello world"))
             0
         }
     "#,
@@ -649,10 +649,10 @@ fn e2e_extern_nop() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_nop()
+            func __mimi_extern_test_nop()
         }
         func main() -> i32 {
-            test_nop()
+            __mimi_extern_test_nop()
             println(42)
             0
         }
@@ -671,10 +671,10 @@ fn e2e_extern_greet_raw() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_greet(x: i32) -> raw_string
+            func __mimi_extern_test_greet(x: i32) -> raw_string
         }
         func main() -> i32 {
-            println(test_greet(42))
+            println(__mimi_extern_test_greet(42))
             0
         }
     "#,
@@ -692,10 +692,10 @@ fn e2e_extern_parse_int_raw_string() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_parse_int(s: raw_string) -> i32
+            func __mimi_extern_test_parse_int(s: raw_string) -> i32
         }
         func main() -> i32 {
-            println(test_parse_int("42"))
+            println(__mimi_extern_test_parse_int("42"))
             0
         }
     "#,
@@ -713,10 +713,10 @@ fn e2e_extern_json_sum() {
     let stdout = compile_and_run(
         r#"
         extern "C" {
-            func test_json_sum(json: List<i32>) -> i32
+            func __mimi_extern_test_json_sum(json: List<i32>) -> i32
         }
         func main() -> i32 {
-            println(test_json_sum([1, 2, 3, 4, 5]))
+            println(__mimi_extern_test_json_sum([1, 2, 3, 4, 5]))
             0
         }
     "#,
@@ -1950,10 +1950,10 @@ MimiHandle __mimi_extern_test_c_shared(MimiHandle handle) {
     let stdout = compile_and_run_with_csrc(
         r#"
         extern "C" {
-            func test_c_shared(x: c_shared i64) -> i64;
+            func __mimi_extern_test_c_shared(x: c_shared i64) -> i64;
         }
         func main() -> i32 {
-            let result = test_c_shared(41)
+            let result = __mimi_extern_test_c_shared(41)
             println(result)
             0
         }
@@ -4540,11 +4540,11 @@ fn e2e_extern_ensures_violation_message_is_human_readable() {
     }
     let src = r#"
         extern "C" {
-            func test_positive(x: i32) -> i32
+            func __mimi_extern_test_positive(x: i32) -> i32
                 ensures: result > 0;
         }
         func main() -> i32 {
-            println(test_positive(0))
+            println(__mimi_extern_test_positive(0))
             0
         }
     "#;
@@ -4555,7 +4555,7 @@ fn e2e_extern_ensures_violation_message_is_human_readable() {
         "message should carry E0808 and ensures phrasing, got: {err}"
     );
     assert!(
-        err.contains("'test_positive'"),
+        err.contains("'__mimi_extern_test_positive'"),
         "owner should be the extern name, got: {err}"
     );
     assert!(
@@ -4895,10 +4895,10 @@ int32_t __mimi_extern_checked_mod(int32_t a, int32_t b) {
     let stdout = compile_and_run_with_csrc(
         r#"
         extern "C" {
-            func checked_mod(a: i32, b: i32) -> i32
+            func __mimi_extern_checked_mod(a: i32, b: i32) -> i32
         }
         func main() -> i32 {
-            let r = checked_mod(17, 5)
+            let r = __mimi_extern_checked_mod(17, 5)
             r
         }
     "#,
@@ -4944,14 +4944,14 @@ int64_t __mimi_extern_c_square(int64_t x) { return x * x; }
     let stdout = compile_and_run_with_csrc(
         r#"
         extern "C" {
-            func c_add(a: i32, b: i32) -> i32
-            func c_mul(a: i32, b: i32) -> i32
-            func c_square(x: i64) -> i64
+            func __mimi_extern_c_add(a: i32, b: i32) -> i32
+            func __mimi_extern_c_mul(a: i32, b: i32) -> i32
+            func __mimi_extern_c_square(x: i64) -> i64
         }
         func main() -> i32 {
-            println(c_add(3, 4))
-            println(c_mul(5, 6))
-            println(c_square(12))
+            println(__mimi_extern_c_add(3, 4))
+            println(__mimi_extern_c_mul(5, 6))
+            println(__mimi_extern_c_square(12))
             0
         }
     "#,
@@ -4976,10 +4976,10 @@ int64_t __mimi_extern_c_negate(int64_t x) { return -x; }
     let stdout = compile_and_run_with_csrc(
         r#"
         extern "C" {
-            func c_negate(x: i64) -> i64
+            func __mimi_extern_c_negate(x: i64) -> i64
         }
         func main() -> i32 {
-            let r = c_negate(42)
+            let r = __mimi_extern_c_negate(42)
             println(r)
             0
         }
@@ -5006,13 +5006,13 @@ double __mimi_extern_c_fabs(double x) { return fabs(x); }
     let stdout = compile_and_run_with_csrc(
         r#"
         extern "C" {
-            func c_hypot(a: f64, b: f64) -> f64
-            func c_fabs(x: f64) -> f64
+            func __mimi_extern_c_hypot(a: f64, b: f64) -> f64
+            func __mimi_extern_c_fabs(x: f64) -> f64
         }
         func main() -> i32 {
-            let h = c_hypot(3.0, 4.0)
+            let h = __mimi_extern_c_hypot(3.0, 4.0)
             println(h as i32)
-            let a = c_fabs(-2.5)
+            let a = __mimi_extern_c_fabs(-2.5)
             println(a as i32)
             0
         }

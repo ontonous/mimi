@@ -14,6 +14,35 @@ struct RegexEngine;
 /// Patterns like `(a+)+b` on `aaaaaaaaaaaaaaaac` cause exponential recursion.
 const REGEX_MAX_DEPTH: usize = 100;
 
+/// §10-#27 (audit 2026-08-05, closed 2026-08-07): the depth cap alone only
+/// bounds the STACK — a pattern like `a*a*a*a*a*a*b` on `aaaaaaaa…` (no `b`)
+/// still explores an exponential number of backtracking paths WITHIN the
+/// depth cap. REGEX_MAX_WORK bounds the TOTAL number of recursive match
+/// attempts per `mimi_regex_*` call, so every regex builtin completes in
+/// bounded time. Exhausting the budget fails the match and emits one warning
+/// per process (fail-loud; the depth cap's silent failure was the audit's
+/// complaint).
+const REGEX_MAX_WORK: usize = 1_000_000;
+
+static WORK_BUDGET_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Consume one unit of the work budget. Returns false (and warns once per
+/// process) when the budget is exhausted.
+fn spend_work(budget: &mut usize) -> bool {
+    if *budget == 0 {
+        if !WORK_BUDGET_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "[mimi runtime] regex work budget ({} steps) exhausted — match aborted to prevent ReDoS exponential time",
+                REGEX_MAX_WORK
+            );
+        }
+        return false;
+    }
+    *budget -= 1;
+    true
+}
+
 impl RegexEngine {
     /// Expand `{n}` / `{n,m}` exact/range quantifiers into `*`/`+` form that
     /// the recursive matcher understands. Also used by capture_groups.
@@ -142,11 +171,17 @@ impl RegexEngine {
         let text_bytes = text.as_bytes();
         let pat_bytes = expanded.as_bytes();
         let anchored = !pat_bytes.is_empty() && pat_bytes[0] == b'^';
+        // §10-#27: one shared budget per builtin call bounds total work.
+        let mut budget = REGEX_MAX_WORK;
         for start in 0..=text_bytes.len() {
             let mut caps: Vec<Option<(usize, usize)>> = Vec::new();
-            if let Some(end) =
-                Self::match_with_captures(pat_bytes, &text_bytes[start..], 0, &mut caps)
-            {
+            if let Some(end) = Self::match_with_captures(
+                pat_bytes,
+                &text_bytes[start..],
+                0,
+                &mut caps,
+                &mut budget,
+            ) {
                 let mut groups = Vec::new();
                 for c in caps {
                     if let Some((a, b)) = c {
@@ -179,8 +214,13 @@ impl RegexEngine {
         text: &[u8],
         depth: usize,
         caps: &mut Vec<Option<(usize, usize)>>,
+        budget: &mut usize,
     ) -> Option<usize> {
         if depth >= REGEX_MAX_DEPTH {
+            return None;
+        }
+        // §10-#27: every recursive attempt costs one work unit.
+        if !spend_work(budget) {
             return None;
         }
         let mut pi = 0usize;
@@ -220,6 +260,7 @@ impl RegexEngine {
                             &text[t2..],
                             depth + 1,
                             &mut inner_caps,
+                            budget,
                         ) {
                             Some(n) => {
                                 last_span = Some((t2, t2 + n));
@@ -265,6 +306,7 @@ impl RegexEngine {
                             &text[t2..],
                             depth + 1,
                             caps,
+                            budget,
                         ) {
                             for c in caps.iter_mut().skip(caps_before_rest) {
                                 if let Some((a, b)) = *c {
@@ -336,9 +378,13 @@ impl RegexEngine {
                     continue;
                 }
                 let caps_before_rest = caps.len();
-                if let Some(rest) =
-                    Self::match_with_captures(&pattern[after..], &text[t2..], depth + 1, caps)
-                {
+                if let Some(rest) = Self::match_with_captures(
+                    &pattern[after..],
+                    &text[t2..],
+                    depth + 1,
+                    caps,
+                    budget,
+                ) {
                     for c in caps.iter_mut().skip(caps_before_rest) {
                         if let Some((a, b)) = *c {
                             *c = Some((a + t2, b + t2));
@@ -392,8 +438,11 @@ impl RegexEngine {
         let pat_bytes = stripped.as_bytes();
         let anchored = !pat_bytes.is_empty() && pat_bytes[0] == b'^';
 
+        // §10-#27: one shared budget per builtin call bounds total work.
+        let mut budget = REGEX_MAX_WORK;
         for start in 0..=text_bytes.len() {
-            let result = Self::match_here_with_depth(pat_bytes, &text_bytes[start..], 0);
+            let result =
+                Self::match_here_with_depth(pat_bytes, &text_bytes[start..], 0, &mut budget);
             if result >= 0 {
                 return true;
             }
@@ -432,8 +481,11 @@ impl RegexEngine {
         let pat_bytes = stripped.as_bytes();
         let anchored = !pat_bytes.is_empty() && pat_bytes[0] == b'^';
 
+        // §10-#27: one shared budget per builtin call bounds total work.
+        let mut budget = REGEX_MAX_WORK;
         for start in 0..=text_bytes.len() {
-            let consumed = Self::match_here_with_depth(pat_bytes, &text_bytes[start..], 0);
+            let consumed =
+                Self::match_here_with_depth(pat_bytes, &text_bytes[start..], 0, &mut budget);
             if consumed >= 0 {
                 return Some((start, start + consumed as usize));
             }
@@ -451,6 +503,8 @@ impl RegexEngine {
         let pat_bytes = stripped.as_bytes();
         let mut result = String::new();
         let mut cursor = 0;
+        // §10-#27: one shared budget per builtin call bounds total work.
+        let mut budget = REGEX_MAX_WORK;
         loop {
             if cursor >= text_bytes.len() {
                 break;
@@ -458,7 +512,8 @@ impl RegexEngine {
             let mut best_pos = text_bytes.len() + 1;
             let mut best_len = 0;
             for start in cursor..text_bytes.len() {
-                let consumed = Self::match_here_with_depth(pat_bytes, &text_bytes[start..], 0);
+                let consumed =
+                    Self::match_here_with_depth(pat_bytes, &text_bytes[start..], 0, &mut budget);
                 if consumed >= 0 {
                     best_pos = start;
                     best_len = consumed as usize;
@@ -483,9 +538,14 @@ impl RegexEngine {
     /// Match pattern against text starting at current position.
     /// Returns number of text characters consumed on success, -1 on failure.
     /// S17: depth-limited variant to prevent ReDoS exponential backtracking.
-    fn match_here_with_depth(pattern: &[u8], text: &[u8], depth: usize) -> i32 {
+    /// §10-#27: `budget` bounds the total number of recursive attempts per
+    /// builtin call (the depth cap alone only bounded stack, not time).
+    fn match_here_with_depth(pattern: &[u8], text: &[u8], depth: usize, budget: &mut usize) -> i32 {
         if depth >= REGEX_MAX_DEPTH {
             return -1; // S17: abort to prevent stack overflow from ReDoS
+        }
+        if !spend_work(budget) {
+            return -1; // §10-#27: work budget exhausted — abort (warned once)
         }
         let mut pi = 0;
         let mut ti = 0;
@@ -543,7 +603,7 @@ impl RegexEngine {
                 for count in (min_count..=max_count).rev() {
                     let sub_pat = &pattern[after_quant..];
                     let sub_text = &text[ti + count..];
-                    let r = Self::match_here_with_depth(sub_pat, sub_text, depth + 1);
+                    let r = Self::match_here_with_depth(sub_pat, sub_text, depth + 1, budget);
                     if r >= 0 {
                         ti = ti + count + r as usize;
                         matched = true;
@@ -759,6 +819,8 @@ pub extern "C" fn mimi_regex_find_all(
     let mut cursor = 0;
     let t_bytes = t.as_bytes();
     let p_bytes = p.as_bytes();
+    // §10-#27: one shared budget per builtin call bounds total work.
+    let mut budget = REGEX_MAX_WORK;
     loop {
         if cursor >= t_bytes.len() {
             break;
@@ -766,7 +828,8 @@ pub extern "C" fn mimi_regex_find_all(
         let mut found = -1;
         let mut found_start = 0;
         for start in cursor..t_bytes.len() {
-            let consumed = RegexEngine::match_here_with_depth(p_bytes, &t_bytes[start..], 0);
+            let consumed =
+                RegexEngine::match_here_with_depth(p_bytes, &t_bytes[start..], 0, &mut budget);
             if consumed >= 0 {
                 let matched =
                     std::str::from_utf8(&t_bytes[start..start + consumed as usize]).unwrap_or("");
@@ -855,5 +918,37 @@ pub extern "C" fn mimi_regex_capture_groups(
             alloc_c_string(&out)
         }
         None => alloc_c_string("[]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §10-#27 regression: without the work budget, `a*a*a*a*a*a*a*a*b` on
+    /// a long run of 'a' (no 'b') explores an exponential number of
+    /// backtracking paths WITHIN the depth cap — effectively never
+    /// terminating. The budget must abort the match in bounded time.
+    #[test]
+    fn redos_work_budget_bounds_time() {
+        let text = "a".repeat(60);
+        let start = std::time::Instant::now();
+        assert!(!RegexEngine::match_pattern(&text, "a*a*a*a*a*a*a*a*b"));
+        assert_eq!(RegexEngine::find_match(&text, "a*a*a*a*a*a*a*a*b"), None);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "regex work budget failed to bound time: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// The work budget must not perturb ordinary matching.
+    #[test]
+    fn work_budget_does_not_break_normal_matching() {
+        assert!(RegexEngine::match_pattern("hello world", "wor.d"));
+        assert_eq!(RegexEngine::find_match("abc123def", "[0-9]+"), Some((3, 6)));
+        assert_eq!(RegexEngine::replace_all("a1b2", "[0-9]", "#"), "a#b#");
+        let caps = RegexEngine::capture_groups("2026-08", "([0-9]+)-([0-9]+)");
+        assert_eq!(caps, Some(vec!["2026".to_string(), "08".to_string()]));
     }
 }

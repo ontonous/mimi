@@ -93,6 +93,28 @@ func main() -> i32 {
     }
 }
 
+/// §1-#10 (audit 2026-08-05, closed 2026-08-07): braces inside QUOTED
+/// literals within an f-string interpolation must not count toward the
+/// interpolation depth. Pre-fix, `f"{ "}" }"` closed the interpolation at
+/// the `}` inside the quotes and failed loudly at a wrong position.
+#[test]
+fn fstring_interpolation_brace_inside_quoted_literal() {
+    let src = r#"
+func main() -> i32 {
+    let s = f"x{ "}" }y"
+    if s == "x}y" {
+        println(1)
+    } else {
+        println(0)
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "check: {:?}", check_source(src));
+    let (_, vm_out) = run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), "1", "VM mismatch");
+}
+
 #[test]
 fn fstring_invalid_unicode_scalar_is_rejected() {
     // \uD800 is a UTF-16 surrogate — passes the lexer's 4-hex-digit check but

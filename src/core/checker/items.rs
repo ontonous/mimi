@@ -1051,8 +1051,11 @@ impl<'a> Checker<'a> {
                                     // the same type. The unqualified name is already
                                     // taken; this flow's state is only accessible via
                                     // the qualified name.
+                                    // §3-诊断卫生 (audit 2026-08-05, closed
+                                    // 2026-08-07): warnings must carry W codes —
+                                    // this advisory used to wear error code E0422.
                                     self.emit_warning_code(
-                                        crate::diagnostic::codes::E0422,
+                                        crate::diagnostic::codes::W0402,
                                         format!(
                                             "flow state '{}' shares an unqualified name with another flow's state; \
                                              use the qualified name 'flow::<flow_name>::{}' to refer to this flow's state",

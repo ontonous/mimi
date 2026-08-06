@@ -620,3 +620,254 @@ func main() -> i32 {
     )
     .expect("expect(message) and unwrap() must still check");
 }
+
+/// 0.34.35b (M-011③): record 的 fn 字段带参数直接调用 → 诚实拒绝。
+/// 此前参数被静默吞掉（checker 返回字段类型、不检查 args），最终以
+/// lowering 的 TOOL-RESOLUTION-001 内部标志拒绝，诊断误导。现 E0223
+/// 明确说明"callee must be a function name"并指导先绑定字段。
+#[test]
+fn audit_11c_record_fn_field_direct_call_rejected() {
+    assert_err_code(
+        r#"
+func add_impl(a: i64, b: i64) -> i64 { a + b }
+type VTable { add: func(i64, i64) -> i64 }
+func main() -> i32 {
+    let vt = VTable { add: add_impl }
+    let r = vt.add(1, 2)
+    println(r)
+    0
+}
+"#,
+        crate::diagnostic::codes::E0223,
+    );
+}
+
+/// M-011③ 对侧：字段取值再调用（`let f = vt.add; f(1,2)`）必须保持合法
+/// ——这是 N-2 修复支持的一等函数路径，不能因拒绝直接调用而误伤。
+#[test]
+fn audit_11c_record_fn_field_bind_then_call_still_checks() {
+    check_source(
+        r#"
+func add_impl(a: i64, b: i64) -> i64 { a + b }
+type VTable { add: func(i64, i64) -> i64 }
+func main() -> i32 {
+    let vt = VTable { add: add_impl }
+    let f = vt.add
+    let r = f(1, 2)
+    println(r)
+    0
+}
+"#,
+    )
+    .expect("field bind-then-call must still check");
+}
+
+/// K-4 复核（2026-08-07）：NumericNarrowChecked 的合法来源只有显式 cast
+/// （wrap 语义，0.34.34 裁决）。隐式收窄被两道门禁拒绝——checker
+/// E0209/E0211 + lower implicit_conversion 仅允许 widen——因此不存在
+/// "Bind/call 实参裸 wrap" 的 L1 分歧路径。以下测试钉死该契约，
+/// 防止未来放宽 checker/lower 时静默引入 wrap-vs-trap 分歧。
+#[test]
+fn audit_k4_implicit_narrow_rejected_at_check() {
+    // Bind 收窄：checker 拒绝（E0209）
+    assert_err_code(
+        r#"
+func main() -> i32 {
+    let wide: i64 = 3000000000
+    let x: i32 = wide
+    x
+}
+"#,
+        crate::diagnostic::codes::E0209,
+    );
+    // call 实参收窄：checker 拒绝（E0211）
+    assert_err_code(
+        r#"
+func takes_i32(x: i32) -> i32 { x }
+func main() -> i32 {
+    let wide: i64 = 3000000000
+    let x = takes_i32(wide)
+    x
+}
+"#,
+        crate::diagnostic::codes::E0211,
+    );
+}
+
+/// K-4 对侧：显式 cast 收窄保持 wrap（0.34.34 裁决），i32 算术溢出保持
+/// trap（SD-7）——双端语义不得被收窄守卫改动。
+#[test]
+fn audit_k4_explicit_cast_wraps_and_i32_overflow_traps() {
+    // 显式 cast：3000000000 as i32 = -1294967296（wrap）
+    let vm = run_source_bytecode_result(
+        r#"
+func main() -> i32 {
+    let wide: i64 = 3000000000
+    let x = wide as i32
+    x
+}
+"#,
+    )
+    .expect("cast wrap must run");
+    assert_eq!(
+        vm,
+        crate::interp::Value::Int(-1294967296),
+        "cast should wrap 3000000000 to -1294967296"
+    );
+    // i32 算术溢出：trap（SD-7）
+    let err = run_source_bytecode_result(
+        r#"
+func main() -> i32 {
+    let x: i32 = 2147483647
+    let y: i32 = x + 1
+    y
+}
+"#,
+    )
+    .expect_err("i32 overflow must trap");
+    assert!(
+        err.contains("E0802") || err.contains("overflow"),
+        "i32 overflow should trap, got: {err}"
+    );
+}
+
+/// K-5 (audit 2026-08-05, closed 2026-08-07): resolved Drop no-op 的合法性契约。
+/// 结论：resolved 路径的 `ResolvedStmtKind::Drop(_) => Ok(None)` 仅在 place
+/// 类型非 Capability 时安全——Capability 局部在 eligible 函数中结构性不可达
+/// （参数/Bind 初始化均过 require_scalar_type），且 eligibility 的 Drop arm
+/// 现显式对 place base local 类型做 require_scalar_type 守卫（fail-closed
+/// fallback legacy）。非 cap 的 drop 三端均为纯 no-op。以下测试钉死两端行为。
+#[test]
+fn audit_k5_non_cap_drop_is_noop_both_backends() {
+    let src = r#"
+func main() -> i32 {
+    let x = 5
+    drop(x)
+    println(x)
+    0
+}
+"#;
+    // VM: drop(x) 不影响后续使用
+    let (vm, vm_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm, crate::interp::Value::Int(0));
+    assert!(vm_out.contains("5"), "vm should print 5, got: {vm_out}");
+    // codegen: 同样 no-op
+    let native = checked_compile_and_run(src).expect("codegen drop noop must run");
+    assert!(
+        native.contains("5"),
+        "codegen should print 5, got: {native}"
+    );
+}
+
+/// K-5 对侧：cap 变量的 drop 必须走 legacy（mimi_cap_drop 释放句柄），
+/// 程序整体编译运行正确——per-function eligibility 将含 Capability 类型的
+/// 函数过滤出 resolved slice（实测 'resolved skip: type Capability(...) is
+/// not in the resolved native slice'），不会静默泄漏 CAP_TABLE 条目。
+#[test]
+fn audit_k5_cap_drop_compiles_and_runs_via_legacy() {
+    let src = r#"
+cap FileReadCap;
+
+func use_cap() -> i32 {
+    let c = FileReadCap
+    drop(c)
+    7
+}
+
+func main() -> i32 {
+    println(use_cap())
+    0
+}
+"#;
+    let native = checked_compile_and_run(src).expect("cap drop must compile via legacy");
+    assert!(
+        native.contains("7"),
+        "cap drop program should print 7, got: {native}"
+    );
+}
+
+/// H-9 (Wave-2, closed 2026-08-07): match 落空必须发射 NON_EXHAUSTIVE_MATCH
+/// （运行时 E0805 panic），而非静默 LoadUnit。此前 compiler.rs 落空分支
+/// `fc.emit(Op::LoadUnit { rd })` 使新 opcode 零发射——VM 与 codegen
+/// （mimi_match_panic）行为分歧。表面层落空被 checker 穷尽性门禁
+/// （E0215 等）挡住，运行时仅 dynamic/flow 路径可达；本测试在字节码级
+/// 钉死发射契约。
+#[test]
+fn audit_h9_match_fallthrough_emits_non_exhaustive_match() {
+    let src = r#"
+func main() -> i32 {
+    let s = "b"
+    match s {
+        "a" => println("A")
+        _ => println("other")
+    }
+    0
+}
+"#;
+    let file = parse(src);
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed");
+    let disasm = crate::interp::bytecode::disasm::disassemble_program(&prog);
+    assert!(
+        disasm.contains("NON_EXHAUSTIVE_MATCH"),
+        "match fall-through must emit NON_EXHAUSTIVE_MATCH (E0805), got:\n{disasm}"
+    );
+    // 行为对齐：wildcard arm 命中时程序正常执行（fall-through 为死码）
+    let (vm, out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm, crate::interp::Value::Int(0));
+    assert!(
+        out.contains("other"),
+        "wildcard arm should fire, got: {out}"
+    );
+}
+
+/// §2-#19 (audit 2026-08-05, closed 2026-08-07): bound-generic 用户 trait
+/// 方法调用此前被 lowering 内部标志 TOOL-RESOLUTION-001 拒绝（连正确调用
+/// 也拒，诊断误导）。现 checker 前置 E0437 诚实拒绝——lowering 无法为泛型
+/// 接收者选 impl（需单态化，1.x 评估）。Clone 为端到端可用例外。
+#[test]
+fn audit_2_19_bound_generic_trait_method_honest_e0437() {
+    assert_err_code(
+        r#"
+trait Speak {
+    func speak(x: i32) -> i32
+}
+
+type Dog {
+    v: i32
+}
+
+impl Speak for Dog {
+    func speak(x: i32) -> i32 { x + 1 }
+}
+
+func call_speak<T: Speak>(x: T, n: i32) -> i32 {
+    x.speak(n)
+}
+
+func main() -> i32 {
+    println(call_speak(Dog { v: 1 }, 5))
+    0
+}
+"#,
+        crate::diagnostic::codes::E0437,
+    );
+}
+
+/// §2-#19 对侧：`T: Clone` 的 `x.clone()` 必须保持合法（lower 拷贝语义
+/// 特化，端到端双后端可用）——E0437 不得误伤内建 Clone 路径。
+#[test]
+fn audit_2_19_bound_clone_still_legal() {
+    check_source(
+        r#"
+func clone_it<T: Clone>(x: T) -> T { x.clone() }
+func main() -> i32 {
+    println(clone_it(42))
+    0
+}
+"#,
+    )
+    .expect("bounded Clone method call must still check");
+}

@@ -826,16 +826,30 @@ impl<'a> Checker<'a> {
                     return Type::Name("i32".into(), vec![]);
                 }
                 "pow" => {
+                    // V-7 (audit 2026-08-05, closed 2026-08-07): type pow by
+                    // its arguments instead of hardcoding f64. Both backends
+                    // already compute int×int as CHECKED i64 (VM checked_pow,
+                    // codegen __mimi_pow_i64) — the old f64 static type was a
+                    // lie that made codegen render `pow(2,60)` as a float
+                    // while the VM printed the exact integer (L1 display
+                    // divergence). int×int → i64 matches reality; anything
+                    // with a float argument stays f64.
+                    let mut both_int = false;
                     if args.len() != 2 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!("{} expects 2 arguments", name),
                         );
                     } else {
-                        self.infer_expr(&args[0], scopes);
-                        self.infer_expr(&args[1], scopes);
+                        let t1 = self.infer_expr(&args[0], scopes);
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        both_int = is_int(&t1) && is_int(&t2);
                     }
-                    return Type::Name("f64".into(), vec![]);
+                    return if both_int {
+                        Type::Name("i64".into(), vec![])
+                    } else {
+                        Type::Name("f64".into(), vec![])
+                    };
                 }
                 "floor" | "ceil" | "round" => {
                     if args.len() != 1 {

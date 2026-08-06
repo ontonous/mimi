@@ -750,7 +750,7 @@ define i32 @main() {
 entry:
   %strlen_call = call i64 @strlen(ptr @str.10)
   %str_wrap_len = insertvalue { ptr, i64 } { ptr @str.10, i64 undef }, i64 %strlen_call, 1
-  %call = call i32 @strlen.11({ ptr, i64 } %str_wrap_len)
+  %call = call i32 @cstrlen.extern_wrapper({ ptr, i64 } %str_wrap_len)
   ret i32 %call
 }
 
@@ -863,12 +863,12 @@ entry:
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
 
-declare i32 @__mimi_extern_strlen(ptr)
+declare i32 @cstrlen(ptr)
 
-define internal i32 @strlen.11({ ptr, i64 } %0) {
+define internal i32 @cstrlen.extern_wrapper({ ptr, i64 } %0) {
 entry:
   %str_ptr_0 = extractvalue { ptr, i64 } %0, 0
-  %extern_call = call i32 @__mimi_extern_strlen(ptr %str_ptr_0)
+  %extern_call = call i32 @cstrlen(ptr %str_ptr_0)
   ret i32 %extern_call
 }
 

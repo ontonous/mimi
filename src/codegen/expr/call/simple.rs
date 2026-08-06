@@ -6904,11 +6904,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return self.emit_function_call(function, name, metadata_args);
                 }
             }
-            // Extern wrappers may have been mangled by LLVM (e.g., `strlen` →
-            // `strlen.11`) when a C library function with the same name exists.
+            // Extern wrappers are keyed by declaration name in the wrapper map
+            // (wrapper itself is named `{name}.extern_wrapper` since 0.34.35b).
             // Check the wrapper map first to call the correct function.
             if let Some(&wrapper) = self.extern_wrapper_fns.get(name) {
                 return self.emit_function_call(wrapper, name, metadata_args);
+            }
+            // 0.34.35b (M-001) guard: extern 符号名 = 声明名，若 wrapper 缺失
+            // （不应发生），module.get_function(name) 会命中 extern 原函数、
+            // 跳过 wrapper 的 ABI 参数转换——必须显式拒绝而非静默误编译。
+            if self.extern_func_defs.contains_key(name) {
+                return Err(CompileError::LlvmError(format!(
+                    "extern '{}': wrapper not emitted (declared but not compiled)",
+                    name
+                )));
             }
             if let Some(function) = self.module.get_function(name) {
                 return self.emit_function_call(function, name, metadata_args);
