@@ -7913,7 +7913,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Serialize a named Record at `struct_ptr` to a heap JSON C string.
     /// Caller owns the buffer (export) or should register_heap_alloc (to_json).
     pub(in crate::codegen) fn compile_record_to_json_cstr(
-        &mut self,
+        &self,
         obj_type: &str,
         struct_ptr: inkwell::values::PointerValue<'ctx>,
     ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
