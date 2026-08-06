@@ -398,6 +398,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
+            // 2026-08-06 (audit 1g): str_contains is polymorphic in the VM —
+            // (string|List|Set, value). A List haystack used to be rejected by
+            // the guard (registered VM-only gap); route it to compile_contains
+            // (element comparison) for VM parity. Set haystacks stay guarded.
+            if name == "str_contains" && !args.is_empty() {
+                let hay_ty = self.infer_object_type(&args[0], vars);
+                if hay_ty.starts_with("List") {
+                    return self
+                        .compile_contains(&metadata_args)
+                        .map_err(|e| CompileError::Generic(e.to_string()));
+                }
+            }
             // 2026-08-06 (audit 1f): exec_safe(prog, arg1, arg2, …) is
             // varargs — every argument after the program must be a string.
             // codegen packed them into argv without checking, so a List

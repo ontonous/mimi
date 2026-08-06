@@ -1776,3 +1776,43 @@ fn audit_1f_exec_safe_varargs_guard() {
         assert_eq!(native, expected, "native must match VM (audit 1f)");
     }
 }
+
+// ── Audit 1g (2026-08-06): str_contains List haystack (VM parity) ─────────
+// The VM treats str_contains as (string|List|Set, value). The codegen guard
+// used to reject a List haystack at compile time (registered VM-only gap);
+// route List haystacks to compile_contains (element comparison) instead. Set
+// haystacks remain a guarded VM-only gap (mimi_set_contains handle path).
+
+#[test]
+fn audit_1g_str_contains_list_haystack() {
+    let src = r#"
+func main() -> i32 {
+    println(str_contains([1, 2, 3], 2))
+    println(str_contains([1, 2, 3], 9))
+    println(str_contains(["a", "b"], "b"))
+    println(str_contains("hello", "ell"))
+    0
+}
+"#;
+    let expected = "true\nfalse\ntrue\ntrue\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM str_contains List haystack");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen str_contains List");
+        assert_eq!(native, expected, "native must match VM (audit 1g)");
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved str_contains List");
+        assert_eq!(resolved, expected, "resolved must match VM (audit 1g)");
+    }
+    // Set haystack stays a guarded VM-only gap: rejected at compile time.
+    let set_case = r#"func main() -> i32 {
+    let s = new_set()
+    println(str_contains(s, 1))
+    0
+}"#;
+    if can_link() {
+        assert!(
+            compile_and_run(set_case).is_err(),
+            "Set haystack must stay guarded (VM-only gap)"
+        );
+    }
+}

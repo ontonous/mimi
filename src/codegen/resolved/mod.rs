@@ -1311,6 +1311,18 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 name = mapped;
                             }
                         }
+                        // 2026-08-06 (audit 1g): str_contains List haystack →
+                        // compile_contains (VM polymorphism parity); the guard
+                        // below keeps rejecting Set/other receivers.
+                        if name == "str_contains" && !call.arguments.is_empty() {
+                            let hay_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            if hay_ty.starts_with("List") {
+                                name = "contains";
+                            }
+                        }
                         // 2026-08-06 (audit 1f): exec_safe(prog, args...) —
                         // every vararg must be a string (codegen used to pack
                         // List varargs into argv as garbage; VM: E0800).
