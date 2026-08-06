@@ -182,7 +182,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             let struct_ty = self.context.struct_type(&field_tys, false);
-            self.tuple_type_stack.push(struct_ty);
+            // §7-#79 (audit 2026-08-05): no push onto tuple_type_stack — a
+            // no-pop push leaks a stale layout into later tuple patterns.
             let alloca = self.build_alloca(struct_ty, "cap_split_tuple")?;
             for (i, val) in field_vals.iter().enumerate() {
                 let gep = self

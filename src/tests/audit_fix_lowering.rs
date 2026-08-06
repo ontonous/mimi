@@ -1224,3 +1224,40 @@ func main() -> i32 {
         "legacy: NaN/inf rejected"
     );
 }
+
+// §6-#58 (audit 2026-08-05): match-guard must be evaluated ONLY after the
+// pattern matched. Pre-fix, the resolved native emitter emitted the guard
+// unconditionally on the fallthrough path, so a side effect inside the guard
+// of a NON-matching arm still ran — diverging from the VM's sequential arm
+// semantics.
+#[test]
+fn audit_58_match_guard_short_circuit() {
+    let src = r#"
+func probeA() -> bool { print("A"); true }
+func probeB() -> bool { print("B"); true }
+func main() -> i32 {
+    let x = 5
+    match x {
+        1 if probeA() => { print("one") }
+        5 if probeB() => { print("five") }
+        _ => { print("none") }
+    }
+    0
+}
+"#;
+    // x==5: arm `1` never matches so its guard probeA() must NOT run (no "A").
+    // Only arm `5` matches and evaluates probeB() → "Bfive".
+    let (_, vm_stdout) = run_source_with_stdout(src);
+    assert_eq!(vm_stdout, "Bfive", "VM guard semantics");
+
+    for (name, native) in [
+        ("legacy", compile_and_run(src)),
+        ("resolved", checked_codegen_compile_and_run(src)),
+    ] {
+        let out = native.unwrap_or_else(|e| panic!("{name} codegen: {e}"));
+        assert_eq!(
+            out, "Bfive",
+            "native {name} match-guard short-circuit diverged; guard escaped arm"
+        );
+    }
+}
