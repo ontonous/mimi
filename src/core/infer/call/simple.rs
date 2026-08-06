@@ -1051,14 +1051,37 @@ impl<'a> Checker<'a> {
                 | "atomic_bool_drop"
                 | "mutex_new"
                 | "mutex_lock"
-                | "channel_new"
                 | "actor_mailbox_depth"
                 | "actor_is_faulted"
-                | "actor_is_muted"
-                | "actor_spawn_count"
-                | "actor_max_children" => {
-                    for a in args {
-                        self.infer_expr(a, scopes);
+                | "actor_is_muted" => {
+                    // §2-#14 (audit 2026-08-05): concurrency handle builtins
+                    // had NO checker arity check — `mutex_new(1,2,3)` passed
+                    // `mimi check` and only trapped as E0800 at run/codegen
+                    // (check/run divergence). These are all single-argument
+                    // handle factories (codegen/VM already enforce ==1); the
+                    // checker must reject the surplus args up front.
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 1 argument (a handle factory receives a single tracked value)"),
+                        );
+                    } else {
+                        for a in args {
+                            self.infer_expr(a, scopes);
+                        }
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                // Zero-argument handle factories: channel_new() creates a
+                // fresh channel, actor_spawn_count()/actor_max_children()
+                // query runtime-wide counters — none take a tracked handle,
+                // so the 1-arg guard above must not apply to them.
+                "channel_new" | "actor_spawn_count" | "actor_max_children" => {
+                    if args.len() != 0 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 0 arguments (it queries runtime state, not a handle)"),
+                        );
                     }
                     return Type::Name("i64".into(), vec![]);
                 }
