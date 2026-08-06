@@ -1670,3 +1670,72 @@ func main() -> i32 {
         );
     }
 }
+
+// ── Audit 1e (2026-08-06): fs/env/path builtins string arguments ─────────
+// Direct builtin calls (file_exists/write_file/path_join/set_env/exec/getenv
+// ...) were NOT covered by the std-lib wrapper signatures (which the checker
+// rejects with E0211), so `file_exists([1,2])` passed type checking and fed a
+// List pointer to access() as a path string. Extend the guard table. Also fix
+// the bool-return L1 divergence: file_exists/is_dir/is_file/mkdir_p/remove_file
+// returned a C int zext to i64 — native printed "1" vs VM "true".
+
+#[test]
+fn audit_1e_fs_env_rejects_non_string_args() {
+    let bad_calls = [
+        "file_exists([1, 2])",
+        "read_file([1, 2])",
+        "write_file([1, 2], \"x\")",
+        "write_file(\"x\", [1, 2])",
+        "append_file(\"x\", [1, 2])",
+        "path_join(\"a\", [1, 2])",
+        "set_env([1, 2], \"v\")",
+        "exec([1, 2])",
+        "getenv([1, 2])",
+        "read_file_partial([1, 2], 10)",
+        "is_dir([1, 2])",
+        "mkdir_p([1, 2])",
+    ];
+    for call in bad_calls {
+        let src = format!(
+            "func main() -> i32 {{\n    let x = {}\n    println(x)\n    0\n}}\n",
+            call
+        );
+        if can_link() {
+            assert!(
+                compile_and_run(&src).is_err(),
+                "legacy path must reject {}",
+                call
+            );
+            assert!(
+                checked_codegen_compile_and_run(&src).is_err(),
+                "resolved path must reject {}",
+                call
+            );
+        }
+    }
+}
+
+#[test]
+fn audit_1e_fs_env_accepts_valid_strings() {
+    // Positive: valid direct builtin calls stay working and VM/native
+    // identical — including the bool predicates (file_exists/is_dir/is_file).
+    let src = r#"
+func main() -> i32 {
+    println(file_exists("/tmp/mimi_definitely_not_exists_xyz"))
+    println(is_dir("/tmp"))
+    println(is_file("/tmp"))
+    println(path_join("a", "b"))
+    0
+}
+"#;
+    let expected = "false\ntrue\nfalse\na/b\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM fs/env");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen fs/env");
+        assert_eq!(
+            native, expected,
+            "native must match VM for fs/env (audit 1e)"
+        );
+    }
+}

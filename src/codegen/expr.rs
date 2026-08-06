@@ -1072,7 +1072,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             "str_trim" | "str_to_upper" | "str_to_lower" | "str_substring" | "str_char_at"
             | "str_repeat" | "str_parse_int" | "str_parse_float" | "string_to_int"
             | "str_to_c_str" | "sha256" | "base64_encode" | "base64_decode" | "from_json"
-            | "json_is_valid" | "json_array_length" | "json_get_element" => Some(&[0]),
+            | "json_is_valid" | "json_array_length" | "json_get_element" | "file_exists"
+            | "read_file" | "listdir" | "is_dir" | "is_file" | "walk_dir" | "exec"
+            | "exec_pipe" | "file_stat" | "read_file_bytes" | "read_file_partial" | "path_ext"
+            | "path_basename" | "path_dirname" | "mkdir_p" | "remove_file" | "getenv"
+            | "exec_safe" => Some(&[0]),
             // (string, string).
             // str_contains is included even though the VM treats it as a
             // polymorphic contains over (string|List|Set, value): the codegen
@@ -1092,7 +1096,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             | "regex_find_all"
             | "json_get_string"
             | "json_get_int"
-            | "json_has_key" => Some(&[0, 1]),
+            | "json_has_key"
+            | "write_file"
+            | "append_file"
+            | "path_join"
+            | "set_env"
+            | "write_file_bytes" => Some(&[0, 1]),
             // (string, string, string).
             "str_replace" | "regex_replace" => Some(&[0, 1, 2]),
             // (List<string>, string) — only the delimiter must be a string.

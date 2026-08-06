@@ -9221,12 +9221,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "exists",
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let ext: BasicValueEnum = self
-            .builder
-            .build_int_z_extend(cmp, self.context.i64_type(), "result")
-            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-            .into();
-        Ok(ext)
+        // 2026-08-06 (audit 1e): return i1 (bool) — the checker infers `bool`
+        // for file_exists; zext to i64 made native print "1" vs VM "true".
+        Ok(cmp.into())
     }
 
     pub(super) fn compile_read_file(
@@ -9784,7 +9781,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ret = result
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", runtime_fn_name)))?;
-        Ok(ret)
+        // 2026-08-06 (audit 1e): the runtime predicate returns a C int (0/1);
+        // the checker infers `bool` for these builtins — normalize to i1 so
+        // native prints "true"/"false" like the VM (was "1"/"0", L1 divergence).
+        let ret_int = ret.into_int_value();
+        let zero = ret_int.get_type().const_int(0, false);
+        let cmp = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, ret_int, zero, "to_bool")
+            .map_err(|e| CompileError::LlvmError(format!("{} to_bool: {}", runtime_fn_name, e)))?;
+        Ok(cmp.into())
     }
 
     fn call_runtime_str_to_str(
