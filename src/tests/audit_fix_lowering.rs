@@ -1290,9 +1290,14 @@ func main() -> i32 {
     assert_eq!(vm, expected, "VM is_ok/is_err/is_some/is_none predicates");
     if can_link() {
         let native = compile_and_run(src).expect("codegen is_* predicates");
-        assert_eq!(native, expected, "native must match VM after D-6 trunc removal");
-        let resolved =
-            checked_codegen_compile_and_run(src).expect("resolved is_* predicates");
-        assert_eq!(resolved, expected, "resolved must match VM after D-6 trunc removal");
+        assert_eq!(
+            native, expected,
+            "native must match VM after D-6 trunc removal"
+        );
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved is_* predicates");
+        assert_eq!(
+            resolved, expected,
+            "resolved must match VM after D-6 trunc removal"
+        );
     }
 }
