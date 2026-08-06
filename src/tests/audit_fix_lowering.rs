@@ -1881,3 +1881,94 @@ func main() -> i32 {
         assert_eq!(native3, method_expected, "native method must match VM");
     }
 }
+
+#[test]
+fn audit_probe_type_name_set_dbg() {
+    let src = r#"
+func main() -> i32 {
+    let s = {4, 1, 1}
+    println(type_name(s))
+    0
+}
+"#;
+    let (_, vm) = crate::tests::run_source_with_stdout(src);
+    eprintln!("VM out: {:?}", vm.trim());
+    if crate::tests::can_link() {
+        let native = crate::tests::compile_and_run(src);
+        eprintln!("native: {:?}", native);
+    }
+}
+
+#[test]
+fn audit_1l_type_name_variable_resolves() {
+    // 2026-08-06 (audit 1l): the parser rewrites `type_name(x)` into
+    // Expr::TypeOf(inner) with a Located wrapper; compile_typeof_expr matched
+    // the wrapper bare and always produced "unknown". Worse, it returned the
+    // ADDRESS of a stack alloca holding {ptr, len} — single-arg println takes
+    // the PointerValue fast path and puts'd the alloca as a C string, printing
+    // struct bytes (garbage "�G "). Both fixed: unwrap before matching, and
+    // return the canonical wrapped {ptr, len} struct value. VM parity: VM
+    // prints the *runtime* type name ("set"/"list"/"record"), native prints
+    // the compiler's type name ("Set"/"List<i64>"/"Map") — the garbage is
+    // gone and the name is meaningful on both backends.
+    let src = r#"
+func main() -> i32 {
+    let s = "hello"
+    let l = [1, 2]
+    let m = {"a": 1}
+    let st = {1, 2}
+    println(type_name(s))
+    println(type_name(l))
+    println(type_name(m))
+    println(type_name(st))
+    let t = type_name(s)
+    println(t)
+    0
+}
+"#;
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(
+        vm.trim(),
+        "string\nlist\nrecord\nset\nstring",
+        "VM type_name (runtime names)"
+    );
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen type_name");
+        let lines: Vec<&str> = native.trim().lines().collect();
+        assert_eq!(lines[0], "string", "native type_name(string)");
+        assert!(
+            lines[1].starts_with("List"),
+            "native type_name(list) = {:?}",
+            lines[1]
+        );
+        assert_eq!(lines[2], "Map", "native type_name(map)");
+        assert_eq!(lines[3], "Set", "native type_name(set)");
+        assert_eq!(lines[4], "string", "native type_name via let-binding");
+    }
+}
+
+#[test]
+fn audit_1k_str_contains_set_haystack() {
+    // 2026-08-06 (audit 1k): str_contains's VM polymorphism covers a Set
+    // haystack; codegen kept it guarded (VM-only gap) after the List
+    // redirect. A Set haystack is a bare i64 handle — route to
+    // mimi_set_contains like function-form contains (audit 1j).
+    let src = r#"
+func main() -> i32 {
+    let s = {1, 2, 3}
+    println(str_contains(s, 2))
+    println(str_contains(s, 9))
+    0
+}
+"#;
+    let expected = "true\nfalse\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM str_contains(Set, int)");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen str_contains(Set, int)");
+        assert_eq!(native, expected, "native must match VM (audit 1k)");
+        let resolved =
+            checked_codegen_compile_and_run(src).expect("resolved str_contains(Set, int)");
+        assert_eq!(resolved, expected, "resolved must match VM (audit 1k)");
+    }
+}

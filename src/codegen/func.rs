@@ -2434,9 +2434,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // so `let s = {1, 2}; contains(s, x)` fell through to
                         // compile_contains ("expected a list"). Track the Set
                         // type name so the contains dispatch can route Set
-                        // haystacks to mimi_set_contains.
+                        // haystacks to mimi_set_contains. (audit 1l) Map
+                        // literals get the same treatment so type_name(m)
+                        // resolves instead of "unknown".
                         if matches!(init.unlocated(), Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "Set".to_string());
+                        }
+                        if matches!(init.unlocated(), Expr::MapLiteral { .. }) {
+                            self.var_type_names.insert(name.clone(), "Map".to_string());
                         }
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {

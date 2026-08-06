@@ -1747,6 +1747,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if matches!(init.unlocated(), Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "Set".to_string());
                         }
+                        if matches!(init.unlocated(), Expr::MapLiteral { .. }) {
+                            self.var_type_names.insert(name.clone(), "Map".to_string());
+                        }
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
