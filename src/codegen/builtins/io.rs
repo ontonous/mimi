@@ -212,6 +212,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn emit_sized_list_of_pieces<F>(
         &self,
         len: inkwell::values::IntValue<'ctx>,
+        sep: &'static str,
         render_elem: F,
         name: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>>
@@ -222,6 +223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ty = self.context.i8_type();
         let strlen_fn = self.get_runtime_fn("strlen")?;
         let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let sep_len = sep.len() as u64;
         let parent = self
             .builder
             .get_insert_block()
@@ -276,7 +278,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_add(cur_total, plen1, &format!("{}_sz_tadd", name))
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        // Separator ", " before every element except the first.
+        // Separator before every element except the first.
         let zero = i64_ty.const_int(0, false);
         let not_first = self
             .builder
@@ -286,7 +288,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_select(
                 not_first,
-                i64_ty.const_int(2, false),
+                i64_ty.const_int(sep_len, false),
                 zero,
                 &format!("{}_sz_sep1", name),
             )
@@ -315,7 +317,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
 
         // ---- Pass 2: allocate exactly and assemble ----
-        let buf = self.malloc_display_buf(total, &format!("{}_buf", name))?;
+        // D-4 (audit 2026-08-05): the buffer is NOT auto-registered here —
+        // ownership belongs to the caller (display callers register it for
+        // the print-time flush; to_json callers register it as a heap alloc
+        // freed at function exit). Auto-registration double-freed JSON list
+        // buffers (flush_display_frees + free_heap_allocs).
+        let buf = self.malloc_or_abort(total, &format!("{}_buf", name))?;
         let off_alloca =
             self.build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("{}_sz_off", name))?;
         self.build_store(off_alloca, i64_ty.const_int(0, false))?;
@@ -373,12 +380,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(sep_bb);
         let sep_lit = self
             .builder
-            .build_global_string_ptr(", ", &format!("{}_sz_sep", name))
+            .build_global_string_ptr(sep, &format!("{}_sz_sep", name))
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let off_sep = self
             .build_load(i64_ty, off_alloca, &format!("{}_sz_osep", name))?
             .into_int_value();
-        // SAFETY: byte-offset GEP into `buf`; off_sep + 2 <= total by pass 1.
+        // SAFETY: byte-offset GEP into `buf`; off_sep + sep_len <= total by pass 1.
         let sep_dst = self
             .gep()
             .build_gep(i8_ty, buf, &[off_sep], &format!("{}_sz_sep_dst", name))
@@ -388,7 +395,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             &[
                 BasicMetadataValueEnum::PointerValue(sep_dst),
                 BasicMetadataValueEnum::PointerValue(sep_lit.as_pointer_value()),
-                BasicMetadataValueEnum::IntValue(i64_ty.const_int(2, false)),
+                BasicMetadataValueEnum::IntValue(i64_ty.const_int(sep_len, false)),
             ],
             &format!("{}_sz_mcpy_sep", name),
         )?;
@@ -396,7 +403,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_add(
                 off_sep,
-                i64_ty.const_int(2, false),
+                i64_ty.const_int(sep_len, false),
                 &format!("{}_sz_osep2", name),
             )
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -1161,8 +1168,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
         // The element renderer is pure, so the two passes render each element
         // twice; measurement pieces are freed per iteration by the sized helper.
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -1368,7 +1376,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(map_str)
             },
             "list_map",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Format `List<Set>` as `[Set{…}, ...]` via set display helpers.
@@ -1386,8 +1396,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
         // The element renderer is pure, so the two passes render each element
         // twice; measurement pieces are freed per iteration by the sized helper.
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -1589,7 +1600,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(set_str)
             },
             "list_set",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Serialize `List<Result<Option<(…)>,E>>` with full Result layout.
@@ -1770,87 +1783,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf =
-            self.malloc_or_abort(i64_ty.const_int(8192, false), "list_res_opt_prod_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_res_opt_prod_json_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_res_opt_prod_json_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca =
-            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_res_opt_prod_json_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_loop");
-        let body_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_body");
-        let done_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_res_opt_prod_json_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_res_opt_prod_json_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_res_opt_prod_json_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_comma_bb");
-        let elem_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(",", "list_res_opt_prod_json_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_res_opt_prod_json_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
         let data_gep = self
             .gep()
             .build_struct_gep(list_ty, list_alloca, 1, "list_res_opt_prod_json_data_gep")
@@ -1860,214 +1792,223 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_res_opt_prod_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_res_opt_prod_json_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
+        let parent = self
             .builder
-            .build_load(i64_ty, elem_slot, "list_res_opt_prod_json_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let res_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_res_opt_prod_json_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let loaded = self
-            .builder
-            .build_load(
-                BasicTypeEnum::StructType(res_sty),
-                res_ptr,
-                "list_res_opt_prod_json_ld",
-            )
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
-        let disc = self
-            .build_extract_value(loaded.into(), 0, "list_res_opt_prod_disc")?
-            .into_int_value();
-        let is_ok = self
-            .builder
-            .build_int_compare(
-                IntPredicate::NE,
-                disc,
-                disc.get_type().const_int(0, false),
-                "list_res_opt_prod_is_ok",
-            )
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let ok_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_ok");
-        let err_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_err");
-        let merge_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_merge");
-        let piece_slot = self.build_alloca(
-            BasicTypeEnum::PointerType(i8_ptr),
-            "list_res_opt_prod_piece",
-        )?;
-        self.builder
-            .build_conditional_branch(is_ok, ok_bb, err_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(ok_bb);
-        let ok_pay = self
-            .build_extract_value(loaded.into(), 1, "list_res_opt_prod_ok")?
-            .into_struct_value();
-        // Ok is Option {i1, payload}.
-        let o_disc = self
-            .build_extract_value(ok_pay.into(), 0, "list_res_opt_prod_o_disc")?
-            .into_int_value();
-        let is_some = self
-            .builder
-            .build_int_compare(
-                IntPredicate::NE,
-                o_disc,
-                o_disc.get_type().const_int(0, false),
-                "list_res_opt_prod_is_some",
-            )
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let some_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_some");
-        let none_bb = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_none");
-        let ok_merge = self
-            .context
-            .append_basic_block(parent, "list_res_opt_prod_json_ok_m");
-        self.builder
-            .build_conditional_branch(is_some, some_bb, none_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(some_bb);
-        let o_pay = self.build_extract_value(ok_pay.into(), 1, "list_res_opt_prod_o_pay")?;
-        let pay_json = if let BasicValueEnum::StructValue(pay_sv) = o_pay {
-            self.emit_product_tuple_to_json(pay_sv)?
-        } else {
-            let tmp = self.malloc_or_abort(i64_ty.const_int(8, false), "list_res_opt_prod_zero")?;
-            let zero_lit = self
-                .builder
-                .build_global_string_ptr("0", "list_res_opt_prod_zero_lit")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            self.build_call(
-                strcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(tmp),
-                    BasicMetadataValueEnum::PointerValue(zero_lit.as_pointer_value()),
-                ],
-                "list_res_opt_prod_zero_cpy",
-            )?;
-            tmp
-        };
-        let some_inner = self.sized_cat_parts(
-            &[
-                CatPart::Lit("{\"Some\":["),
-                CatPart::Dyn(pay_json),
-                CatPart::Lit("]}"),
-            ],
-            "list_res_opt_prod_some_i",
-            false,
-        )?;
-        let ok_wrap = self.sized_cat_parts(
-            &[
-                CatPart::Lit("{\"Ok\":["),
-                CatPart::Dyn(some_inner),
-                CatPart::Lit("]}"),
-            ],
-            "list_res_opt_prod_ok_w",
-            false,
-        )?;
-        self.build_store(piece_slot, ok_wrap)?;
-        self.builder
-            .build_unconditional_branch(ok_merge)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(none_bb);
-        let none_ok =
-            self.malloc_or_abort(i64_ty.const_int(32, false), "list_res_opt_prod_none_ok")?;
-        let nfmt = self
-            .builder
-            .build_global_string_ptr("{\"Ok\":[\"None\"]}", "list_res_opt_prod_nfmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(none_ok),
-                BasicMetadataValueEnum::PointerValue(nfmt.as_pointer_value()),
-            ],
-            "list_res_opt_prod_ncpy",
-        )?;
-        self.build_store(piece_slot, none_ok)?;
-        self.builder
-            .build_unconditional_branch(ok_merge)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(ok_merge);
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(err_bb);
-        let err_pay = self.build_extract_value(loaded.into(), 2, "list_res_opt_prod_err")?;
-        let err_i64 = match err_pay {
-            BasicValueEnum::IntValue(iv) => {
-                if iv.get_type().get_bit_width() < 64 {
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        // D-4: exact-size two-pass assembly instead of the fixed 8192-byte
+        // strcat loop. Every heap piece produced below is registered on the
+        // display ledger; the sized helper flushes this iteration's pieces
+        // right after measuring/copying them (the old loop leaked each
+        // element's piece on every iteration).
+        let buf = self.emit_sized_list_of_pieces(
+            len,
+            ",",
+            |idx| {
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // elements); the sized helper's loop guard gates idx < len.
+                let elem_slot = unsafe {
                     self.builder
-                        .build_int_s_extend(iv, i64_ty, "list_res_opt_prod_err_i64")
+                        .build_gep(i64_ty, data_ptr, &[idx], "list_res_opt_prod_json_slot")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                };
+                let elem_i64 = self
+                    .builder
+                    .build_load(i64_ty, elem_slot, "list_res_opt_prod_json_elem")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let res_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_res_opt_prod_json_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let loaded = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(res_sty),
+                        res_ptr,
+                        "list_res_opt_prod_json_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                let disc = self
+                    .build_extract_value(loaded.into(), 0, "list_res_opt_prod_disc")?
+                    .into_int_value();
+                let is_ok = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        disc,
+                        disc.get_type().const_int(0, false),
+                        "list_res_opt_prod_is_ok",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let ok_bb = self
+                    .context
+                    .append_basic_block(parent, "list_res_opt_prod_json_ok");
+                let err_bb = self
+                    .context
+                    .append_basic_block(parent, "list_res_opt_prod_json_err");
+                let merge_bb = self
+                    .context
+                    .append_basic_block(parent, "list_res_opt_prod_json_merge");
+                let piece_slot = self.build_alloca(
+                    BasicTypeEnum::PointerType(i8_ptr),
+                    "list_res_opt_prod_piece",
+                )?;
+                self.builder
+                    .build_conditional_branch(is_ok, ok_bb, err_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(ok_bb);
+                // Branch-local scratch management: every temporary is
+                // registered after `arm_marker` and freed by the branch's own
+                // flush below, so no undef pointer ever reaches the sized
+                // helper's unconditional flush (a fixed-branch-free undef
+                // would be free(garbage)). Only the final piece crosses the
+                // merge, where it is defined on every path.
+                let arm_marker = self.display_marker();
+                let ok_pay = self
+                    .build_extract_value(loaded.into(), 1, "list_res_opt_prod_ok")?
+                    .into_struct_value();
+                // Ok is Option {i1, payload}.
+                let o_disc = self
+                    .build_extract_value(ok_pay.into(), 0, "list_res_opt_prod_o_disc")?
+                    .into_int_value();
+                let is_some = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        o_disc,
+                        o_disc.get_type().const_int(0, false),
+                        "list_res_opt_prod_is_some",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let some_bb = self
+                    .context
+                    .append_basic_block(parent, "list_res_opt_prod_json_some");
+                let none_bb = self
+                    .context
+                    .append_basic_block(parent, "list_res_opt_prod_json_none");
+                let ok_merge = self
+                    .context
+                    .append_basic_block(parent, "list_res_opt_prod_json_ok_m");
+                self.builder
+                    .build_conditional_branch(is_some, some_bb, none_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(some_bb);
+                let o_pay =
+                    self.build_extract_value(ok_pay.into(), 1, "list_res_opt_prod_o_pay")?;
+                let pay_json = if let BasicValueEnum::StructValue(pay_sv) = o_pay {
+                    let p = self.emit_product_tuple_to_json(pay_sv)?;
+                    self.register_display_alloc(p);
+                    p
                 } else {
-                    iv
-                }
-            }
-            _ => i64_ty.const_int(0, false),
-        };
-        let ewrap = self.emit_result_err_json(err_i64, true)?;
-        self.build_store(piece_slot, ewrap)?;
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(merge_bb);
-        let piece_ptr = self
-            .build_load(
-                BasicTypeEnum::PointerType(i8_ptr),
-                piece_slot,
-                "list_res_opt_prod_piece_ld",
-            )?
-            .into_pointer_value();
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(piece_ptr),
-            ],
-            "list_res_opt_prod_json_strcat_elem",
+                    let tmp =
+                        self.malloc_or_abort(i64_ty.const_int(8, false), "list_res_opt_prod_zero")?;
+                    let zero_lit = self
+                        .builder
+                        .build_global_string_ptr("0", "list_res_opt_prod_zero_lit")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(tmp),
+                            BasicMetadataValueEnum::PointerValue(zero_lit.as_pointer_value()),
+                        ],
+                        "list_res_opt_prod_zero_cpy",
+                    )?;
+                    self.register_display_alloc(tmp);
+                    tmp
+                };
+                let some_inner = self.sized_cat_parts(
+                    &[
+                        CatPart::Lit("{\"Some\":["),
+                        CatPart::Dyn(pay_json),
+                        CatPart::Lit("]}"),
+                    ],
+                    "list_res_opt_prod_some_i",
+                    true,
+                )?;
+                // `ok_wrap` is the final piece — allocated after the branch
+                // flush so only it (and some_inner, via register above)
+                // survives the arm_marker flush below.
+                let ok_wrap = self.sized_cat_parts(
+                    &[
+                        CatPart::Lit("{\"Ok\":["),
+                        CatPart::Dyn(some_inner),
+                        CatPart::Lit("]}"),
+                    ],
+                    "list_res_opt_prod_ok_w",
+                    false,
+                )?;
+                self.flush_display_since(arm_marker)?;
+                self.build_store(piece_slot, ok_wrap)?;
+                self.builder
+                    .build_unconditional_branch(ok_merge)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(none_bb);
+                let none_ok =
+                    self.malloc_or_abort(i64_ty.const_int(32, false), "list_res_opt_prod_none_ok")?;
+                let nfmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Ok\":[\"None\"]}", "list_res_opt_prod_nfmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                self.build_call(
+                    strcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(none_ok),
+                        BasicMetadataValueEnum::PointerValue(nfmt.as_pointer_value()),
+                    ],
+                    "list_res_opt_prod_ncpy",
+                )?;
+                self.build_store(piece_slot, none_ok)?;
+                self.builder
+                    .build_unconditional_branch(ok_merge)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(ok_merge);
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(err_bb);
+                let err_pay =
+                    self.build_extract_value(loaded.into(), 2, "list_res_opt_prod_err")?;
+                let err_i64 = match err_pay {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, "list_res_opt_prod_err_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        }
+                    }
+                    _ => i64_ty.const_int(0, false),
+                };
+                let ewrap = self.emit_result_err_json(err_i64, true)?;
+                self.build_store(piece_slot, ewrap)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let piece = self
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        piece_slot,
+                        "list_res_opt_prod_piece_ld",
+                    )?
+                    .into_pointer_value();
+                // Defined on every path (each arm stored it); register so the
+                // sized helper's per-iteration flush frees it exactly once.
+                self.register_display_alloc(piece);
+                Ok(piece)
+            },
+            "list_res_opt_prod_json",
         )?;
-        let next = self
-            .builder
-            .build_int_add(
-                idx,
-                i64_ty.const_int(1, false),
-                "list_res_opt_prod_json_next",
-            )
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_res_opt_prod_json_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_res_opt_prod_json_close",
-        )?;
+        // Ownership of the assembled JSON list buffer stays with the caller:
+        // simple.rs registers it via register_heap_alloc (freed at function
+        // exit). NOT a display buffer — do not register it here.
         Ok(buf)
     }
 
@@ -2736,85 +2677,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_tup_json_buf")?; // TODO(#audit-wave2): fixed 8192-byte JSON strcat loop — sized assembly
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_tup_json_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_tup_json_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_tup_json_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self
-            .context
-            .append_basic_block(parent, "list_tup_json_loop");
-        let body_bb = self
-            .context
-            .append_basic_block(parent, "list_tup_json_body");
-        let done_bb = self
-            .context
-            .append_basic_block(parent, "list_tup_json_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_tup_json_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_tup_json_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_tup_json_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self
-            .context
-            .append_basic_block(parent, "list_tup_json_comma_bb");
-        let elem_bb = self
-            .context
-            .append_basic_block(parent, "list_tup_json_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(",", "list_tup_json_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_tup_json_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
         let data_gep = self
             .gep()
             .build_struct_gep(list_ty, list_alloca, 1, "list_tup_json_data_gep")
@@ -2824,59 +2686,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_tup_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_tup_json_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_tup_json_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let elem_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_tup_json_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let loaded = self
-            .builder
-            .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "list_tup_json_ld")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
-        let piece = self.emit_product_tuple_to_json(loaded)?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(piece),
-            ],
-            "list_tup_json_strcat_elem",
-        )?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_tup_json_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_tup_json_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_tup_json_close",
-        )?;
-        Ok(buf)
+        // D-4: exact-size two-pass assembly instead of the fixed 8192-byte
+        // strcat loop. Elements are plain product tuples (no branching), so
+        // each piece is defined unconditionally and the sized helper's flush
+        // frees it exactly once per iteration (the old loop leaked every
+        // element piece).
+        self.emit_sized_list_of_pieces(
+            len,
+            ",",
+            |idx| {
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // elements); the sized helper's loop guard gates idx < len.
+                let elem_slot = unsafe {
+                    self.builder
+                        .build_gep(i64_ty, data_ptr, &[idx], "list_tup_json_slot")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                };
+                let elem_i64 = self
+                    .builder
+                    .build_load(i64_ty, elem_slot, "list_tup_json_elem")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let elem_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_tup_json_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let loaded = self
+                    .builder
+                    .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "list_tup_json_ld")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                // emit_product_tuple_to_json returns an unregistered buffer;
+                // register so the sized helper's per-iteration flush frees it.
+                let piece = self.emit_product_tuple_to_json(loaded)?;
+                self.register_display_alloc(piece);
+                Ok(piece)
+            },
+            "list_tup_json",
+        )
     }
 
     /// Format `List<(…)>` product tuples (ptrtoint slots) as `[(1, 2), …]`.
@@ -2903,8 +2750,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // capacity tracking): exact-size two-pass assembly. The element
         // renderer is pure, so the two passes render each tuple twice;
         // measurement pieces are freed per iteration via the sized helper.
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -2933,7 +2781,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_product_tuple_to_string(loaded)
             },
             "list_tup",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Format `List<Enum>` as `[Red(), Blue(7), ...]`.
@@ -2952,8 +2802,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // The element renderer is pure (display formatter), so the two passes
         // render each element twice; measurement pieces are freed per
         // iteration by the sized helper.
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -2995,7 +2846,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_enum_display(enum_name, loaded)
             },
             "list_enum",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Format `List<Result<…>>` as `[Ok(…), Err(…), ...]`.
@@ -3025,8 +2878,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .get(*inner)
                         .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
             });
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -3080,7 +2934,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_result_to_string_typed(loaded, ok_rec, elem_res_type)
             },
             "list_res",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Format `List<Option<…>>` as `[Some(…), None(), …]`.
@@ -3099,8 +2955,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
         // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -3151,7 +3008,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_option_to_string(loaded, None, elem_opt_type)
             },
             "list_opt",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Format `List<Record>` as `[Point { ... }, ...]` matching interp Display.
@@ -8457,49 +8316,33 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Serialize a product-tuple struct to a JSON array C string (compact,
     /// matching serde_json / interp `to_json` for `Value::Tuple`).
+    ///
+    /// D-4 (2026-08-06): fixed 4096-byte strcat assembly replaced by exact-size
+    /// two-pass `sized_cat_parts`. Field pieces are rendered once per pass (the
+    /// renderers are pure), registered as display allocs and freed by
+    /// `flush_display_since(marker)` right after assembly — the returned buffer
+    /// itself is unregistered (JSON producers register it themselves, e.g.
+    /// `register_heap_alloc` at the call site).
     pub(in crate::codegen) fn emit_product_tuple_to_json(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let fields = sv.get_type().get_field_types();
         let i64_ty = self.context.i64_type();
-        // TODO(#audit-wave2): fixed 4096-byte strcat assembly (JSON tuple) —
-        // convert to sized assembly (see list_map_buf note).
-        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "json_tup_buf")?;
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "json_tup_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
         let snprintf_fn = self.get_runtime_fn("snprintf")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "json_tup_open_cpy",
-        )?;
-        let buf_size = i64_ty.const_int(512, false);
+        let marker = self.display_marker();
+        let mut parts: Vec<CatPart<'ctx>> = Vec::new();
+        parts.push(CatPart::Lit("["));
+        // Snprintf scratch for int/float pieces. %ld max length is i64::MIN's
+        // 20 chars + NUL = 21; %g for a double uses at most ~15 + NUL. 32 B
+        // covers both with room to spare.
+        let buf_size = i64_ty.const_int(32, false);
         for (i, ft) in fields.iter().enumerate() {
             if i > 0 {
-                let comma = self
-                    .builder
-                    .build_global_string_ptr(",", "json_tup_comma")
-                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                self.build_call(
-                    strcat_fn,
-                    &[
-                        BasicMetadataValueEnum::PointerValue(buf),
-                        BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-                    ],
-                    "json_tup_comma_cat",
-                )?;
+                parts.push(CatPart::Lit(","));
             }
             let field_val =
                 self.build_extract_value(sv.into(), i as u32, &format!("json_tup_{}", i))?;
-            let piece = self.malloc_or_abort(i64_ty.const_int(512, false), "json_tup_piece")?;
             match (ft, field_val) {
                 (BasicTypeEnum::IntType(it), BasicValueEnum::IntValue(iv)) => {
                     if it.get_bit_width() == 1 {
@@ -8525,14 +8368,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "json_tup_bool_s",
                             )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::PointerValue(sel.into_pointer_value()),
-                            ],
-                            "json_tup_bool_cpy",
-                        )?;
+                        // Static global string — do not register.
+                        parts.push(CatPart::Dyn(sel.into_pointer_value()));
                     } else {
                         let as_i64 = if iv.get_type().get_bit_width() < 64 {
                             self.builder
@@ -8545,6 +8382,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_global_string_ptr("%ld", "json_tup_ld")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let piece = self.malloc_or_abort(buf_size, "json_tup_piece")?;
                         self.build_call(
                             snprintf_fn,
                             &[
@@ -8555,6 +8393,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ],
                             "json_tup_ld_sn",
                         )?;
+                        self.register_display_alloc(piece);
+                        parts.push(CatPart::Dyn(piece));
                     }
                 }
                 (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
@@ -8581,25 +8421,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .try_as_basic_value_opt()
                             .ok_or("mimi_json_escape_string void")?
                             .into_pointer_value();
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::PointerValue(escaped),
-                            ],
-                            "json_tup_esc_cpy",
-                        )?;
+                        self.register_display_alloc(escaped);
+                        parts.push(CatPart::Dyn(escaped));
                     } else {
-                        // Nested product tuple.
+                        // Nested product tuple (recursion returns an
+                        // unregistered buffer; register so the outer marker
+                        // flush releases it).
                         let nested = self.emit_product_tuple_to_json(fsv)?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(piece),
-                                BasicMetadataValueEnum::PointerValue(nested),
-                            ],
-                            "json_tup_nested_cpy",
-                        )?;
+                        self.register_display_alloc(nested);
+                        parts.push(CatPart::Dyn(nested));
                     }
                 }
                 (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(fv)) => {
@@ -8607,6 +8437,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_global_string_ptr("%g", "json_tup_f")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let piece = self.malloc_or_abort(buf_size, "json_tup_piece")?;
                     self.build_call(
                         snprintf_fn,
                         &[
@@ -8617,43 +8448,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ],
                         "json_tup_f_sn",
                     )?;
+                    self.register_display_alloc(piece);
+                    parts.push(CatPart::Dyn(piece));
                 }
                 _ => {
-                    let n = self
-                        .builder
-                        .build_global_string_ptr("null", "json_tup_null")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    self.build_call(
-                        strcpy_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(piece),
-                            BasicMetadataValueEnum::PointerValue(n.as_pointer_value()),
-                        ],
-                        "json_tup_null_cpy",
-                    )?;
+                    parts.push(CatPart::Lit("null"));
                 }
             }
-            self.build_call(
-                strcat_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(piece),
-                ],
-                "json_tup_piece_cat",
-            )?;
         }
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "json_tup_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "json_tup_close_cat",
-        )?;
+        parts.push(CatPart::Lit("]"));
+        let buf = self.sized_cat_parts(&parts, "json_tup", false)?;
+        // Free the per-field scratch pieces (nested JSON buffers, escaped
+        // strings, snprintf buffers) now that they are consumed. The main
+        // buffer is deliberately left unregistered for the caller.
+        self.flush_display_since(marker)?;
         Ok(buf)
     }
 
@@ -8809,8 +8617,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             ScalarListKind::I64 => "list_i64",
             ScalarListKind::Bool => "list_bool",
         };
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 // SAFETY: data_ptr is the collection's data array (`len` i64
                 // slots); the two-pass loop guard `idx ULT len` gates this.
@@ -8892,7 +8701,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             },
             name,
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Format `List<List<(…)>>` by reconstructing each inner list of product tuples.
@@ -8911,8 +8722,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Wave-1 audit fix (§8, FIX: fixed 8192-byte strcat assembly — deeply
         // nested list-of-list-of-tuples rendering beyond 8KB overflowed the
         // display buffer): exact-size two-pass assembly via the sized helper.
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -8945,7 +8757,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_list_product_tuple_to_string(inner_sv, elem_type_str)
             },
             "list_list_tup",
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Audit wave2 (D-5b): display `List<List<f64>>` / `List<List<i64>>` /
@@ -8970,8 +8784,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), name)?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        self.emit_sized_list_of_pieces(
+        let buf = self.emit_sized_list_of_pieces(
             len,
+            ", ",
             |idx| {
                 let data_gep = self
                     .gep()
@@ -9004,7 +8819,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_list_scalar_to_string(inner_sv, kind)
             },
             name,
-        )
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Serialize `List<List<(…)>>` to nested JSON arrays of product tuples.
