@@ -1599,3 +1599,74 @@ func main() -> i32 {
         );
     }
 }
+
+// ── Audit 1d (2026-08-06): json/crypto string arguments ────────────────
+// json_get_*/from_json/json_is_valid/json_array_length/sha256/base64_* take
+// string-only arguments but were not guarded: a List haystack arrived as a raw
+// pointer, got parsed as a JSON document / hashed as a C string, and the
+// native backend ABORTED (core dump, exit 134) on the parse failure — while
+// the VM fails loud with E0800. Compile-time guard, VM parity.
+
+#[test]
+fn audit_1d_json_crypto_rejects_non_string_args() {
+    let bad_calls = [
+        "json_get_string([1, 2], \"key\")",
+        "json_get_int(\"{}\", [1, 2])",
+        "json_get_element([1, 2], 0)",
+        "json_has_key(\"{}\", [1, 2])",
+        "from_json([1, 2])",
+        "json_is_valid([1, 2])",
+        "json_array_length([1, 2])",
+        "sha256([1, 2])",
+        "base64_encode([1, 2])",
+        "base64_decode([1, 2])",
+    ];
+    for call in bad_calls {
+        let src = format!(
+            "func main() -> i32 {{\n    let x = {}\n    println(x)\n    0\n}}\n",
+            call
+        );
+        if can_link() {
+            assert!(
+                compile_and_run(&src).is_err(),
+                "legacy path must reject {}",
+                call
+            );
+            assert!(
+                checked_codegen_compile_and_run(&src).is_err(),
+                "resolved path must reject {}",
+                call
+            );
+        }
+    }
+}
+
+#[test]
+fn audit_1d_json_crypto_accepts_valid_strings() {
+    let src = r#"
+func main() -> i32 {
+    let j = "{\"key\":\"val\"}"
+    println(json_get_string(j, "key"))
+    println(json_is_valid(j))
+    println(json_array_length("[1,2,3]"))
+    println(from_json(j))
+    println(sha256("abc"))
+    0
+}
+"#;
+    let expected = "val\ntrue\n3\n{\"key\":\"val\"}\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM json/crypto");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen json/crypto");
+        assert_eq!(
+            native, expected,
+            "native must match VM for json/crypto (audit 1d)"
+        );
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved json/crypto");
+        assert_eq!(
+            resolved, expected,
+            "resolved must match VM for json/crypto (audit 1d)"
+        );
+    }
+}
