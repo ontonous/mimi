@@ -1077,6 +1077,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             | "exec_pipe" | "file_stat" | "read_file_bytes" | "read_file_partial" | "path_ext"
             | "path_basename" | "path_dirname" | "mkdir_p" | "remove_file" | "getenv"
             | "exec_safe" => Some(&[0]),
+            // Network: connect(fd, host, port) / send(fd, data) — string at
+            // position 1 (fd/port are ints).
+            "connect" | "send" => Some(&[1]),
             // (string, string).
             // str_contains is included even though the VM treats it as a
             // polymorphic contains over (string|List|Set, value): the codegen
@@ -1101,7 +1104,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             | "append_file"
             | "path_join"
             | "set_env"
-            | "write_file_bytes" => Some(&[0, 1]),
+            | "write_file_bytes"
+            | "http_get"
+            | "http_post" => Some(&[0, 1]),
             // (string, string, string).
             "str_replace" | "regex_replace" => Some(&[0, 1, 2]),
             // (List<string>, string) — only the delimiter must be a string.
