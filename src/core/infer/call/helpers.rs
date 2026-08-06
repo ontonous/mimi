@@ -27,8 +27,22 @@ impl<'a> Checker<'a> {
     ) -> Type {
         match method {
             "unwrap" | "expect" => {
-                if method == "expect" && !args.is_empty() {
-                    self.infer_expr(&args[0], scopes);
+                if method == "expect" {
+                    // §2-#15 (audit 2026-08-05): expect's message parameter
+                    // was type-checked when present but SURPLUS arguments were
+                    // silently accepted (`o.expect("m", 1, 2)`) — check/run
+                    // divergence (Op::Unwrap has no message slot, so extras
+                    // could never be honored). Reject >1; the message itself
+                    // reaching the runtime is a registered 0.1.5 opcode
+                    // enhancement (UnwrapMsg).
+                    if args.len() > 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "expect expects at most 1 argument (a panic message string)",
+                        );
+                    } else if let Some(msg) = args.first() {
+                        self.infer_expr(msg, scopes);
+                    }
                 }
                 (*inner).clone()
             }

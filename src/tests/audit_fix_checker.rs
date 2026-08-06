@@ -464,3 +464,81 @@ func main() -> i32 { get_id(UserId(42)) }
     )
     .expect("self-constructor match on a newtype is exhaustive");
 }
+
+// §2-#14 (audit 2026-08-05, re-verified 2026-08-06): concurrency handle
+// builtins lacked a checker arity check — `mutex_new(1,2,3)` passed
+// `mimi check` and only trapped as E0800 at run/codegen (check/run
+// divergence). Now rejected at check time (E0242), matching codegen/VM.
+#[test]
+fn audit_14_handle_builtin_arity_rejected_at_check() {
+    assert_err_code(
+        r#"
+func main() -> i32 {
+    let _ = mutex_new(1, 2, 3)
+    0
+}
+"#,
+        crate::diagnostic::codes::E0242,
+    );
+    // atomic factory surplus args, same rejection.
+    assert_err_code(
+        r#"
+func main() -> i32 {
+    let _ = atomic_i32_new(0, 1)
+    0
+}
+"#,
+        crate::diagnostic::codes::E0242,
+    );
+}
+
+#[test]
+fn audit_14_handle_builtin_legal_arities_still_check() {
+    // channel_new is 0-arg; handle factories are 1-arg. Neither must regress.
+    check_source(
+        r#"
+func main() -> i32 {
+    let _ = channel_new()
+    let _ = mutex_new(1)
+    let _ = atomic_bool_new(true)
+    let _ = actor_spawn_count()
+    0
+}
+"#,
+    )
+    .expect("legal handle-builtin arities must still check");
+}
+
+// §2-#15 (audit 2026-08-05): expect's message arg was checked when present
+// but SURPLUS args were silently accepted (`o.expect("m", 1, 2)`), and
+// Op::Unwrap has no message slot so extras are never honored — check/run
+// divergence. Reject args.len() > 1 at check time.
+#[test]
+fn audit_15_expect_surplus_args_rejected() {
+    assert_err_code(
+        r#"
+func main() -> i32 {
+    let o: Option<i32> = Some(5)
+    let _ = o.expect("m", 1, 2)
+    0
+}
+"#,
+        crate::diagnostic::codes::E0242,
+    );
+}
+
+#[test]
+fn audit_15_expect_single_message_still_checks() {
+    check_source(
+        r#"
+func main() -> i32 {
+    let o: Option<i32> = Some(5)
+    let _ = o.expect("must be some")
+    let u: Option<i32> = Some(3)
+    let _ = u.unwrap()
+    0
+}
+"#,
+    )
+    .expect("expect(message) and unwrap() must still check");
+}
