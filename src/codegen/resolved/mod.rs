@@ -1284,7 +1284,48 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             })
                     }
                     ResolvedCallee::Builtin(builtin_id) => {
-                        let name = builtin_id.as_str();
+                        let mut name = builtin_id.as_str();
+                        // 2026-08-06 (audit 1c): resolved string METHOD calls
+                        // (s.trim() etc.) arrive as `builtin.method.string.X`;
+                        // map them to the global str_* builtin so the same
+                        // emitters + guards apply (they used to E0709).
+                        if let Some(method) = name.strip_prefix("builtin.method.string.") {
+                            let mapped = match method {
+                                "trim" => Some("str_trim"),
+                                "to_upper" => Some("str_to_upper"),
+                                "to_lower" => Some("str_to_lower"),
+                                "contains" => Some("str_contains"),
+                                "starts_with" => Some("str_starts_with"),
+                                "ends_with" => Some("str_ends_with"),
+                                "split" => Some("str_split"),
+                                "replace" => Some("str_replace"),
+                                "repeat" => Some("str_repeat"),
+                                "char_at" => Some("str_char_at"),
+                                "substring" => Some("str_substring"),
+                                "index_of" => Some("str_index_of"),
+                                "parse_int" => Some("str_parse_int"),
+                                "parse_float" => Some("str_parse_float"),
+                                _ => None,
+                            };
+                            if let Some(mapped) = mapped {
+                                name = mapped;
+                            }
+                        }
+                        // 2026-08-06 (audit 1c): `contains` is polymorphic in
+                        // the VM ((string|List|Set, value)); compile_contains
+                        // only handles List and a string haystack would SIGSEGV
+                        // (load_list_len on a string struct). Redirect string
+                        // haystacks to str_contains — the guard below then
+                        // enforces the string needle too.
+                        if name == "contains" && !call.arguments.is_empty() {
+                            let hay_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            if hay_ty == "string" {
+                                name = "str_contains";
+                            }
+                        }
                         // 2026-08-06 (audit 1): string-only builtins — reject a
                         // definitely non-string argument at compile time
                         // (List arrives as a raw pointer, indistinguishable from

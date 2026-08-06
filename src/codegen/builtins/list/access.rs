@@ -234,15 +234,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_unconditional_branch(done_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // Done: phi(true, false)
+        // Done: phi(true, false) — i1 (bool): the checker infers `bool` for
+        // contains; i64 made native print "1" vs VM "true" (L1 divergence).
         self.builder.position_at_end(done_bb);
         let phi = self
             .builder
-            .build_phi(i64_ty, "result")
+            .build_phi(self.context.bool_type(), "result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
         phi.add_incoming(&[
-            (&i64_ty.const_int(1, false), found_bb),
-            (&i64_ty.const_int(0, false), loop_bb),
+            (&self.context.bool_type().const_int(1, false), found_bb),
+            (&self.context.bool_type().const_int(0, false), loop_bb),
         ]);
         Ok(phi.as_basic_value())
     }
