@@ -1343,12 +1343,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // only handles List and a string haystack would SIGSEGV
                         // (load_list_len on a string struct). Redirect string
                         // haystacks to str_contains — the guard below then
-                        // enforces the string needle too.
+                        // enforces the string needle too. (audit 1j) Set
+                        // haystacks: bare i64 handle → mimi_set_contains
+                        // (was a VM-only gap).
                         if name == "contains" && !call.arguments.is_empty() {
                             let hay_ty = resolved_type_display_name(
                                 self.program,
                                 &call.arguments[0].value.ty,
                             );
+                            if hay_ty.starts_with("Set") {
+                                if call.arguments.len() < 2 {
+                                    return Err(CompileError::WrongArgCount(
+                                        "contains expects 2 arguments".into(),
+                                    ));
+                                }
+                                return self
+                                    .generator
+                                    .compile_set_contains_fn(arguments[0], arguments[1]);
+                            }
                             if hay_ty == "string" {
                                 name = "str_contains";
                             }

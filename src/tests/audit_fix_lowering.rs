@@ -1816,3 +1816,68 @@ func main() -> i32 {
         );
     }
 }
+
+#[test]
+fn audit_1j_contains_set_haystack_fn_form() {
+    // 2026-08-06 (audit 1j): function-form `contains(set, value)` was a
+    // VM-only gap — the codegen dispatch only handled string (strstr) and
+    // List (compile_contains); a Set haystack (bare i64 handle) made
+    // require_list_pointer fail loudly. Route Set haystacks to
+    // mimi_set_contains (handle probe), returning i1 for VM Bool parity.
+    let src = r#"
+func main() -> i32 {
+    let s = {4, 1, 1}
+    println(contains(s, 1))
+    println(contains(s, 7))
+    println(contains(s, 4))
+    0
+}
+"#;
+    let expected = "true\nfalse\ntrue\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM contains(Set<i32>, int)");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen contains(Set, int)");
+        assert_eq!(native, expected, "native must match VM (audit 1j)");
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved contains(Set, int)");
+        assert_eq!(resolved, expected, "resolved must match VM (audit 1j)");
+    }
+    // String elements: Set<string> probe must also match (handle = ptrtoint).
+    let str_src = r#"
+func main() -> i32 {
+    let s = {"a", "b"}
+    println(contains(s, "b"))
+    println(contains(s, "z"))
+    0
+}
+"#;
+    let str_expected = "true\nfalse\n";
+    let (_, vm2) = run_source_with_stdout(str_src);
+    assert_eq!(vm2, str_expected, "VM contains(Set<string>, string)");
+    if can_link() {
+        let native2 = compile_and_run(str_src).expect("codegen contains(Set<string>, string)");
+        assert_eq!(native2, str_expected, "native Set<string> must match VM");
+        let resolved2 = checked_codegen_compile_and_run(str_src)
+            .expect("resolved contains(Set<string>, string)");
+        assert_eq!(
+            resolved2, str_expected,
+            "resolved Set<string> must match VM"
+        );
+    }
+    // Method form keeps working (audit D-2 regression guard).
+    let method_src = r#"
+func main() -> i32 {
+    let s = {9, 3}
+    println(s.contains(9))
+    println(s.contains(4))
+    0
+}
+"#;
+    let method_expected = "true\nfalse\n";
+    let (_, vm3) = run_source_with_stdout(method_src);
+    assert_eq!(vm3, method_expected, "VM set.contains method");
+    if can_link() {
+        let native3 = compile_and_run(method_src).expect("codegen set.contains method");
+        assert_eq!(native3, method_expected, "native method must match VM");
+    }
+}

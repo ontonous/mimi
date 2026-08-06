@@ -2429,6 +2429,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     if let PatternKind::Variable(name) = &pat.kind {
+                        // 2026-08-06 (audit 1j): Set literals `{1, 2}` compile
+                        // to an opaque i64 handle with no var_type_names entry,
+                        // so `let s = {1, 2}; contains(s, x)` fell through to
+                        // compile_contains ("expected a list"). Track the Set
+                        // type name so the contains dispatch can route Set
+                        // haystacks to mimi_set_contains.
+                        if matches!(init.unlocated(), Expr::SetLiteral(_)) {
+                            self.var_type_names.insert(name.clone(), "Set".to_string());
+                        }
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
