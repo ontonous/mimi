@@ -1311,6 +1311,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 name = mapped;
                             }
                         }
+                        // 2026-08-06 (audit 1f): exec_safe(prog, args...) —
+                        // every vararg must be a string (codegen used to pack
+                        // List varargs into argv as garbage; VM: E0800).
+                        if name == "exec_safe" && call.arguments.len() > 1 {
+                            for (i, arg) in call.arguments.iter().enumerate().skip(1) {
+                                let arg_ty =
+                                    resolved_type_display_name(self.program, &arg.value.ty);
+                                if self.generator.is_definitely_not_string(&arg_ty) {
+                                    return Err(CompileError::TypeMismatch(format!(
+                                        "exec_safe: all arguments must be strings (argument {} is {})",
+                                        i, arg_ty
+                                    )));
+                                }
+                            }
+                        }
                         // 2026-08-06 (audit 1c): `contains` is polymorphic in
                         // the VM ((string|List|Set, value)); compile_contains
                         // only handles List and a string haystack would SIGSEGV

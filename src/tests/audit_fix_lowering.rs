@@ -1739,3 +1739,40 @@ func main() -> i32 {
         );
     }
 }
+
+// ── Audit 1f (2026-08-06): exec_safe varargs must all be strings ─────────
+// exec_safe(prog, arg1, arg2, …) is varargs; codegen packed args[1..] into
+// argv via extract_raw_str_ptr without checking, so a List vararg became a
+// garbage argv (silent — exit 0 with mangled output), while the VM fails loud
+// E0800 "all arguments must be strings".
+
+#[test]
+fn audit_1f_exec_safe_varargs_guard() {
+    let bad = r#"func main() -> i32 {
+    println(exec_safe("echo", [1, 2]))
+    0
+}"#;
+    if can_link() {
+        assert!(
+            compile_and_run(bad).is_err(),
+            "legacy must reject List vararg"
+        );
+        assert!(
+            checked_codegen_compile_and_run(bad).is_err(),
+            "resolved must reject List vararg"
+        );
+    }
+    // Positive: legal string varargs stay working (VM/native identical).
+    let src = r#"func main() -> i32 {
+    let r = exec_safe("echo", "hi")
+    println(r.exit_code)
+    0
+}"#;
+    let expected = "0\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM exec_safe varargs");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen exec_safe varargs");
+        assert_eq!(native, expected, "native must match VM (audit 1f)");
+    }
+}

@@ -398,6 +398,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
+            // 2026-08-06 (audit 1f): exec_safe(prog, arg1, arg2, …) is
+            // varargs — every argument after the program must be a string.
+            // codegen packed them into argv without checking, so a List
+            // vararg became garbage argv (silent, red-line #2); the VM fails
+            // loud with E0800 "all arguments must be strings".
+            if name == "exec_safe" && args.len() > 1 {
+                for (i, arg) in args.iter().enumerate().skip(1) {
+                    let arg_ty = self.infer_object_type(arg, vars);
+                    if self.is_definitely_not_string(&arg_ty) {
+                        return Err(CompileError::TypeMismatch(format!(
+                            "exec_safe: all arguments must be strings (argument {} is {})",
+                            i, arg_ty
+                        )));
+                    }
+                }
+            }
             // 2026-08-06 (audit 1c): `contains` is polymorphic in the VM
             // ((string|List|Set, value)); compile_contains only handles List,
             // and a string haystack arrives as a raw pointer so load_list_len
