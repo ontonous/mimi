@@ -431,8 +431,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             // and a string haystack arrives as a raw pointer so load_list_len
             // would read a string struct and SIGSEGV. Redirect string
             // haystacks to str_contains (strstr) and guard the needle.
+            // (audit 1j) Set haystacks are bare i64 handles — route to
+            // mimi_set_contains (was a VM-only gap).
             if name == "contains" && !args.is_empty() {
                 let hay_ty = self.infer_object_type(&args[0], vars);
+                if hay_ty.starts_with("Set") {
+                    if compiled_args.len() < 2 {
+                        return Err(CompileError::WrongArgCount(
+                            "contains expects 2 arguments".into(),
+                        ));
+                    }
+                    let i64_ty = self.context.i64_type();
+                    return self
+                        .compile_set_contains_fn(
+                            types::basic_value_to_metadata_value(&compiled_args[0], i64_ty),
+                            types::basic_value_to_metadata_value(&compiled_args[1], i64_ty),
+                        )
+                        .map_err(|e| CompileError::Generic(e.to_string()));
+                }
                 if hay_ty == "string" {
                     if args.len() >= 2 {
                         let needle_ty = self.infer_object_type(&args[1], vars);

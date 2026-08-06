@@ -1906,6 +1906,82 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
+    /// Function-form `contains(set, value)` → mimi_set_contains handle probe.
+    ///
+    /// 2026-08-06 (audit 1j): the VM's `contains` is polymorphic over
+    /// (string|List|Set, value), but the codegen dispatch only handled List
+    /// (compile_contains) and string (strstr). A Set haystack is a bare i64
+    /// handle — `require_list_pointer` on it failed loudly, making
+    /// `contains(set, x)` a VM-only gap. Accept the already-compiled metadata
+    /// values (Set handle is IntValue/PointerValue, element is any value) and
+    /// emit the runtime set probe, returning an i1 (VM parity: Bool).
+    pub(super) fn compile_set_contains_fn(
+        &self,
+        set_val: BasicMetadataValueEnum<'ctx>,
+        target_val: BasicMetadataValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let set_handle = match set_val {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, i64_ty, "set_handle")?
+            }
+            _ => {
+                return Err(CompileError::Generic(
+                    "contains: expected set handle (i64)".into(),
+                ))
+            }
+        };
+        // Mirror any_value_to_handle over the metadata form (int sext /
+        // ptrtoint / struct field 0 / float bitcast).
+        let arg_handle = match target_val {
+            BasicMetadataValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "any_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+                } else {
+                    iv
+                }
+            }
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, i64_ty, "ptr_to_handle")?
+            }
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let field = self.build_extract_value(sv.into(), 0, "struct_field")?;
+                match field {
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.build_ptr_to_int(pv, i64_ty, "struct_ptr_to_handle")?
+                    }
+                    BasicValueEnum::IntValue(iv) => iv,
+                    _ => return Err("unsupported struct field type for set value handle".into()),
+                }
+            }
+            BasicMetadataValueEnum::FloatValue(fv) => self
+                .build_bit_cast(fv.into(), i64_ty.into(), "float_to_handle")?
+                .into_int_value(),
+            _ => return Err("unsupported set element value for handle".into()),
+        };
+        let func = self.get_runtime_fn("mimi_set_contains")?;
+        let result = self.build_call(
+            func,
+            &[
+                BasicMetadataValueEnum::IntValue(set_handle),
+                BasicMetadataValueEnum::IntValue(arg_handle),
+            ],
+            "set_contains",
+        )?;
+        let iv = self
+            .expect_basic_value(&result, "set_contains")?
+            .into_int_value();
+        let one = i64_ty.const_int(1, false);
+        let bv = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, iv, one, "to_bool")
+            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+        Ok(BasicValueEnum::IntValue(bv))
+    }
+
     // ===================================================================
     // v0.28.21 — Runtime QuotedAst construction (malloc + tagged union)
     //
