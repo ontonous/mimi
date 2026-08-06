@@ -3366,6 +3366,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "str_to_upper" => self.compile_str_to_upper(args),
             "str_to_lower" => self.compile_str_to_lower(args),
             "str_substring" => self.compile_str_substring(args),
+            "str_substring_strict" => self.compile_str_substring_strict(args),
             "str_split" => self.compile_str_split(args),
             "str_join" => self.compile_str_join(args),
             "str_replace" => self.compile_str_replace(args),

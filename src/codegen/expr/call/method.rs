@@ -6540,7 +6540,11 @@ fn string_method_to_builtin(method: &str) -> Option<&'static str> {
         "split" => Some("str_split"),
         "replace" => Some("str_replace"),
         "char_at" => Some("str_char_at"),
-        "substring" => Some("str_substring"),
+        // D-5 (2026-08-06): the METHOD form is strict in the VM
+        // (builtin_substring_method traps on end > len); the function form
+        // clamps. Route methods to the strict builtin so `s.substring(1,100)`
+        // fails loud instead of silently clamping.
+        "substring" => Some("str_substring_strict"),
         "parse_int" => Some("str_parse_int"),
         "parse_float" => Some("str_parse_float"),
         "repeat" => Some("str_repeat"),

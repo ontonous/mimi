@@ -119,6 +119,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "str_to_upper"
             | "str_to_lower"
             | "str_substring"
+            | "str_substring_strict"
             | "contains"
             | "sum"
             | "reverse"

@@ -337,6 +337,58 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.wrap_c_string(raw_result)
     }
 
+    /// Method-form `.substring(start, end)` — STRICT bounds (VM
+    /// builtin_substring_method parity): end beyond the char count traps
+    /// instead of clamping. 2026-08-06 (D-5 remainder): the method dispatch
+    /// funneled into compile_str_substring (clamping), so `s.substring(1,
+    /// 100)` silently returned "ello" while the VM trapped E0800 — a silent
+    /// error (red-line #2). The runtime already had the strict
+    /// `mimi_str_substring(ptr, start, end)` helper; this emitter calls it.
+    pub(in crate::codegen) fn compile_str_substring_strict(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 {
+            return Err(CompileError::WrongArgCount(
+                "str_substring_strict expects 3 arguments (s, start, end)".to_string(),
+            ));
+        }
+        let start = require_int_arg(&args[1], "str_substring_strict: start must be integer")?;
+        let end = require_int_arg(&args[2], "str_substring_strict: end must be integer")?;
+        let i64_ty = self.context.i64_type();
+        let start = if start.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(start, i64_ty, "start_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            start
+        };
+        let end = if end.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(end, i64_ty, "end_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            end
+        };
+        let data_ptr = self.extract_string_arg(&args[0], "str_substring_strict")?;
+        let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
+        let raw_result = self
+            .build_call(
+                sub_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(start),
+                    BasicMetadataValueEnum::IntValue(end),
+                ],
+                "str_substring_strict_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_substring returned void")?
+            .into_pointer_value();
+        self.register_heap_alloc(raw_result);
+        self.wrap_c_string(raw_result)
+    }
+
     pub(in crate::codegen) fn compile_str_split(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
