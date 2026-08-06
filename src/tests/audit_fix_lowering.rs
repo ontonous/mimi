@@ -1372,3 +1372,84 @@ func main() -> i32 {
         );
     }
 }
+
+// ── Audit 1 (2026-08-06): string-only builtins must reject non-string args ──
+// The LLVM value of a List arrives as a raw pointer (List value = ptr to the
+// {i64, ptr} struct), indistinguishable from a string pointer inside the
+// string-transform emitters. Before the compile-time guard, `str_trim([1,2,3])`
+// strlen'd a list struct → garbage output (or panic on the {i64, ptr} layout
+// via into_pointer_value()). The guard fails loud at compile time on BOTH the
+// legacy (compile_and_run) and full-resolved (checked_codegen_compile_and_run)
+// paths; the VM reports E0800 at runtime. Valid string calls must still pass.
+
+#[test]
+fn audit_1_string_only_builtin_rejects_list() {
+    // Negative: List → str_trim must be rejected by codegen (both paths).
+    let src = r#"
+func main() -> i32 {
+    let l = [1, 2, 3]
+    let t = str_trim(l)
+    println(t)
+    0
+}
+"#;
+    if can_link() {
+        let legacy = compile_and_run(src);
+        assert!(
+            legacy.is_err(),
+            "legacy path must reject str_trim(List), got {:?}",
+            legacy
+        );
+        let resolved = checked_codegen_compile_and_run(src);
+        assert!(
+            resolved.is_err(),
+            "resolved path must reject str_trim(List), got {:?}",
+            resolved
+        );
+    }
+    // Also exercise to_upper / to_lower / substring guards (List arg).
+    for bad in [
+        "str_to_upper([1, 2])",
+        "str_to_lower([1, 2])",
+        "str_substring([1, 2], 0, 1)",
+    ] {
+        let src = format!(
+            "func main() -> i32 {{\n    let x = {}\n    println(x)\n    0\n}}\n",
+            bad
+        );
+        if can_link() {
+            assert!(compile_and_run(&src).is_err(), "must reject {}", bad);
+        }
+    }
+}
+
+#[test]
+fn audit_1_string_only_builtin_accepts_valid_strings() {
+    // Positive: all four guarded builtins with real strings must keep working
+    // and stay VM/native identical (L1).
+    let src = r#"
+func main() -> i32 {
+    println(str_trim("  hi  "))
+    println(str_to_upper("ab12"))
+    println(str_to_lower("XYz"))
+    println(str_substring("hello", 1, 3))
+    0
+}
+"#;
+    let expected = "hi\nAB12\nxyz\nel\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM string-only builtins");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen string-only builtins");
+        assert_eq!(
+            native, expected,
+            "native must match VM for string-only builtins (audit 1)"
+        );
+        // NOTE: the full-resolved checked_codegen_compile_and_run path is a
+        // SEPARATE known gap — E0722 `{ptr,i64} → ptr` when the string builtin
+        // result crosses the resolved ABI bridge (same family as the resolved
+        // Set E0722, only exposed by forcing the whole program through
+        // compile_checked). Production `mimi build` uses per-function dispatch
+        // and passes, as asserted above via compile_and_run.
+    }
+}
