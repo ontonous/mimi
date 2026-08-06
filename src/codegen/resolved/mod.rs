@@ -867,7 +867,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // Builtin constants (None, true, false) are not in the
                 // program's constants catalog. Handle them directly.
                 if node_id.0 == "builtin:value:None" {
-                    return self.generator.compile_constructor("None", vec![]);
+                    // 0.34.35: build None in the *resolved* layout ({bool,
+                    // payload}) from the expression type. Previously routed to
+                    // legacy compile_constructor, which hard-codes the narrow
+                    // {i1,i64} — an if/else with Some(string) (wide {i1,{ptr,i64}})
+                    // vs None then failed the branch coerce ({i1,i64} → {i1,{ptr,i64}})
+                    // and the whole callable fell back to legacy, where the phi
+                    // merge crashed LLVM's CVP pass (v1: SIGSEGV in visitPHINode)
+                    // or mis-dispatched the print arg (v2/v3).
+                    return self.emit_resolved_optional_ctor("None", vec![], &expression.ty);
                 }
                 // 0.32.12: Enum unit variants (e.g., `Green` in
                 // `type Color { Red | Green | Blue }`) are constants

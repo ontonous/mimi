@@ -809,6 +809,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                         fields[0],
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                     )
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::StructType(st) if {
+                            let inner = st.get_field_types();
+                            inner.len() == 2
+                                && matches!(inner[0], BasicTypeEnum::PointerType(_))
+                                && matches!(
+                                    inner[1],
+                                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                                )
+                        }
+                    )
+                {
+                    // Option<string> whose type name is unrecoverable (e.g. a
+                    // bare `let o = if ... { None } else { Some("hi") }` where
+                    // the if expression has no var_type_names entry). Route to
+                    // the Option formatter: the product-tuple fallback would
+                    // strlen() the None payload's null string → SIGSEGV.
+                    let str_ptr = self.emit_option_to_string(*sv, None, arg_type)?;
+                    Ok((
+                        BasicMetadataValueEnum::PointerValue(str_ptr),
+                        "%s".to_string(),
+                    ))
+                } else if num_fields == 2
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                    )
                     && matches!(fields[1], BasicTypeEnum::PointerType(_))
                 {
                     // Option with pointer payload (e.g. Option<record>):
@@ -1130,238 +1158,193 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_map_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
-        // sized_cat_parts / emit_sized_list_of_pieces (Wave 1 converted the
-        // tuple/list-of-tuple family; Map/Set/Enum/Result/Option list
-        // emitters remain).
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_map_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_map_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_map_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_map_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_map_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_map_body");
-        let done_bb = self.context.append_basic_block(parent, "list_map_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_map_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_map_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_map_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_map_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_map_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_map_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_map_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_map_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_map_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_map_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let handle = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_map_handle")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let map_str = if let Some(val_ty) = map_type
-            .strip_prefix("Map<string, ")
-            .and_then(|s| s.strip_suffix('>'))
-        {
-            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                let elem = if self.is_product_tuple_alias(val_ty) {
-                    self.resolve_alias_type_name(val_ty)
-                } else {
-                    val_ty.to_string()
-                };
-                // Display style for println of List<Map product>.
-                self.emit_map_product_to_json(handle, &elem, 1)?
-            } else if let Some(opt_elem) = val_ty
-                .strip_prefix("Option<")
-                .and_then(|s| s.strip_suffix('>'))
-            {
-                if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
-                    let elem = if self.is_product_tuple_alias(opt_elem) {
-                        self.resolve_alias_type_name(opt_elem)
-                    } else {
-                        opt_elem.to_string()
-                    };
-                    self.emit_map_option_product_to_json(handle, &elem, 1)?
-                } else {
-                    let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
-                    self.build_call(
-                        map_fn,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "list_map_json",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("map to_json void")?
-                    .into_pointer_value()
-                }
-            } else if val_ty.starts_with("Result<") {
-                if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
-                    let mut depth = 0i32;
-                    for (i, ch) in s.char_indices() {
-                        match ch {
-                            '<' | '(' => depth += 1,
-                            '>' | ')' => depth -= 1,
-                            ',' if depth == 0 => {
-                                return Some(s[..i].trim());
-                            }
-                            _ => {}
-                        }
-                    }
-                    None
-                }) {
-                    if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
-                        let elem = if self.is_product_tuple_alias(ok_ty) {
-                            self.resolve_alias_type_name(ok_ty)
-                        } else {
-                            ok_ty.to_string()
-                        };
-                        self.emit_map_result_product_to_json(handle, &elem, 1)?
-                    } else {
-                        let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
-                        self.build_call(
-                            map_fn,
-                            &[BasicMetadataValueEnum::IntValue(handle)],
-                            "list_map_json",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("map to_json void")?
-                        .into_pointer_value()
-                    }
-                } else {
-                    let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
-                    self.build_call(
-                        map_fn,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "list_map_json",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("map to_json void")?
-                    .into_pointer_value()
-                }
-            } else if let Some(set_elem) = val_ty
-                .strip_prefix("Set<")
-                .and_then(|s| s.strip_suffix('>'))
-            {
-                if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
-                    let elem = if self.is_product_tuple_alias(set_elem) {
-                        self.resolve_alias_type_name(set_elem)
-                    } else {
-                        set_elem.to_string()
-                    };
-                    self.emit_map_set_product_to_json(handle, &elem, 1)?
-                } else {
-                    let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
-                    self.build_call(
-                        map_fn,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "list_map_json",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("map to_json void")?
-                    .into_pointer_value()
-                }
-            } else if let Some(list_elem) = val_ty
-                .strip_prefix("List<")
-                .and_then(|s| s.strip_suffix('>'))
-            {
-                if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem) {
-                    let elem = if self.is_product_tuple_alias(list_elem) {
-                        self.resolve_alias_type_name(list_elem)
-                    } else {
-                        list_elem.to_string()
-                    };
-                    self.emit_map_list_product_to_json(handle, &elem, 1)?
-                } else {
-                    let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
-                    self.build_call(
-                        map_fn,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "list_map_json",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("map to_json void")?
-                    .into_pointer_value()
-                }
-            } else if val_ty.starts_with("Map<string, ") {
-                if let Some(inner_val) = val_ty
+        // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
+        // The element renderer is pure, so the two passes render each element
+        // twice; measurement pieces are freed per iteration by the sized helper.
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_map_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_map_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_map_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let handle = self
+                    .builder
+                    .build_load(i64_ty, elem_slot, "list_map_handle")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let map_str = if let Some(val_ty) = map_type
                     .strip_prefix("Map<string, ")
                     .and_then(|s| s.strip_suffix('>'))
                 {
-                    if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val) {
-                        let elem = if self.is_product_tuple_alias(inner_val) {
-                            self.resolve_alias_type_name(inner_val)
+                    if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                        let elem = if self.is_product_tuple_alias(val_ty) {
+                            self.resolve_alias_type_name(val_ty)
                         } else {
-                            inner_val.to_string()
+                            val_ty.to_string()
                         };
-                        self.emit_map_map_product_to_json(handle, &elem, 1)?
+                        // Display style for println of List<Map product>.
+                        self.emit_map_product_to_json(handle, &elem, 1)?
+                    } else if let Some(opt_elem) = val_ty
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
+                            let elem = if self.is_product_tuple_alias(opt_elem) {
+                                self.resolve_alias_type_name(opt_elem)
+                            } else {
+                                opt_elem.to_string()
+                            };
+                            self.emit_map_option_product_to_json(handle, &elem, 1)?
+                        } else {
+                            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            self.build_call(
+                                map_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else if val_ty.starts_with("Result<") {
+                        if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
+                            let mut depth = 0i32;
+                            for (i, ch) in s.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        return Some(s[..i].trim());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            None
+                        }) {
+                            if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                                let elem = if self.is_product_tuple_alias(ok_ty) {
+                                    self.resolve_alias_type_name(ok_ty)
+                                } else {
+                                    ok_ty.to_string()
+                                };
+                                self.emit_map_result_product_to_json(handle, &elem, 1)?
+                            } else {
+                                let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                                self.build_call(
+                                    map_fn,
+                                    &[BasicMetadataValueEnum::IntValue(handle)],
+                                    "list_map_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("map to_json void")?
+                                .into_pointer_value()
+                            }
+                        } else {
+                            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            self.build_call(
+                                map_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else if let Some(set_elem) = val_ty
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                            let elem = if self.is_product_tuple_alias(set_elem) {
+                                self.resolve_alias_type_name(set_elem)
+                            } else {
+                                set_elem.to_string()
+                            };
+                            self.emit_map_set_product_to_json(handle, &elem, 1)?
+                        } else {
+                            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            self.build_call(
+                                map_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else if let Some(list_elem) = val_ty
+                        .strip_prefix("List<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem) {
+                            let elem = if self.is_product_tuple_alias(list_elem) {
+                                self.resolve_alias_type_name(list_elem)
+                            } else {
+                                list_elem.to_string()
+                            };
+                            self.emit_map_list_product_to_json(handle, &elem, 1)?
+                        } else {
+                            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            self.build_call(
+                                map_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else if val_ty.starts_with("Map<string, ") {
+                        if let Some(inner_val) = val_ty
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val)
+                            {
+                                let elem = if self.is_product_tuple_alias(inner_val) {
+                                    self.resolve_alias_type_name(inner_val)
+                                } else {
+                                    inner_val.to_string()
+                                };
+                                self.emit_map_map_product_to_json(handle, &elem, 1)?
+                            } else {
+                                let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                                self.build_call(
+                                    map_fn,
+                                    &[BasicMetadataValueEnum::IntValue(handle)],
+                                    "list_map_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("map to_json void")?
+                                .into_pointer_value()
+                            }
+                        } else {
+                            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            self.build_call(
+                                map_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("map to_json void")?
+                            .into_pointer_value()
+                        }
                     } else {
-                        let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                        // Wave-1 audit fix (§8): route on the parsed value type,
+                        // not substring `contains`.
+                        let map_fn_name = Self::map_json_fn_for_type(map_type);
+                        let map_fn = self.get_runtime_fn(map_fn_name)?;
                         self.build_call(
                             map_fn,
                             &[BasicMetadataValueEnum::IntValue(handle)],
@@ -1381,66 +1364,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .try_as_basic_value_opt()
                     .ok_or("map to_json void")?
                     .into_pointer_value()
-                }
-            } else {
-                // Wave-1 audit fix (§8): route on the parsed value type, not
-                // substring `contains`.
-                let map_fn_name = Self::map_json_fn_for_type(map_type);
-                let map_fn = self.get_runtime_fn(map_fn_name)?;
-                self.build_call(
-                    map_fn,
-                    &[BasicMetadataValueEnum::IntValue(handle)],
-                    "list_map_json",
-                )?
-                .try_as_basic_value_opt()
-                .ok_or("map to_json void")?
-                .into_pointer_value()
-            }
-        } else {
-            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
-            self.build_call(
-                map_fn,
-                &[BasicMetadataValueEnum::IntValue(handle)],
-                "list_map_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map to_json void")?
-            .into_pointer_value()
-        };
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(map_str),
-            ],
-            "list_map_strcat_elem",
-        )?;
-        // Q2 (0.34.25b): element formatters allocated their buffers inside
-        // this loop body — free them here, per iteration, so empty lists
-        // never free undef pointers and N-element lists free all N sets.
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_map_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_map_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_map_close",
-        )?;
-        Ok(buf)
+                };
+                Ok(map_str)
+            },
+            "list_map",
+        )
     }
 
     /// Format `List<Set>` as `[Set{…}, ...]` via set display helpers.
@@ -1455,231 +1383,189 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_set_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
-        // sized assembly (see list_map_buf note).
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_set_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_set_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_set_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_set_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_set_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_set_body");
-        let done_bb = self.context.append_basic_block(parent, "list_set_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_set_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_set_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_set_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_set_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_set_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_set_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_set_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_set_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_set_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_set_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let handle = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_set_handle")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let set_str = if let Some(elem) = set_type
-            .strip_prefix("Set<")
-            .and_then(|s| s.strip_suffix('>'))
-        {
-            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                let resolved = if self.is_product_tuple_alias(elem) {
-                    self.resolve_alias_type_name(elem)
-                } else {
-                    elem.to_string()
-                };
-                self.emit_set_product_to_json(handle, &resolved, 1)?
-            } else if elem.starts_with("Map<string, ") {
-                if let Some(val_ty) = elem
-                    .strip_prefix("Map<string, ")
+        // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
+        // The element renderer is pure, so the two passes render each element
+        // twice; measurement pieces are freed per iteration by the sized helper.
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_set_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_set_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_set_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let handle = self
+                    .builder
+                    .build_load(i64_ty, elem_slot, "list_set_handle")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let set_str = if let Some(elem) = set_type
+                    .strip_prefix("Set<")
                     .and_then(|s| s.strip_suffix('>'))
                 {
-                    if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                        let resolved = if self.is_product_tuple_alias(val_ty) {
-                            self.resolve_alias_type_name(val_ty)
+                    if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                        let resolved = if self.is_product_tuple_alias(elem) {
+                            self.resolve_alias_type_name(elem)
                         } else {
-                            val_ty.to_string()
+                            elem.to_string()
                         };
-                        let arity = {
-                            let body = resolved
-                                .strip_prefix('(')
-                                .and_then(|s| s.strip_suffix(')'))
-                                .unwrap_or(&resolved);
-                            let mut arity = 0i64;
+                        self.emit_set_product_to_json(handle, &resolved, 1)?
+                    } else if elem.starts_with("Map<string, ") {
+                        if let Some(val_ty) = elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let resolved = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_set_to_json_map_product_i64")?;
+                                self.build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::IntValue(handle),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(arity as u64, false),
+                                        ),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(1, false),
+                                        ),
+                                    ],
+                                    "list_set_map_disp",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set map product display void")?
+                                .into_pointer_value()
+                            } else {
+                                let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                                self.build_call(
+                                    set_fn,
+                                    &[BasicMetadataValueEnum::IntValue(handle)],
+                                    "list_set_disp",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set display void")?
+                                .into_pointer_value()
+                            }
+                        } else {
+                            let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                            self.build_call(
+                                set_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_set_disp",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("set display void")?
+                            .into_pointer_value()
+                        }
+                    } else if let Some(opt_inner) = elem
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                            let resolved = if self.is_product_tuple_alias(opt_inner) {
+                                self.resolve_alias_type_name(opt_inner)
+                            } else {
+                                opt_inner.to_string()
+                            };
+                            self.emit_set_option_product_to_json(handle, &resolved, 1)?
+                        } else {
+                            let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                            self.build_call(
+                                set_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_set_disp",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("set display void")?
+                            .into_pointer_value()
+                        }
+                    } else if elem.starts_with("Result<") {
+                        if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
                             let mut depth = 0i32;
-                            let mut any = false;
-                            for ch in body.chars() {
+                            for (i, ch) in s.char_indices() {
                                 match ch {
                                     '<' | '(' => depth += 1,
                                     '>' | ')' => depth -= 1,
                                     ',' if depth == 0 => {
-                                        arity += 1;
-                                        any = true;
+                                        return Some(s[..i].trim());
                                     }
-                                    c if !c.is_whitespace() => any = true,
                                     _ => {}
                                 }
                             }
-                            if any {
-                                arity += 1;
+                            None
+                        }) {
+                            if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                                let resolved = if self.is_product_tuple_alias(ok_ty) {
+                                    self.resolve_alias_type_name(ok_ty)
+                                } else {
+                                    ok_ty.to_string()
+                                };
+                                self.emit_set_result_product_to_json(handle, &resolved, 1)?
+                            } else {
+                                let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                                self.build_call(
+                                    set_fn,
+                                    &[BasicMetadataValueEnum::IntValue(handle)],
+                                    "list_set_disp",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set display void")?
+                                .into_pointer_value()
                             }
-                            arity.max(1)
-                        };
-                        let func = self.get_runtime_fn("mimi_set_to_json_map_product_i64")?;
-                        let i64_ty = self.context.i64_type();
-                        self.build_call(
-                            func,
-                            &[
-                                BasicMetadataValueEnum::IntValue(handle),
-                                BasicMetadataValueEnum::IntValue(
-                                    i64_ty.const_int(arity as u64, false),
-                                ),
-                                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
-                            ],
-                            "list_set_map_disp",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("set map product display void")?
-                        .into_pointer_value()
-                    } else {
-                        let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
-                        self.build_call(
-                            set_fn,
-                            &[BasicMetadataValueEnum::IntValue(handle)],
-                            "list_set_disp",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("set display void")?
-                        .into_pointer_value()
-                    }
-                } else {
-                    let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
-                    self.build_call(
-                        set_fn,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "list_set_disp",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("set display void")?
-                    .into_pointer_value()
-                }
-            } else if let Some(opt_inner) = elem
-                .strip_prefix("Option<")
-                .and_then(|s| s.strip_suffix('>'))
-            {
-                if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
-                    let resolved = if self.is_product_tuple_alias(opt_inner) {
-                        self.resolve_alias_type_name(opt_inner)
-                    } else {
-                        opt_inner.to_string()
-                    };
-                    self.emit_set_option_product_to_json(handle, &resolved, 1)?
-                } else {
-                    let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
-                    self.build_call(
-                        set_fn,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "list_set_disp",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("set display void")?
-                    .into_pointer_value()
-                }
-            } else if elem.starts_with("Result<") {
-                if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
-                    let mut depth = 0i32;
-                    for (i, ch) in s.char_indices() {
-                        match ch {
-                            '<' | '(' => depth += 1,
-                            '>' | ')' => depth -= 1,
-                            ',' if depth == 0 => {
-                                return Some(s[..i].trim());
-                            }
-                            _ => {}
-                        }
-                    }
-                    None
-                }) {
-                    if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
-                        let resolved = if self.is_product_tuple_alias(ok_ty) {
-                            self.resolve_alias_type_name(ok_ty)
                         } else {
-                            ok_ty.to_string()
-                        };
-                        self.emit_set_result_product_to_json(handle, &resolved, 1)?
+                            let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                            self.build_call(
+                                set_fn,
+                                &[BasicMetadataValueEnum::IntValue(handle)],
+                                "list_set_disp",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("set display void")?
+                            .into_pointer_value()
+                        }
                     } else {
-                        let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                        // Wave-1 audit fix (§8): route on the parsed element type,
+                        // not substring `contains`.
+                        let set_fn_name = Self::set_display_fn_for_type(set_type);
+                        let set_fn = self.get_runtime_fn(set_fn_name)?;
                         self.build_call(
                             set_fn,
                             &[BasicMetadataValueEnum::IntValue(handle)],
@@ -1699,63 +1585,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .try_as_basic_value_opt()
                     .ok_or("set display void")?
                     .into_pointer_value()
-                }
-            } else {
-                // Wave-1 audit fix (§8): route on the parsed element type, not
-                // substring `contains`.
-                let set_fn_name = Self::set_display_fn_for_type(set_type);
-                let set_fn = self.get_runtime_fn(set_fn_name)?;
-                self.build_call(
-                    set_fn,
-                    &[BasicMetadataValueEnum::IntValue(handle)],
-                    "list_set_disp",
-                )?
-                .try_as_basic_value_opt()
-                .ok_or("set display void")?
-                .into_pointer_value()
-            }
-        } else {
-            let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
-            self.build_call(
-                set_fn,
-                &[BasicMetadataValueEnum::IntValue(handle)],
-                "list_set_disp",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("set display void")?
-            .into_pointer_value()
-        };
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(set_str),
-            ],
-            "list_set_strcat_elem",
-        )?;
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_set_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_set_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_set_close",
-        )?;
-        Ok(buf)
+                };
+                Ok(set_str)
+            },
+            "list_set",
+        )
     }
 
     /// Serialize `List<Result<Option<(…)>,E>>` with full Result layout.
@@ -3114,154 +2948,54 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_enum_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
-        // sized assembly (see list_map_buf note).
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_enum_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_enum_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_enum_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_enum_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_enum_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_enum_body");
-        let done_bb = self.context.append_basic_block(parent, "list_enum_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_enum_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_enum_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_enum_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self
-            .context
-            .append_basic_block(parent, "list_enum_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_enum_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_enum_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_enum_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_enum_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_enum_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_enum_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_enum_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let enum_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_enum_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let enum_sty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(self.context.i32_type()),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let loaded = self
-            .builder
-            .build_load(
-                BasicTypeEnum::StructType(enum_sty),
-                enum_ptr,
-                "list_enum_ld",
-            )
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
-        let enum_str = self.emit_enum_display(enum_name, loaded)?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(enum_str),
-            ],
-            "list_enum_strcat_elem",
-        )?;
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_enum_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_enum_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_enum_close",
-        )?;
-        Ok(buf)
+        // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
+        // The element renderer is pure (display formatter), so the two passes
+        // render each element twice; measurement pieces are freed per
+        // iteration by the sized helper.
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_enum_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_enum_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_enum_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, "list_enum_elem")?
+                    .into_int_value();
+                let enum_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_enum_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let enum_sty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.i32_type()),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let loaded = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(enum_sty),
+                        enum_ptr,
+                        "list_enum_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                self.emit_enum_display(enum_name, loaded)
+            },
+            "list_enum",
+        )
     }
 
     /// Format `List<Result<…>>` as `[Ok(…), Err(…), ...]`.
@@ -3277,131 +3011,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_res_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        // TODO(#audit-wave2): fixed 4096-byte snprintf/strcat assembly —
-        // convert to sized assembly (see list_map_buf note).
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_res_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_res_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_res_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_res_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_res_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_res_body");
-        let done_bb = self.context.append_basic_block(parent, "list_res_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_res_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_res_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_res_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_res_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_res_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_res_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_res_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_res_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_res_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_res_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_res_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let res_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_res_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        // Full Result layout (by-value Ok tuple/record) when known.
-        let res_ty = crate::codegen::extract_list_elem_type(&format!("List<{}>", elem_res_type))
-            .unwrap_or_else(|| {
-                crate::ast::Type::Name(
-                    "Result".into(),
-                    vec![
-                        crate::ast::Type::Name("i64".into(), vec![]),
-                        crate::ast::Type::Name("i64".into(), vec![]),
-                    ],
-                )
-            });
-        let res_sty = match self.llvm_type_for(&res_ty) {
-            Some(BasicTypeEnum::StructType(s)) => s,
-            _ => self.context.struct_type(
-                &[
-                    BasicTypeEnum::IntType(self.context.bool_type()),
-                    BasicTypeEnum::IntType(i64_ty),
-                    BasicTypeEnum::IntType(i64_ty),
-                ],
-                false,
-            ),
-        };
-        let loaded = self
-            .builder
-            .build_load(BasicTypeEnum::StructType(res_sty), res_ptr, "list_res_ld")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
+        // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
+        // The element renderer is pure, so the two passes render each element
+        // twice; measurement pieces are freed per iteration by the sized helper.
         let ok_rec = elem_res_type
             .strip_prefix("Result<")
             .and_then(|s| s.split(',').next())
@@ -3413,38 +3025,62 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .get(*inner)
                         .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
             });
-        let res_str = self.emit_result_to_string_typed(loaded, ok_rec, elem_res_type)?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(res_str),
-            ],
-            "list_res_strcat_elem",
-        )?;
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_res_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_res_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_res_close",
-        )?;
-        Ok(buf)
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_res_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_res_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_res_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, "list_res_elem")?
+                    .into_int_value();
+                let res_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_res_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                // Full Result layout (by-value Ok tuple/record) when known.
+                let res_ty =
+                    crate::codegen::extract_list_elem_type(&format!("List<{}>", elem_res_type))
+                        .unwrap_or_else(|| {
+                            crate::ast::Type::Name(
+                                "Result".into(),
+                                vec![
+                                    crate::ast::Type::Name("i64".into(), vec![]),
+                                    crate::ast::Type::Name("i64".into(), vec![]),
+                                ],
+                            )
+                        });
+                let res_sty = match self.llvm_type_for(&res_ty) {
+                    Some(BasicTypeEnum::StructType(s)) => s,
+                    _ => self.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(self.context.bool_type()),
+                            BasicTypeEnum::IntType(i64_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    ),
+                };
+                let loaded = self
+                    .builder
+                    .build_load(BasicTypeEnum::StructType(res_sty), res_ptr, "list_res_ld")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                self.emit_result_to_string_typed(loaded, ok_rec, elem_res_type)
+            },
+            "list_res",
+        )
     }
 
     /// Format `List<Option<…>>` as `[Some(…), None(), …]`.
@@ -3454,8 +3090,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         sv: inkwell::values::StructValue<'ctx>,
         elem_opt_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        // Reuse list-of-record style loop but format each i64 slot as Option
-        // by treating list data as array of {i1,i64} pointers/values stored as i64.
         // List elements for Option are typically by-value structs spilled as ptrtoint
         // of stack Option or packed; walk as i64 and interpret as Option via temp.
         let i64_ty = self.context.i64_type();
@@ -3464,161 +3098,60 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_opt_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
-        // TODO(#audit-wave2): fixed 4096-byte strcat assembly — convert to
-        // sized assembly (see list_map_buf note).
-        let buf = self.malloc_display_buf(i64_ty.const_int(4096, false), "list_opt_buf")?;
-        let disp_marker = self.display_marker();
-        let open = self
-            .builder
-            .build_global_string_ptr("[", "list_opt_open")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-        let strcat_fn = self.get_runtime_fn("strcat")?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
-            ],
-            "list_opt_open_cpy",
-        )?;
-        let parent = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_parent())
-            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_opt_i")?;
-        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_opt_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_opt_body");
-        let done_bb = self.context.append_basic_block(parent, "list_opt_done");
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(loop_bb);
-        let idx = self
-            .builder
-            .build_load(i64_ty, idx_alloca, "list_opt_idx")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let cont = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, idx, len, "list_opt_cont")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_conditional_branch(cont, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(body_bb);
-        let zero = i64_ty.const_int(0, false);
-        let need_comma = self
-            .builder
-            .build_int_compare(IntPredicate::UGT, idx, zero, "list_opt_comma")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_opt_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_opt_elem");
-        self.builder
-            .build_conditional_branch(need_comma, comma_bb, elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(comma_bb);
-        let comma = self
-            .builder
-            .build_global_string_ptr(", ", "list_opt_comma_s")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
-            ],
-            "list_opt_strcat_comma",
-        )?;
-        self.builder
-            .build_unconditional_branch(elem_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(elem_bb);
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_ty, alloca, 1, "list_opt_data_gep")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let data_ptr = self
-            .builder
-            .build_load(i8_ptr, data_gep, "list_opt_data")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_pointer_value();
-        // Elements are pointers to Option structs (or ptrtoint of them).
-        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
-        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
-        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
-        let elem_slot = unsafe {
-            self.builder
-                .build_gep(i64_ty, data_ptr, &[idx], "list_opt_slot")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        };
-        let elem_i64 = self
-            .builder
-            .build_load(i64_ty, elem_slot, "list_opt_elem")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_int_value();
-        let opt_ptr = self
-            .builder
-            .build_int_to_ptr(elem_i64, i8_ptr, "list_opt_as_ptr")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        // Use full Option layout (by-value tuple / record payload) when known;
-        // fall back to canonical {i1,i64} for scalar Option elements.
-        let opt_ty = crate::codegen::extract_list_elem_type(&format!("List<{}>", elem_opt_type))
-            .unwrap_or_else(|| {
-                crate::ast::Type::Name(
-                    "Option".into(),
-                    vec![crate::ast::Type::Name("i64".into(), vec![])],
-                )
-            });
-        let opt_sty = match self.llvm_type_for(&opt_ty) {
-            Some(BasicTypeEnum::StructType(s)) => s,
-            _ => self.context.struct_type(
-                &[
-                    BasicTypeEnum::IntType(self.context.bool_type()),
-                    BasicTypeEnum::IntType(i64_ty),
-                ],
-                false,
-            ),
-        };
-        let loaded = self
-            .builder
-            .build_load(BasicTypeEnum::StructType(opt_sty), opt_ptr, "list_opt_ld")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-            .into_struct_value();
-        let opt_str = self.emit_option_to_string(loaded, None, elem_opt_type)?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(opt_str),
-            ],
-            "list_opt_strcat_elem",
-        )?;
-        self.flush_display_since(disp_marker)?;
-        let next = self
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "list_opt_next")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_store(idx_alloca, next)?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(done_bb);
-        let close = self
-            .builder
-            .build_global_string_ptr("]", "list_opt_close")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
-            ],
-            "list_opt_close",
-        )?;
-        Ok(buf)
+        // D-4: exact-size two-pass assembly (fixed 4096-byte strcat removed).
+        self.emit_sized_list_of_pieces(
+            len,
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_opt_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_opt_data")?
+                    .into_pointer_value();
+                // SAFETY: data_ptr is the collection's data array (`len` i64
+                // slots, loaded from the struct's data field). The sized
+                // helper's loop guards `idx ULT len` gate every call.
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_opt_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, "list_opt_elem")?
+                    .into_int_value();
+                let opt_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_opt_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                // Use full Option layout (by-value tuple / record payload) when
+                // known; fall back to canonical {i1,i64} for scalar elements.
+                let opt_ty =
+                    crate::codegen::extract_list_elem_type(&format!("List<{}>", elem_opt_type))
+                        .unwrap_or_else(|| {
+                            crate::ast::Type::Name(
+                                "Option".into(),
+                                vec![crate::ast::Type::Name("i64".into(), vec![])],
+                            )
+                        });
+                let opt_sty = match self.llvm_type_for(&opt_ty) {
+                    Some(BasicTypeEnum::StructType(s)) => s,
+                    _ => self.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(self.context.bool_type()),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    ),
+                };
+                let loaded = self
+                    .builder
+                    .build_load(BasicTypeEnum::StructType(opt_sty), opt_ptr, "list_opt_ld")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                self.emit_option_to_string(loaded, None, elem_opt_type)
+            },
+            "list_opt",
+        )
     }
 
     /// Format `List<Record>` as `[Point { ... }, ...]` matching interp Display.
