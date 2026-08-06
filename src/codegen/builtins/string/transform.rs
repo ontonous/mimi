@@ -425,17 +425,31 @@ impl<'ctx> CodeGenerator<'ctx> {
     // -------------------------------------------------------------------------
 
     /// Extract a raw string pointer from a PointerValue or StructValue argument.
-    fn extract_string_arg(
+    /// 2026-08-06 (audit 1): a non-string struct (e.g. `List` with `{i64, ptr}`
+    /// layout) used to reach `into_pointer_value()` and PANIC the compiler —
+    /// match the field types and fail loud instead (VM parity: E0800 runtime).
+    pub(in crate::codegen) fn extract_string_arg(
         &self,
         arg: &BasicMetadataValueEnum<'ctx>,
         context: &str,
     ) -> MimiResult<PointerValue<'ctx>> {
         match arg {
             BasicMetadataValueEnum::PointerValue(pv) => Ok(*pv),
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .build_extract_value((*sv).into(), 0, "str_ptr")
-                .map(|v| v.into_pointer_value())
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e))),
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let ftys = sv.get_type().get_field_types();
+                let is_str_layout = ftys.len() == 2
+                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
+                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if !is_str_layout {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{}: string argument expected (found a non-string struct)",
+                        context
+                    )));
+                }
+                self.build_extract_value((*sv).into(), 0, "str_ptr")
+                    .map(|v| v.into_pointer_value())
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))
+            }
             _ => Err(CompileError::TypeMismatch(format!(
                 "{}: string argument expected",
                 context

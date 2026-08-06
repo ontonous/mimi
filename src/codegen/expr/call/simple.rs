@@ -399,18 +399,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
             // 2026-08-06 (audit 1): string-only builtins — reject a definitely
-            // non-string first argument at compile time. The LLVM value of a
+            // non-string argument at compile time. The LLVM value of a
             // List arrives as a raw pointer (List value = ptr to {i64, ptr}),
             // indistinguishable from a string pointer in the emitter, so
             // `str_trim([1,2,3])` used to strlen a list struct → garbage /
-            // panic. Fail loud (VM parity: E0800 at runtime).
-            if Self::is_string_only_builtin(name) && !args.is_empty() {
-                let arg_ty = self.infer_object_type(&args[0], vars);
-                if self.is_definitely_not_string(&arg_ty) {
-                    return Err(CompileError::TypeMismatch(format!(
-                        "{} expects a string argument, found {}",
-                        name, arg_ty
-                    )));
+            // panic. Fail loud (VM parity: E0800 at runtime). Guards every
+            // string argument position of the whole str_* / regex_* family.
+            if let Some(pos) = Self::string_only_builtin_string_args(name) {
+                for &p in pos {
+                    let p = p as usize;
+                    if p >= args.len() {
+                        break; // arg-count error is reported by the callee
+                    }
+                    let arg_ty = self.infer_object_type(&args[p], vars);
+                    if self.is_definitely_not_string(&arg_ty) {
+                        return Err(CompileError::TypeMismatch(format!(
+                            "{} expects a string argument at position {}, found {}",
+                            name, p, arg_ty
+                        )));
+                    }
                 }
             }
             // Special case: `to_json(obj)` where obj is a List<T> — dispatch

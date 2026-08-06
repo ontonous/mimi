@@ -1286,20 +1286,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ResolvedCallee::Builtin(builtin_id) => {
                         let name = builtin_id.as_str();
                         // 2026-08-06 (audit 1): string-only builtins — reject a
-                        // definitely non-string first argument at compile time
+                        // definitely non-string argument at compile time
                         // (List arrives as a raw pointer, indistinguishable from
                         // a string pointer in the emitter; VM parity: E0800).
-                        if CodeGenerator::is_string_only_builtin(name) && !call.arguments.is_empty()
-                        {
-                            let arg_ty = resolved_type_display_name(
-                                self.program,
-                                &call.arguments[0].value.ty,
-                            );
-                            if self.generator.is_definitely_not_string(&arg_ty) {
-                                return Err(CompileError::TypeMismatch(format!(
-                                    "{} expects a string argument, found {}",
-                                    name, arg_ty
-                                )));
+                        // Guards every string argument position of the whole
+                        // str_* / regex_* family.
+                        if let Some(pos) = CodeGenerator::string_only_builtin_string_args(name) {
+                            for &p in pos {
+                                let p = p as usize;
+                                if p >= call.arguments.len() {
+                                    break; // arg-count error is reported later
+                                }
+                                let arg_ty = resolved_type_display_name(
+                                    self.program,
+                                    &call.arguments[p].value.ty,
+                                );
+                                if self.generator.is_definitely_not_string(&arg_ty) {
+                                    return Err(CompileError::TypeMismatch(format!(
+                                        "{} expects a string argument at position {}, found {}",
+                                        name, p, arg_ty
+                                    )));
+                                }
                             }
                         }
                         // push/pop need the *original alloca pointer* for

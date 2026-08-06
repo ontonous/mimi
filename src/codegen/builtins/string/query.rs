@@ -14,32 +14,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_contains expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_contains: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let sub_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_contains: second arg must be string".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_contains")?;
+        let sub_ptr = self.extract_string_arg(&args[1], "str_contains")?;
         // strstr(s, sub) -> i8* (or NULL if not found)
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let strstr_fn = self
@@ -77,12 +53,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_is_not_null(result.into_pointer_value(), "found")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let ext: BasicValueEnum = self
-            .builder
-            .build_int_z_extend(cmp, self.context.i64_type(), "result")
-            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-            .into();
-        Ok(ext)
+        // 2026-08-06 (audit 1): return i1 (bool) — the checker infers `bool`
+        // for str_contains; zext to i64 made `println(str_contains(..))` print
+        // "1" on the native backend vs "true" on the VM (L1 divergence).
+        Ok(cmp.into())
     }
 
     pub(in crate::codegen) fn compile_str_starts_with(
@@ -94,32 +68,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_starts_with expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_starts_with: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let prefix_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_starts_with: second arg must be string".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_starts_with")?;
+        let prefix_ptr = self.extract_string_arg(&args[1], "str_starts_with")?;
         let _i8_ty = self.context.i8_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         // Call C helper: strncmp(s, prefix, strlen(prefix)) == 0
@@ -181,12 +131,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "starts_with",
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let ext: BasicValueEnum = self
-            .builder
-            .build_int_z_extend(eq, self.context.i64_type(), "result")
-            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-            .into();
-        Ok(ext)
+        // 2026-08-06 (audit 1): return i1 (bool) — checker infers `bool`;
+        // zext to i64 made native print "1" vs VM "true" (L1 divergence).
+        Ok(eq.into())
     }
 
     pub(in crate::codegen) fn compile_str_ends_with(
@@ -198,32 +145,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_ends_with expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_ends_with: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let suffix_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_ends_with: second arg must be string".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_ends_with")?;
+        let suffix_ptr = self.extract_string_arg(&args[1], "str_ends_with")?;
         let i8_ty = self.context.i8_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
@@ -322,10 +245,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "ends_with",
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let eq_ext = self
-            .builder
-            .build_int_z_extend(eq, i64_ty, "ext")
-            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
@@ -334,15 +253,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // Merge
+        // Merge — phi over i1 (bool); checker infers `bool` for str_ends_with,
+        // zext to i64 made native print "1" vs VM "true" (L1 divergence).
         self.builder.position_at_end(merge_bb);
         let phi = self
             .builder
-            .build_phi(i64_ty, "result")
+            .build_phi(self.context.bool_type(), "result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
         phi.add_incoming(&[
-            (&self.context.i64_type().const_int(0, false), false_bb),
-            (&eq_ext, check_bb),
+            (&self.context.bool_type().const_zero(), false_bb),
+            (&eq, check_bb),
         ]);
         Ok(phi.as_basic_value())
     }
@@ -355,32 +275,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "regex_match expects 2 arguments (text, pattern)".to_string(),
             ));
         }
-        let text_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_match: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let pattern_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_match: second arg must be string".to_string(),
-                ))
-            }
-        };
+        let text_ptr = self.extract_string_arg(&args[0], "regex_match")?;
+        let pattern_ptr = self.extract_string_arg(&args[1], "regex_match")?;
         let func = self
             .module
             .get_function("mimi_regex_match")
@@ -407,11 +303,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "regex_match_bool",
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let ext = self
-            .builder
-            .build_int_z_extend(cmp, self.context.i64_type(), "result")
-            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
-        Ok(ext.into())
+        // 2026-08-06 (audit 1): return i1 (bool) — checker infers `bool`;
+        // zext to i64 made native print "1" vs VM "true" (L1 divergence).
+        Ok(cmp.into())
     }
 
     pub(in crate::codegen) fn compile_regex_find(
@@ -423,32 +317,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "regex_find expects 2 arguments (text, pattern)".to_string(),
             ));
         }
-        let text_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_find: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let pattern_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_find: second arg must be string".to_string(),
-                ))
-            }
-        };
+        let text_ptr = self.extract_string_arg(&args[0], "regex_find")?;
+        let pattern_ptr = self.extract_string_arg(&args[1], "regex_find")?;
         let func = self
             .module
             .get_function("mimi_regex_find")
@@ -478,45 +348,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "regex_replace expects 3 arguments (text, pattern, replacement)".to_string(),
             ));
         }
-        let text_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_replace: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let pattern_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_replace: second arg must be string".to_string(),
-                ))
-            }
-        };
-        let replacement_ptr = match &args[2] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "regex_replace: third arg must be string".to_string(),
-                ))
-            }
-        };
+        let text_ptr = self.extract_string_arg(&args[0], "regex_replace")?;
+        let pattern_ptr = self.extract_string_arg(&args[1], "regex_replace")?;
+        let replacement_ptr = self.extract_string_arg(&args[2], "regex_replace")?;
         let func = self
             .module
             .get_function("mimi_regex_replace")
@@ -547,32 +381,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_index_of expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_index_of: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let sub_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_index_of: second arg must be string".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_index_of")?;
+        let sub_ptr = self.extract_string_arg(&args[1], "str_index_of")?;
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strstr(s, sub) -> pointer or NULL
