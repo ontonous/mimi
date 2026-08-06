@@ -2,7 +2,6 @@ use crate::ast::*;
 use crate::codegen::{CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use std::collections::HashMap;
 
@@ -13,7 +12,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // type_name(x): resolve type name at compile time
-        let type_str = match inner {
+        // 2026-08-06 (audit 1l): the parser rewrites `type_name(x)` into
+        // Expr::TypeOf(inner) where inner is a *Located* expression (span
+        // wrapper). The old `Expr::Ident(var_name)` match missed the wrapper
+        // and always produced "unknown" — so `type_name(s)` on any variable
+        // compiled to the "unknown" global string while the VM printed the
+        // real type. Unwrap before matching.
+        let type_str = match inner.unlocated() {
             Expr::Ident(var_name) => self
                 .var_type_names
                 .get(var_name)
@@ -22,38 +27,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => "unknown".to_string(),
         };
         // Build string literal struct { i8*, i64 }
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let i64_ty = self.context.i64_type();
         let global = self
             .builder
             .build_global_string_ptr(&type_str, "typename")
             .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let alloca = self
-            .builder
-            .build_alloca(string_ty, "type_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, alloca, 0, "ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, global.as_pointer_value())
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, alloca, 1, "len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, i64_ty.const_int(type_str.len() as u64, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(alloca.into())
+        // 2026-08-06 (audit 1l): the old implementation returned the address
+        // of a stack alloca holding {ptr, len} — a third, unsupported string
+        // shape. Single-arg `println` takes the PointerValue fast path and
+        // `puts`'d the alloca address as a C string, printing struct bytes
+        // (garbage like "�G "). Return the canonical struct VALUE
+        // ({i8*, i64} via wrap_c_string), matching str_char_at/substring etc.
+        self.wrap_c_string(global.as_pointer_value())
     }
 
     pub(in crate::codegen) fn compile_typeinfo_expr(

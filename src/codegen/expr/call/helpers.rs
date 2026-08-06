@@ -100,6 +100,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Determine if an expression evaluates to a string type (for len() dispatch).
     pub(in crate::codegen) fn expr_is_string(&self, expr: &Expr) -> bool {
         match expr.unlocated() {
+            // 2026-08-06 (audit 1l): `type_name(x)` is parsed to Expr::TypeOf
+            // and compiles to a wrapped {ptr, len} string struct; let-bindings
+            // must normalize it like any other string expression.
+            Expr::TypeOf(_) => true,
             Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => true,
             Expr::Ident(name) => self
                 .var_type_names

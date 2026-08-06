@@ -401,9 +401,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             // 2026-08-06 (audit 1g): str_contains is polymorphic in the VM —
             // (string|List|Set, value). A List haystack used to be rejected by
             // the guard (registered VM-only gap); route it to compile_contains
-            // (element comparison) for VM parity. Set haystacks stay guarded.
+            // (element comparison) for VM parity. (audit 1k) Set haystacks
+            // (bare i64 handle) route to mimi_set_contains — same VM parity.
             if name == "str_contains" && !args.is_empty() {
                 let hay_ty = self.infer_object_type(&args[0], vars);
+                if hay_ty.starts_with("Set") {
+                    if compiled_args.len() < 2 {
+                        return Err(CompileError::WrongArgCount(
+                            "str_contains expects 2 arguments".into(),
+                        ));
+                    }
+                    let i64_ty = self.context.i64_type();
+                    return self
+                        .compile_set_contains_fn(
+                            types::basic_value_to_metadata_value(&compiled_args[0], i64_ty),
+                            types::basic_value_to_metadata_value(&compiled_args[1], i64_ty),
+                        )
+                        .map_err(|e| CompileError::Generic(e.to_string()));
+                }
                 if hay_ty.starts_with("List") {
                     return self
                         .compile_contains(&metadata_args)

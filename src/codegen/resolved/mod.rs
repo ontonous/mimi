@@ -1314,11 +1314,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // 2026-08-06 (audit 1g): str_contains List haystack →
                         // compile_contains (VM polymorphism parity); the guard
                         // below keeps rejecting Set/other receivers.
+                        // (audit 1k) Set haystacks → mimi_set_contains.
                         if name == "str_contains" && !call.arguments.is_empty() {
                             let hay_ty = resolved_type_display_name(
                                 self.program,
                                 &call.arguments[0].value.ty,
                             );
+                            if hay_ty.starts_with("Set") {
+                                if call.arguments.len() < 2 {
+                                    return Err(CompileError::WrongArgCount(
+                                        "str_contains expects 2 arguments".into(),
+                                    ));
+                                }
+                                return self
+                                    .generator
+                                    .compile_set_contains_fn(arguments[0], arguments[1]);
+                            }
                             if hay_ty.starts_with("List") {
                                 name = "contains";
                             }
