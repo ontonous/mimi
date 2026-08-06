@@ -398,6 +398,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
+            // 2026-08-06 (audit 1c): `contains` is polymorphic in the VM
+            // ((string|List|Set, value)); compile_contains only handles List,
+            // and a string haystack arrives as a raw pointer so load_list_len
+            // would read a string struct and SIGSEGV. Redirect string
+            // haystacks to str_contains (strstr) and guard the needle.
+            if name == "contains" && !args.is_empty() {
+                let hay_ty = self.infer_object_type(&args[0], vars);
+                if hay_ty == "string" {
+                    if args.len() >= 2 {
+                        let needle_ty = self.infer_object_type(&args[1], vars);
+                        if self.is_definitely_not_string(&needle_ty) {
+                            return Err(CompileError::TypeMismatch(format!(
+                                "contains expects a string needle for a string haystack, found {}",
+                                needle_ty
+                            )));
+                        }
+                    }
+                    return self
+                        .compile_str_contains(&metadata_args)
+                        .map_err(|e| CompileError::Generic(e.to_string()));
+                }
+            }
             // 2026-08-06 (audit 1): string-only builtins — reject a definitely
             // non-string argument at compile time. The LLVM value of a
             // List arrives as a raw pointer (List value = ptr to {i64, ptr}),

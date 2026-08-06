@@ -1545,3 +1545,57 @@ func main() -> i32 {
         );
     }
 }
+
+// ── Audit 1c (2026-08-06): `contains` polymorphic receiver ─────────────
+// The VM treats contains as (string|List|Set, value). The codegen List path
+// (compile_contains) used to SIGSEGV on a string haystack (string arrives as
+// a raw pointer; load_list_len reads a string struct as a list length) — and
+// its result was zext to i64, printing "1" vs the VM's "true". Both fixed:
+// string haystacks redirect to str_contains (with a string-needle guard), and
+// compile_contains returns i1 (bool).
+
+#[test]
+fn audit_1c_contains_polymorphic_receiver() {
+    let src = r#"
+func main() -> i32 {
+    println(contains("hello", "ell"))
+    println(contains("hello", "xyz"))
+    println(contains([1, 2, 3], 2))
+    println(contains([1, 2, 3], 9))
+    let s = "hello"
+    println(s.contains("ell"))
+    0
+}
+"#;
+    let expected = "true\nfalse\ntrue\nfalse\ntrue\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM contains polymorphic");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen contains redirect");
+        assert_eq!(
+            native, expected,
+            "native must match VM for contains (audit 1c)"
+        );
+        // resolved path must not SIGSEGV either (regression for the crash).
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved contains");
+        assert_eq!(
+            resolved, expected,
+            "resolved must match VM for contains (audit 1c)"
+        );
+    }
+    // String haystack + non-string needle → rejected at compile time.
+    let bad = r#"func main() -> i32 {
+    println(contains("hello", [1, 2]))
+    0
+}"#;
+    if can_link() {
+        assert!(
+            compile_and_run(bad).is_err(),
+            "legacy must reject string/List contains"
+        );
+        assert!(
+            checked_codegen_compile_and_run(bad).is_err(),
+            "resolved must reject string/List contains"
+        );
+    }
+}
