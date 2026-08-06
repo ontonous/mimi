@@ -1453,3 +1453,95 @@ func main() -> i32 {
         // and passes, as asserted above via compile_and_run.
     }
 }
+
+// ── Audit 1b (2026-08-06): the same guard now covers the WHOLE str_* /
+// regex_* family. Every string argument position must fail loud instead of
+// strlen'ing a List struct (garbage) or panicking the compiler via
+// `into_pointer_value()` on the `{i64, ptr}` layout. Each negative case must
+// be rejected by BOTH codegen paths; each positive case must stay VM/native
+// identical (L1).
+
+#[test]
+fn audit_1b_string_family_rejects_non_string_args() {
+    let bad_calls = [
+        // (string) positions
+        "str_repeat([1, 2], 3)",
+        "str_char_at([1, 2], 0)",
+        "str_parse_int([1, 2])",
+        "str_parse_float([1, 2])",
+        "string_to_int([1, 2])",
+        "str_to_c_str([1, 2])",
+        // (string, string) positions — second arg
+        "str_split([1, 2], \",\")",
+        "str_contains(\"a\", [1, 2])",
+        "str_starts_with(\"a\", [1, 2])",
+        "str_ends_with(\"a\", [1, 2])",
+        "str_index_of(\"a\", [1, 2])",
+        "str_count_substring(\"a\", [1, 2])",
+        "regex_match(\"a\", [1, 2])",
+        "regex_find(\"a\", [1, 2])",
+        "regex_find_all(\"a\", [1, 2])",
+        // (string, string, string) — second and third args
+        "str_replace(\"a\", [1, 2], \"b\")",
+        "str_replace(\"a\", \"b\", [1, 2])",
+        "regex_replace(\"a\", \"b\", [1, 2])",
+        // str_join: first arg is a List (legal) — the DELIMITER must be a string
+        "str_join([\"a\", \"b\"], [1, 2])",
+    ];
+    for call in bad_calls {
+        let src = format!(
+            "func main() -> i32 {{\n    let x = {}\n    println(x)\n    0\n}}\n",
+            call
+        );
+        if can_link() {
+            assert!(
+                compile_and_run(&src).is_err(),
+                "legacy path must reject {}",
+                call
+            );
+            assert!(
+                checked_codegen_compile_and_run(&src).is_err(),
+                "resolved path must reject {}",
+                call
+            );
+        }
+    }
+}
+
+#[test]
+fn audit_1b_string_family_accepts_valid_strings() {
+    // Every guarded builtin with legal arguments stays working and VM/native
+    // identical. (str_join additionally proves the List first arg is still
+    // accepted — the guard must NOT reject its position 0.)
+    let src = r#"
+func main() -> i32 {
+    println(str_repeat("ab", 3))
+    println(str_split("a,b", ","))
+    println(str_replace("aaa", "a", "b"))
+    println(str_contains("hello", "ell"))
+    println(str_starts_with("hello", "he"))
+    println(str_ends_with("hello", "lo"))
+    println(str_index_of("hello", "l"))
+    println(str_count_substring("lolol", "lo"))
+    println(str_char_at("hello", 1))
+    println(str_parse_int("42"))
+    println(str_parse_float("3.5"))
+    println(str_to_c_str("xy"))
+    println(regex_match("abc123", "[0-9]+"))
+    println(regex_find("abc123", "[0-9]+"))
+    println(regex_replace("a1b2", "[0-9]", "x"))
+    println(str_join(["a", "b"], ","))
+    0
+}
+"#;
+    let expected = "ababab\n[a, b]\nbbb\ntrue\ntrue\ntrue\nSome(2)\n2\ne\n(true, 42)\n(true, 3.5)\nxy\ntrue\n123\naxbx\na,b\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM string family");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen string family");
+        assert_eq!(
+            native, expected,
+            "native must match VM for string family (audit 1b)"
+        );
+    }
+}

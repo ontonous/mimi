@@ -1058,17 +1058,48 @@ impl<'ctx> CodeGenerator<'ctx> {
         Self::strip_list_element_type(s).is_some()
     }
 
-    /// Builtins whose first argument must be a string. The LLVM argument for a
+    /// Builtins whose string arguments must be strings. The LLVM argument for a
     /// `List` value arrives as a raw pointer too (List value = pointer to the
     /// `{i64, ptr}` struct), so the emitters cannot tell it apart from a
     /// string pointer at codegen time — without a compile-time guard,
     /// `str_trim([1,2,3])` strlen'd a list struct and emitted garbage (or
     /// panicked on the `{i64, ptr}` layout). VM parity: E0800 at runtime.
+    /// Returns the 0-based argument positions that must be strings; `None`
+    /// means the builtin has no string-only argument positions.
+    pub(super) fn string_only_builtin_string_args(name: &str) -> Option<&'static [u32]> {
+        match name {
+            // Single string argument.
+            "str_trim" | "str_to_upper" | "str_to_lower" | "str_substring" | "str_char_at"
+            | "str_repeat" | "str_parse_int" | "str_parse_float" | "string_to_int"
+            | "str_to_c_str" => Some(&[0]),
+            // (string, string).
+            // str_contains is included even though the VM treats it as a
+            // polymorphic contains over (string|List|Set, value): the codegen
+            // emitter (strstr) is string-only, and a List/Set receiver arrives
+            // as a raw pointer the emitter cannot distinguish from a string
+            // pointer — so a List/Set receiver would strlen a list struct and
+            // emit garbage. The guard rejects it at compile time (a registered
+            // VM-only receiver gap; use `mimi run` for List/Set contains).
+            "str_contains"
+            | "str_starts_with"
+            | "str_ends_with"
+            | "str_index_of"
+            | "str_count_substring"
+            | "str_split"
+            | "regex_match"
+            | "regex_find"
+            | "regex_find_all" => Some(&[0, 1]),
+            // (string, string, string).
+            "str_replace" | "regex_replace" => Some(&[0, 1, 2]),
+            // (List<string>, string) — only the delimiter must be a string.
+            "str_join" => Some(&[1]),
+            _ => None,
+        }
+    }
+
+    /// Convenience: does the builtin require its FIRST argument to be a string?
     pub(super) fn is_string_only_builtin(name: &str) -> bool {
-        matches!(
-            name,
-            "str_trim" | "str_to_upper" | "str_to_lower" | "str_substring"
-        )
+        Self::string_only_builtin_string_args(name).is_some_and(|pos| pos.contains(&0))
     }
 
     /// Conservative "this type is definitely not a string" test. Only types we
@@ -1246,6 +1277,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(*pv)
             }
             BasicMetadataValueEnum::StructValue(sv) => {
+                // 2026-08-06 (audit 1): match the string struct layout so a
+                // `List` `{i64, ptr}` struct fails loud instead of
+                // `into_pointer_value()` panicking the compiler (VM parity:
+                // E0800 runtime).
+                let ftys = sv.get_type().get_field_types();
+                let is_str_layout = ftys.len() == 2
+                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
+                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if !is_str_layout {
+                    return Err("string struct expected (found a non-string struct)".into());
+                }
                 let extracted = self.build_extract_value((*sv).into(), 0, "str_ptr")?;
                 match extracted {
                     BasicValueEnum::PointerValue(pv) => Ok(pv),

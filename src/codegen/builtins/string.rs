@@ -30,19 +30,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Handle both string representations:
         // - PointerValue: char* directly (literal strings)
         // - StructValue: {i8*, i64} (builtin function results)
-        let data_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 0, "str_data_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("extract str data: {}", e)))?
-                .into_pointer_value(),
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_char_at: first arg must be string".to_string(),
-                ))
-            }
-        };
+        // 2026-08-06 (audit 1): layout-checked extraction — a `List` `{i64,ptr}`
+        // struct used to reach `into_pointer_value()` and panic the compiler.
+        let data_ptr = self.extract_string_arg(&args[0], "str_char_at")?;
         // CG-H1: Unicode scalar indexing via runtime (matches interpreter).
         let i64_ty = self.context.i64_type();
         let index_i64 = if index.get_type().get_bit_width() < 64 {
