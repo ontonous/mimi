@@ -741,7 +741,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         disc: IntValue<'ctx>,
         expect_true: bool,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let bool_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
         let cond = if expect_true {
             disc
@@ -750,14 +749,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_not(disc, "is_not")
                 .map_err(|e| CompileError::LlvmError(format!("not error: {}", e)))?
         };
-        // Truncate i8 to i1 (bool), then extend to i64 for uniform representation
-        let bool_i1 = self
-            .builder
-            .build_int_truncate(cond, bool_ty, "is_trunc")
-            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+        // D-6 (audit 2026-08-05): `disc` is ALREADY an i1 — it is loaded from
+        // the i1 discriminator slot (see the `build_load(i1_ty, disc_gep)`
+        // above), and `build_not` preserves i1. The former
+        // `build_int_truncate(cond, bool_ty)` was `trunc i1 to i1`, an
+        // ILLEGAL instruction (the comment claiming i8→i1 was stale); LLVM's
+        // verifier tolerates it only as a no-op in some release builds.
+        // Extend the i1 predicate straight to the uniform i64 representation.
         let bool_val = self
             .builder
-            .build_int_z_extend(bool_i1, i64_ty, "is_ext")
+            .build_int_z_extend(cond, i64_ty, "is_ext")
             .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
         Ok(BasicValueEnum::IntValue(bool_val))
     }
