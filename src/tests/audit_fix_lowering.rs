@@ -1972,3 +1972,38 @@ func main() -> i32 {
         assert_eq!(resolved, expected, "resolved must match VM (audit 1k)");
     }
 }
+
+#[test]
+fn audit_1m_variant_name_no_substring_hijack() {
+    // 2026-08-06 (§6-#65): lookup_variant_name's fallback matched builtin
+    // variant names by SUBSTRING (`id_str.contains("Err")`) — any NodeId
+    // whose stable fragment contains "Err" (e.g. user enum `Errors`, fragment
+    // `variant.Errors`) resolved to builtin "Err" and compiled the wrong
+    // constructor/pattern arm. Now matches the exact `variant.<name>` suffix.
+    let src = r#"
+type Errors { FileNotFound NetworkDown }
+
+func main() -> i32 {
+    let e = NetworkDown
+    match e {
+        FileNotFound => println("found"),
+        NetworkDown => println("down")
+    }
+    let f = FileNotFound
+    match f {
+        FileNotFound => println("found"),
+        NetworkDown => println("down")
+    }
+    0
+}
+"#;
+    let expected = "down\nfound\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM Errors enum match (no Err hijack)");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen Errors enum match");
+        assert_eq!(native, expected, "native must match VM (audit 1m)");
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved Errors enum match");
+        assert_eq!(resolved, expected, "resolved must match VM (audit 1m)");
+    }
+}
