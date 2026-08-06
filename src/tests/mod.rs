@@ -761,7 +761,11 @@ fn link_and_run_module<'ctx>(
     };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if std::env::var("MIMI_KEEP_TMP").is_err() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    } else {
+        eprintln!("[mimi-test] kept tmp dir: {}", tmp_dir.display());
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

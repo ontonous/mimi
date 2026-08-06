@@ -3,6 +3,7 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::types::BasicTypeEnum;
+use inkwell::values::BasicValue;
 use inkwell::values::BasicValueEnum;
 use std::collections::HashMap;
 
@@ -59,7 +60,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .flatten();
         // Else branch
         self.builder.position_at_end(else_bb);
-        let (else_val, else_reaches) = if let Some(eb) = else_ {
+        let (mut else_val, else_reaches) = if let Some(eb) = else_ {
             let mut else_vars = vars.clone();
             let v = self
                 .compile_block_last_val(eb, &mut else_vars)
@@ -88,7 +89,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             .flatten();
         // Merge with phi (only from blocks that actually reach merge)
         self.builder.position_at_end(merge_bb);
-        let ty = then_val.get_type();
+        let mut ty = then_val.get_type();
+        let mut then_val = then_val;
+        // Unify Option branch layouts: a bare `None` arm compiles to a narrow
+        // {i1,i64} struct, while `Some(string)`/`Some(record)` arms carry the
+        // full payload layout {i1,{ptr,i64}}. The VM unifies these branches
+        // fine; native used to refuse with E0200 (L1 divergence). Widen the
+        // narrow None arm to the sibling arm's layout (payload zero-filled —
+        // safe, a None arm's payload is meaningless).
+        if let Some(ev) = else_val {
+            if ev.get_type() != ty {
+                if let Some(w) = self.widen_option_none_to_layout(ev, ty)? {
+                    else_val = Some(w);
+                } else if let Some(w) = self.widen_option_none_to_layout(then_val, ev.get_type())? {
+                    then_val = w;
+                    ty = ev.get_type();
+                }
+            }
+        }
         let phi = self
             .builder
             .build_phi(ty, "ifexpr_result")
@@ -110,6 +128,53 @@ impl<'ctx> CodeGenerator<'ctx> {
             phi.add_incoming(&[(&ev as &dyn inkwell::values::BasicValue, bb)]);
         }
         Ok(phi.as_basic_value())
+    }
+
+    /// Widen a narrow Option branch value `{i1,i64}` (bare `None` constructor)
+    /// to a target layout `{i1,payload}` when the sibling branch carried a real
+    /// payload (`Some(string)`, `Some(record)`, …). The payload is zero-filled:
+    /// safe, because a `None` arm's payload is meaningless. Returns `None` when
+    /// the value is not a narrow Option struct (never masks a genuine mismatch).
+    fn widen_option_none_to_layout(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(target_sty)) =
+            (val, target)
+        else {
+            return Ok(None);
+        };
+        let actual = sv.get_type();
+        let af = actual.get_field_types();
+        let tf = target_sty.get_field_types();
+        // Only Option-shaped 2-field structs with i1 discriminants.
+        if af.len() != 2 || tf.len() != 2 {
+            return Ok(None);
+        }
+        let is_i1 =
+            |t: &BasicTypeEnum| matches!(t, BasicTypeEnum::IntType(it) if it.get_bit_width() == 1);
+        if !is_i1(&af[0]) || !is_i1(&tf[0]) {
+            return Ok(None);
+        }
+        if af[1] == tf[1] {
+            return Ok(None); // already compatible
+        }
+        // Only widen when the value side carries the None zero-pad (plain i64).
+        if !matches!(af[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64) {
+            return Ok(None);
+        }
+        // Build the widened value in pure SSA (insertvalue) rather than
+        // alloca+partial-store+load: the alloca form made LLVM 18's CVP pass
+        // crash when the widened value fed a PHI (CalledValuePropagationPass
+        // SIGSEGV in visitPHINode).
+        let disc = self.build_extract_value(sv.into(), 0, "opt_none_disc")?;
+        let zero = self.const_zero_for_type(BasicTypeEnum::StructType(target_sty));
+        let widened = self
+            .builder
+            .build_insert_value(zero.into_struct_value(), disc, 0, "opt_none_widened")
+            .map_err(|e| CompileError::LlvmError(format!("insertvalue: {}", e)))?;
+        Ok(Some(widened.as_basic_value_enum()))
     }
 
     /// Slice: `target[start..end]`.

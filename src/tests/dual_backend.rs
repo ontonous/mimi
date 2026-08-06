@@ -5612,6 +5612,104 @@ fn dual_option_string_payload_unwrap_or() {
 }
 
 #[test]
+fn dual_option_string_payload_if_branch_none() {
+    if !can_link() {
+        return;
+    }
+    // 0.34.35: `if c { Some(string) } else { None }` — bare None used to
+    // compile to the narrow {i1,i64} layout while Some(string) is wide
+    // {i1,{ptr,i64}}; native either refused (E0200, VM accepted) or, after a
+    // legacy widen, crashed LLVM's CVP pass / mis-dispatched println. None is
+    // now built from the resolved expression type (wide layout) so if/else
+    // merges cleanly in the resolved emitter.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut lo: List<Option<string>> = []
+            let mut m = 0
+            while m < 4 {
+                let o = if m % 2 == 0 { Some("hi" + to_string(m)) } else { None }
+                push(lo, o)
+                m = m + 1
+            }
+            println(lo)
+            0
+        }
+    "#,
+        "[Some(hi0), None(), Some(hi2), None()]"
+    );
+}
+
+#[test]
+fn dual_option_string_payload_if_branch_none_reversed() {
+    if !can_link() {
+        return;
+    }
+    // None in the then arm, Some(string) in the else arm — both layouts must
+    // still unify, and bare `let o = if ...; println(o)` must display Option
+    // (not fall into the (bool, string) product-tuple path / strlen(null)).
+    // Verified via the checked (resolved) harness: the legacy `compile_file`
+    // path miscompiles this shape (LLVM SIGSEGV at compile_to_object — see
+    // devdocs D-4 ledger), while the CLI/user path is correct.
+    let src = r#"
+        func main() -> i32 {
+            let o = if true { None } else { Some("hi") }
+            println(o)
+            let o2 = if false { None } else { Some("yo") }
+            println(o2)
+            0
+        }
+    "#;
+    let interp_out = crate::tests::run_source_with_stdout(src);
+    assert_eq!(interp_out.1.trim(), "None()\nSome(yo)");
+    let native_out =
+        crate::tests::checked_codegen_compile_and_run(src).expect("resolved native run");
+    assert_eq!(native_out.trim(), "None()\nSome(yo)");
+}
+
+#[test]
+fn dual_option_string_payload_push() {
+    if !can_link() {
+        return;
+    }
+    // Separate-let binding + push (no if expression): narrows down whether the
+    // compile_file-path double-free only affects if-merged Option<string>.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut lo: List<Option<string>> = []
+            let o: Option<string> = Some("hi" + to_string(1))
+            push(lo, o)
+            println(lo)
+            0
+        }
+    "#,
+        "[Some(hi1)]"
+    );
+}
+
+#[test]
+fn dual_option_i32_payload_if_branch_none() {
+    if !can_link() {
+        return;
+    }
+    // Narrow Option<i32> branches (already layout-consistent) must keep
+    // working. The annotation pins the type: bare `{i1,i64}` is
+    // layout-ambiguous with a bool-headed tuple, so the unannotated form
+    // legitimately prints as a product.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let o: Option<i32> = if true { Some(42) } else { None }
+            println(o)
+            0
+        }
+    "#,
+        "Some(42)"
+    );
+}
+
+#[test]
 fn dual_result_string_payload_ok_or() {
     if !can_link() {
         return;

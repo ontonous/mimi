@@ -2238,18 +2238,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } = entry
                 {
                     self.emit_enum_box_free(free_fn, slot, struct_ty, &boxed_ordinals, &claimed)?;
+                    // L6b (D-4, 2026-08-06): after a tag-conditional free, reset
+                    // the slot to zero so a subsequent scope pop for a branch
+                    // that never re-stored the slot (e.g. the untaken arm of an
+                    // `if` inside a loop) frees tag=0/payload=0 — a no-op —
+                    // instead of the previous iteration's already-freed box.
+                    // Without the reset, the stale tag could re-trigger the free.
+                    self.builder
+                        .build_store(slot, struct_ty.const_zero())
+                        .map_err(|e| CompileError::LlvmError(format!("enum-box reset: {}", e)))?;
                     continue;
                 }
-                let ptr = match entry {
+                let (ptr, reset_target) = match entry {
                     HeapEntry::Ptr(slot) => {
                         // Load from the entry-block alloca (see register_heap_alloc).
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        self.builder
+                        let ptr = self
+                            .builder
                             .build_load(ptr_ty, slot, "heap_slot")
                             .map_err(|e| {
                                 CompileError::LlvmError(format!("heap slot load error: {}", e))
                             })?
-                            .into_pointer_value()
+                            .into_pointer_value();
+                        (ptr, Some(slot))
                     }
                     HeapEntry::Slot(base, struct_ty, field) => {
                         let gep = self
@@ -2259,12 +2270,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 CompileError::LlvmError(format!("heap slot gep error: {}", e))
                             })?;
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        self.builder
+                        let ptr = self
+                            .builder
                             .build_load(ptr_ty, gep, "heap_slot")
                             .map_err(|e| {
                                 CompileError::LlvmError(format!("heap slot load error: {}", e))
                             })?
-                            .into_pointer_value()
+                            .into_pointer_value();
+                        (ptr, Some(gep))
                     }
                     HeapEntry::EnumBox { .. } => unreachable!("handled above"),
                 };
@@ -2283,6 +2296,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // positional pop (which misfired when unrelated
                     // allocations followed the env registration).
                     self.emit_guarded_scope_free(free_fn, ptr, &claimed)?;
+                }
+                // L6c (D-4, 2026-08-06): reset the heap slot to null right after
+                // the free. When a conditional (e.g. `if` with a `Some(string)`
+                // arm) registers the allocation only on one branch, the slot is
+                // entry-block state that survives into the next iteration of a
+                // loop. The untaken branch never re-stores it, so the next
+                // scope pop would free the previous iteration's already-freed
+                // pointer — a double free under glibc tcache. Resetting here
+                // turns the stale free into `free(null)`, a no-op.
+                if let Some(target) = reset_target {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    self.builder
+                        .build_store(target, ptr_ty.const_null())
+                        .map_err(|e| CompileError::LlvmError(format!("heap slot reset: {}", e)))?;
                 }
             }
         }
