@@ -185,7 +185,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(value_gep, value_handle)
             .map_err(|e| format!("store error: {}", e))?;
-        self.tuple_type_stack.push(tuple_ty);
+        // §7-#79 (audit 2026-08-05): do NOT push tuple_ty here. A no-pop push
+        // pollutes tuple_type_stack for later tuple patterns (func/pattern.rs
+        // reads the top, giving them a stale/foreign layout). Match now
+        // resolves pointer-tuple layout from the scrutinee's AST tuple type
+        // (match.rs resolve_pointer_tuple_type) with the stack only as a fail-
+        // closed fallback, so a pushed-but-never-popped entry is never useful.
         // Return the tuple by value (not the alloca pointer) so println/match
         // see a struct, matching interp `Value::Tuple`.
         let loaded = self

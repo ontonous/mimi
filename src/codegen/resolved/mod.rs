@@ -2715,27 +2715,54 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                 };
 
-                let cond = if let Some(guard) = &arm.guard {
-                    let guard_val = self.emit_expr(guard, frame)?;
-                    let guard_bool = self.ensure_bool(guard_val)?;
-                    self.generator
-                        .builder
-                        .build_and(pattern_matches, guard_bool, "match_guard_and")
-                        .map_err(|e| CompileError::LlvmError(format!("guard and: {e}")))?
-                } else {
-                    pattern_matches
-                };
-
-                if is_last {
-                    self.generator.build_cond_br(cond, arm_bb, merge_bb)?;
-                } else {
-                    let next_bb = self
+                // §6-#58 (audit 2026-08-05): match-guard short-circuit. A guard is
+                // evaluated ONLY after the pattern matched — Rust match-guard
+                // semantics. Pre-fix emit_expr ran the guard unconditionally
+                // here, so a side effect inside the guard (a function call/
+                // println/...) executed on the fallthrough path even when the
+                // pattern did NOT match, diverging from the base/eval semantics.
+                if let Some(guard) = &arm.guard {
+                    let guard_bb = self
                         .generator
                         .context
-                        .append_basic_block(function, &format!("match_next{arm_index}"));
-                    self.generator.build_cond_br(cond, arm_bb, next_bb)?;
-                    fallthrough_bb = next_bb;
-                }
+                        .append_basic_block(function, &format!("match_guard{arm_index}"));
+                    if is_last {
+                        self.generator
+                            .build_cond_br(pattern_matches, guard_bb, merge_bb)?;
+                    } else {
+                        let next_bb = self
+                            .generator
+                            .context
+                            .append_basic_block(function, &format!("match_next{arm_index}"));
+                        self.generator
+                            .build_cond_br(pattern_matches, guard_bb, next_bb)?;
+                        fallthrough_bb = next_bb;
+                    }
+                    self.generator.builder.position_at_end(guard_bb);
+                    let guard_val = self.emit_expr(guard, frame)?;
+                    let guard_bool = self.ensure_bool(guard_val)?;
+                    // guard failure falls through to the same next-arm as
+                    // a pattern mismatch.
+                    if is_last {
+                        self.generator.build_cond_br(guard_bool, arm_bb, merge_bb)?;
+                    } else {
+                        let next_bb = fallthrough_bb;
+                        self.generator.build_cond_br(guard_bool, arm_bb, next_bb)?;
+                    }
+                } else {
+                    // No guard: pattern-match decides the branch.
+                    let cond = pattern_matches;
+                    if is_last {
+                        self.generator.build_cond_br(cond, arm_bb, merge_bb)?;
+                    } else {
+                        let next_bb = self
+                            .generator
+                            .context
+                            .append_basic_block(function, &format!("match_next{arm_index}"));
+                        self.generator.build_cond_br(cond, arm_bb, next_bb)?;
+                        fallthrough_bb = next_bb;
+                    }
+                };
             } else {
                 // Unconditional match.
                 self.generator.build_br(arm_bb)?;
