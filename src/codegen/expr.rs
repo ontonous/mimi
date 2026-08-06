@@ -1058,6 +1058,45 @@ impl<'ctx> CodeGenerator<'ctx> {
         Self::strip_list_element_type(s).is_some()
     }
 
+    /// Builtins whose first argument must be a string. The LLVM argument for a
+    /// `List` value arrives as a raw pointer too (List value = pointer to the
+    /// `{i64, ptr}` struct), so the emitters cannot tell it apart from a
+    /// string pointer at codegen time — without a compile-time guard,
+    /// `str_trim([1,2,3])` strlen'd a list struct and emitted garbage (or
+    /// panicked on the `{i64, ptr}` layout). VM parity: E0800 at runtime.
+    pub(super) fn is_string_only_builtin(name: &str) -> bool {
+        matches!(
+            name,
+            "str_trim" | "str_to_upper" | "str_to_lower" | "str_substring"
+        )
+    }
+
+    /// Conservative "this type is definitely not a string" test. Only types we
+    /// can positively identify as non-string are rejected; an unrecognised
+    /// name (e.g. a variable whose let-init was not tracked) is left alone so
+    /// valid programs are never rejected on a type-inference gap.
+    pub(super) fn is_definitely_not_string(&self, ty: &str) -> bool {
+        match ty {
+            "string" => false,
+            "i32" | "i64" | "f64" | "bool" | "unit" | "nothing" | "u32" | "u64" => true,
+            t if t.starts_with("List")
+                || t.starts_with("Map")
+                || t.starts_with("Set")
+                || t.starts_with("Option")
+                || t.starts_with("Result")
+                || t.starts_with("Flow") =>
+            {
+                true
+            }
+            t => self.type_defs.get(t).is_some_and(|td| {
+                matches!(
+                    td.kind,
+                    crate::ast::TypeDefKind::Record(_) | crate::ast::TypeDefKind::Enum(_)
+                )
+            }),
+        }
+    }
+
     /// Map a stored LLVM value type back to a coarse Mimi type name for method
     /// dispatch. This is intentionally approximate: it only needs to distinguish
     /// the builtin scalar types and common struct layouts (string, List, Option,

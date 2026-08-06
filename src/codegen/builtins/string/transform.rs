@@ -176,6 +176,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Extract `(data_ptr, byte_len)` from a string argument.
     /// StructValue `{i8*, i64}` carries the byte length in field 1; a raw
     /// PointerValue (string literal) is NUL-terminated, so strlen supplies it.
+    /// 2026-08-06 (audit 1): a non-string struct (e.g. `List` whose layout is
+    /// `{i64, ptr}`) used to reach `into_pointer_value()` and PANIC the
+    /// compiler instead of failing loud — match the field types and return a
+    /// TypeMismatch so codegen degrades gracefully (VM parity: E0800 at
+    /// runtime; the checker deliberately does not constrain these params).
     fn extract_string_arg_ptr_len(
         &self,
         arg: &BasicMetadataValueEnum<'ctx>,
@@ -187,6 +192,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((*pv, len))
             }
             BasicMetadataValueEnum::StructValue(sv) => {
+                let ftys = sv.get_type().get_field_types();
+                let is_str_layout = ftys.len() == 2
+                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
+                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if !is_str_layout {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{}: string argument expected (found a non-string struct)",
+                        context
+                    )));
+                }
                 let ptr = self
                     .build_extract_value((*sv).into(), 0, "str_ptr")
                     .map(|v| v.into_pointer_value())

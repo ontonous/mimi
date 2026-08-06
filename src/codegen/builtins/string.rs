@@ -1083,6 +1083,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Extract a C string pointer from a string argument (raw pointer or {ptr,len} struct).
+    /// 2026-08-06 (audit 1): a non-string struct (e.g. `List` with `{i64, ptr}`
+    /// layout) used to reach `into_pointer_value()` and PANIC the compiler —
+    /// match the field types and fail loud instead (VM parity: E0800 runtime).
     fn extract_string_arg_ptr(
         &self,
         arg: &BasicMetadataValueEnum<'ctx>,
@@ -1091,6 +1094,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         match arg {
             BasicMetadataValueEnum::PointerValue(pv) => Ok(*pv),
             BasicMetadataValueEnum::StructValue(sv) => {
+                let ftys = sv.get_type().get_field_types();
+                let is_str_layout = ftys.len() == 2
+                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
+                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if !is_str_layout {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{}: first arg must be string, int, or float (found a non-string struct)",
+                        caller
+                    )));
+                }
                 let ptr = self
                     .builder
                     .build_extract_value(*sv, 0, "str_ptr")

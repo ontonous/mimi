@@ -398,6 +398,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
+            // 2026-08-06 (audit 1): string-only builtins — reject a definitely
+            // non-string first argument at compile time. The LLVM value of a
+            // List arrives as a raw pointer (List value = ptr to {i64, ptr}),
+            // indistinguishable from a string pointer in the emitter, so
+            // `str_trim([1,2,3])` used to strlen a list struct → garbage /
+            // panic. Fail loud (VM parity: E0800 at runtime).
+            if Self::is_string_only_builtin(name) && !args.is_empty() {
+                let arg_ty = self.infer_object_type(&args[0], vars);
+                if self.is_definitely_not_string(&arg_ty) {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{} expects a string argument, found {}",
+                        name, arg_ty
+                    )));
+                }
+            }
             // Special case: `to_json(obj)` where obj is a List<T> — dispatch
             // to the appropriate mimi_list_*_to_json runtime helper.
             if name == "to_json" && !args.is_empty() && !metadata_args.is_empty() {
