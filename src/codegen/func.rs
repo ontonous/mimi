@@ -2456,6 +2456,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
+                                // 2026-08-06 (§7-#81): register the declared
+                                // Func signature so fn-pointer calls recover
+                                // the real return type (f64/struct) instead of
+                                // hard-coded i64 — an i64 indirect call on an
+                                // f64-returning callee read garbage from %rax.
+                                if let Some(fdef) = self.func_defs.get(fn_name.as_str()) {
+                                    let params: Vec<Type> =
+                                        fdef.params.iter().map(|p| p.ty.clone()).collect();
+                                    let ret = fdef.ret.clone().unwrap_or(Type::Infer);
+                                    self.var_types
+                                        .insert(name.clone(), Type::Func(params, Box::new(ret)));
+                                }
                             }
                             if self.cap_type_names.contains(fn_name.as_str()) {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());

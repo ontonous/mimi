@@ -2007,3 +2007,32 @@ func main() -> i32 {
         assert_eq!(resolved, expected, "resolved must match VM (audit 1m)");
     }
 }
+
+#[test]
+fn audit_1n_fn_ptr_f64_return_abi() {
+    // 2026-08-06 (§7-#81): compile_fn_ptr_var_call hard-coded the indirect
+    // call's return type to i64 — an f64-returning first-class function
+    // pointer called through an i64 signature wrote %xmm0 while the caller
+    // read garbage from %rax (4618722892845154304 instead of 6.25). Two
+    // fixes: recover the declared ret type from var_types (mirrors closure
+    // calls), and register the Func signature on `let f = square`.
+    let src = r#"
+func square(x: f64) -> f64 { x * x }
+func double(x: i32) -> i32 { x * 2 }
+
+func main() -> i32 {
+    let f = square
+    let g = double
+    println(f(2.5))
+    println(g(21))
+    0
+}
+"#;
+    let expected = "6.25\n42\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM fn-pointer f64/i32");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen fn-pointer f64 return");
+        assert_eq!(native, expected, "native must match VM (audit 1n)");
+    }
+}
