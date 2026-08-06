@@ -118,8 +118,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             .iter()
             .map(|arg| basic_value_to_metadata_type(arg))
             .collect::<Result<Vec<_>, _>>()?;
-        let ret_type = i64_ty;
-        let indirect_fn_type = ret_type.fn_type(&all_meta, false);
+        // 2026-08-06 (§7-#81): the return type was hard-coded to i64, so a
+        // first-class function pointer returning f64 (or a struct) called
+        // with an i64-returning indirect signature — the callee wrote its
+        // f64 result into %xmm0 while the caller read a garbage i64 from
+        // %rax (e.g. 4618722892845154304 instead of 6.25). Recover the
+        // declared return type from var_types (mirrors closure calls).
+        let ret_type = self
+            .var_types
+            .get(name)
+            .and_then(|ty| self.closure_return_llvm_type(ty))
+            .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+        let indirect_fn_type = match ret_type {
+            BasicTypeEnum::IntType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::ArrayType(t) => t.fn_type(&all_meta, false),
+            _ => i64_ty.fn_type(&all_meta, false),
+        };
         let fn_ptr_typed = self.build_pointer_cast(
             fn_ptr,
             self.context.ptr_type(inkwell::AddressSpace::default()),
