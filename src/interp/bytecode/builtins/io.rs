@@ -7,7 +7,7 @@ use crate::interp::value::Value;
 
 /// Display for print/println: auto-deref Shared/LocalShared so dual-backend
 /// matches codegen (which loads the payload, not the wrapper tag).
-fn print_display(v: &Value) -> String {
+pub(crate) fn print_display(v: &Value) -> String {
     match v {
         Value::Shared(arc) => match arc.read() {
             Ok(inner) => print_display(&inner),
@@ -70,10 +70,10 @@ fn builtin_print(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
 }
 
 fn builtin_print_err(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    for arg in args {
-        eprint!("{}", arg);
-    }
-    eprintln!();
+    // B-7 (audit 2026-08-05): auto-deref Shared/LocalShared for dual-backend
+    // parity with print/println (codegen loads the payload, not the wrapper).
+    let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
+    eprintln!("{}", s);
     Ok(Value::Unit)
 }
 
@@ -93,5 +93,26 @@ fn builtin_input_int(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value,
     match input.trim().parse::<i64>() {
         Ok(n) => Ok(Value::Int(n)),
         Err(_) => Ok(Value::Int(0)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// B-7 (audit 2026-08-05): the print family (print/println/print_err and
+    /// the misc-registered `eprintln`) must display the Shared PAYLOAD, not
+    /// the wrapper tag — codegen loads the payload before formatting, so
+    /// `shared(42)` on the VM vs `42` natively was an L1 divergence.
+    #[test]
+    fn print_display_auto_derefs_shared() {
+        let shared = Value::Shared(Arc::new(std::sync::RwLock::new(Value::Int(42))));
+        assert_eq!(print_display(&shared), "42");
+        // Nested shared chains deref recursively.
+        let nested = Value::Shared(Arc::new(std::sync::RwLock::new(shared.clone())));
+        assert_eq!(print_display(&nested), "42");
+        // Non-shared values keep their normal display.
+        assert_eq!(print_display(&Value::Int(7)), "7");
     }
 }

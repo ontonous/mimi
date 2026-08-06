@@ -17,7 +17,7 @@ pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> 
         Expr::Ident(name) => vars.get_int(name).cloned(),
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                let old_name = format!("old.{}", name);
                 return vars.get_int(&old_name).cloned();
             }
             None
@@ -294,15 +294,15 @@ fn collect_i32_definedness(
 }
 
 /// Convert an expression to a Z3 variable name for field/identity access.
-/// Handles nested identities (e.g. p.x -> "p", old(p).x -> "old_p").
+/// Handles nested identities (e.g. p.x -> "p", old(p).x -> "old.p").
 fn field_var_name(expr: &Expr) -> String {
     match expr.unlocated() {
         Expr::Ident(name) => name.clone(),
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                format!("old_{}", name)
+                format!("old.{}", name)
             } else {
-                format!("old_{}", field_var_name(inner))
+                format!("old.{}", field_var_name(inner))
             }
         }
         Expr::Field(obj, field) => {
@@ -331,11 +331,11 @@ fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
         }
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                let old_name = format!("old.{}", name);
                 vars.get_real(&old_name).is_some() && vars.get_int(&old_name).is_none()
             } else {
                 // old(p.x) — mirror is_real_expr's nested-access handling.
-                let old_name = format!("old_{}", field_var_name(inner));
+                let old_name = format!("old.{}", field_var_name(inner));
                 vars.is_real(&old_name)
             }
         }
@@ -407,7 +407,7 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
         }
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                let old_name = format!("old.{}", name);
                 if let Some(v) = vars.get_real(&old_name) {
                     return Some(v.clone());
                 }
@@ -542,7 +542,7 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
         }
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                let old_name = format!("old.{}", name);
                 // RT-H6: check string nonempty for old(string) expressions.
                 if let Some(v) = vars.get_string_nonempty(&old_name) {
                     return Some(v.clone());
@@ -774,11 +774,11 @@ fn is_real_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
         Expr::Literal(Lit::Float(_)) => true,
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                let old_name = format!("old.{}", name);
                 vars.is_real(&old_name)
             } else {
                 // Handle old(p.x) — use field_var_name for nested access
-                let old_name = format!("old_{}", field_var_name(inner));
+                let old_name = format!("old.{}", field_var_name(inner));
                 vars.is_real(&old_name)
             }
         }
@@ -820,12 +820,20 @@ fn is_real_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
 /// Uses the function name and field-var-name of each argument to create
 /// a unique key, so the same call with the same args maps to the same
 /// Z3 variable (functional consistency within a provedure).
+///
+/// §11-#37 (audit 2026-08-05, residual): parts are joined with `#`, NOT
+/// `_`. Underscore joins were ambiguous: `f(a_b, c)` and `f(a, b_c)`
+/// produced the identical key `call_f_a_b_c`, aliasing two distinct call
+/// results into one Z3 variable — a callee's ensures proven for one call
+/// then became an axiom for the other (cross-call fake Proven). `#` is
+/// outside the identifier charset `[A-Za-z0-9_]`, so no user parameter or
+/// field path can ever collide with a generated key.
 pub(crate) fn call_var_key(name: &str, args: &[Expr]) -> String {
     let mut parts = vec![format!("call_{}", name)];
     for a in args {
         parts.push(field_var_name(a));
     }
-    parts.join("_")
+    parts.join("#")
 }
 
 /// Encode an f64 value as an exact Z3 rational using string representation.
@@ -1022,7 +1030,8 @@ fn resolve_string_expr(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3String> {
         Expr::Literal(Lit::String(s)) => Z3String::from_str(s).ok(),
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                // §11-#37: dot separator for namespace consistency.
+                let old_name = format!("old.{}", name);
                 vars.get_string_var(&old_name).cloned()
             } else {
                 None
@@ -1055,7 +1064,7 @@ pub(crate) fn resolve_list_len(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int
         Expr::Ident(name) => vars.get_list_len(name).cloned(),
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
-                let old_name = format!("old_{}", name);
+                let old_name = format!("old.{}", name);
                 vars.get_list_len(&old_name).cloned()
             } else {
                 None

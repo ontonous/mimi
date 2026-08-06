@@ -196,6 +196,15 @@ fn io_fix_input_vm_eof_is_empty_string() {
     // VM path with the test runner's stdin (non-tty → read_line returns
     // 0 bytes → EOF → ""). Pre-fix the value was an Ok("") variant and the
     // `s == ""` comparison fell to the else arm.
+    //
+    // tty guard: the VM builtin reads the harness process' REAL stdin. On an
+    // interactive terminal stdin never reaches EOF and read_line blocks
+    // forever — the suite must skip deterministically instead of hanging
+    // (2026-08-06: two such hangs froze an audit_fix run for 1.5h). CI /
+    // `< /dev/null` launches are non-tty and keep executing the assertion.
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return;
+    }
     let src = r#"
 func main() -> i32 {
     let s = input()
@@ -219,6 +228,11 @@ fn io_fix_input_line_vm_eof_returns_err() {
     // std/io.mimi `input_line` wraps input() with the "" sentinel → Err on
     // EOF. Pre-fix the VM gave input() a Result shape, so `line == ""`
     // compared variant vs string and input_line returned Ok("") on EOF.
+    // tty guard: see io_fix_input_vm_eof_is_empty_string — an interactive
+    // stdin never EOFs and would hang the whole suite.
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return;
+    }
     let src = r#"
 func main() -> i32 {
     let r = input_line()

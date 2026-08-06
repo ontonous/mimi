@@ -326,7 +326,6 @@ func main() -> i32 { 0 }
 // top-level definition for all subsequently checked items.
 
 #[test]
-#[ignore = "V-11 known gap (devdocs/full-audit-2026-08-05.md §16): nested-function shadowing lowering ambiguity — the call inside `outer` resolves against the shadowing helper's canonical type, which lowering cannot admit (no implicit conversion between the two rt: types). Fail-closed; scope-aware nested-function resolution is a Wave-2/Wave-3 work item (V-11)."]
 fn fix8_nested_func_shadow_does_not_leak() {
     // Inside `outer` the nested helper is visible and used; after `outer`,
     // `caller` must still type-check against the top-level helper signature.
@@ -358,7 +357,86 @@ func main() -> i32 { outer2() }
     .expect("nested func must stay callable after its declaration in the owner body");
 }
 
-// ─── Fix 9: guarded match arms are not full coverage ─────────────────
+#[test]
+fn fix8_nested_func_shadow_dual_backend_execution() {
+    // V-11 (audit 2026-08-05 §16): the shadowing shape must EXECUTE
+    // identically on both backends, not just type-check. Inside `outer`
+    // the nested `helper(string) -> i32` shadows the global
+    // `helper(i32) -> i32`; `caller` outside still binds the global.
+    // Pre-fix: lowering rejected the program (TOOL-RESOLUTION-001); with
+    // lowering fixed but codegen untouched, the native build resolved the
+    // shadowed call to the global LLVM symbol and crashed LLVM (string
+    // struct passed for an i32 parameter).
+    if !crate::tests::can_link() {
+        return;
+    }
+    let src = r#"
+func helper(x: i32) -> i32 { x + 1 }
+func outer() -> i32 {
+    func helper(y: string) -> i32 { len(y) }
+    helper("shadowed")
+}
+func caller() -> i32 { helper(5) }
+func main() -> i32 {
+    println(outer())
+    println(caller())
+    0
+}
+"#;
+    check_source(src).expect("shadowed nested helper must check");
+    let (_interp_val, interp_stdout) = run_source_with_stdout(src);
+    assert_eq!(interp_stdout.trim(), "8\n6", "VM shadow execution");
+    let codegen_stdout = compile_and_run(src).expect("codegen failed");
+    assert_eq!(codegen_stdout.trim(), "8\n6", "native shadow execution");
+}
+
+// ─── §4-#41: module function vs actor method NodeId collision ────────
+// [MED] checker/items.rs + resolved catalog — the actor method key lacked
+// the module path, so `module { func m }` + `actor { m }` collided into one
+// NodeId and aborted a VALID program with TOOL-RESOLUTION-001.
+
+#[test]
+fn audit41_module_func_actor_method_same_name_no_node_id_collision() {
+    // Top-level module function `util::m` and top-level actor method
+    // `Counter::m` must coexist: qualified keys keep their NodeIds apart.
+    check_source(
+        r#"
+module util {
+    func m(x: i32) -> i32 { x + 1 }
+}
+actor Counter {
+    mut count: i32 = 0;
+    func m(v: i32) -> i32 { v + 2 }
+}
+func main() -> i32 { 0 }
+"#,
+    )
+    .expect("module func and actor method with the same name must not collide");
+}
+
+#[test]
+fn audit41_module_nested_actor_same_name_no_node_id_collision() {
+    // The actor lives INSIDE the module: both `util::m` (function) and
+    // `util::Counter::m` (method) must resolve — the method key must carry
+    // the full module path, and the checker signature lookup for the
+    // module-wrapped actor must still find its finalized signature.
+    check_source(
+        r#"
+module util {
+    func m(x: i32) -> i32 { x + 1 }
+    actor Counter {
+        mut count: i32 = 0;
+        func m(v: i32) -> i32 { v + 2 }
+        func go(n: i32) -> i32 { n * 2 }
+    }
+}
+func main() -> i32 { 0 }
+"#,
+    )
+    .expect("module-nested actor method must not collide with the module function");
+}
+
+// ─── Fix 9: guarded match arms are not full coverage ─────────────
 // [HIGH] infer/match_.rs — guards can fail at runtime, leaving the variant
 // unmatched; guarded arms must not count toward exhaustiveness.
 

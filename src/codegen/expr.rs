@@ -1149,6 +1149,43 @@ impl<'ctx> CodeGenerator<'ctx> {
         Self::string_only_builtin_string_args(name).is_some_and(|pos| pos.contains(&0))
     }
 
+    /// to_int/to_float accept string / int / float / bool. A statically
+    /// known aggregate (List/Map/Set/record/…) arrives at the runtime parser
+    /// as a raw pointer indistinguishable from a C string, so native used to
+    /// report "to_int parse error: invalid digit found in string" while the
+    /// VM reported "to_int cannot convert this type" (E0800) — same fail-loud
+    /// outcome, divergent misleading message. Rejecting the aggregate at
+    /// compile time removes the divergence entirely; genuinely dynamic
+    /// (Any-handle) values keep the runtime path.
+    pub(super) fn is_conversion_builtin(name: &str) -> bool {
+        matches!(name, "to_int" | "to_float")
+    }
+
+    /// Conservative "definitely not convertible by to_int/to_float" test:
+    /// aggregates and nominal containers only. Scalars and unrecognised types
+    /// pass through so valid programs are never rejected on an inference gap.
+    pub(super) fn is_definitely_not_convertible(&self, ty: &str) -> bool {
+        match ty {
+            "string" | "i32" | "i64" | "f64" | "f32" | "bool" | "u32" | "u64" | "unit"
+            | "nothing" => false,
+            t if t.starts_with("List")
+                || t.starts_with("Map")
+                || t.starts_with("Set")
+                || t.starts_with("Option")
+                || t.starts_with("Result")
+                || t.starts_with("Flow") =>
+            {
+                true
+            }
+            t => self.type_defs.get(t).is_some_and(|td| {
+                matches!(
+                    td.kind,
+                    crate::ast::TypeDefKind::Record(_) | crate::ast::TypeDefKind::Enum(_)
+                )
+            }),
+        }
+    }
+
     /// Conservative "this type is definitely not a string" test. Only types we
     /// can positively identify as non-string are rejected; an unrecognised
     /// name (e.g. a variable whose let-init was not tracked) is left alone so

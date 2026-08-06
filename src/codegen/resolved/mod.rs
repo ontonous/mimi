@@ -1402,6 +1402,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 }
                             }
                         }
+                        // to_int/to_float aggregate guard (VM message parity):
+                        // a statically known aggregate argument cannot be
+                        // converted; reject with the VM-aligned E0800 message
+                        // instead of letting the native parser strlen the
+                        // aggregate pointer and report "invalid digit".
+                        if CodeGenerator::is_conversion_builtin(name) && !call.arguments.is_empty()
+                        {
+                            let arg_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            if self.generator.is_definitely_not_convertible(&arg_ty) {
+                                return Err(CompileError::TypeMismatch(format!(
+                                    "[E0800] {} cannot convert this type ({})",
+                                    name, arg_ty
+                                )));
+                            }
+                        }
                         // push/pop need the *original alloca pointer* for
                         // their first argument — the legacy `compile_push`
                         // (require_list_pointer) GEPs into the struct fields

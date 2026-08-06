@@ -858,7 +858,10 @@ fn builtin_assert_approx_eq(
 // ── IO misc ─────────────────────────────────────────────
 
 fn builtin_eprintln(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+    // B-7 (audit 2026-08-05): auto-deref Shared/LocalShared exactly like
+    // print/println — codegen's eprintln loads the shared payload, so the
+    // VM must not print the wrapper (`shared(42)` vs `42` divergence).
+    let parts: Vec<String> = args.iter().map(super::io::print_display).collect();
     eprintln!("{}", parts.join(" "));
     Ok(Value::Unit)
 }

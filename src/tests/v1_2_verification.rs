@@ -532,6 +532,49 @@ func f(p: Pair, p_a: i32) -> i32 {
 }
 
 #[test]
+fn verify_audit37_call_key_underscore_join_no_cross_call_alias() {
+    // §11-#37 (full-audit-2026-08-05 §11, residual): `call_var_key` joined
+    // parts with `_`, so `g(a_b, c)` and `g(a, b_c)` produced the identical
+    // Z3 key `call_g_a_b_c` — two distinct call results aliased into one
+    // variable. The proven callee ensures of the first call then became an
+    // axiom for the second, proving `result == 5` from the unrelated fact
+    // `a_b == 5` (cross-call fake Proven). Parts now join with `#`, outside
+    // the identifier charset.
+    let src = r#"
+func g(x: i32, y: i32) -> i32 {
+    ensures: result == x
+    x
+}
+
+func caller(a_b: i32, a: i32, b_c: i32, c: i32) -> i32 {
+    requires: a_b == 5
+    ensures: result == 5
+    let r1 = g(a_b, c)
+    let r2 = g(a, b_c)
+    r2
+}
+"#;
+    assert_failed(src);
+}
+
+#[test]
+fn verify_audit37_string_len_derived_const_no_param_alias() {
+    // §11-#37 (residual): the string length constant of parameter `s` was
+    // named `s_len`, aliasing a user parameter literally named `s_len`.
+    // `requires: len(s) == 5` then constrained the unrelated i32 param and
+    // proved `ensures: s_len == 5` vacuously. Derived constants now use a
+    // dot separator (`s.len`), outside the identifier charset.
+    let src = r#"
+func f(s: string, s_len: i32) -> i32 {
+    requires: len(s) == 5
+    ensures: s_len == 5
+    s_len
+}
+"#;
+    assert_failed(src);
+}
+
+#[test]
 fn verify_audit40_tail_if_let_without_value_is_not_fake_proven() {
     // #40 (full-audit-2026-08-05 §11): a tail `if let` whose branches yield
     // no extractable value used to fall through to `result = 0` in func.rs,

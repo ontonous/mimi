@@ -524,3 +524,65 @@ fn audit_str_transform_method_form_unicode_dual() {
         "STRASSE",
     );
 }
+
+// ── to_int/to_float aggregate message parity (§14 leftover 2) ───────
+
+#[test]
+fn audit_to_int_aggregate_argument_fails_loud_with_vm_aligned_message() {
+    // §14 leftover 2 (2026-08-06 string-guard campaign): to_int/to_float on
+    // a List argument used to fail loud on BOTH backends but with divergent
+    // messages — native strlen'd the list pointer and reported
+    // "parse error: invalid digit", the VM reported E0800
+    // "cannot convert this type". A statically known aggregate is now
+    // rejected at compile time with the VM-aligned message.
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    to_int(xs)
+}
+"#;
+    let err = match compile_and_run(src) {
+        Err(e) => e,
+        Ok(_) => panic!("to_int(List) must not compile on the native backend"),
+    };
+    assert!(
+        err.contains("cannot convert this type"),
+        "expected VM-aligned E0800 message, got: {err}"
+    );
+    // Same shape for to_float.
+    let src_f = r#"
+func main() -> i32 {
+    let m = {"a": 1}
+    to_float(m)
+}
+"#;
+    let err_f = match compile_and_run(src_f) {
+        Err(e) => e,
+        Ok(_) => panic!("to_float(Map) must not compile on the native backend"),
+    };
+    assert!(
+        err_f.contains("cannot convert this type"),
+        "expected VM-aligned E0800 message, got: {err_f}"
+    );
+}
+
+#[test]
+fn audit_to_int_scalar_and_string_forms_still_dual() {
+    // The aggregate guard must not reject the legitimate conversion forms.
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let a = to_int("42")
+            let b = to_int(3.9)
+            let c = to_int(true)
+            let d = to_float("2.5")
+            println(a + b + c + to_int(d))
+            0
+        }
+        "#,
+        "48",
+    );
+}
