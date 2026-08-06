@@ -398,11 +398,11 @@ impl VerifierCtx {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
                 vars.insert_string_nonempty(
                     p.name.as_str(),
-                    Z3Bool::new_const(format!("{}_ne", p.name)),
+                    Z3Bool::new_const(format!("{}.ne", p.name)),
                 );
                 vars.insert_string_len(
                     p.name.as_str(),
-                    Z3Int::new_const(format!("{}_len", p.name)),
+                    Z3Int::new_const(format!("{}.len", p.name)),
                 );
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
             } else {

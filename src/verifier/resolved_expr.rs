@@ -72,7 +72,8 @@ pub(crate) fn resolved_to_z3_int(
         ResolvedExprKind::Old(inner) => {
             if let ResolvedExprKind::Load(place) = &inner.kind {
                 let key = local_key(place, body)?;
-                let old_key = format!("old_{}", key);
+                // §11-#37: dot separator for namespace consistency.
+                let old_key = format!("old.{}", key);
                 return vars.get_int(&old_key).cloned();
             }
             None
@@ -170,7 +171,7 @@ pub(crate) fn resolved_to_z3_real(
         ResolvedExprKind::Old(inner) => {
             if let ResolvedExprKind::Load(place) = &inner.kind {
                 let key = local_key(place, body)?;
-                let old_key = format!("old_{}", key);
+                let old_key = format!("old.{}", key);
                 return vars.get_real(&old_key).cloned();
             }
             None
@@ -825,8 +826,9 @@ fn create_parameter_vars(
                 }
             }
         }
-        // Create old_* snapshot variable
-        let old_key = format!("old_{}", key);
+        // Create old snapshot variable
+        // §11-#37: dot separator prevents namespace collision.
+        let old_key = format!("old.{}", key);
         match category {
             Z3TypeCategory::Real => {
                 vars.insert_real(&old_key, Z3Real::new_const(old_key.as_str()));
@@ -947,7 +949,7 @@ pub(crate) fn verify_contracts_from_resolved(
             continue;
         };
         let key = local_var_key(&local.id, &local.display_name);
-        let old_key = format!("old_{}", key);
+        let old_key = format!("old.{}", key);
         let category = z3_type_category(&local.ty, types);
         match category {
             Z3TypeCategory::Int => {
@@ -1461,8 +1463,8 @@ mod tests {
         let mut vars = Z3VarMap::new();
         let local_id = ResolvedLocalId(NodeId("local:x".into()));
         vars.insert_int(
-            format!("old_{}", local_var_key(&local_id, "x")),
-            Z3Int::new_const("old_x#local:x"),
+            format!("old.{}", local_var_key(&local_id, "x")),
+            Z3Int::new_const("old.x#local:x"),
         );
         let inner = test_expr(ResolvedExprKind::Load(ResolvedPlace::root(local_id)));
         let expr = test_expr(ResolvedExprKind::Old(Box::new(inner)));

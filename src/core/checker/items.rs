@@ -669,9 +669,18 @@ impl<'a> Checker<'a> {
                 self.types.insert(actor.name.clone(), actor_type_def);
 
                 // Collect actor methods as functions
+                // §4-#41 (audit 2026-08-05): actor method keys must include the
+                // module path to avoid NodeId collision with module-level functions
+                // (check_item at line 1373 already does this; collect_item_decls must
+                // match so the funcs catalog agrees with the resolved/lowering paths).
+                let actor_qualified = if self.module_path.is_empty() {
+                    actor.name.clone()
+                } else {
+                    format!("{}::{}", self.module_path.join("::"), actor.name)
+                };
                 for method in &actor.methods {
                     self.set_span(method.meta.span);
-                    let qualified = format!("{}::{}", actor.name, method.name);
+                    let qualified = format!("{}::{}", actor_qualified, method.name);
                     if self.funcs.contains_key(&qualified) {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
@@ -714,8 +723,10 @@ impl<'a> Checker<'a> {
                     );
                     self.generic_scope
                         .truncate(self.generic_scope.len() - generic_names.len());
-                    self.funcs
-                        .insert(format!("{}::{}", actor.name, method.name), (params, ret));
+                    self.funcs.insert(
+                        format!("{}::{}", actor_qualified, method.name),
+                        (params, ret),
+                    );
                 }
             }
             Item::Cap(c) => {

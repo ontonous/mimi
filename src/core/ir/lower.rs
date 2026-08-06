@@ -766,6 +766,14 @@ struct LambdaCaptureContext {
 
 impl BodyLowerer<'_> {
     fn install_parameters(&mut self) -> Result<(), Vec<ResolvedBodyError>> {
+        // R-1/V-11 (audit 2026-08-05): push a dedicated parameter scope above
+        // the capture scope so nested function parameters can shadow captured
+        // outer bindings. The checker explicitly supports parameter shadowing
+        // (check_stmt.rs:1780); lowering must mirror that semantics.
+        // For top-level functions the capture scope is empty, so this is a
+        // no-op identity push; for nested functions the parameter scope
+        // shadows same-named captures while lookup_local still walks outer.
+        self.scopes.push(BTreeMap::new());
         if self.signature.parameters.is_empty() {
             return Ok(());
         }
@@ -2426,6 +2434,27 @@ impl BodyLowerer<'_> {
                         type_arguments,
                     );
                 }
+                // V-11 (audit 2026-08-05): scope-aware nested shadowing. The
+                // call-site collector resolved this Ident against the global
+                // directory (no scope awareness) and recorded the top-level
+                // same-named function, but the checker registers a nested
+                // `func name` in its bare-name directory the moment the
+                // declaration statement is visited, keeping it live through
+                // the rest of the owner body (check_stmt.rs Stmt::Func +
+                // deferred restores). Every call source-ordered after the
+                // declaration therefore checked against the NESTED signature;
+                // lowering the global one fabricates an argument conversion
+                // the checker never admitted (TOOL-RESOLUTION-001). Mirror
+                // the checker's resolution here.
+                if let Some(nested) = self.shadowing_nested_function(name, node_id)? {
+                    return self.lower_nested_function_call(
+                        node_id,
+                        &nested,
+                        arguments,
+                        role,
+                        type_arguments,
+                    );
+                }
             }
         }
         if site.kind == ResolvedCallKind::Builtin {
@@ -3092,6 +3121,74 @@ impl BodyLowerer<'_> {
             effects: Vec::new(),
             session: Vec::new(),
         })
+    }
+
+    /// V-11 (audit 2026-08-05): find a nested function declared in the
+    /// current owner body that shadows a same-named global at `call_node`.
+    ///
+    /// Mirrors the checker's registration semantics (check_stmt.rs
+    /// `Stmt::Func`): the nested signature enters the bare-name directory
+    /// when the declaration statement is visited and stays live until the
+    /// enclosing callable exits (deferred restores). Therefore a call sees
+    /// the nested signature iff it is source-ordered after the declaration.
+    /// When several same-named declarations qualify, the latest one wins —
+    /// each registration overwrites the previous directory entry.
+    ///
+    /// Only DIRECT children of the current owner qualify: a nested-of-nested
+    /// callable belongs to a deeper lexical scope and is not visible here.
+    fn shadowing_nested_function(
+        &self,
+        name: &str,
+        call_node: &NodeId,
+    ) -> Result<Option<FuncDef>, Vec<ResolvedBodyError>> {
+        let mut candidates: Vec<&FuncDef> = Vec::new();
+        let mut seen: BTreeSet<NodeId> = BTreeSet::new();
+        for statement in &self.function.body {
+            if let Stmt::Func(function) = statement.unlocated() {
+                if function.name == name
+                    && seen.insert(nested_function_owner(&self.owner, function))
+                {
+                    candidates.push(function);
+                }
+            }
+        }
+        // Declarations inside branch blocks (if/else, block expressions,
+        // defer, ...) are invisible to the top-level scan; reuse the
+        // exhaustive walker. Iteration is NodeId-sorted, so the pick stays
+        // deterministic.
+        let mut nested = BTreeMap::new();
+        collect_nested_function_syntax(&self.function.body, &self.owner, &mut nested);
+        for (owner_key, function) in &nested {
+            if function.name != name {
+                continue;
+            }
+            if *owner_key != nested_function_owner(&self.owner, function) {
+                continue;
+            }
+            if seen.insert(owner_key.clone()) {
+                candidates.push(function);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let call_span = self.origin(call_node)?.user_span();
+        let mut best: Option<&FuncDef> = None;
+        for function in candidates {
+            let declaration = function.meta.span;
+            let declared_before_call = (declaration.start_line, declaration.start_col)
+                <= (call_span.start_line, call_span.start_col);
+            if !declared_before_call {
+                continue;
+            }
+            match best {
+                Some(current)
+                    if (current.meta.span.start_line, current.meta.span.start_col)
+                        >= (declaration.start_line, declaration.start_col) => {}
+                _ => best = Some(function),
+            }
+        }
+        Ok(best.cloned())
     }
 
     fn lower_nested_function_call(

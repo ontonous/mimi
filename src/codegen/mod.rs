@@ -172,6 +172,21 @@ pub struct CodeGenerator<'ctx> {
     cap_components: std::collections::HashMap<String, Vec<String>>,
     type_map: HashMap<String, crate::ast::Type>,
     func_defs: HashMap<String, FuncDef>,
+    /// V-11 (audit 2026-08-05): active nested-function shadows. When a
+    /// nested `func name` shadows a same-named global inside its enclosing
+    /// body, the nested body is emitted under a mangled symbol and this map
+    /// redirects bare-name calls to it while the enclosing body compiles
+    /// (mirrors the checker's bare-name directory registration, which keeps
+    /// the nested signature live through the whole enclosing callable).
+    /// Maps bare name -> (mangled LLVM symbol, func_defs entry displaced by
+    /// the shadow, restored when the enclosing frame exits).
+    nested_shadow_symbols: HashMap<String, (String, Option<FuncDef>)>,
+    /// Name of the function currently compiled by compile_func_legacy (used
+    /// to mangle shadowing nested symbols deterministically).
+    current_legacy_fn: String,
+    /// Monotonic counter disambiguating same-named shadows within one
+    /// enclosing function (e.g. two `func h` declarations in sequence).
+    nested_shadow_counter: usize,
     var_type_names: HashMap<String, String>,
     /// Type objects for variables (avoids string re-parsing for Arch-2).
     var_types: HashMap<String, Type>,
@@ -550,6 +565,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             cap_components: std::collections::HashMap::new(),
             type_map: HashMap::new(),
             func_defs: HashMap::new(),
+            nested_shadow_symbols: HashMap::new(),
+            current_legacy_fn: String::new(),
+            nested_shadow_counter: 0,
             var_type_names: HashMap::new(),
             var_types: HashMap::new(),
             upgrade_option_vars: std::collections::HashSet::new(),

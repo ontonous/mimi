@@ -3108,6 +3108,49 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Permanent ineligible body classes: capturing lambdas, generics,
     /// async, extern ABI wrappers, view/mutate borrow params (non-self).
     pub(super) fn compile_func_legacy(&mut self, func: &FuncDef) -> MimiResult<()> {
+        // V-11 (audit 2026-08-05) frame guard: nested-function shadows
+        // registered while compiling this body (bare-name directory swap +
+        // call redirect) must stay live through the WHOLE body — mirroring
+        // the checker's deferred restores — but must not leak into
+        // subsequently compiled functions. Snapshot on entry, restore on
+        // every exit (including `?` error propagation).
+        let saved_shadows = self.nested_shadow_symbols.clone();
+        let saved_current_fn = std::mem::replace(&mut self.current_legacy_fn, func.name.clone());
+        let result = self.compile_func_legacy_inner(func);
+        self.restore_nested_shadow_frame(saved_shadows, saved_current_fn);
+        result
+    }
+
+    /// Undo the shadows registered by one compile_func_legacy frame.
+    /// Entries inherited from the enclosing frame (identical mangled symbol
+    /// in the saved snapshot) are kept untouched; entries (re)registered by
+    /// this frame restore the func_defs entry they displaced.
+    fn restore_nested_shadow_frame(
+        &mut self,
+        saved_shadows: HashMap<String, (String, Option<FuncDef>)>,
+        saved_current_fn: String,
+    ) {
+        for (name, (mangled, prior)) in &self.nested_shadow_symbols {
+            let re_registered = saved_shadows
+                .get(name)
+                .map(|(saved_mangled, _)| saved_mangled != mangled)
+                .unwrap_or(true);
+            if re_registered {
+                match prior {
+                    Some(def) => {
+                        self.func_defs.insert(name.clone(), def.clone());
+                    }
+                    None => {
+                        self.func_defs.remove(name);
+                    }
+                }
+            }
+        }
+        self.nested_shadow_symbols = saved_shadows;
+        self.current_legacy_fn = saved_current_fn;
+    }
+
+    fn compile_func_legacy_inner(&mut self, func: &FuncDef) -> MimiResult<()> {
         // Per-function variable type tracking must start fresh so that parameters
         // with common names (e.g. `xs`) don't inherit types from other functions.
         // Also clear the generic substitution map: non-generic functions must not

@@ -518,6 +518,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
+            // to_int/to_float aggregate guard: a statically known List/Map/
+            // record argument cannot be converted — the VM fails loud with
+            // "cannot convert this type" (E0800), while the native runtime
+            // parser would strlen the aggregate pointer and report a
+            // misleading "invalid digit" parse error. Reject at compile time
+            // with the VM-aligned message.
+            if Self::is_conversion_builtin(name) && !args.is_empty() {
+                let arg_ty = self.infer_object_type(&args[0], vars);
+                if self.is_definitely_not_convertible(&arg_ty) {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "[E0800] {} cannot convert this type ({})",
+                        name, arg_ty
+                    )));
+                }
+            }
             // Special case: `to_json(obj)` where obj is a List<T> — dispatch
             // to the appropriate mimi_list_*_to_json runtime helper.
             if name == "to_json" && !args.is_empty() && !metadata_args.is_empty() {
@@ -6879,6 +6894,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .is_some_and(|f| !f.generics.is_empty());
         if !is_generic {
+            // V-11 (audit 2026-08-05): an active nested-function shadow
+            // redirects the bare name to the mangled symbol. Must precede
+            // the plain module lookup — the flat LLVM symbol namespace would
+            // otherwise resolve the call to the shadowed GLOBAL function
+            // (type-mismatched arguments → invalid IR).
+            if let Some((symbol, _)) = self.nested_shadow_symbols.get(name) {
+                if let Some(function) = self.module.get_function(symbol) {
+                    return self.emit_function_call(function, name, metadata_args);
+                }
+            }
             // Extern wrappers may have been mangled by LLVM (e.g., `strlen` →
             // `strlen.11`) when a C library function with the same name exists.
             // Check the wrapper map first to call the correct function.

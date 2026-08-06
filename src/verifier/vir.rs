@@ -1670,15 +1670,17 @@ impl VirZ3Ctx {
                     ctx.bool_vars
                         .insert(var, z3::ast::Bool::new_const(name.as_str()));
                     // V-2: bool params get old snapshots too (engine parity).
-                    let old_name = format!("old_{}", var);
+                    // §11-#37: dot separator for namespace consistency.
+                    let old_name = format!("old.{}", var);
                     ctx.old_bool_vars
                         .insert(var, z3::ast::Bool::new_const(old_name.as_str()));
                 }
                 VType::I32 | VType::I64 => {
                     ctx.int_vars
                         .insert(var, z3::ast::Int::new_const(name.as_str()));
-                    // Also register old_ snapshot for postconditions
-                    let old_name = format!("old_{}", var);
+                    // Also register old snapshot for postconditions
+                    // §11-#37: dot separator for namespace consistency.
+                    let old_name = format!("old.{}", var);
                     ctx.old_int_vars
                         .insert(var, z3::ast::Int::new_const(old_name.as_str()));
                 }

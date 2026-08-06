@@ -105,14 +105,16 @@ impl VerifierCtx {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 // V-H5: strings get dedicated string vars (plus length/nonempty).
+                // §11-#37: dot separator — `_len`/`_ne` suffixes could alias a
+                // parameter literally named `{p}_len`/`{p}_ne` (cross-object proof).
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
                 vars.insert_string_nonempty(
                     p.name.as_str(),
-                    Z3Bool::new_const(format!("{}_ne", p.name)),
+                    Z3Bool::new_const(format!("{}.ne", p.name)),
                 );
                 vars.insert_string_len(
                     p.name.as_str(),
-                    Z3Int::new_const(format!("{}_len", p.name)),
+                    Z3Int::new_const(format!("{}.len", p.name)),
                 );
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool") {
                 // V-H5: bools are Z3 Bool, not opaque Int.
@@ -407,13 +409,15 @@ impl VerifierCtx {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 // V-H5: strings use dedicated string vars (not opaque Int).
+                // §11-#37: dot separator keeps derived constants out of the
+                // user-identifier namespace (`s_len` params stay distinct).
                 vars.insert_string_nonempty(
                     p.name.as_str(),
-                    Z3Bool::new_const(format!("{}_ne", p.name)),
+                    Z3Bool::new_const(format!("{}.ne", p.name)),
                 );
                 vars.insert_string_len(
                     p.name.as_str(),
-                    Z3Int::new_const(format!("{}_len", p.name)),
+                    Z3Int::new_const(format!("{}.len", p.name)),
                 );
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool") {
@@ -423,7 +427,7 @@ impl VerifierCtx {
             {
                 // List parameters get a length variable for modeling sort() etc.
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
-                let len_var = Z3Int::new_const(format!("{}_len", p.name));
+                let len_var = Z3Int::new_const(format!("{}.len", p.name));
                 // RT-H10 (audit): constrain list length to be >= 0 so the
                 // solver does not produce unconstrained values that could
                 // satisfy vacuously true postconditions.
@@ -442,7 +446,9 @@ impl VerifierCtx {
                     session.solver.assert(iv.le(&hi));
                 }
             }
-            old_names.push(format!("old_{}", p.name));
+            // §11-#37 (audit 2026-08-05): dot separator prevents collision
+            // between parameter `old_p` and `old(p)` expression.
+            old_names.push(format!("old.{}", p.name));
         }
 
         if returns_real {
@@ -469,16 +475,16 @@ impl VerifierCtx {
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 vars.insert_string_nonempty(
                     old_name,
-                    Z3Bool::new_const(format!("{}_ne", old_name)),
+                    Z3Bool::new_const(format!("{}.ne", old_name)),
                 );
-                vars.insert_string_len(old_name, Z3Int::new_const(format!("{}_len", old_name)));
+                vars.insert_string_len(old_name, Z3Int::new_const(format!("{}.len", old_name)));
                 vars.insert_string_var(old_name, Z3String::new_const(old_name));
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool") {
                 vars.insert_bool(old_name, Z3Bool::new_const(old_name));
             } else if matches!(p.ty.unlocated(), Type::Name(n, args) if n == "List" && !args.is_empty())
             {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
-                let old_len_var = Z3Int::new_const(format!("{}_len", old_name));
+                let old_len_var = Z3Int::new_const(format!("{}.len", old_name));
                 let zero = Z3Int::from_i64(0);
                 session.solver.assert(old_len_var.ge(&zero));
                 vars.insert_list_len(old_name, old_len_var);
@@ -2112,7 +2118,7 @@ impl VerifierCtx {
 
         if let Some(model) = model {
             for (name, z3_var) in &vars.int_vars {
-                if name == "result" || name.starts_with("old_") || name.starts_with('_') {
+                if name == "result" || name.starts_with("old.") || name.starts_with('_') {
                     continue;
                 }
                 if let Some(val) = model.eval(z3_var, true) {
@@ -2129,7 +2135,7 @@ impl VerifierCtx {
                 }
             }
             for (name, z3_var) in &vars.real_vars {
-                if name == "result" || name.starts_with("old_") {
+                if name == "result" || name.starts_with("old.") {
                     continue;
                 }
                 if let Some(val) = model.eval(z3_var, true) {
@@ -2155,7 +2161,7 @@ impl VerifierCtx {
             }
             // V5: Collect string variable values for counterexample display.
             for (name, z3_var) in &vars.string_vars {
-                if name.starts_with("old_") {
+                if name.starts_with("old.") {
                     continue;
                 }
                 if let Some(val) = model.eval(z3_var, true) {
@@ -2281,7 +2287,7 @@ impl VerifierCtx {
             }),
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.unlocated() {
-                    let old_name = format!("old_{}", name);
+                    let old_name = format!("old.{}", name);
                     vars.get_string_var(&old_name).and_then(|z3_var| {
                         model
                             .eval(z3_var, true)
@@ -2303,7 +2309,7 @@ impl VerifierCtx {
                 .and_then(|z3_var| model.eval(z3_var, true).and_then(|v| v.as_i64())),
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.unlocated() {
-                    let old_name = format!("old_{}", name);
+                    let old_name = format!("old.{}", name);
                     vars.get_int(&old_name)
                         .and_then(|z3_var| model.eval(z3_var, true).and_then(|v| v.as_i64()))
                 } else {
@@ -2360,7 +2366,7 @@ impl VerifierCtx {
                 }),
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.unlocated() {
-                    let old_name = format!("old_{}", name);
+                    let old_name = format!("old.{}", name);
                     vars.get_real(&old_name)
                         .and_then(|z3_var| {
                             model
@@ -2425,7 +2431,7 @@ impl VerifierCtx {
             }
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.unlocated() {
-                    let old_name = format!("old_{}", name);
+                    let old_name = format!("old.{}", name);
                     if let Some(z3_var) = vars.get_int(&old_name) {
                         match model.eval(z3_var, true) {
                             Some(val) => val.as_i64().map(|i| i != 0).unwrap_or(false),
