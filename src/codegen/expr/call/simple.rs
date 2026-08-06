@@ -2926,6 +2926,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_int_z_extend(disc, self.context.i64_type(), "opt_disc_i64")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     let payload_bv = self.build_extract_value(sv.into(), 1, "opt_payload")?;
+                    // D-3: heap-string payload is StructValue {ptr,i64} — must
+                    // NOT reach the generic mimi_option_i64_to_json scalar path
+                    // (which would print the pointer as a number) nor the
+                    // product-tuple path ([ptr,len]).
+                    let payload_is_string = matches!(
+                        &payload_bv,
+                        BasicValueEnum::StructValue(sv) if {
+                            let f = sv.get_type().get_field_types();
+                            f.len() == 2
+                                && matches!(f[0], BasicTypeEnum::PointerType(_))
+                                && matches!(
+                                    f[1],
+                                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                                )
+                        }
+                    );
                     // Option of Result by-value: payload is Result struct {i1,ok,err}.
                     if obj_type.contains("Result")
                         && matches!(payload_bv, BasicValueEnum::StructValue(_))
@@ -4203,6 +4219,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_ptr_to_int(pv, self.context.i64_type(), "opt_pay_ptr")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        BasicValueEnum::StructValue(sv) => {
+                            // D-3: heap-string payload {ptr,i64} — serialize
+                            // to a JSON string literal instead of the generic
+                            // E0700 rejection.
+                            let j = self.emit_heap_string_payload_json(sv)?;
+                            self.register_heap_alloc(j);
+                            self.builder
+                                .build_ptr_to_int(j, self.context.i64_type(), "opt_pay_str_json")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        }
                         other => {
                             return Err(CompileError::Generic(format!(
                                 "to_json Option: unexpected payload {:?}",
@@ -4796,6 +4822,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .try_as_basic_value_opt()
                             .ok_or("mimi_option_set_to_json void")?
                             .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
+                    // D-3: Option<string> — Some payload is a heap string
+                    // {ptr,i64}; payload_i64 is the ptrtoint of the escaped
+                    // JSON string literal. Emit structured JSON instead of
+                    // printing the pointer as a number.
+                    if payload_is_string {
+                        let raw = self.emit_option_string_to_json_cstr(disc_i64, payload_i64)?;
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
@@ -5916,11 +5951,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                             )
                             && matches!(ok_fields[1], BasicTypeEnum::PointerType(_));
-                        if !ok_is_string
-                            && !ok_fields.is_empty()
-                            && !ok_is_nested_wrapper
-                            && !ok_is_list
-                        {
+                        if !ok_fields.is_empty() && !ok_is_nested_wrapper && !ok_is_list {
+                            // Note: ok_is_string deliberately NOT excluded —
+                            // heap-string Ok payloads {ptr,i64} must take the
+                            // structured JSON path (D-3), not fall through to
+                            // the scalar i64 coercion which rejects them (E0700)
+                            // or re-serializes the struct as a product tuple.
                             let mut ok_inner = obj_type
                                 .strip_prefix("Result<")
                                 .and_then(|s| s.split(',').next())
@@ -5942,7 +5978,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
                                 matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                             });
-                            if !is_named_record && ok_fields.len() < 2 {
+                            if !is_named_record && !ok_is_string && ok_fields.len() < 2 {
                                 // fall through
                             } else {
                                 let ok_json = if is_named_record {
@@ -5953,6 +5989,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     )?;
                                     self.build_store(rec_alloca, ok_sv)?;
                                     self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
+                                } else if ok_is_string {
+                                    // D-3: heap-string Ok payload {ptr,i64} must
+                                    // NOT be treated as a 2-field product tuple
+                                    // (its 2 struct fields would otherwise
+                                    // mis-serialize as [ptr,len]). Emit a JSON
+                                    // string literal instead.
+                                    let sj = self.emit_heap_string_payload_json(ok_sv)?;
+                                    self.register_heap_alloc(sj);
+                                    sj
                                 } else {
                                     self.emit_product_tuple_to_json(ok_sv)?
                                 };
@@ -6012,30 +6057,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
                                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                                 self.builder.position_at_end(ok_bb);
-                                let buf = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "res_tup_ok_buf",
-                                )?;
-                                let ofmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Ok\":[%s]}", "res_tup_ofmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                                self.build_call(
-                                    snprintf_fn,
+                                // D-3: sized assembly instead of the old fixed
+                                // 1024-byte snprintf — long payloads truncated
+                                // at 1023 (NUL) on the native backend while the
+                                // VM kept the full rendering.
+                                let wrap = self.sized_cat_parts(
                                     &[
-                                        BasicMetadataValueEnum::PointerValue(buf),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            ofmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(ok_json),
+                                        crate::codegen::builtins::io::CatPart::Lit("{\"Ok\":["),
+                                        crate::codegen::builtins::io::CatPart::Dyn(ok_json),
+                                        crate::codegen::builtins::io::CatPart::Lit("]}"),
                                     ],
-                                    "res_tup_osn",
+                                    "res_tup_ok_wrap",
+                                    false,
                                 )?;
-                                self.build_store(out_alloca, buf)?;
+                                self.build_store(out_alloca, wrap)?;
                                 self.builder
                                     .build_unconditional_branch(merge_bb)
                                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -6072,6 +6107,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_ptr_to_int(pv, self.context.i64_type(), "res_ok_ptr")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        BasicValueEnum::StructValue(sv) => {
+                            // D-3: heap-string Ok payload {ptr,i64} — serialize
+                            // to a JSON string literal (the 5908 arm already
+                            // excluded strings from the product-tuple path;
+                            // without this the payload hits the generic E0700).
+                            let j = self.emit_heap_string_payload_json(sv)?;
+                            self.register_heap_alloc(j);
+                            self.builder
+                                .build_ptr_to_int(j, self.context.i64_type(), "res_ok_str_json")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        }
                         other => {
                             return Err(CompileError::Generic(format!(
                                 "to_json Result: unexpected Ok payload {:?}",
@@ -6094,6 +6140,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_ptr_to_int(pv, self.context.i64_type(), "res_err_ptr")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        BasicValueEnum::StructValue(sv) => {
+                            // D-3: heap-string Err payload → JSON string literal.
+                            let j = self.emit_heap_string_payload_json(sv)?;
+                            self.register_heap_alloc(j);
+                            self.builder
+                                .build_ptr_to_int(j, self.context.i64_type(), "res_err_str_json")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        }
                         other => {
                             return Err(CompileError::Generic(format!(
                                 "to_json Result: unexpected Err payload {:?}",

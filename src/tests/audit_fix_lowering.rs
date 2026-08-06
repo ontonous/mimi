@@ -1301,3 +1301,74 @@ func main() -> i32 {
         );
     }
 }
+
+// D-3 (audit 2026-08-05, re-verified 2026-08-06): `to_json` on Result/Option
+// with a heap-string payload (String is {ptr,i64}) previously failed native
+// codegen with E0700 "unexpected Ok/Option payload StructType" — the payload
+// either hit the scalar i64 coercion rejection or was mis-serialized as a
+// 2-field product tuple `[ptr,len]`. The VM always produced the correct
+// `{"Ok":["..."]}` / `{"Some":["..."]}`. The resolved/native emitter now
+// routes {ptr,i64} payloads through emit_heap_string_payload_json.
+#[test]
+fn audit_d3_to_json_string_payloads_option_result() {
+    let src = r#"
+func main() -> i32 {
+    let r: Result<string, i32> = Ok("hi")
+    let re: Result<i32, string> = Err("boom \"x\"\n")
+    let o: Option<string> = Some("opt \"y\"")
+    let n: Option<string> = None
+    println(to_json(r))
+    println(to_json(re))
+    println(to_json(o))
+    println(to_json(n))
+    0
+}
+"#;
+    let expected = "{\"Ok\":[\"hi\"]}\n{\"Err\":[\"boom \\\"x\\\"\\n\"]}\n{\"Some\":[\"opt \\\"y\\\"\"]}\n\"None\"\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM to_json string payloads");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen to_json string payloads");
+        assert_eq!(
+            native, expected,
+            "native must match VM for Result/Option string payloads (D-3)"
+        );
+        // NOTE: the full-resolved `checked_codegen_compile_and_run` path is a
+        // SEPARATE known gap — E0722 `{i1,i64} → {i1,{ptr,i64}}` in
+        // resolved_emit (same family as the resolved Set E0722, only exposed
+        // by forcing the whole program through compile_checked). Production
+        // `mimi build` uses per-function dispatch and passes, as asserted
+        // above via compile_and_run.
+    }
+}
+
+// D-3 long-payload regression: the original defect also truncated >1024-byte
+// JSON renderings via fixed snprintf buffers. Sized assembly must keep the
+// full payload intact end-to-end on the native backend.
+#[test]
+fn audit_d3_to_json_long_string_payload_not_truncated() {
+    let src = r#"
+func main() -> i32 {
+    let mut long = ""
+    let mut i = 0
+    while i < 1500 {
+        long = long + "x"
+        i = i + 1
+    }
+    let r: Result<string, i32> = Ok(long)
+    let j = to_json(r)
+    println(len(j) == 1500 + 11) // {"Ok":[" + payload + "]} = 11 overhead
+    0
+}
+"#;
+    let expected = "true\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM long string payload length check");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen long string payload");
+        assert_eq!(
+            native, expected,
+            "native must not truncate long string payloads (D-3)"
+        );
+    }
+}
