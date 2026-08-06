@@ -2443,6 +2443,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if matches!(init.unlocated(), Expr::MapLiteral { .. }) {
                             self.var_type_names.insert(name.clone(), "Map".to_string());
                         }
+                        // 2026-08-06 (audit 1l): enum variant constructors
+                        // (`let e = FileNotFound`) compile to a tagged
+                        // i64/int value with no var_type_names entry —
+                        // type_name(e) printed "unknown". Register the
+                        // variant's owning type name.
+                        if let Expr::Ident(variant_name) = init.unlocated() {
+                            if let Some((owner, _)) = self.find_variant_owner(variant_name) {
+                                self.var_type_names.insert(name.clone(), owner);
+                            }
+                        }
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());

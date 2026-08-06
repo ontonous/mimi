@@ -3802,10 +3802,18 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
             }
         }
-        // Fallback: check if the NodeId string contains a known variant name.
+        // Fallback: check if the NodeId's variant fragment matches a known
+        // builtin variant name. 2026-08-06 (§6-#65): the old `contains(name)`
+        // substring match misclassified ANY NodeId containing "Err" — e.g. a
+        // user enum variant `Errors` (fragment `variant.Errors`) resolved to
+        // builtin "Err" and compiled the wrong constructor. Match exact
+        // suffixes instead: builtin Option/Result use `builtin:variant:Option::Some`
+        // (colon form), custom enums use `<node>/decl.variant/variant.<name>`.
         let id_str = &variant_id.0;
         for name in ["Some", "None", "Ok", "Err"] {
-            if id_str.contains(name) {
+            if id_str.ends_with(&format!("::{name}"))
+                || id_str.ends_with(&format!("variant.{name}"))
+            {
                 return Ok(name.to_string());
             }
         }
