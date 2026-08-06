@@ -12,7 +12,7 @@ use inkwell::IntPredicate;
 /// no capacity tracking — silent truncation or heap overflow for long
 /// renderings. Sized assembly computes the exact total first, mallocs once,
 /// then memcpys each piece at a running offset.
-enum CatPart<'ctx> {
+pub(in crate::codegen) enum CatPart<'ctx> {
     /// Compile-time literal fragment (byte length known at emit time).
     Lit(&'static str),
     /// Runtime NUL-terminated C string (length taken with strlen at runtime).
@@ -83,7 +83,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// `malloc_display_buf` and released by the consuming print's
     /// `flush_display_frees`; JSON producers pass `false` and keep the
     /// existing lifetime discipline of their call sites.
-    fn sized_cat_parts(
+    pub(in crate::codegen) fn sized_cat_parts(
         &self,
         parts: &[CatPart<'ctx>],
         name: &str,
@@ -4511,6 +4511,122 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.emit_result_err_json(err_i64, true)
     }
 
+    /// Serialize a `{ ptr, len }` heap string payload (String value) into a
+    /// JSON string literal (`"..."`, quoted + escaped via
+    /// `mimi_json_escape_string`). Matches the JSON VM's `Value::String`
+    /// branch of `to_json`. Used by the native emitter for Option/Result
+    /// string payloads, which previously hit the generic "unexpected
+    /// StructType" rejection (D-3 resolved-gap fix).
+    ///
+    /// Returns the heap-allocated JSON C-string (caller owns/frees it).
+    pub(in crate::codegen) fn emit_heap_string_payload_json(
+        &self,
+        payload: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let ptr = self
+            .build_extract_value(payload.into(), 0, "str_payload_ptr")?
+            .into_pointer_value();
+        let escape_fn = self.get_runtime_fn("mimi_json_escape_string")?;
+        let escaped = self
+            .build_call(
+                escape_fn,
+                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                "str_payload_escaped",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_json_escape_string void")?
+            .into_pointer_value();
+        // Upstream caller registers/frees `escaped` as appropriate.
+        Ok(escaped)
+    }
+
+    /// D-3: emit `{"Some":[<json>]}` / `{"None"}` for an Option whose payload
+    /// is a heap string. `payload_i64` is the ptrtoint of the escaped JSON
+    /// string literal produced by `emit_heap_string_payload_json`; cast back
+    /// and embed with sized assembly (no fixed-buffer truncation).
+    pub(in crate::codegen) fn emit_option_string_to_json_cstr(
+        &self,
+        disc_i64: inkwell::values::IntValue<'ctx>,
+        payload_i64: inkwell::values::IntValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let disc_is_some = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                disc_i64,
+                i64_ty.const_int(0, false),
+                "opt_str_some",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let some_bb = self.context.append_basic_block(parent, "opt_str_some_bb");
+        let none_bb = self.context.append_basic_block(parent, "opt_str_none_bb");
+        let merge_bb = self.context.append_basic_block(parent, "opt_str_merge_bb");
+        let out_slot = self.build_alloca(BasicTypeEnum::PointerType(i8_ptr), "opt_str_out")?;
+        self.builder
+            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(some_bb);
+        {
+            let json_ptr = self
+                .builder
+                .build_int_to_ptr(payload_i64, i8_ptr, "opt_str_json_ptr")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let wrap = self.sized_cat_parts(
+                &[
+                    CatPart::Lit("{\"Some\":["),
+                    CatPart::Dyn(json_ptr),
+                    CatPart::Lit("]}"),
+                ],
+                "opt_str_wrap",
+                false,
+            )?;
+            self.build_store(out_slot, wrap)?;
+        }
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(none_bb);
+        {
+            let none_heap =
+                self.malloc_or_abort(i64_ty.const_int(8, false), "opt_str_none_heap")?;
+            let none_lit = self
+                .builder
+                .build_global_string_ptr("\"None\"", "opt_str_none_lit")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+            self.build_call(
+                strcpy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(none_heap),
+                    BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                ],
+                "opt_str_none_cpy",
+            )?;
+            self.build_store(out_slot, none_heap)?;
+        }
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(merge_bb);
+        Ok(self
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr),
+                out_slot,
+                "opt_str_result",
+            )?
+            .into_pointer_value())
+    }
+
     /// Serialize a by-value Result struct `{i1, ok, err}` to a JSON C string.
     /// Handles product-tuple / record Ok and string Err.
     pub(in crate::codegen) fn emit_result_struct_to_json_cstr(
@@ -4564,7 +4680,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                 )
                 && matches!(ofields[1], BasicTypeEnum::PointerType(_));
-            if ok_is_nested_result {
+            let ok_is_string = ofields.len() == 2
+                && matches!(ofields[0], BasicTypeEnum::PointerType(_))
+                && matches!(ofields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
+            if ok_is_string {
+                // D-3: heap-string Ok payload {ptr,i64} is NOT a 2-field
+                // product tuple — emit a JSON string literal instead of
+                // the generic tuple path's [ptr,len] mis-serialization.
+                self.emit_heap_string_payload_json(ok_sv)?
+            } else if ok_is_nested_result {
                 self.emit_result_struct_to_json_cstr(ok_sv, &ok_inner)?
             } else if ok_is_list || ok_inner.starts_with("List") {
                 let tmp = self.build_alloca(
