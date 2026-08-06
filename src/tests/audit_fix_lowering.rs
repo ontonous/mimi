@@ -2036,3 +2036,47 @@ func main() -> i32 {
         assert_eq!(native, expected, "native must match VM (audit 1n)");
     }
 }
+
+#[test]
+fn audit_1o_substring_method_strict_bounds() {
+    // 2026-08-06 (D-5 remainder): the `.substring()` METHOD form is strict
+    // in the VM (E0800 on end > len) but codegen's method dispatch funneled
+    // it into the CLAMPING str_substring — `s.substring(1, 100)` silently
+    // returned "ello" (red-line #2). Route methods to a new strict builtin
+    // (str_substring_strict → mimi_str_substring); the function form keeps
+    // clamping (VM parity). In-range calls must stay identical across all
+    // three backends.
+    let src = r#"
+func main() -> i32 {
+    let s = "hello"
+    println(s.substring(1, 3))
+    println(str_substring(s, 1, 100))
+    0
+}
+"#;
+    let expected = "el\nello\n";
+    let (_, vm) = run_source_with_stdout(src);
+    assert_eq!(vm, expected, "VM method strict + function clamp");
+    if can_link() {
+        let native = compile_and_run(src).expect("codegen substring strict");
+        assert_eq!(native, expected, "native must match VM (audit 1o)");
+        let resolved = checked_codegen_compile_and_run(src).expect("resolved substring strict");
+        assert_eq!(resolved, expected, "resolved must match VM (audit 1o)");
+    }
+    // Out-of-bounds method call must fail loud on BOTH backends (abort/E0800),
+    // not silently clamp.
+    let bad = r#"func main() -> i32 {
+    let s = "hello"
+    println(s.substring(1, 100))
+    0
+}"#;
+    let vm_bad = run_source_result(bad);
+    assert!(vm_bad.is_err(), "VM must trap substring out-of-bounds");
+    if can_link() {
+        let r = compile_and_run(bad);
+        assert!(
+            r.is_err(),
+            "native must fail loud on out-of-bounds substring"
+        );
+    }
+}

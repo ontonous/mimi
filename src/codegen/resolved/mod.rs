@@ -1301,7 +1301,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "replace" => Some("str_replace"),
                                 "repeat" => Some("str_repeat"),
                                 "char_at" => Some("str_char_at"),
-                                "substring" => Some("str_substring"),
+                                // D-5 (2026-08-06): method form is strict in
+                                // the VM — match the legacy method mapping.
+                                "substring" => Some("str_substring_strict"),
                                 "index_of" => Some("str_index_of"),
                                 "parse_int" => Some("str_parse_int"),
                                 "parse_float" => Some("str_parse_float"),
@@ -1649,33 +1651,45 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                  (not safe for resolved delegation)"
                             )));
                         }
+                        // 2026-08-06 (audit 1o): substring builtins take the
+                        // Mimi string VALUE ({ptr,i64} struct) but the runtime
+                        // helpers (mimi_str_substring / mimi_str_substring_clamp)
+                        // take a raw C-string ptr — the runtime-direct path
+                        // coerced {ptr,i64} → ptr and failed (E0722). Skip the
+                        // direct-runtime shortcut so the call falls through to
+                        // compile_builtin_call → the string emitters, which
+                        // extract the data pointer via extract_string_arg
+                        // (handles both the struct and raw-ptr forms).
+                        const STRING_ABI_BUILTINS: &[&str] =
+                            &["str_substring", "str_substring_strict"];
+                        let runtime_fn_name = if STRING_ABI_BUILTINS.contains(&name) {
+                            String::new() // sentinel: no direct runtime call
+                        } else {
+                            let runtime_fn_name = format!("mimi_{name}");
+                            if self
+                                .generator
+                                .module
+                                .get_function(&runtime_fn_name)
+                                .is_some()
+                            {
+                                runtime_fn_name
+                            } else {
+                                // Alias mapping for builtins that delegate to
+                                // differently-named runtime functions.
+                                match name {
+                                    "session_send" => "mimi_channel_send".to_string(),
+                                    "session_recv" => "mimi_channel_recv".to_string(),
+                                    "session_close" => "mimi_channel_drop".to_string(),
+                                    _ => runtime_fn_name,
+                                }
+                            }
+                        };
                         // 0.32.22: Coerce integer arguments to match the runtime
                         // function's declared parameter types. Builtins like
                         // mutex_new call runtime functions (mimi_mutex_new)
                         // declared with i64 params, but the resolved IR types
                         // integer literals as i32. Look up the runtime function
                         // and coerce to match its signature.
-                        // 0.32.24: Some builtins delegate to differently-named
-                        // runtime functions (e.g. session_send → mimi_channel_send).
-                        // Try the direct name first, then known aliases.
-                        let runtime_fn_name = format!("mimi_{name}");
-                        let runtime_fn_name = if self
-                            .generator
-                            .module
-                            .get_function(&runtime_fn_name)
-                            .is_some()
-                        {
-                            runtime_fn_name
-                        } else {
-                            // Alias mapping for builtins that delegate to
-                            // differently-named runtime functions.
-                            match name {
-                                "session_send" => "mimi_channel_send".to_string(),
-                                "session_recv" => "mimi_channel_recv".to_string(),
-                                "session_close" => "mimi_channel_drop".to_string(),
-                                _ => runtime_fn_name,
-                            }
-                        };
                         if let Some(runtime_fn) =
                             self.generator.module.get_function(&runtime_fn_name)
                         {
