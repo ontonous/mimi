@@ -456,7 +456,6 @@ fn audit_sum_float_vm_reference() {
 }
 
 #[test]
-#[ignore = "codegen sum(List<f64>) needs an element-type dispatch channel (expr/call/simple.rs pending-flag, outside wave-1 list_string ownership); audit-wave2"]
 fn audit_sum_float_dual_pending_wave2() {
     assert_dual(
         r#"

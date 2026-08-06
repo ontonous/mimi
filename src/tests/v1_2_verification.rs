@@ -413,12 +413,17 @@ func negate(x: i32) -> i32 {
     assert_eq!(results[0].status, crate::verifier::VerifStatus::Verified);
 }
 
-#[ignore]
 #[test]
 fn verify_unsatisfiable_requires() {
+    // 2026-08-06: the old case wrote contracts in a `mms{}` block, which the
+    // compiler no longer reads (§10 — Mimi never extracts contracts from
+    // mms{}); verification saw no requires and returned InfrastructureError.
+    // Rewritten with top-level `requires:` — contradictory preconditions must
+    // make the contract Failed, not Verified.
     let src = r#"
 func impossible(x: i32) -> i32 {
-    mms { "requires: x > 0\nrequires: x < 0" }
+    requires: x > 0
+    requires: x < 0
     x
 }
 "#;
