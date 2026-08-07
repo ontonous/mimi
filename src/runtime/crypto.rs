@@ -250,6 +250,26 @@ pub extern "C" fn mimi_to_string_f64(val: f64) -> *mut std::ffi::c_char {
     alloc_c_string(&val.to_string())
 }
 
+/// §8-#96 (0.34.36): NUL-terminate `buf[offset]` for the sized display
+/// assembly. Exists as an opaque call so LLVM O1 cannot fold the
+/// straight-line memcpy chain + trailing NUL store into a miscompiled
+/// constant-offset store sequence (record display truncation).
+///
+/// # Safety contract
+/// `buf` must point to an allocation of at least `offset + 1` bytes
+/// (sized_cat_parts allocates exactly total = content + 1 and passes
+/// offset = total - 1).
+#[no_mangle]
+pub extern "C" fn mimi_runtime_buf_nul_terminate(buf: *mut u8, offset: i64) {
+    if buf.is_null() || offset < 0 {
+        return;
+    }
+    // SAFETY: caller contract above (allocation covers offset + 1).
+    unsafe {
+        *buf.offset(offset as isize) = 0;
+    }
+}
+
 #[no_mangle]
 /// M15: template string formatting with up to 8 arguments ({}-placeholders).
 /// If more than 8 args are needed, callers should concatenate intermediate results.
