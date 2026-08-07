@@ -2,6 +2,112 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.40 — resolved dispatch 度量门禁（AF-4 前置 1，纯增量基建）
+
+> Phase G（0.34.39-45）第二个 sprint：进 0.1.5 前把 legacy 受管退役的度量地基钉死——
+> fallback 率成为一等指标 + CI 禁静默回退。依据 ADR-005（legacy 受管退役）。
+
+- **MIMI_STAT=1 结构化分派报告**：`DispatchStats`（`src/codegen/resolved/eligibility.rs`）
+  收集 eligible/legacy 计数 + skip 原因直方图；`eligible_function_ids_with_stats`
+  逐函数记录 skip 类别；`emit_dispatch_stats` 写 JSON 到
+  `MIMI_STAT_OUT`（默认 `target/mimi-stat/<src>.json`）；
+- **skip reason 规范化**：`normalize_skip_reason` 折叠含 `NodeId(`/`@external:`/
+  `ResolvedTypeId(`/`ResolvedCall {` 等不稳定 Debug 输出的 reason 为稳定类别
+  （unsupported expression/statement/pattern/type/callee）——避免源哈希跨会话
+  漂移导致门禁误报 + JSON 膨胀；
+- **基线语料入仓**：`devdocs/v0.34/golden/dispatch-baseline.json`（demos/+examples/+
+  tests/real_world/ 全跑）——112 程序编译成功 / 16 跳过，202 eligible / 5425 总函数，
+  聚合 fallback_rate=0.9628（符合 AF-4 草案“resolved 覆盖 = entry 顶层无泛型无
+  合约标量函数”的现状描述）；
+- **门禁脚本**：`scripts/dispatch_stat.py`（generate/check/report）。check 模式对比
+  基线禁静默回退率上升（EPSILON=1e-9）；白名单登记制
+  （`devdocs/v0.34/golden/dispatch-whitelist.json`，reason 必填，`_` 前缀说明 key
+  过滤，同 ignored 测试纪律）；新程序首次纳入不判回退；TMPDIR 指向工作区适配
+  sandbox 只读 /tmp；
+- **门禁自检三项全过**：无回退→exit 0；篡改静默回退→exit 1（报 `demos/01_basics.mimi:
+  0.5000 → 0.9767`）；白名单登记→`[whitelisted]` 放行 exit 0；
+- **MIMI_VERBOSE info 行格式冻结**：既有 `info: resolved skip/…` 行格式不变
+  （向后兼容承诺，本 sprint 仅新增 stats 收集不改 verbose 输出）；
+
+### 0.34.39 — 架构裁决战役：四项 One-Way Door 升格正式 ADR（纯裁决，零实现）
+
+> Phase G（0.34.39-45）启动 sprint：进 0.1.5（性能主线）前把架构形状钉死——裁决先行，
+> 实现分档。依据 `devdocs/v0.34/architecture-freeze-draft.md`（四项深度评估 + 裁决草案
+> + §8 版本战略重估）。
+
+- **ADR-005 legacy 发射器受管退役（AF-4）**：推翻“长期保留”旧裁决——退役终态
+  （legacy 不再编译函数体，三引擎函数体统一 Resolved IR）+ 四前置（度量门禁/
+  假边界消灭/单态化/机制迁移，顺序不可颠倒）+ 回退纪律（回退>0.5% 或 SIGSEGV 即
+  回滚）；实施 0.34.40-43 启动，终态 0.2 轨；
+- **ADR-006 codegen 内存所有权账本（AF-1）**：编译期所有权账本（复用 CFG +
+  ResourceAnalysis，与线性能力 exactly-once 同一套机器）——字面量非 owned 不入账本、
+  builtin returns_owned 目录、per-turn 固定容量池分配策略优先评估（QP/C 参照）；
+  实施 0.2 轨；
+- **ADR-007 值表示 ABI 布局冻结（AF-2）**：冻结当前 handle/`{ptr,len}`/has_header
+  布局 + Component IR abi_version 握手做 Two-Way Door；0.34.45 定稿文档 + 0.2 实施；
+- **ADR-008 Verifier 引擎收敛（AF-3）**：resolved 主引擎 + VIR 降级 math: 通道 +
+  缓存引擎隔离（键=(program_hash, engine, clause)，分歧 fail-closed 新诊断码）；
+  实施 0.34.44；
+- **版本战略**：0.minor=大版本（Zig 式，每 minor 边界即冻结点 + 允许 breaking +
+  必附迁移注记）；AF-1/AF-4 前置 3/4 重分类 0.2 轨；pre-1.0/ → pre-0.1/ 更名随
+  0.34.45 落地；草案标“已升格”归档，README §4 裁决表补行 ADR-005~008；
+
+### 0.34.38 — 字符串参数守卫战役 + 2026-08-07 大项清扫 + R-2 确定性选择
+
+> 依据台账 `devdocs/audit-unfixed-2026-08-05.md` §14（字符串参数守卫战役）+
+> §12 结构性项。战役动机：LLVM 层 List 值以原始指针传递（List = ptr to `{i64,ptr}`），
+> 与字符串指针在 emitter 内不可区分——宽松 builtin 参数不受 checker 约束导致
+> `str_trim([1,2,3])` strlen 一个 List struct → 垃圾输出 / `into_pointer_value()`
+> panic / abort(核心转储)。本次系统性消除该族。全量 lib 5263 → 5273 全绿。
+
+- **string 家族编译期守卫（`7c5574ed` + `1fde0249`）**：表驱动
+  `string_only_builtin_string_args` 按参数位守卫（str_repeat/str_char_at/str_parse_int/
+  str_parse_float/string_to_int/str_to_c_str 位0、str_split/starts_with/ends_with/
+  index_of/count_substring/regex_match/regex_find/regex_find_all 位0,1、str_replace/
+  regex_replace 位0,1,2、str_join 位1）；`is_definitely_not_string` 保守判定未知
+  类型放行防误拒；emitter 布局检查防 panic。**str_contains/starts_with/ends_with/
+  regex_match 返回 i1(bool) 修 L1 分歧**（checker 推断 bool、VM 返回 bool、codegen
+  此前 zext i64 打印 1 vs true）；
+- **contains 多态接收者（`827a2764`）**：全局 `contains("hello","ell")` 曾
+  SIGSEGV（compile_contains 把 string 当 List 指针 load_list_len）；string 干草堆
+  重定向 str_contains + needle 守卫；compile_contains 返回 i1；resolved 字符串
+  方法映射（`builtin.method.string.X` → str_X，消除 E0709）；
+- **json/crypto 家族守卫（`b137e088`）**：sha256/base64_encode/base64_decode/
+  from_json/json_is_valid/json_array_length/json_get_element（位0）、json_get_string/
+  json_get_int/json_has_key（位0,1）；消除 List 参数 abort(exit 134)；
+- **fs/env/path/exec 守卫（`0771be95` + `26ca5af5`）**：read_file/write_file/
+  path_join/set_env 等 List 参数编译期拒绝；bool 谓词返回 i1 修 L1 分歧；
+  exec_safe varargs 守卫——List 参数静默成为垃圾 argv 修复；
+- **network + lexer 守卫（`0ebf8a04` + `c9fbad3b`）**：http_get/http_post/send/
+  connect 字符串参数守卫；lexer 内建字符串参数守卫；
+- **str_contains List/Set 干草堆路由（`c1e2300f` + `9e04bf94` + `cff7c640`）**：
+  List 干草堆路由 compile_contains、Set 干草堆路由 mimi_set_contains、函数形式
+  `contains(Set, x)` 同路由（消除 VM-only gap）；type_name(x) 修复 Located 解包 +
+  返回规范 string struct；
+- **§6-#65 variant 名子串错配（`508147db`）**：lookup_variant_name fallback 改
+  精确后缀（`variant.Errors` 不再误配 Err）+ §4-#44 AST 重复条目删除 + enum
+  variant type_name 登记；
+- **§7-#81 fn pointer 返回 ABI 错配（`b6d1730d`）**：间接调用返回类型从
+  var_types 恢复（closure_return_llvm_type 同款），f64 不再读 %rax 垃圾；
+- **D-5 substring strict 越界（`05f354f7`）**：方法形路由新 builtin
+  str_substring_strict（mimi_str_substring strict runtime），函数形保持 clamp；
+  resolved 直连 ABI 桥修复（STRING_ABI_BUILTINS 跳过 runtime 直连走 emitter，
+  E0722 消除）；
+- **2026-08-07 大项清扫（`5e30cf8a`）**：§11-#37 Z3 命名空间残留清扫（call_var_key
+  歧义拼接改 `#` 分隔 + `{p}.len`/`{p}.ne` 派生常量改点分隔，消跨调用别名）；
+  R-1/V-11 嵌套函数遮蔽 lowering 歧义（shadowing_nested_function 镜像 checker
+  声明序裸名注册 + codegen 遮蔽符号重定向 + 帧守卫，LLVM ERROR 消除，#[ignore]
+  已解）；§4-#41 module/actor NodeId 碰撞（collect_item_decls 补 module path）；
+  B-7 print_err auto-deref（builtin_eprintln 改走 io::print_display）；to_int/
+  to_float 消息差异（静态已知聚合类型以 VM 对齐消息 `[E0800] cannot convert
+  this type` 编译期拒绝）；测试基建：audit_fix_io 两条 VM input EOF 测试加
+  IsTerminal 守卫（tty 环境读真实 stdin 永久阻塞曾冻结 audit_fix 运行 1.5h）；
+- **R-2 构造器模式确定性（`0b909de6`）**：flow_variant 查找提取为
+  `pick_matching_record_def`（字典序最小 variant id 确定性选择，注释钉死 R-2），
+  消除 `HashMap::iter().find()` 非确定遍历 + 缺失 field 捏造；
+  `r2_pick_matching_record_def_is_deterministic` 回归（50 次 fresh-HashMap 断言
+  稳定 + 全名匹配 + 非 record/未知名不匹配）；
+
 ### 0.34.37 — 显示截断族修复：legacy 显示固定缓冲 → 精确尺寸组装
 
 > §8-#96/D-4 固定缓冲显示截断族全闭（台账 `devdocs/audit-unfixed-2026-08-05.md`）。
@@ -53,11 +159,14 @@
   静默忽略，硬上限由 slow-timeout period×terminate-after 承载）；stdlib JSON 与
   serde 语义对齐（1e999 f64 溢出拒绝，双端等价）。
 
-### 0.34.35 — FFI 审计闭环：repr(C) 导出 SysV ABI 修复 + fn 字段调用 L1 修复（进行中）
+### 0.34.35 — FFI 审计闭环：repr(C) 导出 SysV ABI 修复 + fn 字段调用 L1 修复
 
 > 依据 2026-08-05 Jupitune dogfood 外部评估审计（`devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md`，
 > 17 条复核 14 成立 + 3 个审计新发现）。本 sprint 处置 L1/L2/L3 级阻断 bug；
 > 特性缺口（f32/指针/数据符号/vtable）登记 0.2 不进本版。
+> **0.34.35b/c 收尾（2026-08-07 随 0.34.36 战役落地）**：M-001 extern 符号
+> 真实命名 + M-006 dlopen ABI 测试族 + M-011③ 直接调用诚实拒绝 + N-3 警告
+> 洪水 + M-003/016/017 文档统一，见下。
 
 - **N-2｜fn 字段调用 codegen 静默误编译修复（L1）**：裸函数引用存入 closure 型
   record 字段（`type VTable { add: func(...) }`）时，codegen 把 8 字节 fn 指针存进
@@ -86,6 +195,29 @@
   全场。default 60s / ci profile 120s（对齐 2 vCPU runner）。全量 nextest 复跑绿：
   4623 passed / 0 failed / 7 skipped。（0.34.36 补记：原 `test-timeout` 键为
   nextest 不识别的幽灵键，硬上限实际由 slow-timeout 承载，已清理。）
+- **0.34.35b｜M-001 extern 符号真实命名（L1 分裂）**：extern 符号默认直接使用
+  声明名（`func strlen` 链接 C 库的 `strlen`，与 VM 侧 `lib.get(name)` 一致），
+  `__mimi_extern_` 前缀机制移除；内部测试桩经显式完整符号名保留
+  （`__mimi_extern_test_*`）。LLVM 侧先查模块复用同名兼容符号（签名不兼容
+  → fail-loud 诚实拒绝，不 mangle 成连不上的名字）；`demos/14_ffi.mimi`
+  端到端链接真实 libc 可跑；
+- **0.34.35b｜M-006 dlopen ABI 测试族**：`--shared` + C dlopen 往返探针常规化——
+  编译 mimi 共享库 → C 探针 dlopen/dlsym 调用导出函数 → 校验返回值（
+  `build_shared.rs` `dlopen_roundtrip` helper，8B/16B/24B/混合 SSE 形状矩阵 +
+  f32 缺位负测试）；
+- **0.34.35b｜M-011③ fn 字段直接调用诚实拒绝**：`vt.add(1, 2)` 字段直接调用
+  此前 E0207 吞参静默错值；现 E0223 明确诊断
+  （"field 'add' of 'VTable' is a function value and cannot be invoked directly
+  on the record"）+ help 指导（bind 后调用），audit_fix_checker 回归绿；
+- **0.34.35c｜N-3 component-ir 警告洪水闭合**：四个 trap 运行时函数
+  （mimi_trap_overflow/div_by_zero/div_overflow/float_not_finite）登记 Component
+  IR 注册表（component/gen.rs），构建不再刷屏
+  `get_runtime_fn("mimi_trap_*") not in Component IR registry`；
+- **0.34.35c｜M-003/016/017 FFI 文档矛盾统一**：ffi-guide §4 i32 宽度改正
+  （int32_t，与 ffi-type-mapping 一致）；`mimi run` 非零退出码回显
+  （`-> <exit_code>`）行为文档化（readme/07-cli.md）；spec §7.4 ffi
+  slice/buffer 标注"未实现（0.2 评估）"；devdocs ffi-1.0-surface-eval §5
+  已就绪清单更正注记（M-010/N-1 实证为假）；
 
 ### 0.34.34 — i32 算术语义钉死：SD-7 trap 对等 + O1 毒值修复（L1 双后端等价闭环）
 

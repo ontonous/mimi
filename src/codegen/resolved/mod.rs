@@ -27,7 +27,8 @@ use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
 
 use self::eligibility::{
-    eligible_function_ids, require_resolved_native_program, UnsupportedResolvedNode,
+    eligible_function_ids_with_stats, require_resolved_native_program, DispatchStats,
+    UnsupportedResolvedNode,
 };
 use self::types::llvm_type_for_resolved;
 
@@ -37,12 +38,18 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
 
 /// Returns the set of function NodeIds eligible for resolved native compilation.
 /// Returns None if program-level blockers prevent any resolved compilation.
+/// Also returns structured dispatch stats (0.34.40, MIMI_STAT=1).
 pub(super) fn resolved_eligible_functions(
     program: &CheckedProgram,
 ) -> Option<std::collections::BTreeSet<NodeId>> {
-    match eligible_function_ids(program) {
-        Ok(set) if !set.is_empty() => Some(set),
-        Ok(_) => {
+    match eligible_function_ids_with_stats(program) {
+        Ok((set, stats)) if !set.is_empty() => {
+            emit_dispatch_stats(&stats);
+            Some(set)
+        }
+        Ok((_set, stats)) => {
+            // Emit stats even when nothing is eligible (fallback rate = 1.0).
+            emit_dispatch_stats(&stats);
             if std::env::var("MIMI_VERBOSE").is_ok() {
                 eprintln!(
                     "info: resolved dispatch: 0 eligible functions (all filtered per-function)"
@@ -55,6 +62,35 @@ pub(super) fn resolved_eligible_functions(
                 eprintln!("info: resolved dispatch blocked: {}", blocker.reason);
             }
             None
+        }
+    }
+}
+
+/// When `MIMI_STAT=1`, write the structured dispatch report as JSON to
+/// `MIMI_STAT_OUT` (default: `target/mimi-stat/<program>.json`).
+pub(super) fn emit_dispatch_stats(stats: &DispatchStats) {
+    if std::env::var("MIMI_STAT").map_or(false, |v| v == "1") {
+        let out_dir = std::env::var("MIMI_STAT_OUT").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("mimi-stat")
+                .to_string_lossy()
+                .to_string()
+        });
+        let dir = std::path::Path::new(&out_dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("warning: mimi-stat: cannot create {}: {}", out_dir, e);
+            return;
+        }
+        let file_name = format!("{}.json", stats.program);
+        let path = dir.join(file_name);
+        match serde_json::to_string_pretty(stats) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("warning: mimi-stat: cannot write {}: {}", path.display(), e);
+                }
+            }
+            Err(e) => eprintln!("warning: mimi-stat: serialize: {}", e),
         }
     }
 }
@@ -7051,7 +7087,7 @@ func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
                 .values()
                 .filter(|f| !f.is_comptime)
                 .collect();
-            let eligible = eligible_function_ids(&program);
+            let eligible = eligible_function_ids_with_stats(&program).map(|(set, _stats)| set);
 
             let eligible_set = match &eligible {
                 Ok(set) => set.clone(),
