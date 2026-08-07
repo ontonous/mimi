@@ -1019,14 +1019,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // L6: claim a returned custom-enum payload box (caller
                 // re-registers via EnumBox). Mirrors func.rs emit_return.
                 self.claim_returned_enum_box(val, ret_type)?;
-                let ensures = self.ensures_stmts.clone();
-                for ensures_expr in &ensures {
-                    self.compile_contract_assert(
-                        ensures_expr,
-                        vars,
-                        super::scope::ContractPhase::Ensures,
-                    )?;
-                }
+                // 0.34.41 第二档: ensures with `result` binding (was unbound
+                // here — "undefined variable 'result'" family).
+                self.compile_ensures_asserts(Some(val), ret_type, vars)?;
                 self.pop_shared_scope()?;
                 self.flush_heap_scopes_to_boundary()?;
                 // 0.34.36: run the method's defers on the early-return path
@@ -1039,14 +1034,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Ok(true);
             }
             Stmt::Return(None) => {
-                let ensures = self.ensures_stmts.clone();
-                for ensures_expr in &ensures {
-                    self.compile_contract_assert(
-                        ensures_expr,
-                        vars,
-                        super::scope::ContractPhase::Ensures,
-                    )?;
-                }
+                self.compile_ensures_asserts(None, ret_type, vars)?;
                 self.pop_shared_scope()?;
                 self.flush_heap_scopes_to_boundary()?;
                 self.pop_defer_scope(vars)?;

@@ -15,7 +15,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 
 use crate::ast::BinOp;
 use crate::codegen::{CallSiteValueExt, CodeGenerator};
-use crate::core::ir::ResolvedFStringPart;
+use crate::core::ir::{ContractKind, ResolvedFStringPart};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
     CheckedConversion, CheckedConversionKind, CheckedProgram, FunctionTypeAbi, NodeId,
@@ -106,6 +106,10 @@ struct ResolvedVarEntry<'ctx> {
 struct ResolvedFrame<'ctx> {
     owner: NodeId,
     locals: BTreeMap<ResolvedLocalId, ResolvedVarEntry<'ctx>>,
+    /// 0.34.41 第二档: entry snapshots for `old(x)` occurrences in ensures
+    /// conditions, keyed by the NodeId of the `Old` expression occurrence.
+    /// Empty unless `verify_contracts` is on and the callable has ensures.
+    old_snapshots: BTreeMap<NodeId, ResolvedVarEntry<'ctx>>,
 }
 
 /// Loop context for `break`/`continue` lowering.
@@ -508,8 +512,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let mut frame = ResolvedFrame {
             owner: callable.owner.clone(),
             locals: BTreeMap::new(),
+            old_snapshots: BTreeMap::new(),
         };
         self.bind_parameters(callable, function, &mut frame)?;
+        // 0.34.41 第二档: contract guard emission (--verify-contracts).
+        // Mirrors legacy func.rs ordering: requires asserts run at entry after
+        // parameter binding, before the body; old() snapshots are captured at
+        // entry so postconditions observe pre-call values.
+        if self.generator.verify_contracts && !callable.contracts.is_empty() {
+            self.emit_contract_prologue(callable, &mut frame)?;
+        }
         let value = self.emit_block(&callable.body, &callable.body.root, &mut frame)?;
         if self.current_block_terminated() {
             // An early Return statement already emitted its path-specific
@@ -539,6 +551,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             }
         };
         let value = self.coerce_to(value, result_type)?;
+        // 0.34.41 第二档: ensures guards before any return cleanup (legacy
+        // emit_return checks ensures before heap teardown).
+        self.emit_ensures_checks(callable, Some(value), &mut frame)?;
         // Determine whether the return type transitively owns heap data.
         // If so, drain the heap scope (caller takes ownership) instead of
         // freeing — otherwise the returned pointer(s) dangle.
@@ -606,6 +621,409 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 .insert(local_id.clone(), ResolvedVarEntry { storage, llvm_type });
         }
         Ok(())
+    }
+
+    // ── 0.34.41 第二档: contract guard emission (--verify-contracts) ──────
+    //
+    // Parity target: legacy func.rs/scope.rs. Requires asserts at entry after
+    // parameter binding; ensures asserts at every return point with a `result`
+    // binding; `old(x)` loads entry snapshots. Violation aborts with an E0808
+    // message (same shape as legacy; condition text degrades to span
+    // coordinates — the resolved IR has no surface renderer, and the VM's own
+    // message prints the evaluated condition value, so cross-backend text
+    // equality was never a contract).
+
+    /// Emit requires guards and capture old() snapshots at function entry.
+    fn emit_contract_prologue(
+        &mut self,
+        callable: &crate::core::ResolvedCallable,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let owner = self.callable_symbol(&callable.owner)?.to_string();
+        // 1. Snapshot every `old(...)` occurrence referenced by an ensures
+        //    condition. Legacy only snapshots idents actually referenced via
+        //    old() (CG-H10); here each Old occurrence snapshots its inner
+        //    expression evaluated AT ENTRY (parameters only are bound so far).
+        let mut old_nodes: Vec<&crate::core::ResolvedExpr> = Vec::new();
+        for contract in &callable.contracts {
+            if matches!(contract.kind, ContractKind::Ensures) {
+                Self::collect_old_nodes(&contract.condition, &mut old_nodes);
+            }
+        }
+        for old_node in old_nodes {
+            let crate::core::ResolvedExprKind::Old(inner) = &old_node.kind else {
+                continue;
+            };
+            let value = self.emit_expr(inner, frame)?;
+            let llvm_type = self.lower_type(&old_node.ty)?;
+            let storage = self.generator.build_alloca(llvm_type, "old_snapshot")?;
+            self.generator.build_store(storage, value)?;
+            frame.old_snapshots.insert(
+                old_node.node_id.clone(),
+                ResolvedVarEntry { storage, llvm_type },
+            );
+        }
+        // 2. Requires guards in declaration order.
+        for contract in &callable.contracts {
+            if matches!(contract.kind, ContractKind::Requires) {
+                self.emit_contract_assert(&contract.condition, "requires", &owner, frame)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit ensures guards for one return point. `value` is the (already
+    /// coerced) return value; `None` for a bare `return;` (unit stores zero,
+    /// matching legacy).
+    fn emit_ensures_checks(
+        &mut self,
+        callable: &crate::core::ResolvedCallable,
+        value: Option<BasicValueEnum<'ctx>>,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        if !self.generator.verify_contracts {
+            return Ok(());
+        }
+        let ensures: Vec<&crate::core::ResolvedContract> = callable
+            .contracts
+            .iter()
+            .filter(|contract| matches!(contract.kind, ContractKind::Ensures))
+            .collect();
+        if ensures.is_empty() {
+            return Ok(());
+        }
+        let owner = self.callable_symbol(&callable.owner)?.to_string();
+        // Bind the desugared `result` pseudo-local (lower.rs ensures lowering
+        // registers `{owner}/contract-result/local` with the signature result
+        // type) to the actual return value.
+        let result_type = self.lower_type(&callable.signature.result)?;
+        let result_alloca = self.generator.build_alloca(result_type, "result")?;
+        let stored = value.unwrap_or_else(|| result_type.const_zero());
+        self.generator.build_store(result_alloca, stored)?;
+        let result_local = ResolvedLocalId(NodeId(format!(
+            "{}/contract-result/local",
+            callable.owner.0
+        )));
+        let prior = frame.locals.insert(
+            result_local.clone(),
+            ResolvedVarEntry {
+                storage: result_alloca,
+                llvm_type: result_type,
+            },
+        );
+        let outcome = (|| {
+            for contract in &ensures {
+                self.emit_contract_assert(&contract.condition, "ensures", &owner, frame)?;
+            }
+            Ok(())
+        })();
+        // Restore the frame: the pseudo-local must not leak past the check
+        // (the body never binds it).
+        match prior {
+            Some(entry) => {
+                frame.locals.insert(result_local, entry);
+            }
+            None => {
+                frame.locals.remove(&result_local);
+            }
+        }
+        outcome
+    }
+
+    /// Compile one contract condition as a runtime assert: cond → pass BB /
+    /// fail BB (E0808 message + mimi_runtime_abort + unreachable).
+    fn emit_contract_assert(
+        &mut self,
+        condition: &crate::core::ResolvedExpr,
+        phase: &str,
+        owner: &str,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let cond = self.emit_expr(condition, frame)?;
+        let cond_bool = match cond {
+            BasicValueEnum::IntValue(int_value) => {
+                if int_value.get_type().get_bit_width() == 1 {
+                    int_value
+                } else {
+                    self.generator
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            int_value,
+                            int_value.get_type().const_zero(),
+                            "contract_cond_ne",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("contract cond: {e}")))?
+                }
+            }
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "contract condition is not boolean ({:?})",
+                    other.get_type()
+                )))
+            }
+        };
+        let function = self
+            .generator
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| {
+                CompileError::LlvmError("no current function for contract assert".into())
+            })?;
+        // NodeId-suffixed BB names: unique per condition occurrence, no
+        // counter state (legacy needed contract_bb_counter; the resolved IR
+        // carries stable identity).
+        let suffix = condition.node_id.0.replace(['/', ':', ' '], "_");
+        let pass_bb = self
+            .generator
+            .context
+            .append_basic_block(function, &format!("contract_pass_{suffix}"));
+        let fail_bb = self
+            .generator
+            .context
+            .append_basic_block(function, &format!("contract_fail_{suffix}"));
+        self.generator.build_cond_br(cond_bool, pass_bb, fail_bb)?;
+        self.generator.builder.position_at_end(fail_bb);
+        let message = self.contract_violation_message(condition, phase, owner);
+        let msg_ptr = self
+            .generator
+            .builder
+            .build_global_string_ptr(&message, "contract_msg")
+            .map_err(|e| CompileError::LlvmError(format!("contract msg: {e}")))?;
+        let abort_fn = self.generator.get_or_declare_abort_fn();
+        self.generator.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                msg_ptr.as_pointer_value(),
+            )],
+            "contract_abort",
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("contract unreachable: {e}")))?;
+        self.generator.builder.position_at_end(pass_bb);
+        Ok(())
+    }
+
+    /// Build the embedded E0808 violation message. Shape mirrors legacy
+    /// scope.rs build_contract_violation_message; the resolved IR has no
+    /// surface renderer, so the condition text slot carries the span
+    /// coordinates directly (still machine-first, still exact).
+    fn contract_violation_message(
+        &self,
+        condition: &crate::core::ResolvedExpr,
+        phase: &str,
+        owner: &str,
+    ) -> String {
+        let pretty_owner = match owner.strip_suffix("__method") {
+            Some(stripped) => stripped.replace("__", "::"),
+            None => owner.to_string(),
+        };
+        let mut message = format!("[E0808] {phase} condition failed for '{pretty_owner}'");
+        let span = condition.origin.user_span();
+        if span.start_line > 0 {
+            let label = self.generator.contract_location_label(span.source_id);
+            let columns = if span.start_col > 0 {
+                if span.end_line == span.start_line && span.end_col > span.start_col {
+                    format!("{}-{}", span.start_col, span.end_col)
+                } else {
+                    format!("{}", span.start_col)
+                }
+            } else {
+                String::new()
+            };
+            message.push_str(&format!(" @ {}:{}:{}", label, span.start_line, columns));
+        }
+        message
+            .push_str(" | hint: rebuild without --verify-contracts to disable contract checking.");
+        message
+    }
+
+    /// Collect every `Old` occurrence in a contract condition tree.
+    fn collect_old_nodes<'a>(
+        expression: &'a crate::core::ResolvedExpr,
+        out: &mut Vec<&'a crate::core::ResolvedExpr>,
+    ) {
+        use crate::core::ResolvedExprKind as K;
+        match &expression.kind {
+            K::Old(_) => {
+                out.push(expression);
+            }
+            K::Literal(_)
+            | K::Constant(_)
+            | K::Callable(_)
+            | K::DefaultArgument { .. }
+            | K::Load(_)
+            | K::ComptimeValue(_)
+            | K::TypeValue(_) => {}
+            K::FString(parts) => {
+                for part in parts {
+                    if let crate::core::ir::ResolvedFStringPart::Interpolation(inner) = part {
+                        Self::collect_old_nodes(inner, out);
+                    }
+                }
+            }
+            K::Project { value, .. }
+            | K::TypeOf(value)
+            | K::Spawn(value)
+            | K::Await(value)
+            | K::Try { value, .. } => Self::collect_old_nodes(value, out),
+            K::Binary { left, right, .. } => {
+                Self::collect_old_nodes(left, out);
+                Self::collect_old_nodes(right, out);
+            }
+            K::Unary { operand, .. } => Self::collect_old_nodes(operand, out),
+            K::Call(call) => {
+                for argument in &call.arguments {
+                    Self::collect_old_nodes(&argument.value, out);
+                }
+            }
+            K::Tuple(items) | K::List(items) | K::Set(items) => {
+                for item in items {
+                    Self::collect_old_nodes(item, out);
+                }
+            }
+            K::Map(entries) => {
+                for (key, value) in entries {
+                    Self::collect_old_nodes(key, out);
+                    Self::collect_old_nodes(value, out);
+                }
+            }
+            K::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                Self::collect_old_nodes(value, out);
+                Self::collect_old_nodes(iterable, out);
+                if let Some(guard) = guard {
+                    Self::collect_old_nodes(guard, out);
+                }
+            }
+            K::OptionalChain { .. } => {}
+            K::Record { fields, .. } => {
+                for field in fields {
+                    Self::collect_old_nodes(&field.value, out);
+                }
+            }
+            K::Block(block) => Self::collect_old_block(block, out),
+            K::Scope { body, .. } | K::Comptime(body) | K::Quote(body) => {
+                Self::collect_old_block(body, out)
+            }
+            K::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                Self::collect_old_nodes(condition, out);
+                Self::collect_old_block(then_block, out);
+                Self::collect_old_block(else_block, out);
+            }
+            K::Match { scrutinee, arms } => {
+                Self::collect_old_nodes(scrutinee, out);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        Self::collect_old_nodes(guard, out);
+                    }
+                    Self::collect_old_nodes(&arm.body, out);
+                }
+            }
+            K::Range { start, end } => {
+                Self::collect_old_nodes(start, out);
+                Self::collect_old_nodes(end, out);
+            }
+            K::Slice { target, start, end } => {
+                Self::collect_old_nodes(target, out);
+                if let Some(start) = start {
+                    Self::collect_old_nodes(start, out);
+                }
+                if let Some(end) = end {
+                    Self::collect_old_nodes(end, out);
+                }
+            }
+            K::Cast { value, .. } => Self::collect_old_nodes(value, out),
+            K::Lambda(_) => {
+                // Lambda bodies bind their own parameters; an old() inside one
+                // cannot reference this callable's entry snapshot. Skipping is
+                // the fail-closed shape: such a condition would evaluate the
+                // inner at check time instead of the snapshot — the checker
+                // does not admit old() inside contract lambdas today.
+            }
+        }
+    }
+
+    /// Block companion of collect_old_nodes (statements + trailing result).
+    fn collect_old_block<'a>(
+        block: &'a crate::core::ResolvedBlock,
+        out: &mut Vec<&'a crate::core::ResolvedExpr>,
+    ) {
+        for statement in &block.statements {
+            match &statement.kind {
+                crate::core::ResolvedStmtKind::Bind {
+                    initializer: Some(value),
+                    ..
+                }
+                | crate::core::ResolvedStmtKind::Assign { value, .. }
+                | crate::core::ResolvedStmtKind::Expr(value)
+                | crate::core::ResolvedStmtKind::Return {
+                    value: Some(value), ..
+                }
+                | crate::core::ResolvedStmtKind::Break(Some(value)) => {
+                    Self::collect_old_nodes(value, out)
+                }
+                crate::core::ResolvedStmtKind::Contract { condition, .. } => {
+                    Self::collect_old_nodes(condition, out)
+                }
+                crate::core::ResolvedStmtKind::Math(expressions) => {
+                    for expression in expressions {
+                        Self::collect_old_nodes(expression, out);
+                    }
+                }
+                crate::core::ResolvedStmtKind::IfLet {
+                    initializer,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    Self::collect_old_nodes(initializer, out);
+                    Self::collect_old_block(then_block, out);
+                    if let Some(else_block) = else_block {
+                        Self::collect_old_block(else_block, out);
+                    }
+                }
+                crate::core::ResolvedStmtKind::While { condition, body } => {
+                    Self::collect_old_nodes(condition, out);
+                    Self::collect_old_block(body, out);
+                }
+                crate::core::ResolvedStmtKind::WhileLet {
+                    initializer, body, ..
+                }
+                | crate::core::ResolvedStmtKind::For {
+                    iterable: initializer,
+                    body,
+                    ..
+                } => {
+                    Self::collect_old_nodes(initializer, out);
+                    Self::collect_old_block(body, out);
+                }
+                crate::core::ResolvedStmtKind::Loop(body)
+                | crate::core::ResolvedStmtKind::Scope { body, .. } => {
+                    Self::collect_old_block(body, out)
+                }
+                crate::core::ResolvedStmtKind::Pinned { value, body, .. } => {
+                    Self::collect_old_nodes(value, out);
+                    Self::collect_old_block(body, out);
+                }
+                _ => {}
+            }
+        }
+        if let Some(result) = &block.result {
+            Self::collect_old_nodes(result, out);
+        }
     }
 
     fn emit_block(
@@ -701,6 +1119,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let value = value
                     .map(|value| self.coerce_to(value, result_type))
                     .transpose()?;
+                // 0.34.41 第二档: ensures guards on early return paths too
+                // (legacy emit_return is the single funnel there; here every
+                // Return statement funnels its own check before the ret).
+                self.emit_ensures_checks(
+                    self.program.callable(&frame.owner).ok_or_else(|| {
+                        CompileError::Unsupported("callable absent for return ensures".into())
+                    })?,
+                    value,
+                    frame,
+                )?;
                 self.generator.build_return(
                     value
                         .as_ref()
@@ -2075,9 +2503,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Slice { target, start, end } => {
                 self.emit_slice(target, start.as_deref(), end.as_deref(), frame)
             }
-            // 0.32.32: Old expression (contract `old(x)`). Identity in codegen —
-            // contracts are erased at runtime; only the verifier distinguishes old().
-            ResolvedExprKind::Old(inner) => self.emit_expr(inner, frame),
+            // 0.32.32: Old expression (contract `old(x)`). Identity in codegen
+            // when contracts are erased; under --verify-contracts (0.34.41
+            // 第二档) it loads the entry snapshot captured by
+            // emit_contract_prologue.
+            ResolvedExprKind::Old(inner) => {
+                if let Some(entry) = frame.old_snapshots.get(&expression.node_id) {
+                    let entry = *entry;
+                    return self
+                        .generator
+                        .build_load(entry.llvm_type, entry.storage, "old_load");
+                }
+                self.emit_expr(inner, frame)
+            }
             // 0.32.33: Comprehension ([value for pattern in iterable if guard]).
             // Lowered to: pre-allocate buffer of iterable_len, loop, filter, store, build list.
             ResolvedExprKind::Comprehension {
@@ -5964,6 +6402,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let mut lambda_frame = ResolvedFrame {
             owner: frame.owner.clone(),
             locals: BTreeMap::new(),
+            old_snapshots: BTreeMap::new(),
         };
         for (i, local_id) in lambda.parameters.iter().enumerate() {
             let metadata = callable_body.locals.get(local_id).ok_or_else(|| {

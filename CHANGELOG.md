@@ -2,11 +2,11 @@
 
 ## [Unreleased] — 0.1.4-dev
 
-### 0.34.41 — contracts 进 resolved slice 第一档：默认擦除路径带合约函数转正（AF-4 前置 2①）
+### 0.34.41 — contracts 进 resolved slice：默认擦除转正（第一档）+ 运行时守卫发射（第二档）（AF-4 前置 2①）
 
 > Phase G 第三个 sprint。安全分档策略：**第一档**让带合约函数在默认路径
-> （verify_contracts=false，合约擦除）脱离 legacy；第二档（运行时守卫发射接入
-> resolved emitter）待做，当前 --verify-contracts 仍 fail-closed 到 legacy。
+> （verify_contracts=false，合约擦除）脱离 legacy；**第二档**把运行时守卫发射
+> 接入 resolved emitter，解除 --verify-contracts 的 fail-closed。两档均已落地。
 
 - **第一档落地**：`require_resolved_native_callable_with_source` 加
   `verify_contracts` 门——verify_contracts=false（默认）时带合约函数进 resolved
@@ -24,6 +24,29 @@
   `dual_assert_contract_violation`（断言 VM + codegen 都 trap 且含 E0808）；
 - **门禁**：全量 5268 lib 绿（+2 新测试）/ clippy -D warnings 绿 / fmt 干净 /
   语料零 SIGSEGV（112 程序编译成功）；
+- **第二档落地（resolved 守卫发射）**：`emit_contract_prologue`（入口 old() 快照
+  按 Old 节点 NodeId 键控 + requires 声明序断言）+ `emit_ensures_checks`
+  （fall-through 与每个早退 Return 两处漏斗，`result` 绑定 lower.rs
+  `{owner}/contract-result/local` 伪 local，检查后恢复 frame）+
+  `emit_contract_assert`（E0808 abort 消息对齐 legacy scope.rs 格式，BB 名以
+  条件 NodeId 去重免计数器）；`collect_old_nodes`/`collect_old_block` 全 variant
+  递归收集；`ResolvedFrame.old_snapshots` + `Old` arm 快照加载（无快照时保持
+  擦除恒等语义）；eligibility 的 verify_contracts fail-closed gate 删除
+  （条件表达式仍由 require_block Contract arm slice 检查，不支持则 per-function
+  降级 legacy，不静默丢守卫）；消息中条件文本降级为 span 坐标（resolved IR 无
+  surface 渲染器；VM 本身打印的是求值结果值，跨后端文本平等本就不存在）；
+- **附带修复存量 L1（第二档测试暴露）**：legacy 早退 Return 六处 ensures 断言
+  无 `result` 绑定——`block.rs` compile_block 值/None 臂 + 块表达式路径值/None
+  臂 + `actors.rs` 方法体值/None 臂，任何引用 `result` 的 ensures 在这些路径
+  直接编译失败（undefined variable 'result'）；抽 `compile_ensures_asserts`
+  共享 helper（scope.rs，result alloca + 绑定 + 断言，对齐 func.rs emit_return
+  语义）统一六处；
+- **第二档验证**：探针矩阵 p1-p6 双端对等（requires 违反 / ensures 违反 /
+  早退 Return 违反 / old()+result 通过 / 多合约函数，VM 与 native 逐项一致）；
+  dual 回归 ×3（`dual_contract_verify_ensures_old_result_on_resolved` /
+  `..._early_return_ensures_violation` / `..._multi_clause_pass`）；全量 5271
+  lib 绿；门禁 check 无回退（fallback_rate 0.9609 不变——第二档只动
+  verify 路径，默认模式分派第一档已定型）；
 
 ### 0.34.40 — resolved dispatch 度量门禁（AF-4 前置 1，纯增量基建）
 
