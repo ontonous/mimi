@@ -1398,6 +1398,11 @@ Typed Mimi IR
 | `ffi c_str` | Explicit NUL-terminated C string |
 | `ffi buffer<T>` | owned `{ptr,len,cap,allocator}` buffer |
 
+> **未实现（0.2 评估）**：`ffi slice`/`ffi slice_mut`/`ffi buffer` 为纸面特性——
+> 当前 parser/codegen 零支持（M-009 实证），与指针读写同属 0.2 Component IR
+> 特性轨（见 `devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md` §3 登记）。
+> 语言层 `view/mutate/consume` 权限模型不受影响。
+
 The `ffi view/mutate/owned` are Component IR ABI modes. Mimi surface language continues to only use `view/mutate/consume`; no parallel permission mental model.
 
 ### 7.5 Handle `[stable]`

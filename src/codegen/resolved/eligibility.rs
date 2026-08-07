@@ -4,6 +4,80 @@ use crate::core::{
     ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
 };
 
+/// Structured per-function resolved/legacy dispatch statistics (0.34.40,
+/// AF-4 前置 1 度量门禁). Emitted as JSON when `MIMI_STAT=1`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DispatchStats {
+    /// Entry program name (basename, for correlation).
+    pub program: String,
+    /// Total non-comptime functions in the program.
+    pub total_functions: usize,
+    /// Functions compiled through the resolved native emitter.
+    pub eligible: usize,
+    /// Functions left to the legacy emitter (eligibility skip).
+    pub legacy_fallback: usize,
+    /// Eligible functions whose emission failed at codegen time
+    /// (verify/emit error → legacy recompile).
+    pub emit_failed: usize,
+    /// Skip-reason histogram (reason string → count).
+    pub skip_reasons: std::collections::BTreeMap<String, usize>,
+}
+
+impl DispatchStats {
+    /// Fallback rate = legacy / total. Total is 0 → 1.0 (nothing eligible).
+    pub fn fallback_rate(&self) -> f64 {
+        if self.total_functions == 0 {
+            1.0
+        } else {
+            self.legacy_fallback as f64 / self.total_functions as f64
+        }
+    }
+
+    fn record_skip(&mut self, reason: impl Into<String>) {
+        let key = normalize_skip_reason(&reason.into());
+        *self.skip_reasons.entry(key).or_insert(0) += 1;
+        self.legacy_fallback += 1;
+    }
+}
+
+/// 0.34.40: Normalize a skip reason into a stable histogram key.
+///
+/// Eligibility rejection messages from `require_expr` / `require_block` embed
+/// full `Debug` renderings of `ResolvedExpr` / `ResolvedCall` (including
+/// `@external:<hash>` source identities and `NodeId(...)` internals). Those
+/// are unstable across sessions/commits and would make the fallback-rate
+/// baseline gate flaky + bloat the JSON. Collapse any reason carrying such
+/// unstable markers into a coarse, stable category keyed by the leading noun.
+fn normalize_skip_reason(reason: &str) -> String {
+    let unstable = reason.contains("NodeId(")
+        || reason.contains("@external:")
+        || reason.contains("ResolvedCall {")
+        || reason.contains("ResolvedExpr {")
+        || reason.contains("ResolvedPattern {")
+        || reason.contains("ResolvedTypeId(")
+        || reason.contains("NominalTypeId(")
+        || reason.contains("source_id: SourceId(");
+    if !unstable {
+        return reason.to_string();
+    }
+    if reason.starts_with("expression ") || reason.starts_with("try inner") {
+        return "unsupported expression".to_string();
+    }
+    if reason.starts_with("statement ") {
+        return "unsupported statement".to_string();
+    }
+    if reason.starts_with("pattern ") {
+        return "unsupported pattern".to_string();
+    }
+    if reason.starts_with("type ") {
+        return "unsupported type".to_string();
+    }
+    if reason.starts_with("callee ") {
+        return "unsupported callee".to_string();
+    }
+    "unsupported node".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UnsupportedResolvedNode {
     pub owner: NodeId,
@@ -123,9 +197,12 @@ pub(super) fn require_resolved_native_program(
 ///
 /// Program-level blockers (flows, actors, sessions) still cause a full
 /// rejection because they require special compilation infrastructure.
-pub(super) fn eligible_function_ids(
+/// Per-function eligibility with structured dispatch statistics (0.34.40).
+/// Returns the eligible set plus a stats record covering ALL non-comptime
+/// functions (eligible count + skip-reason histogram).
+pub(super) fn eligible_function_ids_with_stats(
     program: &CheckedProgram,
-) -> Result<std::collections::BTreeSet<NodeId>, UnsupportedResolvedNode> {
+) -> Result<(std::collections::BTreeSet<NodeId>, DispatchStats), UnsupportedResolvedNode> {
     // 0.32.24: Actors/sessions/protocols/capabilities/externs unblocked at
     // program level. These programs contain regular helper functions (main,
     // utility functions) that don't involve actor/session/protocol compilation.
@@ -181,16 +258,31 @@ pub(super) fn eligible_function_ids(
     // defined in a different source file).
     let entry_source = program.entry_span().map(|s| s.source_id);
     let verbose = std::env::var("MIMI_VERBOSE").is_ok();
+    let mut stats = DispatchStats {
+        // 0.34.40: program identity is the entry source id (u32). The
+        // filename is correlated at the caller / script layer; codegen has
+        // no SourceRegistry access from CheckedProgram.
+        program: entry_source
+            .map(|sid| format!("src-{}", sid.raw()))
+            .unwrap_or_else(|| "src-0".to_string()),
+        ..Default::default()
+    };
     let mut eligible = std::collections::BTreeSet::new();
     for function in program.functions().values() {
+        if function.is_comptime {
+            continue; // comptime functions are folded, not compiled.
+        }
+        stats.total_functions += 1;
         let name = &function.qualified_name;
-        if function.is_comptime || function.is_async || function.extern_abi.is_some() {
+        if function.is_async || function.extern_abi.is_some() {
+            stats.record_skip("async/extern");
             if verbose {
                 eprintln!("info: resolved skip '{}': comptime/async/extern", name);
             }
             continue;
         }
         if !function.generics.is_empty() || function.qualified_name.contains("::") {
+            stats.record_skip("generics/qualified");
             if verbose {
                 eprintln!("info: resolved skip '{}': generics/qualified", name);
             }
@@ -200,6 +292,7 @@ pub(super) fn eligible_function_ids(
         // generated by the runtime system). Their bodies may reference runtime
         // symbols the resolved emitter doesn't track, causing SIGSEGV.
         if !matches!(function.origin, crate::core::Origin::User(_)) {
+            stats.record_skip("non-user origin");
             if verbose {
                 eprintln!("info: resolved skip '{}': non-user origin", name);
             }
@@ -212,6 +305,7 @@ pub(super) fn eligible_function_ids(
         // compiled through the resolved emitter.
         if let (Some(entry_src), Origin::User(span)) = (entry_source, &function.origin) {
             if span.source_id != entry_src {
+                stats.record_skip("module file (source_id mismatch)");
                 if verbose {
                     eprintln!(
                         "info: resolved skip '{}': module file (source_id mismatch)",
@@ -222,6 +316,7 @@ pub(super) fn eligible_function_ids(
             }
         }
         let Some(callable) = program.callable(&function.node_id) else {
+            stats.record_skip("no ResolvedCallable");
             if verbose {
                 eprintln!("info: resolved skip '{}': no ResolvedCallable", name);
             }
@@ -230,15 +325,17 @@ pub(super) fn eligible_function_ids(
         match require_resolved_native_callable_with_source(program, callable, entry_source) {
             Ok(()) => {
                 eligible.insert(function.node_id.clone());
+                stats.eligible += 1;
             }
             Err(reason) => {
+                stats.record_skip(reason.reason.clone());
                 if verbose {
                     eprintln!("info: resolved skip '{}': {}", name, reason.reason);
                 }
             }
         }
     }
-    Ok(eligible)
+    Ok((eligible, stats))
 }
 
 pub(super) fn require_resolved_native_callable(
