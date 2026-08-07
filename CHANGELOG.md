@@ -2,6 +2,34 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.42 — stdlib 模块函数体进 resolved slice：source_id workaround 根因化（AF-4 前置 2②）
+
+> Phase G 第四个 sprint。历史 SIGSEGV（0.32.8 std_strings/multiple_std_modules）
+> 当年用 source_id 过滤器整体屏蔽了 3848 个模块函数实例——本 sprint 实测根因
+> 并逐 slice 放开。**曲线点：fallback_rate 0.9609 → 0.3030**（eligible
+> 212→3781，+3569 转正，AF-4 迄今最大单步覆盖率收益）。
+
+- **根因实测**（与 AF-4 草案预判同框架）：gdb 抓崩在 LLVM
+  `LowerExpectIntrinsicPass`；`MIMI_DUMP_MODULE` 导出 IR 发现无终止符残桩函数。
+  链路：resolved emitter 发射失败后残桩留在模块 → legacy 重编的 skip 守卫用
+  surface `func.name` 查 `resolved_failed_functions`，而失败登记用 catalog
+  `qualified_name`（impl 方法两者不同，如 `char_at` vs `string_char_at`）→
+  查不到 → 残桩当“已编译”跳过 → 无效 IR 崩 pass pipeline；
+- **修复 ×3**：① `compile_subset` 两个失败分支（verify 失败 / emit Err）现场
+  清空残桩块（`clear_partial_body` 还原纯声明，符号保留供调用方引用）；
+  ② legacy skip 守卫改 `func.name` + LLVM 实际符号名双键查找；③ source_id
+  过滤器改白名单门 `module_bodies_lifted`（env `MIMI_RESOLVED_MODULE_BODIES`：
+  `=1` 全解除实验模式 / `=csv` 片段覆盖 / 未设=内建白名单 `prelude,mymath`，
+  按 `<frag>.mimi` 路径尾匹配防误放）；
+- **A/B 证据**（120 程序双模式 build+run 对比）：prelude 零回退 → +mymath
+  零回退 → +strings 回退 1（a1_verification 链接 undefined symbol
+  `string_char_at`——resolved trait 调用方指向的符号与 legacy 方法体所在
+  mangled 符号不同，trait dispatch 符号路由问题，显式裁剪登记 0.1.5）；
+  默认模式全语料 equivalent 101/120（其余为两侧同态既有噪音）；
+- **曲线纪律**：基线 dispatch-baseline.json 重生（3781/5425，0.3030），
+  门禁只降不升；覆盖率曲线单调不降 + 全量零新增失败即验收（允许部分模块，
+  strings/collections 登记 0.1.5）；
+
 ### 0.34.41 — contracts 进 resolved slice：默认擦除转正（第一档）+ 运行时守卫发射（第二档）（AF-4 前置 2①）
 
 > Phase G 第三个 sprint。安全分档策略：**第一档**让带合约函数在默认路径

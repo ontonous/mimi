@@ -307,6 +307,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             self.generator
                                 .resolved_failed_functions
                                 .insert(symbol.clone());
+                            // 0.34.42: clear the partial body HERE. The legacy
+                            // skip guard is keyed on surface func.name which
+                            // can differ from the LLVM symbol (impl method
+                            // mangling); a leftover terminator-less stub
+                            // segfaults LLVM's pass pipeline.
+                            self.clear_partial_body(llvm_fn);
                             failed += 1;
                             continue;
                         }
@@ -319,7 +325,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // will handle it by deleting the partial body and
                     // re-compiling from scratch.
                     let symbol = function.qualified_name.clone();
-                    self.generator.resolved_failed_functions.insert(symbol);
+                    self.generator
+                        .resolved_failed_functions
+                        .insert(symbol.clone());
+                    // 0.34.42: same clear-on-failure as the verify-fail arm —
+                    // never leave a terminator-less stub in the module.
+                    if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
+                        self.clear_partial_body(llvm_fn);
+                    }
                     if std::env::var("MIMI_VERBOSE").is_ok() {
                         eprintln!(
                             "warning: resolved emitter fallback for '{}': {}",
@@ -339,6 +352,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             );
         }
         Ok(count)
+    }
+
+    /// 0.34.42: delete every basic block of a partially-emitted function,
+    /// restoring it to a pure declaration. Keeps the symbol alive (callers
+    /// compiled by the resolved emitter hold value references) while making
+    /// the body slot reusable by whichever emitter recompiles it. Mirrors the
+    /// clear loop in func.rs compile_func_legacy_inner.
+    fn clear_partial_body(&self, function: inkwell::values::FunctionValue<'ctx>) {
+        unsafe {
+            // SAFETY: inkwell delete() 要求可变函数上下文；删除后块内引用不再使用。
+            while function.count_basic_blocks() > 0 {
+                if let Some(bb) = function.get_first_basic_block() {
+                    let _ = bb.delete();
+                }
+            }
+        }
     }
 
     fn callable_symbol(&self, owner: &NodeId) -> Result<&str, CompileError> {
