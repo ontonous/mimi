@@ -3180,8 +3180,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let (function, ret_type) = self.declare_func(func)?;
         // Skip functions already compiled by the resolved native emitter,
         // unless they failed emission — those need recompilation.
+        // 0.34.42: key the failed-set lookup on the ACTUAL LLVM symbol name.
+        // The resolved emitter records failures by catalog qualified_name
+        // (e.g. `string_char_at`), but legacy reaches this point with the
+        // surface func.name (`char_at`) while declare_func returns the
+        // mangled LLVM function. The old func.name-only lookup missed the
+        // mismatch, left the partial stub untouched (count_basic_blocks may
+        // even be 0 after bind_parameters-only emission), and the invalid
+        // terminator-less function segfaulted LLVM's pass pipeline.
+        let llvm_symbol = function.get_name().to_string_lossy().into_owned();
         if function.count_basic_blocks() != 0 {
-            if self.resolved_failed_functions.contains(&func.name) {
+            if self.resolved_failed_functions.contains(&func.name)
+                || self.resolved_failed_functions.contains(&llvm_symbol)
+            {
                 // Delete all basic blocks from the function, keeping the
                 // declaration intact. The legacy emitter will recompile the
                 // body from scratch. We cannot delete-and-redeclare because

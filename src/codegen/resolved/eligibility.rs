@@ -24,15 +24,6 @@ pub struct DispatchStats {
 }
 
 impl DispatchStats {
-    /// Fallback rate = legacy / total. Total is 0 → 1.0 (nothing eligible).
-    pub fn fallback_rate(&self) -> f64 {
-        if self.total_functions == 0 {
-            1.0
-        } else {
-            self.legacy_fallback as f64 / self.total_functions as f64
-        }
-    }
-
     fn record_skip(&mut self, reason: impl Into<String>) {
         let key = normalize_skip_reason(&reason.into());
         *self.skip_reasons.entry(key).or_insert(0) += 1;
@@ -309,8 +300,14 @@ pub(super) fn eligible_function_ids_with_stats(
         // source file than the entry point. Their bodies reference runtime
         // symbols and cross-emitter patterns that cause SIGSEGV when
         // compiled through the resolved emitter.
+        // 0.34.42 experiment/slice gate: MIMI_RESOLVED_MODULE_BODIES lifts
+        // this filter per module:
+        //   =1            lift for ALL module files (full experiment)
+        //   =<csv list>   lift only when the source disk path contains one
+        //                 of the fragments (e.g. "prelude", "prelude,mymath")
+        //   unset         keep the filter (production default)
         if let (Some(entry_src), Origin::User(span)) = (entry_source, &function.origin) {
-            if span.source_id != entry_src {
+            if span.source_id != entry_src && !module_bodies_lifted(program, span.source_id) {
                 stats.record_skip("module file (source_id mismatch)");
                 if verbose {
                     eprintln!(
@@ -347,6 +344,59 @@ pub(super) fn eligible_function_ids_with_stats(
         }
     }
     Ok((eligible, stats))
+}
+
+/// 0.34.42: decide whether the source_id module-file filter is lifted for a
+/// given source.
+///
+/// Resolution order:
+/// 1. `MIMI_RESOLVED_MODULE_BODIES=1` lifts globally (experiment mode);
+/// 2. `MIMI_RESOLVED_MODULE_BODIES=<csv>` lifts only sources whose disk
+///    path / canonical URI / registry key contains one fragment (overrides
+///    the default allowlist; an explicitly empty value lifts nothing);
+/// 3. unset: the BUILT-IN allowlist proven green by the 0.34.42 A/B corpus
+///    (120 programs, zero divergence): prelude + mymath. strings/collections
+///    remain filtered — their method bodies reach resolved callers through
+///    trait-dispatch symbols (`string_char_at` shape) whose bodies live under
+///    a differently-mangled legacy symbol (registered 0.1.5; the underlying
+///    partial-stub SIGSEGV itself was fixed this sprint).
+fn module_bodies_lifted(program: &CheckedProgram, source_id: crate::span::SourceId) -> bool {
+    let spec = match std::env::var("MIMI_RESOLVED_MODULE_BODIES") {
+        Ok(explicit) => explicit.trim().to_string(),
+        Err(_) => "prelude,mymath".to_string(),
+    };
+    if spec.is_empty() {
+        return false;
+    }
+    if spec == "1" {
+        return true;
+    }
+    let record = program.raw_ast().sources.record(source_id);
+    let haystacks: Vec<String> = match record {
+        Some(record) => {
+            let mut out = Vec::new();
+            if let Some(path) = &record.disk_path {
+                out.push(path.to_string_lossy().into_owned());
+            }
+            if let Some(uri) = &record.canonical_uri {
+                out.push(uri.clone());
+            }
+            out.push(record.key.as_str().to_string());
+            out
+        }
+        None => Vec::new(),
+    };
+    // Match on the module FILE NAME, not a bare substring — a fragment like
+    // "prelude" must not accidentally lift an entry file named
+    // "my_prelude_hack.mimi"... which is itself a path containing the module
+    // name, so require the std-path shape `<fragment>.mimi`.
+    let wanted: Vec<String> = spec
+        .split(',')
+        .map(|f| format!("{}.mimi", f.trim()))
+        .collect();
+    wanted
+        .iter()
+        .any(|w| haystacks.iter().any(|h| h.ends_with(w)))
 }
 
 pub(super) fn require_resolved_native_callable(
