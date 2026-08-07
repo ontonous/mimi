@@ -1986,6 +1986,46 @@ pub extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_cha
     unsafe { (*map_from_handle(handle)).inner.remove(&s).is_some() as i32 }
 }
 
+/// RT-H4 helper: probe whether `[ptr, ptr+len)` spans only mapped pages.
+/// Returns 1 on mapped, 0 otherwise. Never dereferences; mincore only.
+/// Used by legacy display codegen to distinguish an `Err(string)` slot that
+/// stores a bare NUL-terminated data pointer (mincore(field0) fails, field0
+/// is payload bytes) from one that stores a `{ptr,len}` struct pointer
+/// (mincore(field0) succeeds, field0 is the data pointer).
+#[no_mangle]
+pub extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> i64 {
+    if ptr.is_null() || len <= 0 {
+        return 0;
+    }
+    // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX
+    // functions; mincore only queries page mappings, never dereferences.
+    unsafe {
+        let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let start = ptr as usize;
+        let end = start.saturating_add(len as usize);
+        let first = start & !(page_size - 1);
+        let last = if end == 0 {
+            0
+        } else {
+            (end - 1) & !(page_size - 1)
+        };
+        let mut page = first;
+        loop {
+            let mut mvec: u8 = 0;
+            let r = libc::mincore(page as *mut std::ffi::c_void, page_size, &mut mvec);
+            if r != 0 {
+                return 0;
+            }
+            if page == last {
+                break;
+            }
+            page += page_size;
+        }
+        1
+    }
+}
+
 #[no_mangle]
 /// RT-H4 helper: treat a ValueHandle as a C string only if mincore says the
 /// page is mapped and a NUL terminator appears within a bounded scan.

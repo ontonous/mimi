@@ -2,6 +2,27 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.37 — 显示截断族修复：legacy 显示固定缓冲 → 精确尺寸组装
+
+> §8-#96/D-4 固定缓冲显示截断族全闭（台账 `devdocs/audit-unfixed-2026-08-05.md`）。
+> 实证复现：VM 404/305/606 字符 vs legacy 255/255/511（256B/512B/固定缓冲−1），静默数据丢失。
+> 全量 lib 测试 5260 → 5263 全绿（+3 回归）。
+
+- **显示四族固定缓冲 → sized_cat_parts 精确组装**：enum 128B snprintf（emit_enum_display）、
+  record est-size snprintf（emit_record_display）、Result 256B snprintf（emit_result_to_string_typed）、
+  Option 512B snprintf（emit_option_to_string）全部改为两遍 strlen 精确 malloc + memcpy 组装，
+  统一 out_slot+merge 注册 + 臂内局部 display_marker 生命周期模式（共享前置 marker 会跨臂
+  污染并释放 merge 注册的 wrap → UAF）；长 payload 双端字节一致（404/305/606 不再截断）；
+- **预存崩溃 bug 顺手闭合**：`Result<string,string>` 的 Err(string) 槽 legacy 存裸数据指针
+  （运行时字符串，如 str_repeat）或 {ptr,len} 结构指针（字面量）——结构解码对数据指针
+  valence 把 payload 字节当指针 strlen → SIGSEGV（0.34.36 HEAD 同崩，非本轮引入）。
+  str_bb err 分支改双通道：mincore 探测 field0 可读性（新 runtime helper
+  `mimi_runtime_ptr_readable`）区分两条构造路径，字面量与运行时字符串均正确显示；
+- **D-4 复核闭合（台账过时）**：List 显示族已无固定缓冲（runtime 动态分配 +
+  sized_cat_parts），List<string> 双 500 字符探针 1005 字节完整；
+- **回归测试**：audit_896 ×3（Result/Option 长 payload 双端全量字节断言 + enum/record
+  长字段 + 短路径臂精确字节）；
+
 ### 0.34.36 — 审计台账收尾战役：audit-unfixed-2026-08-05 收尾包 A–F 全闭
 
 > 依据 `devdocs/audit-unfixed-2026-08-05.md`（单一事实源）。纪律：冻结期不加新语法，

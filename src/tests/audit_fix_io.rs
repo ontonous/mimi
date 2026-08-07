@@ -582,3 +582,140 @@ func main() -> i32 {
         vm_stdout, cg_stdout
     );
 }
+
+// ── FIX §8-#96 / D-4 residue (0.34.36): fixed-buffer display truncation ─
+// Result 256B / Option 512B / enum 128B snprintf buffers + record est-size
+// buffer silently truncated payloads longer than the buffer (VM prints the
+// full rendering). All four emitters now assemble exact-size strings
+// (emit_display_wrap / sized_cat_parts) — assert full-length dual parity.
+
+#[test]
+fn audit_896_long_result_option_payloads_not_truncated() {
+    let src = r#"
+func mk_ok() -> Result<string, string> {
+    return Ok(str_repeat("x", 400))
+}
+func mk_err() -> Result<string, string> {
+    return Err(str_repeat("e", 300))
+}
+func mk_some() -> Option<string> {
+    return Some(str_repeat("y", 600))
+}
+func main() {
+    println(mk_ok())
+    println(mk_err())
+    println(mk_some())
+}
+"#;
+    let (_vm_val, vm_stdout) = run_source_with_stdout(src);
+    let cg_stdout = compile_and_run(src).expect("codegen long payload run failed");
+    assert!(
+        vm_stdout.contains(&format!("Ok({})", "x".repeat(400))),
+        "VM must render the full 400-char Ok payload: lengths {:?}",
+        vm_stdout.lines().map(str::len).collect::<Vec<_>>()
+    );
+    assert!(
+        vm_stdout.contains(&format!("Err({})", "e".repeat(300))),
+        "VM must render the full 300-char Err payload"
+    );
+    assert!(
+        vm_stdout.contains(&format!("Some({})", "y".repeat(600))),
+        "VM must render the full 600-char Some payload"
+    );
+    assert_eq!(
+        cg_stdout,
+        vm_stdout,
+        "codegen truncates long Result/Option payloads: cg lens {:?} vs vm lens {:?}",
+        cg_stdout.lines().map(str::len).collect::<Vec<_>>(),
+        vm_stdout.lines().map(str::len).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn audit_896_long_enum_and_record_display_not_truncated() {
+    let src = r#"
+type Msg {
+    Text(string)
+    Num(i64)
+    Empty
+}
+type P {
+    name: string,
+    age: i32,
+}
+func main() {
+    println(Text(str_repeat("z", 250)))
+    println(Num(-42))
+    println(Empty)
+    let p = P { name: str_repeat("n", 300), age: 7 }
+    println(p)
+}
+"#;
+    let (_vm_val, vm_stdout) = run_source_with_stdout(src);
+    let cg_stdout = compile_and_run(src).expect("codegen enum/record display run failed");
+    // enum string payload exceeded the old 128B buffer; record string field
+    // exceeded the est-size snprintf budget.
+    assert!(
+        cg_stdout.contains(&format!("Text({})", "z".repeat(250))),
+        "codegen truncated the enum string payload: lens {:?}",
+        cg_stdout.lines().map(str::len).collect::<Vec<_>>()
+    );
+    assert!(
+        cg_stdout.contains(&"n".repeat(300)),
+        "codegen truncated the record string field"
+    );
+    assert!(cg_stdout.contains("age: 7"), "record int field missing");
+    assert_eq!(
+        cg_stdout,
+        vm_stdout,
+        "enum/record display diverges: cg lens {:?} vs vm lens {:?}",
+        cg_stdout.lines().map(str::len).collect::<Vec<_>>(),
+        vm_stdout.lines().map(str::len).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn audit_896_short_payload_arms_still_exact() {
+    // Regression guard for the non-%s arms rewritten alongside the sized
+    // assembly (i64/f64 renders, literal labels, merge-slot registration):
+    // short payloads must keep byte-identical output on both backends.
+    let src = r#"
+type Msg {
+    Num(i64)
+    Empty
+}
+func mk_some_i() -> Option<i64> {
+    return Some(42)
+}
+func mk_none() -> Option<i64> {
+    return None
+}
+func mk_ok_i() -> Result<i64, string> {
+    return Ok(123)
+}
+func mk_ok_f() -> Result<f64, string> {
+    return Ok(1.5)
+}
+func main() {
+    println(mk_some_i())
+    println(mk_none())
+    println(mk_ok_i())
+    println(mk_ok_f())
+    println(Num(-42))
+    println(Empty)
+}
+"#;
+    let (_vm_val, vm_stdout) = run_source_with_stdout(src);
+    let cg_stdout = compile_and_run(src).expect("codegen short payload run failed");
+    assert_eq!(
+        cg_stdout, vm_stdout,
+        "short-payload display arms diverge: cg={:?} vm={:?}",
+        cg_stdout, vm_stdout
+    );
+    assert!(cg_stdout.contains("Some(42)"));
+    assert!(cg_stdout.contains("None()"));
+    assert!(cg_stdout.contains("Ok(123)"));
+    assert!(cg_stdout.contains("Ok(1.5)"));
+    assert!(cg_stdout.contains("Num(-42)"));
+    assert!(cg_stdout.contains("Empty()"));
+}
