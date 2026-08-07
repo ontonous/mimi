@@ -1676,6 +1676,55 @@ fn dual_contract_ensures() {
 }
 
 #[test]
+fn dual_contract_requires_violation_traps_both_backends() {
+    if !can_link() {
+        return;
+    }
+    // 0.34.41 (AF-4 前置 2①): under --verify-contracts contract-bearing
+    // functions fail-closed to legacy; the requires guard must fire with
+    // E0808 on both VM and codegen.
+    dual_assert_contract_violation(
+        r#"
+        func safe_div(a: i64, b: i64) -> i64 {
+            requires: b != 0
+            a / b
+        }
+        func main() -> i32 { let r = safe_div(10, 0); println(r); 0 }
+    "#,
+    );
+}
+
+#[test]
+fn dual_contract_fn_erased_default_runs_on_resolved() {
+    if !can_link() {
+        return;
+    }
+    // 0.34.41: with contracts ERASED (default, verify_contracts=false),
+    // contract-bearing functions now compile through the resolved emitter
+    // (Contract arm is a no-op). Multiple contract functions interacting
+    // must stay dual-backend equivalent with no miscompile.
+    dual_assert!(
+        r#"
+        func clamp_pos(x: i64) -> i64 {
+            requires: x >= 0
+            ensures: result >= 0
+            if x > 100 { 100 } else { x }
+        }
+        func sum_clamped(a: i64, b: i64) -> i64 {
+            ensures: result >= 0
+            clamp_pos(a) + clamp_pos(b)
+        }
+        func main() -> i32 {
+            println(sum_clamped(30, 40))
+            println(sum_clamped(150, 5))
+            0
+        }
+    "#,
+        "70\n105"
+    );
+}
+
+#[test]
 fn dual_contract_ensures_old_dual() {
     if !can_link() {
         return;

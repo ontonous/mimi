@@ -2,6 +2,29 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.41 — contracts 进 resolved slice 第一档：默认擦除路径带合约函数转正（AF-4 前置 2①）
+
+> Phase G 第三个 sprint。安全分档策略：**第一档**让带合约函数在默认路径
+> （verify_contracts=false，合约擦除）脱离 legacy；第二档（运行时守卫发射接入
+> resolved emitter）待做，当前 --verify-contracts 仍 fail-closed 到 legacy。
+
+- **第一档落地**：`require_resolved_native_callable_with_source` 加
+  `verify_contracts` 门——verify_contracts=false（默认）时带合约函数进 resolved
+  （resolved emitter 的 `Contract` arm 已为 no-op，与 legacy 默认擦除对齐）；
+  --verify-contracts 时 fail-closed 到 legacy（守卫仍由 legacy 发射，不静默丢守卫）；
+  all-or-nothing 路径保守不变（`require_resolved_native_callable` 传 true）；
+  传参链：`eligible_function_ids_with_stats`/`resolved_eligible_functions`/compile.rs
+  各加 verify_contracts 形参；
+- **fallback 率差值报告**：eligible 202→212（+10 带合约函数全量转正），聚合
+  fallback_rate 0.9628→0.9609（−0.0018，改进方向）；contracts skip reason 清零；
+  基线 dispatch-baseline.json 更新至 212/5425；
+- **dual 回归 ×2**：`dual_contract_fn_erased_default_runs_on_resolved`（合约擦除下
+  多合约函数交互双端对等，无错值）+ `dual_contract_requires_violation_traps_both_
+  backends`（--verify-contracts 违反 requires 双端 E0808 trap 对等）；新增 helper
+  `dual_assert_contract_violation`（断言 VM + codegen 都 trap 且含 E0808）；
+- **门禁**：全量 5268 lib 绿（+2 新测试）/ clippy -D warnings 绿 / fmt 干净 /
+  语料零 SIGSEGV（112 程序编译成功）；
+
 ### 0.34.40 — resolved dispatch 度量门禁（AF-4 前置 1，纯增量基建）
 
 > Phase G（0.34.39-45）第二个 sprint：进 0.1.5 前把 legacy 受管退役的度量地基钉死——

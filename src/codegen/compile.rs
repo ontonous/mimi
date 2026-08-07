@@ -530,7 +530,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Set MIMI_USE_PER_FUNCTION_DISPATCH=0 or unset to disable.
         let eligible: Option<std::collections::BTreeSet<crate::core::NodeId>> =
             if std::env::var("MIMI_USE_PER_FUNCTION_DISPATCH").map_or(true, |v| v != "0") {
-                super::resolved::resolved_eligible_functions(program)
+                super::resolved::resolved_eligible_functions(program, self.verify_contracts)
             } else {
                 None
             };
