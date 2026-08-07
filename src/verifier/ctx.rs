@@ -170,11 +170,25 @@ pub struct ProofArtifact {
     pub resolved_ir_hash: String,
     /// BLAKE3 hash of the VIR (verification-ir identity, span-free).
     pub vir_hash: String,
+    /// 0.34.44 (ADR-008 §2): engine identity. Proof cache entries are only
+    /// interchangeable between proofs of the SAME engine — cross-engine reuse
+    /// is a fail-loud error, never a silent downgrade. See the
+    /// `ENGINE_FLOW_AST` / `ENGINE_RESOLVED` constants.
+    pub engine: String,
 }
 
 impl ProofArtifact {
     /// Current semantics version. Bump when verification semantics change.
     pub const SEMANTICS_VERSION: u32 = 1;
+
+    /// Engine identity: Flow/VIR verifier (encodes surface AST bodies via
+    /// `legacy_body_file`; ADR-008 demotes this engine to the `math:` channel,
+    /// retirement registered on the 0.2 track).
+    pub const ENGINE_FLOW_AST: &'static str = "flow_ast";
+    /// Engine identity: Resolved IR verifier (`verify_checked_contracts`,
+    /// verifies from CheckedProgram's Resolved IR — the primary engine per
+    /// ADR-008 and the only engine the LSP may read/write proof cache for).
+    pub const ENGINE_RESOLVED: &'static str = "resolved";
 
     /// Create a new artifact with the current semantics version.
     pub fn new(solver_version: String, source_hash: String) -> Self {
@@ -189,6 +203,9 @@ impl ProofArtifact {
             source_hash,
             resolved_ir_hash: String::new(),
             vir_hash: String::new(),
+            // 0.34.44 (ADR-008 §2): this constructor serves the flow/VIR
+            // paths (the resolved engine builds its artifact inline).
+            engine: Self::ENGINE_FLOW_AST.to_string(),
         }
     }
 
@@ -198,15 +215,34 @@ impl ProofArtifact {
             && self.integer_model == current.integer_model
             && self.float_model == current.float_model
             && self.solver_version == current.solver_version
+            // 0.34.44 (ADR-008 §2): engine identity is part of compatibility —
+            // a flow_ast proof is never compatible with a resolved obligation.
+            && self.engine == current.engine
             && self.vir_hash == current.vir_hash
     }
 
-    /// Proof cache key: `(semantics_version, solver_version, integer_model, vir_hash)`.
-    /// Two proofs with the same key are interchangeable.
+    /// Proof cache key: `(semantics_version, solver_version, integer_model,
+    /// engine, program_identity)`.
+    ///
+    /// 0.34.44 (ADR-008 §2): the key carries the ENGINE identity and a
+    /// program hash. The resolved engine binds `resolved_ir_hash` (its
+    /// `vir_hash` is empty by construction — it never lowers to VIR), the
+    /// flow engine binds `vir_hash`; either way a key collision requires the
+    /// same engine proving the same program. Two proofs with the same key are
+    /// interchangeable; anything else is a fail-loud cache miss.
     pub fn cache_key(&self) -> String {
+        let program_identity = if self.vir_hash.is_empty() {
+            &self.resolved_ir_hash
+        } else {
+            &self.vir_hash
+        };
         format!(
-            "v{}:{}:{}:{}",
-            self.semantics_version, self.solver_version, self.integer_model, self.vir_hash
+            "v{}:{}:{}:{}:{}",
+            self.semantics_version,
+            self.solver_version,
+            self.integer_model,
+            self.engine,
+            program_identity
         )
     }
 }
@@ -1873,6 +1909,8 @@ impl Verifier {
                 source_hash: self.ctx.source_hash.clone(),
                 resolved_ir_hash: self.ctx.resolved_ir_hash.clone(),
                 vir_hash: String::new(),
+                // 0.34.44 (ADR-008 §2): this is the resolved engine.
+                engine: ProofArtifact::ENGINE_RESOLVED.to_string(),
             });
 
             results.push(VerificationResult {

@@ -2479,3 +2479,276 @@ func caller(x: i32) -> i32 {
         caller.unwrap().message
     );
 }
+
+// ============================================================
+// 0.34.44: ADR-008 engine isolation regression locks
+//
+// 1. Proof cache keys carry engine identity — cross-engine reuse is
+//    structurally impossible (fail-loud cache miss, never silent downgrade).
+// 2. The LSP verification cache key is engine-scoped; pre-0.34.44 entries
+//    (no engine segment) can never match.
+// 3. Dual-engine divergence is fail-closed: the weaker conclusion wins and
+//    the merged result carries the E0439 divergence diagnostic.
+// ============================================================
+
+fn vr_044(func_name: &str, status: VerifStatus) -> VerificationResult {
+    VerificationResult {
+        func_name: func_name.to_string(),
+        status,
+        message: String::new(),
+        diagnostic: None,
+        duration_us: 0,
+        constraint_count: 1,
+        artifact: None,
+        trusted_subset_domain: None,
+    }
+}
+
+#[test]
+fn proof_cache_key_carries_engine_identity() {
+    let mut flow = ProofArtifact::new("z3 4.13.0".to_string(), "src-hash".to_string());
+    flow.vir_hash = "vh".to_string();
+    let mut resolved = flow.clone();
+    resolved.engine = ProofArtifact::ENGINE_RESOLVED.to_string();
+    resolved.vir_hash = String::new(); // resolved engine binds resolved_ir_hash
+    resolved.resolved_ir_hash = "vh".to_string();
+
+    // Same program identity under BOTH engines must never collide.
+    assert_ne!(
+        flow.cache_key(),
+        resolved.cache_key(),
+        "cross-engine cache keys must differ (ADR-008 §2)"
+    );
+    assert!(flow.cache_key().contains(ProofArtifact::ENGINE_FLOW_AST));
+    assert!(resolved
+        .cache_key()
+        .contains(ProofArtifact::ENGINE_RESOLVED));
+
+    // Same engine + same identity → interchangeable (stable key).
+    let flow_again = flow.clone();
+    assert_eq!(flow.cache_key(), flow_again.cache_key());
+}
+
+#[test]
+fn proof_artifact_cross_engine_is_incompatible() {
+    let mut flow = ProofArtifact::new("z3 4.13.0".to_string(), "src-hash".to_string());
+    flow.vir_hash = "vh".to_string();
+    let mut resolved = flow.clone();
+    resolved.engine = ProofArtifact::ENGINE_RESOLVED.to_string();
+    assert!(
+        !flow.is_compatible(&resolved),
+        "a flow_ast proof must never be compatible with a resolved obligation"
+    );
+    assert!(flow.is_compatible(&flow.clone()));
+}
+
+#[test]
+fn lsp_verification_cache_key_is_engine_scoped() {
+    let key = crate::lsp::verification_cache_key("file:///a.mimi", "double");
+    // Engine identity + semantics version are mandatory segments.
+    assert!(key.contains(ProofArtifact::ENGINE_RESOLVED), "key: {key}");
+    assert!(
+        key.contains(&format!("v{}", ProofArtifact::SEMANTICS_VERSION)),
+        "key: {key}"
+    );
+    // The pre-0.34.44 shape can never match the new key → old on-disk
+    // entries auto-invalidate on upgrade.
+    assert_ne!(key, "file:///a.mimi:double");
+}
+
+#[test]
+fn merge_divergence_proven_vs_disproven_fails_closed() {
+    let primary = vec![vr_044("f", VerifStatus::Proven)];
+    let mut flow = vr_044("f", VerifStatus::Disproven);
+    flow.message = "counterexample found".to_string();
+    let merged = merge_engine_verdicts(primary, vec![flow]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].status,
+        VerifStatus::Disproven,
+        "Disproven must beat Proven on divergence"
+    );
+    assert!(
+        merged[0].message.contains("E0439"),
+        "divergence must carry the E0439 diagnostic: {}",
+        merged[0].message
+    );
+    assert!(
+        merged[0].artifact.is_none(),
+        "a divergent verdict is no proof"
+    );
+}
+
+#[test]
+fn merge_divergence_proven_vs_unknown_fails_closed() {
+    let primary = vec![vr_044("f", VerifStatus::Proven)];
+    let secondary = vec![vr_044("f", VerifStatus::SolverUnknown)];
+    let merged = merge_engine_verdicts(primary, secondary);
+    assert_eq!(merged[0].status, VerifStatus::SolverUnknown);
+    assert!(merged[0].message.contains("E0439"));
+}
+
+#[test]
+fn merge_agreement_keeps_resolved_result() {
+    let mut primary = vec![vr_044("f", VerifStatus::Proven)];
+    primary[0].message = "resolved proof".to_string();
+    let secondary = vec![vr_044("f", VerifStatus::Proven)];
+    let merged = merge_engine_verdicts(primary, secondary);
+    assert_eq!(merged[0].status, VerifStatus::Proven);
+    assert_eq!(
+        merged[0].message, "resolved proof",
+        "primary wins on agreement"
+    );
+    assert!(!merged[0].message.contains("E0439"));
+}
+
+#[test]
+fn merge_no_opinion_defers_to_the_proving_engine() {
+    // resolved attempted no proof → flow verdict wins silently.
+    let primary = vec![vr_044("f", VerifStatus::NoObligations)];
+    let secondary = vec![vr_044("f", VerifStatus::Proven)];
+    let merged = merge_engine_verdicts(primary, secondary);
+    assert_eq!(merged[0].status, VerifStatus::Proven);
+    assert!(!merged[0].message.contains("E0439"));
+
+    // flow attempted no proof → resolved verdict wins silently.
+    let primary = vec![vr_044("g", VerifStatus::Proven)];
+    let secondary = vec![vr_044("g", VerifStatus::InfrastructureError)];
+    let merged = merge_engine_verdicts(primary, secondary);
+    assert_eq!(merged[0].status, VerifStatus::Proven);
+    assert!(!merged[0].message.contains("E0439"));
+}
+
+#[test]
+fn merge_flow_only_obligations_pass_through() {
+    // The flow engine still models obligations the resolved engine does not
+    // (call sites etc.); those results must survive the merge untouched.
+    let primary = vec![vr_044("a", VerifStatus::Proven)];
+    let secondary = vec![
+        vr_044("a", VerifStatus::Proven),
+        vr_044("extern sqrt", VerifStatus::Disproven),
+    ];
+    let merged = merge_engine_verdicts(primary, secondary);
+    assert_eq!(merged.len(), 2);
+    let ext = merged
+        .iter()
+        .find(|r| r.func_name == "extern sqrt")
+        .unwrap();
+    assert_eq!(ext.status, VerifStatus::Disproven);
+}
+
+#[test]
+fn dual_engine_agrees_on_simple_contract() {
+    // Z3 end-to-end: a trivially provable contract must come out of
+    // verify_checked_dual WITHOUT any divergence diagnostic.
+    //
+    // NOTE (0.34.44): arithmetic-free postcondition on purpose. Empirically
+    // the two engines disagree on integer definedness in BOTH directions —
+    // i64: flow enforces overflow definedness while resolved proves the
+    // unbounded model; i32: resolved enforces checked_i32 definedness while
+    // flow proves unbounded. Any arithmetic postcondition is therefore a
+    // divergence candidate; the agreement path is pinned with an identity
+    // postcondition instead. The divergences are locked by
+    // dual_engine_divergence_* below.
+    if !is_z3_available() {
+        return;
+    }
+    let src = r#"
+func identity(x: i64) -> i64 {
+    requires: x >= 0
+    ensures: result == x
+    x
+}
+"#;
+    let file = super::parse_memory_source(src, "dual-agreement").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(src.as_bytes()).to_hex().to_string();
+    let results = super::verify_checked_dual(&program, source_hash).expect("dual verify");
+    let identity = results.iter().find(|r| r.func_name == "identity");
+    assert!(identity.is_some(), "must verify 'identity': {results:?}");
+    let identity = identity.unwrap();
+    assert_eq!(
+        identity.status,
+        VerifStatus::Proven,
+        "simple contract must be Proven by both engines: {}",
+        identity.message
+    );
+    assert!(
+        !identity.message.contains("E0439"),
+        "no divergence expected: {}",
+        identity.message
+    );
+}
+
+#[test]
+fn dual_engine_divergence_on_i64_overflow_is_fail_closed() {
+    // 0.34.44 (ADR-008 §3): the flow engine enforces i64 overflow
+    // definedness, the resolved engine proves under the unbounded model —
+    // flow Disproven vs resolved Proven. Divergence must surface as E0439
+    // with the weaker (Disproven) conclusion, never a silent Proven.
+    if !is_z3_available() {
+        return;
+    }
+    let src = r#"
+func double(x: i64) -> i64 {
+    requires: x >= 0
+    ensures: result == x * 2
+    x * 2
+}
+"#;
+    let file = super::parse_memory_source(src, "dual-divergence").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(src.as_bytes()).to_hex().to_string();
+    let results = super::verify_checked_dual(&program, source_hash).expect("dual verify");
+    let double = results
+        .iter()
+        .find(|r| r.func_name == "double")
+        .expect("must have a result for 'double'");
+    assert_eq!(
+        double.status,
+        VerifStatus::Disproven,
+        "divergence must fail closed to the weaker conclusion: {}",
+        double.message
+    );
+    assert!(
+        double.message.contains("E0439"),
+        "divergence must be reported explicitly: {}",
+        double.message
+    );
+}
+
+#[test]
+fn dual_engine_divergence_on_i32_definedness_is_fail_closed() {
+    // 0.34.44 (ADR-008 §3): the REVERSE divergence — resolved enforces
+    // checked_i32 definedness, flow proves unbounded. Same fail-closed
+    // contract: E0439 + the weaker conclusion.
+    if !is_z3_available() {
+        return;
+    }
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1000
+    ensures: result == x * 2
+    x * 2
+}
+"#;
+    let file = super::parse_memory_source(src, "dual-divergence-i32").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(src.as_bytes()).to_hex().to_string();
+    let results = super::verify_checked_dual(&program, source_hash).expect("dual verify");
+    let double = results
+        .iter()
+        .find(|r| r.func_name == "double")
+        .expect("must have a result for 'double'");
+    assert_eq!(
+        double.status,
+        VerifStatus::Disproven,
+        "divergence must fail closed to the weaker conclusion: {}",
+        double.message
+    );
+    assert!(
+        double.message.contains("E0439"),
+        "divergence must be reported explicitly: {}",
+        double.message
+    );
+}

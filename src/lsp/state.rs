@@ -578,9 +578,11 @@ impl LspServer {
 
         // Compute body hash for caching
         let body_hash = hash_func_body(text, func);
-        // Include URI in cache key to prevent collisions between identically
-        // named functions in different files.
-        let cache_key = format!("{}:{}", uri, func.name);
+        // 0.34.44 (ADR-008 §2): engine-scoped key (uri + func + resolved
+        // engine + semantics version). Prevents collisions between
+        // identically named functions in different files AND cross-engine
+        // cache pollution; pre-0.34.44 entries auto-invalidate.
+        let cache_key = super::verification_cache_key(uri, &func.name);
 
         // Check cache
         if let Some(cached) = self.verification_cache.get(&cache_key).cloned() {

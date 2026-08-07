@@ -545,7 +545,8 @@ fn lsp_verification_cache_hit_preserves_structured_span() {
     )
     .with_origin(crate::diagnostic::DiagnosticOrigin::user());
     server.insert_verification_cache_with_diagnostic(
-        format!("{uri}:bad"),
+        // 0.34.44: engine-scoped key (the only shape the lookup path reads).
+        crate::lsp::verification_cache_key(uri, "bad"),
         body_hash,
         crate::verifier::VerifStatus::Failed,
         "cached postcondition violation".to_string(),
@@ -616,7 +617,7 @@ fn lsp_verification_cache_invalidates_when_function_moves() {
         .id_for_uri(uri)
         .expect("URI source id");
     server.insert_verification_cache_with_diagnostic(
-        format!("{uri}:bad"),
+        crate::lsp::verification_cache_key(uri, "bad"),
         original_hash,
         crate::verifier::VerifStatus::Failed,
         "cached postcondition violation".to_string(),
@@ -776,8 +777,11 @@ fn lsp_verification_cache_persistent_roundtrip_preserves_span_and_origin() {
         rule: Some("verification.contract_failure".to_string()),
         parent_node_id: Some("function:bad".to_string()),
     };
+    // 0.34.44: engine-scoped key end-to-end — the persisted entry must be
+    // stored AND restored under the engine-qualified key shape.
+    let persisted_key = crate::lsp::verification_cache_key(&uri, "bad");
     writer.insert_verification_cache_with_diagnostic(
-        format!("{uri}:bad"),
+        persisted_key.clone(),
         77,
         crate::verifier::VerifStatus::Failed,
         "persistent failure".to_string(),
@@ -791,7 +795,7 @@ fn lsp_verification_cache_persistent_roundtrip_preserves_span_and_origin() {
     let cache_json: serde_json::Value = serde_json::from_str(&cache_json).expect("cache json");
     assert_eq!(cache_json["version"], 4);
     assert_eq!(
-        cache_json["entries"][format!("{uri}:bad")]["diagnostic"]["origin"]["parent_node_id"],
+        cache_json["entries"][persisted_key.as_str()]["diagnostic"]["origin"]["parent_node_id"],
         "function:bad"
     );
 
@@ -807,7 +811,7 @@ fn lsp_verification_cache_persistent_roundtrip_preserves_span_and_origin() {
         .expect("register restored source");
     let restored = reader
         .verification_cache
-        .get(&format!("{uri}:bad"))
+        .get(&persisted_key)
         .expect("restored entry")
         .diagnostic(&restored_file.sources)
         .expect("restored diagnostic");

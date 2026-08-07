@@ -33,7 +33,10 @@ impl LspServer {
                         )
                     });
                     if has_contracts {
-                        let cache_key = format!("{}:{}", uri, f.name);
+                        // 0.34.44 (ADR-008 §2): same engine-scoped key as the
+                        // write path (state.rs) — reading with any other shape
+                        // would silently resurrect pre-isolation entries.
+                        let cache_key = super::verification_cache_key(uri, &f.name);
                         let verify_title =
                             if let Some(entry) = self.verification_cache.get(&cache_key) {
                                 match entry.status.clone() {

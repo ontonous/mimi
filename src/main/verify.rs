@@ -86,7 +86,11 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         }
         results
     } else {
-        mimi::verifier::verify_checked(&checked_program, source_hash)?
+        // 0.34.44 (ADR-008 §3): the CLI main judgment is DUAL-engine —
+        // resolved (primary) + flow/VIR (demoted math: channel) with
+        // fail-closed divergence (E0439). Neither engine is trusted alone
+        // when their verdict classes disagree.
+        mimi::verifier::verify_checked_dual(&checked_program, source_hash)?
     };
 
     if results.is_empty() {

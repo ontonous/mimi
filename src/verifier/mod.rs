@@ -193,6 +193,146 @@ pub fn is_z3_available() -> bool {
     Verifier::new().is_ok()
 }
 
+/// 0.34.44 (ADR-008 §3): dual-engine verification with fail-closed divergence.
+///
+/// Runs BOTH engines on the same checked program and merges their verdicts:
+/// - primary = the Resolved engine (ADR-008 §1 main judgment);
+/// - secondary = the flow/VIR engine (demoted `math:` channel, retirement on
+///   the 0.2 track);
+/// - per-function verdict classes that disagree produce a fail-closed result
+///   carrying the new E0439 divergence diagnostic — neither engine is trusted
+///   alone when they disagree.
+///
+/// Used by `mimi verify` (the CLI main path). Library callers that need a
+/// single engine keep using `verify_checked` / `Verifier::verify_checked`.
+pub fn verify_checked_dual(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    program
+        .validate_backend(crate::core::BackendProfile::Verifier)
+        .map_err(format_check_errors)?;
+    let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
+    if !is_z3_available() {
+        // C4 mock path: from CheckedProgram, no raw_ast needed.
+        return Ok(ctx::mock_verify_checked(program));
+    }
+    // Primary engine: resolved (verifies from Resolved IR).
+    let mut primary = Verifier::new()?;
+    primary.set_source_hash(source_hash.clone());
+    let resolved_results = primary.verify_checked(program);
+    // Secondary engine: flow/VIR (encodes surface AST bodies).
+    let flow_results =
+        flow::flow_verify_file_with_hashes(program.raw_ast(), source_hash, resolved_ir_hash)?;
+    Ok(merge_engine_verdicts(resolved_results, flow_results))
+}
+
+/// Coarse verdict classes for divergence detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerdictClass {
+    Proven,
+    Disproven,
+    Inconclusive,
+    /// NoObligations / InfrastructureError — the engine attempted no proof;
+    /// never counts as a divergence counterpart.
+    NoOpinion,
+}
+
+fn verdict_class(status: &VerifStatus) -> VerdictClass {
+    match status {
+        VerifStatus::Proven => VerdictClass::Proven,
+        VerifStatus::Disproven => VerdictClass::Disproven,
+        VerifStatus::NoObligations | VerifStatus::InfrastructureError => VerdictClass::NoOpinion,
+        _ => VerdictClass::Inconclusive,
+    }
+}
+
+/// Merge per-function verdicts from the two engines (ADR-008 §3).
+///
+/// Rules:
+/// - both agree (same class) → primary (resolved) result wins;
+/// - one side is NoOpinion → the other side's result wins silently (no proof
+///   was attempted on the silent side, so there is nothing to disagree with);
+/// - classes disagree → fail-closed: Disproven beats Inconclusive beats
+///   Proven, and the merged result carries the E0439 divergence diagnostic.
+fn merge_engine_verdicts(
+    primary: Vec<VerificationResult>,
+    secondary: Vec<VerificationResult>,
+) -> Vec<VerificationResult> {
+    let mut merged: Vec<VerificationResult> = Vec::with_capacity(primary.len());
+    let mut secondary_by_name: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (index, result) in secondary.iter().enumerate() {
+        secondary_by_name
+            .entry(result.func_name.clone())
+            .or_insert(index);
+    }
+    let mut consumed: Vec<bool> = vec![false; secondary.len()];
+    for mut result in primary {
+        let Some(&sec_index) = secondary_by_name.get(&result.func_name) else {
+            merged.push(result);
+            continue;
+        };
+        consumed[sec_index] = true;
+        let flow_result = &secondary[sec_index];
+        let primary_class = verdict_class(&result.status);
+        let flow_class = verdict_class(&flow_result.status);
+        if primary_class == VerdictClass::NoOpinion {
+            // Resolved engine attempted no proof — take the flow verdict.
+            merged.push(flow_result.clone());
+            continue;
+        }
+        if flow_class == VerdictClass::NoOpinion || flow_class == primary_class {
+            merged.push(result);
+            continue;
+        }
+        // Divergence: fail-closed to the weaker conclusion.
+        let weaker_is_flow = matches!(
+            (primary_class, flow_class),
+            (VerdictClass::Proven, VerdictClass::Disproven)
+                | (VerdictClass::Proven, VerdictClass::Inconclusive)
+                | (VerdictClass::Inconclusive, VerdictClass::Disproven)
+        );
+        let weaker = if weaker_is_flow {
+            flow_result.clone()
+        } else {
+            result.clone()
+        };
+        result.status = weaker.status.clone();
+        result.trusted_subset_domain = weaker.trusted_subset_domain;
+        result.constraint_count = weaker.constraint_count;
+        result.message = format!(
+            "[E0439] engine divergence for '{}': resolved={:?} vs flow_ast={:?}; \
+             fail-closed to {:?} ({})",
+            result.func_name, primary_class, flow_class, result.status, weaker.message
+        );
+        let divergence = crate::diagnostic::Diagnostic::error(
+            format!(
+                "E0439: verification engines disagree on '{}' (resolved={:?}, \
+                 flow_ast={:?}); the weaker conclusion wins",
+                result.func_name, primary_class, flow_class
+            ),
+            weaker
+                .diagnostic
+                .as_ref()
+                .or(result.diagnostic.as_ref())
+                .map(|d| d.span)
+                .unwrap_or_else(|| crate::span::Span::new(1, 1, 1, 1)),
+        );
+        result.diagnostic = Some(divergence);
+        result.artifact = None; // a divergent verdict is no proof
+        merged.push(result);
+    }
+    // Functions verified ONLY by the flow engine (e.g. call-site obligations
+    // the resolved engine does not model yet) pass through untouched.
+    for (index, result) in secondary.iter().enumerate() {
+        if !consumed[index] {
+            merged.push(result.clone());
+        }
+    }
+    merged
+}
+
 fn format_check_errors(diagnostics: Vec<crate::diagnostic::Diagnostic>) -> String {
     diagnostics
         .into_iter()
