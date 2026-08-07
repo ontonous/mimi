@@ -900,6 +900,37 @@ pub(crate) fn dual_assert_contract_ok(src: &str) {
     compile_and_verify_contracts(src).expect("codegen contract run failed");
 }
 
+/// Run a Mimi source whose contracts are VIOLATED, with contract checking
+/// enabled, through both backends — asserting BOTH trap with E0808 (0.34.41,
+/// AF-4 前置 2①). Under --verify-contracts contract-bearing functions
+/// fail-closed to the legacy emitter, whose runtime guards must fire
+/// identically on VM and codegen (dual-backend trap parity).
+pub(crate) fn dual_assert_contract_violation(src: &str) {
+    let file = parse(src);
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed in dual_assert_contract_violation");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.verify_contracts = true;
+    let vm_err = vm
+        .run_value()
+        .err()
+        .expect("VM should trap on contract violation");
+    let vm_err_str = vm_err.to_string();
+    assert!(
+        vm_err_str.contains("E0808"),
+        "VM contract violation should carry E0808, got: {vm_err_str}"
+    );
+    let cg_err = compile_and_verify_contracts(src)
+        .err()
+        .expect("codegen should trap on contract violation");
+    assert!(
+        cg_err.contains("E0808"),
+        "codegen contract violation should carry E0808, got: {cg_err}"
+    );
+}
+
 /// Test helper: promote a .mms file to .mimi (copies source to output).
 pub fn main_promote(
     path: &std::path::Path,

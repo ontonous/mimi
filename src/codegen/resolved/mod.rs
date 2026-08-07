@@ -39,10 +39,12 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
 /// Returns the set of function NodeIds eligible for resolved native compilation.
 /// Returns None if program-level blockers prevent any resolved compilation.
 /// Also returns structured dispatch stats (0.34.40, MIMI_STAT=1).
+/// `verify_contracts` (0.34.41): gate contract-bearing functions (erased when false).
 pub(super) fn resolved_eligible_functions(
     program: &CheckedProgram,
+    verify_contracts: bool,
 ) -> Option<std::collections::BTreeSet<NodeId>> {
-    match eligible_function_ids_with_stats(program) {
+    match eligible_function_ids_with_stats(program, verify_contracts) {
         Ok((set, stats)) if !set.is_empty() => {
             emit_dispatch_stats(&stats);
             Some(set)
@@ -7087,7 +7089,8 @@ func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
                 .values()
                 .filter(|f| !f.is_comptime)
                 .collect();
-            let eligible = eligible_function_ids_with_stats(&program).map(|(set, _stats)| set);
+            let eligible =
+                eligible_function_ids_with_stats(&program, false).map(|(set, _stats)| set);
 
             let eligible_set = match &eligible {
                 Ok(set) => set.clone(),

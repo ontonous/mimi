@@ -200,8 +200,13 @@ pub(super) fn require_resolved_native_program(
 /// Per-function eligibility with structured dispatch statistics (0.34.40).
 /// Returns the eligible set plus a stats record covering ALL non-comptime
 /// functions (eligible count + skip-reason histogram).
+///
+/// `verify_contracts` (0.34.41): when false (default), contract-bearing
+/// functions are admitted (contracts erased at runtime, resolved Contract arm
+/// is a no-op); when true they fail-closed to legacy for runtime guard emission.
 pub(super) fn eligible_function_ids_with_stats(
     program: &CheckedProgram,
+    verify_contracts: bool,
 ) -> Result<(std::collections::BTreeSet<NodeId>, DispatchStats), UnsupportedResolvedNode> {
     // 0.32.24: Actors/sessions/protocols/capabilities/externs unblocked at
     // program level. These programs contain regular helper functions (main,
@@ -322,7 +327,12 @@ pub(super) fn eligible_function_ids_with_stats(
             }
             continue;
         };
-        match require_resolved_native_callable_with_source(program, callable, entry_source) {
+        match require_resolved_native_callable_with_source(
+            program,
+            callable,
+            entry_source,
+            verify_contracts,
+        ) {
             Ok(()) => {
                 eligible.insert(function.node_id.clone());
                 stats.eligible += 1;
@@ -342,19 +352,31 @@ pub(super) fn require_resolved_native_callable(
     program: &CheckedProgram,
     callable: &ResolvedCallable,
 ) -> Result<(), UnsupportedResolvedNode> {
-    require_resolved_native_callable_with_source(program, callable, None)
+    // All-or-nothing path stays conservative: treat as verify_contracts=true so
+    // contract-bearing callables never enter the whole-program resolved slice.
+    // Per-function dispatch (eligible_function_ids_with_stats) passes the real
+    // flag and admits contracts when runtime guards are disabled (erased).
+    require_resolved_native_callable_with_source(program, callable, None, true)
 }
 
 fn require_resolved_native_callable_with_source(
     program: &CheckedProgram,
     callable: &ResolvedCallable,
     entry_source: Option<crate::span::SourceId>,
+    verify_contracts: bool,
 ) -> Result<(), UnsupportedResolvedNode> {
-    if !callable.contracts.is_empty() {
+    // 0.34.41 (AF-4 前置 2①): contracts enter the resolved slice when runtime
+    // guards are DISABLED (verify_contracts=false, the default). In that mode
+    // contracts are erased at runtime — the resolved emitter's Contract arm is
+    // a no-op (mod.rs `ResolvedStmtKind::Contract { .. } => Ok(None)`), exactly
+    // matching legacy's default erasure. When --verify-contracts is on, legacy
+    // emits runtime requires/ensures guards the resolved emitter does not yet
+    // produce, so fail-closed to legacy rather than silently drop the guards.
+    if verify_contracts && !callable.contracts.is_empty() {
         return Err(UnsupportedResolvedNode::new(
             &callable.owner,
             &callable.owner,
-            "contracts are not in the resolved native slice",
+            "contracts need runtime guards (--verify-contracts) not yet in the resolved native slice",
         ));
     }
     require_scalar_type(program, &callable.owner, &callable.signature.result)?;
