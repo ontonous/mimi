@@ -15263,6 +15263,83 @@ fn dual_mutate_param_multiple_calls() {
     );
 }
 
+#[test]
+fn dual_borrow_mutate_scalar_writeback() {
+    // 0.34.43 (AF-4 前置 2③): scalar view/mutate borrow parameters enter the
+    // resolved slice with the pointer ABI (callee storage IS the caller's
+    // storage). Mutations through the borrow must be visible to the caller
+    // on both backends — the reference-semantics contract of ParamBorrow.
+    // (Explicit i64 annotations keep argument conversions Identity so the
+    // resolved Call arm passes the caller's storage address directly.)
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func add_to(x: mutate i64, delta: i64) {
+            x = x + delta
+        }
+        func main() -> i32 {
+            let mut n: i64 = 10
+            add_to(n, 5)
+            println(n)
+            0
+        }
+        "#,
+        "15"
+    );
+}
+
+#[test]
+fn dual_borrow_view_scalar_read() {
+    // 0.34.43: view (read-only) borrow through the resolved pointer ABI.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func read_only(x: view i64) -> i64 {
+            x * 2
+        }
+        func main() -> i32 {
+            let mut n: i64 = 21
+            println(read_only(n))
+            println(n)
+            0
+        }
+        "#,
+        "42\n21"
+    );
+}
+
+#[test]
+fn dual_borrow_forward_nested() {
+    // 0.34.43: a borrow parameter forwarded to another borrow parameter —
+    // the pointer must pass through untouched (no re-alloca copy), or the
+    // inner mutation never reaches the caller's variable.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func inner(x: mutate i64) {
+            x = x + 1
+        }
+        func outer(y: mutate i64) {
+            inner(y)
+            y = y * 2
+        }
+        func main() -> i32 {
+            let mut v: i64 = 5
+            outer(v)
+            println(v)
+            0
+        }
+        "#,
+        "12"
+    );
+}
+
 // ============================================================
 // 0.34.34: i32 width fidelity + shift/cast parity (SD-7, L1)
 //

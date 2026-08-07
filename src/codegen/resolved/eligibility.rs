@@ -429,27 +429,14 @@ fn require_resolved_native_callable_with_source(
     let _ = verify_contracts;
     require_scalar_type(program, &callable.owner, &callable.signature.result)?;
     for parameter in &callable.signature.parameters {
-        // 0.32.20: Reject view/mutate borrow parameters. These are passed
-        // as pointers in the LLVM ABI, but the resolved emitter treats
-        // parameters as values, causing ABI mismatches (SIGSEGV).
-        // Exception: method receivers named "self" use value ABI even
-        // with Mutate permission — the legacy forward declaration matches
-        // the resolved emitter's lower_type output.
-        if parameter.name != "self"
-            && matches!(
-                parameter.permission,
-                Some(crate::core::ir::Permission::View) | Some(crate::core::ir::Permission::Mutate)
-            )
-        {
-            return Err(UnsupportedResolvedNode::new(
-                &callable.owner,
-                &callable.owner,
-                format!(
-                    "parameter '{}' has view/mutate borrow (not in resolved native slice)",
-                    parameter.name
-                ),
-            ));
-        }
+        // 0.34.43 (AF-4 前置 2③): non-self view/mutate borrow parameters
+        // enter the resolved slice — declare_callable/bind_parameters use
+        // the same pointer ABI as legacy declare_func (callee storage IS the
+        // caller's storage; true reference semantics, no writeback step),
+        // and the Call arm passes such arguments by address. The self
+        // receiver exception keeps value ABI (legacy forward declarations
+        // match lower_type output there). require_scalar_type below keeps
+        // record/List borrows on legacy (scalar-leaf slice discipline).
         require_scalar_type(program, &callable.owner, &parameter.ty)?;
     }
     require_block(

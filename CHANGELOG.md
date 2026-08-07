@@ -2,6 +2,29 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.43 — view/mutate 借用参数 ABI 对齐进 resolved slice（AF-4 前置 2③）
+
+> Phase G 第五个 sprint，AF-4 三个假边界全部落地。非-self 标量 view/mutate
+> 借用参数进 resolved slice，指针 ABI 与 legacy 完全对齐；曲线点
+> fallback_rate 0.3030→0.3027（eligible 3781→3783）。
+
+- **ABI 对齐**：`declare_callable` 对非-self 借用参数发 ptr 参数类型（对齐
+  legacy `declare_func` 的 `param.borrow.is_some() → ptr`）；`bind_parameters`
+  借用参数直用入参指针作 storage（不新建 alloca——callee 存储即 caller
+  存储，真引用语义，无写回步骤，对齐 0.34.13）；
+- **调用传址**：Call arm 按 callee signature 逐位识别借用参数，实参仅接受
+  裸 `Load(place)`（无投影、conversion=Identity）时传 caller 存储地址；
+  其余形态 fail-closed per-function 降级 legacy（不静默 ABI 错配）；嵌套
+  借用转发（借用参数再传入借用参数）指针透传不重建；
+- **切片纪律**：eligibility 删除 0.32.20 拒绝；`require_scalar_type` 继续
+  守住 record/List 借用（`mutate Buffer` 等仍留 legacy，待指针投影/间接
+  存储支持后评估）；self 接收者保持 value ABI 例外；
+- **验证**：探针 p11/p12 双端对等（mutate 写回可见 / view 只读 / 嵌套转发，
+  34/34 全函数转正）；dual 回归 ×3（`dual_borrow_mutate_scalar_writeback` /
+  `dual_borrow_view_scalar_read` / `dual_borrow_forward_nested`）；全量
+  5274 绿（含既有 view_mutate_exec/mutate_field_writeback 条款 6 族）；
+  clippy 零警告；A/B 默认模式全语料零回退；
+
 ### 0.34.42 — stdlib 模块函数体进 resolved slice：source_id workaround 根因化（AF-4 前置 2②）
 
 > Phase G 第四个 sprint。历史 SIGSEGV（0.32.8 std_strings/multiple_std_modules）
