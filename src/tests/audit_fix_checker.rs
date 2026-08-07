@@ -871,3 +871,49 @@ func main() -> i32 {
     )
     .expect("bounded Clone method call must still check");
 }
+
+// ─── R-4 (audit 2026-08-05): alias-wrapping a linear type must not open a
+// leak. 2026-08-07 实测复核：三场景均无用户可见漏检——
+// ① SessionChan alias 泄漏仍报 E0425（session 端点审计独立于 is_linear）；
+// ② cap 名作为 alias 目标报 E0407（undefined type，fail-closed 拒绝）；
+// ③ flow state alias 泄漏与直接 flow state 泄漏行为一致（基线即不查，
+//    alias 不引入差异）。下列回归钉死契约。
+
+#[test]
+fn r4_alias_of_session_chan_stays_linear() {
+    let src = r#"
+session S = !i32 . end
+type MyChan = SessionChan<S>
+func leaky(ch: MyChan) -> i32 { 0 }
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).expect_err("alias-wrapped session leak must be flagged");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0425),
+        "expected E0425 for the unfinished alias-typed endpoint, got: {:?}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn r4_alias_of_cap_name_rejected() {
+    // Capability names are not type declarations; aliasing one fails closed
+    // (E0407 undefined type) instead of silently weakening linearity.
+    let src = r#"
+cap Token
+type MyCap = Token
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).expect_err("cap alias must be rejected");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0407),
+        "expected E0407 for aliasing a capability name, got: {:?}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}

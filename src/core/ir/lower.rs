@@ -764,6 +764,28 @@ struct LambdaCaptureContext {
     captures: BTreeSet<ResolvedLocalId>,
 }
 
+/// R-2 (deterministic): record-constructor fallback lookup for flow-state
+/// shape patterns. `type_defs` is a HashMap, so `iter().find()` would pick an
+/// arbitrary def when several qualified names share the constructor's short
+/// name. Select the lexicographically smallest variant id — stable across
+/// runs regardless of HashMap iteration order.
+fn pick_matching_record_def<'a>(
+    type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    name: &str,
+) -> Option<(&'a NodeId, &'a ResolvedTypeDef)> {
+    type_defs
+        .iter()
+        .filter(|(_, def)| {
+            def.kind == ResolvedTypeKind::Record
+                && (def.qualified_name == name
+                    || def
+                        .qualified_name
+                        .rsplit_once("::")
+                        .is_some_and(|(_, short)| short == name))
+        })
+        .min_by(|(left, _), (right, _)| left.0.cmp(&right.0))
+}
+
 impl BodyLowerer<'_> {
     fn install_parameters(&mut self) -> Result<(), Vec<ResolvedBodyError>> {
         // R-1/V-11 (audit 2026-08-05): push a dedicated parameter scope above
@@ -4330,14 +4352,9 @@ impl BodyLowerer<'_> {
             // return Value::Record(Some("StateName"), fields). The scrutinee type
             // may be unit (checker workaround) or a record type. Accept the pattern
             // if the constructor name matches a known record type definition.
-            let flow_variant = self.type_defs.iter().find(|(_, def)| {
-                def.kind == ResolvedTypeKind::Record
-                    && (def.qualified_name == name
-                        || def
-                            .qualified_name
-                            .rsplit_once("::")
-                            .is_some_and(|(_, short)| short == name))
-            });
+            // R-2 (deterministic): see pick_matching_record_def — lexicographically
+            // smallest variant id wins when several records share the short name.
+            let flow_variant = pick_matching_record_def(self.type_defs, name);
             // v0.34.15: flow states are NOT Item::Type — they live in the flow
             // directory (ResolvedFlow.states). Multi-target match arms name the
             // state constructors (Small/Large), which never appear in type_defs.
@@ -7195,6 +7212,46 @@ mod tests {
         assert_eq!(call.arguments[1].parameter, signature.parameters[1].id);
         body.validate(program.resolved_types(), program.resolved_type_targets())
             .expect("valid transition call");
+    }
+
+    #[test]
+    fn r2_pick_matching_record_def_is_deterministic() {
+        // R-2 audit: two records sharing the short name "Item" in different
+        // modules. ResolvedTypeDef map is a HashMap with a random seed per
+        // instance — iteration order differs across runs. The helper must
+        // always select the lexicographically smallest variant id.
+        let file = parse("type Item { v: i32 }\nfunc main() -> i32 { 0 }");
+        let program = crate::core::check_program(&file).expect("check");
+        let orig = program
+            .type_defs()
+            .iter()
+            .find(|(_, d)| d.qualified_name == "Item")
+            .expect("Item type def");
+        for _ in 0..50 {
+            // Fresh HashMap each iteration: RandomState re-seeds, so the
+            // iteration order differs; the selection must not change.
+            let mut defs = HashMap::new();
+            let mut def_b = orig.1.clone();
+            def_b.node_id = NodeId("module:b::Item".into());
+            def_b.qualified_name = "module:b::Item".into();
+            let mut def_a = orig.1.clone();
+            def_a.node_id = NodeId("module:a::Item".into());
+            def_a.qualified_name = "module:a::Item".into();
+            defs.insert(NodeId("module:b::Item".into()), def_b);
+            defs.insert(NodeId("module:a::Item".into()), def_a);
+
+            let (id, def) = pick_matching_record_def(&defs, "Item").expect("matching def");
+            assert_eq!(
+                id.0, "module:a::Item",
+                "short-name match must pick lexicographically smallest id"
+            );
+            assert_eq!(def.qualified_name, "module:a::Item");
+            // Exact qualified-name match also resolves.
+            let exact = pick_matching_record_def(&defs, "module:b::Item").expect("exact match");
+            assert_eq!(exact.0 .0, "module:b::Item");
+            // Non-record kinds and unknown names never match.
+            assert!(pick_matching_record_def(&defs, "Missing").is_none());
+        }
     }
 
     #[test]
