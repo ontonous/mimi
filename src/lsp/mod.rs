@@ -132,6 +132,23 @@ pub(crate) struct VerificationCacheEntry {
     persisted_diagnostic: Option<PersistedDiagnostic>,
 }
 
+/// 0.34.44 (ADR-008 §2): the ONLY cache-key shape for verification verdicts.
+///
+/// The key carries the ENGINE identity (`resolved` — the LSP never runs or
+/// caches the flow/VIR engine) and the semantics version, so:
+/// - pre-0.34.44 persisted entries (no engine segment) never match → the old
+///   on-disk cache auto-invalidates on upgrade (fail-loud, never silent reuse);
+/// - any future engine switch or semantics bump invalidates every entry.
+pub(crate) fn verification_cache_key(uri: &str, func_name: &str) -> String {
+    format!(
+        "{}:{}:{}:v{}",
+        uri,
+        func_name,
+        crate::verifier::ProofArtifact::ENGINE_RESOLVED,
+        crate::verifier::ProofArtifact::SEMANTICS_VERSION
+    )
+}
+
 #[derive(Clone, Default)]
 struct ParseCacheEntry {
     source_key: String,

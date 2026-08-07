@@ -2,6 +2,34 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.44 — verifier 引擎隔离治理（AF-3 落地，ADR-008）
+
+> Phase G 第六个 sprint。resolved 主引擎 + 缓存引擎隔离 + 双引擎分歧
+> fail-closed；VIR（flow_ast）降级为 math: 通道，退役登记 0.2 轨。
+
+- **引擎身份入缓存键**：`ProofArtifact` 新增 `engine` 字段
+  （`ENGINE_FLOW_AST`/`ENGINE_RESOLVED`）；`cache_key()` =
+  (semantics, solver, integer_model, **engine**, program_identity)，
+  resolved 引擎绑 resolved_ir_hash、flow 引擎绑 vir_hash；`is_compatible`
+  含引擎相等——跨引擎证明复用结构上不可能（fail-loud cache miss）；
+- **LSP 只读 resolved 引擎缓存**：验证缓存键统一走
+  `verification_cache_key`（uri + func + resolved + 语义版本），读写
+  同源；旧格式磁盘缓存（无引擎段）永不命中，升级自动失效；
+- **双引擎分歧 fail-closed**：`mimi verify` 主路径改用
+  `verify_checked_dual`——resolved（主判定）+ flow/VIR 并跑，裁决类
+  （Proven/Disproven/Inconclusive/NoOpinion）分歧时取较弱结论 +
+  新诊断码 **E0439**（注册 error-codes.md）+ artifact 作废；
+  NoOpinion（未尝试证明）不构成分歧；仅 flow 覆盖的义务（如 call-site）
+  透传不丢；
+- **实测分歧（诚实披露）**：两引擎整数模型不对称——flow 对 i64 强制
+  溢出定义性而 resolved 按无界模型证明（i32 方向相反）；存量算术合约
+  （examples/validation_contracts.mimi 的 fib/factorial/divide/withdraw）
+  现报 E0439 + fail-closed，两引擎整数模型统一登记为 VIR 退役前置
+  条件（0.2 轨，diagnostics.md G8）；
+- **验证**：回归锁 ×8（缓存键引擎隔离/兼容性/LSP 键形/分歧合并四
+  向/NoOpinion 让位/flow-only 透传）+ Z3 端到端 ×3（一致路径、i64/i32
+  双向分歧 fail-closed）；全量 5285 绿；clippy 零警告；
+
 ### 0.34.43 — view/mutate 借用参数 ABI 对齐进 resolved slice（AF-4 前置 2③）
 
 > Phase G 第五个 sprint，AF-4 三个假边界全部落地。非-self 标量 view/mutate

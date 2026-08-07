@@ -1518,6 +1518,9 @@ impl VerifierCtx {
             source_hash: self.source_hash.clone(),
             resolved_ir_hash: self.resolved_ir_hash.clone(),
             vir_hash,
+            // 0.34.44 (ADR-008 §2): this is the flow/VIR engine (demoted to
+            // the math: channel; retirement registered on the 0.2 track).
+            engine: crate::verifier::ctx::ProofArtifact::ENGINE_FLOW_AST.to_string(),
         });
 
         // Check if there are any contracts to verify

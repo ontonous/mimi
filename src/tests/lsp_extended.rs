@@ -1109,7 +1109,8 @@ fn lsp_code_lens_verify_status_with_cache() {
     // Directly populate the verification cache
     let uri = "file:///test.mimi";
     server.insert_verification_cache(
-        format!("{}:add", uri),
+        // 0.34.44: engine-scoped key (the only shape the lookup path reads).
+        crate::lsp::verification_cache_key(uri, "add"),
         0u64,
         crate::verifier::VerifStatus::Verified,
         "postconditions verified".to_string(),
@@ -1138,7 +1139,7 @@ fn lsp_code_lens_verify_status_failed() {
     let mut server = LspServer::new();
     let uri = "file:///test.mimi";
     server.insert_verification_cache(
-        format!("{}:bad", uri),
+        crate::lsp::verification_cache_key(uri, "bad"),
         0u64,
         crate::verifier::VerifStatus::Failed,
         "postcondition violation".to_string(),
@@ -1161,7 +1162,7 @@ fn lsp_code_lens_verify_status_unknown() {
     let mut server = LspServer::new();
     let uri = "file:///test.mimi";
     server.insert_verification_cache(
-        format!("{}:unk", uri),
+        crate::lsp::verification_cache_key(uri, "unk"),
         0u64,
         crate::verifier::VerifStatus::SolverUnknown,
         "verification inconclusive".to_string(),
