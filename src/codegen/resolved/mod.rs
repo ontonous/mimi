@@ -486,10 +486,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .parameters
             .iter()
             .map(|parameter| {
+                // 0.34.43: non-self view/mutate borrow parameters use the
+                // pointer ABI — identical to legacy declare_func, which
+                // declares borrowed params as ptr so callee stores are
+                // visible to the caller (true reference semantics).
+                if parameter.name != "self"
+                    && matches!(
+                        parameter.permission,
+                        Some(crate::core::ir::Permission::View)
+                            | Some(crate::core::ir::Permission::Mutate)
+                    )
+                {
+                    return Ok(BasicMetadataTypeEnum::from(
+                        self.generator
+                            .context
+                            .ptr_type(inkwell::AddressSpace::default()),
+                    ));
+                }
                 self.lower_type(&parameter.ty)
                     .map(BasicMetadataTypeEnum::from)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, CompileError>>()?;
         let function_type = match result {
             BasicTypeEnum::IntType(ty) => ty.fn_type(&parameters, false),
             BasicTypeEnum::FloatType(ty) => ty.fn_type(&parameters, false),
@@ -641,10 +658,34 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     callable.owner.0
                 ))
             })?;
-            let storage = self
-                .generator
-                .build_alloca(llvm_type, &local.display_name)?;
-            self.generator.build_store(storage, value)?;
+            // 0.34.43: borrowed (view/mutate) parameters arrive as a pointer
+            // to the CALLER's storage and are used directly — no fresh
+            // alloca — so callee stores are the caller's stores (legacy
+            // func.rs bind shape; the reference ABI promised by ParamBorrow).
+            let parameter = callable.signature.parameters.get(index);
+            let borrowed = parameter.is_some_and(|p| {
+                p.name != "self"
+                    && matches!(
+                        p.permission,
+                        Some(crate::core::ir::Permission::View)
+                            | Some(crate::core::ir::Permission::Mutate)
+                    )
+            });
+            let storage = if borrowed {
+                let BasicValueEnum::PointerValue(ptr) = value else {
+                    return Err(CompileError::LlvmError(format!(
+                        "resolved borrowed parameter {index} of '{}' is not a pointer",
+                        callable.owner.0
+                    )));
+                };
+                ptr
+            } else {
+                let storage = self
+                    .generator
+                    .build_alloca(llvm_type, &local.display_name)?;
+                self.generator.build_store(storage, value)?;
+                storage
+            };
             frame
                 .locals
                 .insert(local_id.clone(), ResolvedVarEntry { storage, llvm_type });
@@ -1682,9 +1723,61 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.apply_conversion(value, conversion)
             }
             ResolvedExprKind::Call(call) => {
+                // 0.34.43: positions whose callee parameter is a non-self
+                // view/mutate borrow are passed BY ADDRESS (the caller's
+                // storage pointer) — the reference ABI legacy declare_func
+                // promises. Anything not a bare place load fails closed to
+                // the legacy per-function fallback (no silent ABI mismatch).
+                let borrow_positions: Vec<bool> = match &call.callee {
+                    ResolvedCallee::Function(owner) => self
+                        .program
+                        .callable(owner)
+                        .map(|callee_callable| {
+                            callee_callable
+                                .signature
+                                .parameters
+                                .iter()
+                                .map(|p| {
+                                    p.name != "self"
+                                        && matches!(
+                                            p.permission,
+                                            Some(crate::core::ir::Permission::View)
+                                                | Some(crate::core::ir::Permission::Mutate)
+                                        )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
                 // Evaluate arguments (shared by all callee kinds)
                 let mut arguments = Vec::with_capacity(call.arguments.len());
-                for argument in &call.arguments {
+                for (index, argument) in call.arguments.iter().enumerate() {
+                    if borrow_positions.get(index).copied().unwrap_or(false) {
+                        let crate::core::ResolvedExprKind::Load(place) = &argument.value.kind
+                        else {
+                            return Err(CompileError::Unsupported(format!(
+                                "borrow argument '{}' is not a place load",
+                                argument.value.node_id.0
+                            )));
+                        };
+                        if !place.projections.is_empty()
+                            || !matches!(argument.conversion.kind, CheckedConversionKind::Identity)
+                        {
+                            return Err(CompileError::Unsupported(format!(
+                                "borrow argument '{}' has projections or conversion",
+                                argument.value.node_id.0
+                            )));
+                        }
+                        let entry = frame.locals.get(&place.base).ok_or_else(|| {
+                            CompileError::Unsupported(format!(
+                                "borrow argument '{}' base local is not in frame",
+                                argument.value.node_id.0
+                            ))
+                        })?;
+                        arguments.push(BasicMetadataValueEnum::PointerValue(entry.storage));
+                        continue;
+                    }
                     let value = self.emit_expr(&argument.value, frame)?;
                     let value = self.apply_conversion(value, &argument.conversion)?;
                     arguments.push(BasicMetadataValueEnum::from(value));
