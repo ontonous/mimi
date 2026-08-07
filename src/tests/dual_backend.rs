@@ -1680,9 +1680,9 @@ fn dual_contract_requires_violation_traps_both_backends() {
     if !can_link() {
         return;
     }
-    // 0.34.41 (AF-4 前置 2①): under --verify-contracts contract-bearing
-    // functions fail-closed to legacy; the requires guard must fire with
-    // E0808 on both VM and codegen.
+    // 0.34.41 (AF-4 前置 2①): under --verify-contracts the requires guard
+    // must fire with E0808 on both VM and codegen (第二档起守卫由 resolved
+    // emitter 直接发射，不再 fail-closed legacy)。
     dual_assert_contract_violation(
         r#"
         func safe_div(a: i64, b: i64) -> i64 {
@@ -1752,6 +1752,91 @@ fn dual_contract_ensures_old_dual() {
     )
     .expect("codegen contract stdout");
     assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn dual_contract_verify_ensures_old_result_on_resolved() {
+    if !can_link() {
+        return;
+    }
+    // 0.34.41 第二档: --verify-contracts 下 ensures 守卫（result 绑定 +
+    // old() 入口快照）由 resolved emitter 发射，双端必须同值通过。
+    dual_assert_contract_ok(
+        r#"
+        func double(x: i64) -> i64 {
+            ensures: result == x + old(x)
+            x + x
+        }
+        func main() -> i32 { println(double(21)); 0 }
+    "#,
+    );
+    let stdout = compile_and_verify_contracts(
+        r#"
+        func double(x: i64) -> i64 {
+            ensures: result == x + old(x)
+            x + x
+        }
+        func main() -> i32 { println(double(21)); 0 }
+    "#,
+    )
+    .expect("resolved ensures/old stdout");
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn dual_contract_verify_early_return_ensures_violation() {
+    if !can_link() {
+        return;
+    }
+    // 0.34.41 第二档: ensures 守卫必须覆盖 EARLY RETURN 路径（resolved
+    // emitter 每个 Return 语句各自漏斗检查，对齐 legacy emit_return 单漏斗）。
+    dual_assert_contract_violation(
+        r#"
+        func sneaky(n: i64) -> i64 {
+            ensures: result >= 0
+            if n < 0 { return n; }
+            n
+        }
+        func main() -> i32 { let r = sneaky(-7); println(r); 0 }
+    "#,
+    );
+}
+
+#[test]
+fn dual_contract_verify_multi_clause_pass() {
+    if !can_link() {
+        return;
+    }
+    // 0.34.41 第二档: 多 requires + 多 ensures 同函数（BB 命名以条件 NodeId
+    // 去重，无碰撞），双端同值。
+    dual_assert_contract_ok(
+        r#"
+        func clamp_pos(x: i64) -> i64 {
+            requires: x > -1000
+            requires: x < 1000
+            ensures: result >= 0
+            ensures: result <= x + 1000
+            if x < 0 { return x - x; }
+            x
+        }
+        func main() -> i32 { println(clamp_pos(5) + clamp_pos(-5)); 0 }
+    "#,
+    );
+    let stdout = compile_and_verify_contracts(
+        r#"
+        func clamp_pos(x: i64) -> i64 {
+            requires: x > -1000
+            requires: x < 1000
+            ensures: result >= 0
+            ensures: result <= x + 1000
+            if x < 0 { return x - x; }
+            x
+        }
+        func main() -> i32 { println(clamp_pos(5) + clamp_pos(-5)); 0 }
+    "#,
+    )
+    .expect("multi-clause resolved stdout");
+    assert_eq!(stdout.trim(), "5");
 }
 
 // ─── 18.  Variables (2 tests) ────────────────────────────────

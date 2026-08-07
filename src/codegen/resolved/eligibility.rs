@@ -201,9 +201,10 @@ pub(super) fn require_resolved_native_program(
 /// Returns the eligible set plus a stats record covering ALL non-comptime
 /// functions (eligible count + skip-reason histogram).
 ///
-/// `verify_contracts` (0.34.41): when false (default), contract-bearing
-/// functions are admitted (contracts erased at runtime, resolved Contract arm
-/// is a no-op); when true they fail-closed to legacy for runtime guard emission.
+/// `verify_contracts` (0.34.41): contract-bearing functions are admitted in
+/// both modes — erased at runtime when false (default), guard-emitted by the
+/// resolved emitter when true (第二档). The parameter is retained for the
+/// stats histogram and future per-mode policy.
 pub(super) fn eligible_function_ids_with_stats(
     program: &CheckedProgram,
     verify_contracts: bool,
@@ -365,20 +366,17 @@ fn require_resolved_native_callable_with_source(
     entry_source: Option<crate::span::SourceId>,
     verify_contracts: bool,
 ) -> Result<(), UnsupportedResolvedNode> {
-    // 0.34.41 (AF-4 前置 2①): contracts enter the resolved slice when runtime
-    // guards are DISABLED (verify_contracts=false, the default). In that mode
-    // contracts are erased at runtime — the resolved emitter's Contract arm is
-    // a no-op (mod.rs `ResolvedStmtKind::Contract { .. } => Ok(None)`), exactly
-    // matching legacy's default erasure. When --verify-contracts is on, legacy
-    // emits runtime requires/ensures guards the resolved emitter does not yet
-    // produce, so fail-closed to legacy rather than silently drop the guards.
-    if verify_contracts && !callable.contracts.is_empty() {
-        return Err(UnsupportedResolvedNode::new(
-            &callable.owner,
-            &callable.owner,
-            "contracts need runtime guards (--verify-contracts) not yet in the resolved native slice",
-        ));
-    }
+    // 0.34.41 (AF-4 前置 2①): contracts enter the resolved slice.
+    // 第一档: verify_contracts=false (default) admits them via erasure — the
+    // Contract arm is a no-op, exactly matching legacy's default erasure.
+    // 第二档: verify_contracts=true (--verify-contracts) also admits them —
+    // the resolved emitter now emits the same runtime guards legacy does
+    // (requires at entry, ensures at every return point, old() entry
+    // snapshots; E0808 abort on violation, mod.rs emit_contract_prologue /
+    // emit_ensures_checks). Condition expressions are slice-checked by the
+    // Contract arm of require_block; an unsupported condition demotes the
+    // function to legacy per-function (fail-closed, no silent guard loss).
+    let _ = verify_contracts;
     require_scalar_type(program, &callable.owner, &callable.signature.result)?;
     for parameter in &callable.signature.parameters {
         // 0.32.20: Reject view/mutate borrow parameters. These are passed

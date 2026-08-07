@@ -1,4 +1,5 @@
 use crate::ast::*;
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -186,6 +187,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Compile all pending `ensures` assertions for one return point, binding
+    /// the `result` pseudo-variable to the returned value (0.34.41 第二档
+    /// audit finding: the early-Return paths in block.rs/actors.rs previously
+    /// passed `vars` WITHOUT a result binding, so any ensures clause
+    /// referencing `result` failed compilation with "undefined variable
+    /// 'result'" — func.rs emit_return was the only correct site).
+    /// `value` None = bare `return;` (result stores zero, mirroring
+    /// func.rs:1221).
+    pub(super) fn compile_ensures_asserts(
+        &mut self,
+        value: Option<BasicValueEnum<'ctx>>,
+        ret_type: BasicTypeEnum<'ctx>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        let ensures = self.ensures_stmts.clone();
+        if ensures.is_empty() {
+            return Ok(());
+        }
+        let result_alloca = self.build_alloca(ret_type, "result")?;
+        let stored = value.unwrap_or_else(|| self.context.i64_type().const_int(0, false).into());
+        self.build_store(result_alloca, stored)?;
+        let mut ensures_vars = vars.clone();
+        ensures_vars.insert("result".to_string(), (result_alloca, ret_type));
+        for ensures_expr in &ensures {
+            self.compile_contract_assert(ensures_expr, &ensures_vars, ContractPhase::Ensures)?;
+        }
+        Ok(())
+    }
+
     /// Build the embedded violation message for a contract assertion.
     ///
     /// Single dense line, phrasing aligned with the bytecode VM's E0808
@@ -251,8 +281,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Resolve a `SourceId` to a display label for contract messages:
     /// disk path when available, then canonical URI, then the registry key.
     /// In-memory sources (test harnesses) degrade to their key — coordinates
-    /// remain exact either way.
-    fn contract_location_label(&self, source_id: crate::span::SourceId) -> String {
+    /// remain exact either way. `pub(super)` (0.34.41 第二档): the resolved
+    /// emitter reuses the exact label logic for its own E0808 messages.
+    pub(super) fn contract_location_label(&self, source_id: crate::span::SourceId) -> String {
         self.comptime_file
             .as_ref()
             .and_then(|f| f.sources.record(source_id))

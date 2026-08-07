@@ -902,9 +902,8 @@ pub(crate) fn dual_assert_contract_ok(src: &str) {
 
 /// Run a Mimi source whose contracts are VIOLATED, with contract checking
 /// enabled, through both backends — asserting BOTH trap with E0808 (0.34.41,
-/// AF-4 前置 2①). Under --verify-contracts contract-bearing functions
-/// fail-closed to the legacy emitter, whose runtime guards must fire
-/// identically on VM and codegen (dual-backend trap parity).
+/// AF-4 前置 2①). 第二档起守卫由 resolved emitter 直接发射（不再 fail-closed
+/// legacy）；无论哪条发射路径，VM 与 codegen 的 trap 必须对等。
 pub(crate) fn dual_assert_contract_violation(src: &str) {
     let file = parse(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();

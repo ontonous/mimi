@@ -136,15 +136,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ret_type,
                         self.current_fn_ret_ty_ast.as_ref(),
                     )?;
+                    // 0.34.41 第二档: ensures with a proper `result` binding
+                    // (previously this path asserted with no result binding —
+                    // "undefined variable 'result'"). Mirrors func.rs
+                    // emit_return ordering: after coerce, before load/cleanup.
+                    self.compile_ensures_asserts(Some(val), ret_type, vars)?;
                     val = self.load_return_value_if_needed(val)?;
-                    let ensures = self.ensures_stmts.clone();
-                    for ensures_expr in &ensures {
-                        self.compile_contract_assert(
-                            ensures_expr,
-                            vars,
-                            super::scope::ContractPhase::Ensures,
-                        )?;
-                    }
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
@@ -154,14 +151,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Return(None) => {
-                    let ensures = self.ensures_stmts.clone();
-                    for ensures_expr in &ensures {
-                        self.compile_contract_assert(
-                            ensures_expr,
-                            vars,
-                            super::scope::ContractPhase::Ensures,
-                        )?;
-                    }
+                    self.compile_ensures_asserts(
+                        None,
+                        self.current_fn_ret_type()
+                            .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
+                        vars,
+                    )?;
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
@@ -1644,20 +1639,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ret_type,
                         self.current_fn_ret_ty_ast.as_ref(),
                     )?;
+                    // 0.34.41 第二档: ensures with `result` binding (same fix
+                    // as compile_block's Return; was unbound here too).
+                    self.compile_ensures_asserts(Some(val), ret_type, vars)?;
                     val = self.load_return_value_if_needed(val)?;
                     // 0.34.36 (audit §6.7): full return-path cleanup parity
                     // with compile_block's Return (block.rs:128-140). The old
                     // code only flushed heap scopes: registered shared
                     // releases never ran and defer blocks were dropped on
                     // value-position returns (the VM runs both).
-                    let ensures = self.ensures_stmts.clone();
-                    for ensures_expr in &ensures {
-                        self.compile_contract_assert(
-                            ensures_expr,
-                            vars,
-                            super::scope::ContractPhase::Ensures,
-                        )?;
-                    }
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
@@ -1669,14 +1659,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(None) => {
                     // 0.34.36 (audit §6.7): same cleanup parity as the
                     // valued-Return arm above (mirrors compile_block:144-159).
-                    let ensures = self.ensures_stmts.clone();
-                    for ensures_expr in &ensures {
-                        self.compile_contract_assert(
-                            ensures_expr,
-                            vars,
-                            super::scope::ContractPhase::Ensures,
-                        )?;
-                    }
+                    self.compile_ensures_asserts(
+                        None,
+                        self.current_fn_ret_type()
+                            .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
+                        vars,
+                    )?;
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
