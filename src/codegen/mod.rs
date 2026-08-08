@@ -3435,13 +3435,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // (try_expr i32-vs-i1 type mismatch; extern wrapper name collision
         // strlen → strlen.11). Confidence baseline: 0.34.34 full-suite +
         // differential fuzz re-run with O1 default.
+        // MIMI_DUMP_MODULE=<path>: dump the module IR right before the
+        // optimization pipeline (diagnostics; mirrors the test-side
+        // MIMI_DUMP_IR hook but for the CLI build path). 0.35.11: hoisted
+        // above the optimize gate so O0 (MIMI_OPT=0) builds can be inspected
+        // too — the O1-only placement left the default debug opt-out builds
+        // invisible.
+        if let Ok(path) = std::env::var("MIMI_DUMP_MODULE") {
+            let _ = self.module.print_to_file(&path);
+        }
         if self.optimize {
-            // MIMI_DUMP_MODULE=<path>: dump the module IR right before the
-            // optimization pipeline (diagnostics; mirrors the test-side
-            // MIMI_DUMP_IR hook but for the CLI build path).
-            if let Ok(path) = std::env::var("MIMI_DUMP_MODULE") {
-                let _ = self.module.print_to_file(&path);
-            }
             // 0.35.3 L1 (SD-9 chain convergence): fold per-op finiteness
             // checks to chain-end points before the optimizer so the check
             // branches no longer block vectorization. O0 keeps per-point

@@ -175,6 +175,43 @@ fn real_world_literal_pattern_fallthrough() {
     );
 }
 
+// ===================== List intrinsics display + realloc ownership =====================
+// 0.35.11 (O1 correctness slice):
+// 1. The resolved slice emitter's trap block lacked a terminator — LLVM
+//    verify rejected the caller and the whole body silently demoted to the
+//    legacy emitter. `sort` + `data[1..4]` in one function was the repro.
+// 2. Legacy print dispatch inferred the callee NAME ("map", "reverse", …)
+//    as the result type for list-returning builtins, misrouting the
+//    {i64 len, ptr data} struct to the string fast path (empty output).
+// 3. A list literal bound to a local constructed into a temp registered as
+//    the buffer owner; push/pop realloc through the local left the temp
+//    slot stale → scope-exit free double-freed it (tcache abort at O0).
+
+#[test]
+fn real_world_list_intrinsic_display_and_realloc() {
+    run_both(
+        r#"
+        func main() -> i32 {
+            let data = [3, 1, 4, 1, 5]
+            println("sort:", sort(data))
+            println("slice:", data[1..4])
+            println("reverse:", reverse(data))
+            println("map:", map(data, fn(v: i32) -> i32 { v * 2 }))
+            println("filter:", filter(data, fn(v: i32) -> bool { v % 2 == 0 }))
+            let m = map(data, fn(v: i32) -> i32 { v + 1 })
+            println("bound:", m)
+            let mut ys = [1, 2, 3]
+            push(ys, 4)
+            println("pushed:", len(ys))
+            let popped = pop(ys)
+            println("popped:", popped)
+            0
+        }
+    "#,
+        "sort: [1, 1, 3, 4, 5]\nslice: [1, 4, 1]\nreverse: [5, 1, 4, 1, 3]\nmap: [6, 2, 8, 2, 10]\nfilter: [4]\nbound: [4, 2, 5, 2, 6]\npushed: 4\npopped: 4",
+    );
+}
+
 // ===================== Standard library: strings =====================
 // `use std::strings` merges pub functions into the current scope.
 

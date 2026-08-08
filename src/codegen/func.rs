@@ -2298,6 +2298,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         {
                                             self.var_type_names.insert(name.clone(), tn.clone());
                                         }
+                                        // 0.35.11-fix: list-returning builtins
+                                        // (map/filter/reverse/sort/range)
+                                        // leave the binding untyped otherwise —
+                                        // println(m) then puts the list struct
+                                        // pointer as a C string. Derive the
+                                        // display type from the source arg.
+                                        if let Some(list_ty) = self.infer_list_builtin_return_type(
+                                            func_name, call_args, vars,
+                                        ) {
+                                            self.var_type_names.insert(name.clone(), list_ty);
+                                        }
                                         // G-41: Track return types for builtins and std
                                         // functions that return List<string>.
                                         match func_name.as_str() {
