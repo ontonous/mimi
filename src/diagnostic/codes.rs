@@ -137,6 +137,7 @@ pub const E0435: &str = "E0435"; // two mutate arguments alias the same place (e
 pub const E0436: &str = "E0436"; // generic parameter name shadows a builtin type name
 pub const E0437: &str = "E0437"; // trait method call on a bounded generic parameter (no monomorphization pre-0.1)
 pub const E0438: &str = "E0438"; // generic type argument count mismatch (§3-诊断卫生: split from polysemous E0231)
+pub const E0439: &str = "E0439"; // verification engine divergence: resolved vs flow_ast disagree, fail-closed (ADR-008 §3, 0.34.44)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -377,6 +378,7 @@ pub fn describe(code: &str) -> &'static str {
         E0436 => "generic parameter name shadows a builtin type name",
         E0437 => "trait method call on a bounded generic parameter is not supported (monomorphization deferred to 1.x)",
         E0438 => "generic type argument count mismatch",
+        E0439 => "verification engine divergence: resolved and flow_ast disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -587,6 +589,7 @@ mod tests {
             super::E0428,
             super::E0429,
             super::E0430,
+            super::E0431,
             super::E0432,
             super::E0433,
             super::E0434,
@@ -594,6 +597,7 @@ mod tests {
             super::E0436,
             super::E0437,
             super::E0438,
+            super::E0439,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,

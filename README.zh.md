@@ -440,7 +440,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 里程碑 |
 |------|--------|
-| **0.1.4-dev** | **当前**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。RC 门禁全绿（4598 lib），tag 按裁决暂缓，保持 -dev。 |
+| **0.1.4-dev** | **当前**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。Phase G（架构冻结）：ADR-005~008、dispatch 门禁（fallback 0.3027）、contracts 进 resolved slice、view/mutate 借用 ABI、verifier 引擎隔离（E0439）、ABI 布局冻结（native-abi-1 §7/§8）、pre-0.1 更名、0.minor=大版本战略。RC 门禁全绿（5285 lib），tag 按裁决暂缓，保持 -dev。 |
 | **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
 | **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |
 | **0.1.1** | 51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |
