@@ -769,7 +769,7 @@ else:                                             ; preds = %entry
   %checked_op = call { i64, i1 } @llvm.ssub.with.overflow.i64(i64 %promote4, i64 1)
   %op_result = extractvalue { i64, i1 } %checked_op, 0
   %op_overflow = extractvalue { i64, i1 } %checked_op, 1
-  br i1 %op_overflow, label %trap_overflow, label %op_ok
+  br i1 %op_overflow, label %trap_overflow, label %op_ok, !branch_weights !0
 
 ifcont:                                           ; preds = %op_ok23, %then
   %if_result = phi i32 [ %n2, %then ], [ %op_result20, %op_ok23 ]
@@ -797,7 +797,7 @@ i32_ok:                                           ; preds = %op_ok
   %checked_op7 = call { i64, i1 } @llvm.ssub.with.overflow.i64(i64 %promote6, i64 2)
   %op_result8 = extractvalue { i64, i1 } %checked_op7, 0
   %op_overflow9 = extractvalue { i64, i1 } %checked_op7, 1
-  br i1 %op_overflow9, label %trap_overflow10, label %op_ok11
+  br i1 %op_overflow9, label %trap_overflow10, label %op_ok11, !branch_weights !0
 
 trap_overflow10:                                  ; preds = %i32_ok
   call void @mimi_trap_overflow(ptr @op_name.11)
@@ -819,7 +819,7 @@ i32_ok16:                                         ; preds = %op_ok11
   %checked_op19 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %call, i32 %call18)
   %op_result20 = extractvalue { i32, i1 } %checked_op19, 0
   %op_overflow21 = extractvalue { i32, i1 } %checked_op19, 1
-  br i1 %op_overflow21, label %trap_overflow22, label %op_ok23
+  br i1 %op_overflow21, label %trap_overflow22, label %op_ok23, !branch_weights !0
 
 trap_overflow22:                                  ; preds = %i32_ok16
   call void @mimi_trap_overflow(ptr @op_name.13)
@@ -952,3 +952,5 @@ declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32) #1
 
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!0 = !{!"branch_weights", i32 0, i32 1}

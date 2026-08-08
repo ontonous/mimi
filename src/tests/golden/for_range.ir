@@ -766,7 +766,7 @@ loopbody:                                         ; preds = %loop
   %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %s2, i64 %i3)
   %op_result = extractvalue { i64, i1 } %checked_op, 0
   %op_overflow = extractvalue { i64, i1 } %checked_op, 1
-  br i1 %op_overflow, label %trap_overflow, label %op_ok
+  br i1 %op_overflow, label %trap_overflow, label %op_ok, !branch_weights !0
 
 loopcont:                                         ; preds = %loop
   %s10 = load i64, ptr %s, align 4
@@ -783,7 +783,7 @@ op_ok:                                            ; preds = %loopbody
   %checked_op5 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %i4, i64 1)
   %op_result6 = extractvalue { i64, i1 } %checked_op5, 0
   %op_overflow7 = extractvalue { i64, i1 } %checked_op5, 1
-  br i1 %op_overflow7, label %trap_overflow8, label %op_ok9
+  br i1 %op_overflow7, label %trap_overflow8, label %op_ok9, !branch_weights !0
 
 trap_overflow8:                                   ; preds = %op_ok
   call void @mimi_trap_overflow(ptr @op_name.10)
@@ -908,3 +908,5 @@ declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
 
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!0 = !{!"branch_weights", i32 0, i32 1}

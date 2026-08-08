@@ -757,9 +757,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Trap block: call mimi_trap_div_by_zero (unreachable after).
             let trap_bb = self.context.append_basic_block(function, "trap_div_zero");
             let cont_bb = self.context.append_basic_block(function, "div_cont");
-            self.builder
+            let chk_br = self
+                .builder
                 .build_conditional_branch(is_zero, trap_bb, cont_bb)
                 .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+            // 0.35.4 L2: trap 分支 cold 权重（分支布局优化，不改语义）
+            crate::codegen::float_chain::mark_cold_trap_branch(self.context, chk_br);
 
             // Emit trap call — or absorb into Fault in a fallible transition
             // (v0.34.18a: `-> S | Fault` bottoms out a div-by-zero to the Fault
@@ -808,9 +811,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             let trap_ovf_bb = self.context.append_basic_block(function, "trap_div_ovf");
             let safe_bb = self.context.append_basic_block(function, "div_safe");
-            self.builder
+            let ovf_br = self
+                .builder
                 .build_conditional_branch(min_div_neg1, trap_ovf_bb, safe_bb)
                 .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+            // 0.35.4 L2: trap 分支 cold 权重
+            crate::codegen::float_chain::mark_cold_trap_branch(self.context, ovf_br);
 
             self.builder.position_at_end(trap_ovf_bb);
             if self.in_fallible_multi_target() {
@@ -907,9 +913,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Branch on overflow: trap or continue.
         let trap_bb = self.context.append_basic_block(function, "trap_overflow");
         let ok_bb = self.context.append_basic_block(function, "op_ok");
-        self.builder
+        let ovf_chk = self
+            .builder
             .build_conditional_branch(overflow_flag, trap_bb, ok_bb)
             .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+        // 0.35.4 L2: trap 分支 cold 权重
+        crate::codegen::float_chain::mark_cold_trap_branch(self.context, ovf_chk);
 
         // Trap block — or absorb into Fault in a fallible transition (v0.34.18a).
         self.builder.position_at_end(trap_bb);
@@ -1046,9 +1055,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Branch: trap or continue.
         let trap_bb = self.context.append_basic_block(function, "trap_float");
         let ok_bb = self.context.append_basic_block(function, "float_ok");
-        self.builder
+        let fin_br = self
+            .builder
             .build_conditional_branch(not_finite, trap_bb, ok_bb)
             .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+        // 0.35.4 L2: trap 分支 cold 权重
+        crate::codegen::float_chain::mark_cold_trap_branch(self.context, fin_br);
 
         // Trap block — or absorb into Fault in a fallible transition (v0.34.18a).
         self.builder.position_at_end(trap_bb);

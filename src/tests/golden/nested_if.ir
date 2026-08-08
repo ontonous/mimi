@@ -776,7 +776,7 @@ blt_then:                                         ; preds = %then
   %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %x4, i64 %y5)
   %op_result = extractvalue { i64, i1 } %checked_op, 0
   %op_overflow = extractvalue { i64, i1 } %checked_op, 1
-  br i1 %op_overflow, label %trap_overflow, label %op_ok
+  br i1 %op_overflow, label %trap_overflow, label %op_ok, !branch_weights !0
 
 blt_else:                                         ; preds = %then
   %x6 = load i64, ptr %x, align 4
@@ -908,3 +908,5 @@ declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
 
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!0 = !{!"branch_weights", i32 0, i32 1}

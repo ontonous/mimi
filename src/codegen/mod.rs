@@ -3453,6 +3453,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let _ = self.module.print_to_file(&path);
             }
             let options = inkwell::passes::PassBuilderOptions::create();
+            // 0.35.4: branch_weights cold metadata 由 emitter/收敛 pass 直接
+            // 附加（见 float_chain::mark_cold_trap_branch），优化管线保持
+            // default<O1>（CVP 实测无收益，不引入风险面）。
             self.module
                 .run_passes("default<O1>", tm, options)
                 .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))?;

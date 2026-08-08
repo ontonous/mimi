@@ -816,7 +816,7 @@ bounds_ok12:                                      ; preds = %bounds_fail13, %bou
   %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %elem_val, i64 %elem_val20)
   %op_result = extractvalue { i64, i1 } %checked_op, 0
   %op_overflow = extractvalue { i64, i1 } %checked_op, 1
-  br i1 %op_overflow, label %trap_overflow, label %op_ok
+  br i1 %op_overflow, label %trap_overflow, label %op_ok, !branch_weights !0
 
 bounds_fail13:                                    ; preds = %bounds_ok
   call void @mimi_runtime_abort(ptr @oob_msg.10)
@@ -846,7 +846,7 @@ bounds_ok27:                                      ; preds = %bounds_fail28, %op_
   %checked_op36 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %op_result, i64 %elem_val35)
   %op_result37 = extractvalue { i64, i1 } %checked_op36, 0
   %op_overflow38 = extractvalue { i64, i1 } %checked_op36, 1
-  br i1 %op_overflow38, label %trap_overflow39, label %op_ok40
+  br i1 %op_overflow38, label %trap_overflow39, label %op_ok40, !branch_weights !0
 
 bounds_fail28:                                    ; preds = %op_ok
   call void @mimi_runtime_abort(ptr @oob_msg.11)
@@ -981,3 +981,5 @@ declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
 
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!0 = !{!"branch_weights", i32 0, i32 1}

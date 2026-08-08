@@ -70,6 +70,28 @@
   ieee_depth 回归；全量 **5292 lib** 绿 / 15 real_world / 28 cli / clippy 零警告 /
   fmt 干净；诊断钩子 MIMI_DUMP_MODULE_CONVERGED（pass 后 dump）。
 
+### 0.35.4 — trap 分支 cold 权重（trap 成本消减 L2，Phase B）
+
+> 0.1.5 性能主线的收尾项：为全部 trap/Fault 分支附加 branch_weights cold
+> metadata，让 LLVM 分支布局优化把 trap 代码移出热路径。检查合并/循环提升
+> 经链收敛后无剩余空间（热循环已压到 1 检查/迭代），裁剪登记；CVP pass
+> 实测无收益（fib 2.96× vs 2.98× 噪声内）不引入风险面，撤销。
+
+- **mark_cold_trap_branch**（float_chain.rs）：`branch_weights {0,1}` cold 权重
+  附加 helper（LLVMGetMDKindIDInContext + metadata_node）；5 处 trap 分支统一
+  标记：SD-8 div-zero / MIN÷−1、SD-7 checked add/sub/mul、SD-9 float finiteness
+  （legacy check_float_finite + resolved enforce_float_finite 两路）；
+- **golden IR 更新 ×14**：branch_weights metadata 入 golden 快照（`!0 =
+  !{!"branch_weights", i32 0, i32 1}`）；
+- **CVP 评估**：pass 串实验 `default<O1>,correlated-propagation`——fib 的
+  checked intrinsic 未被消除（alloca/load 模型下 range 分析不propagate），
+  矩阵无收益（fib 47.3 vs 47.4ms 噪声内），按"无收益不引入风险"撤销；
+- **检查合并/循环提升裁剪**：L1 链收敛后 dsp/mandelbrot 热循环均为 1 检查/
+  迭代（环守卫/比较观察点，语义必需），无合并空间；环守卫不能提升出循环
+  （非有限传播需实时捕获）；登记无剩余工作项；
+- **验证**：全量 5292 lib 绿 / 15 real_world / 28 cli / clippy 零警告 / fmt 干净；
+  矩阵终测 dsp 1.04× / mandelbrot 1.78× / fib 2.90×（O1）。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

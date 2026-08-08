@@ -32,8 +32,8 @@ func main() -> i32 {
         cg_err
     );
     // VM: 逐点检查，中间 b 就 trap
-    let vm_err = run_source_bytecode_result(src)
-        .expect_err("bytecode must trap on chain non-finite");
+    let vm_err =
+        run_source_bytecode_result(src).expect_err("bytecode must trap on chain non-finite");
     assert!(
         vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
         "bytecode chain trap missing E0813: {}",
@@ -61,8 +61,7 @@ func main() -> i32 {
         "codegen dead-result trap missing E0813: {}",
         cg_err
     );
-    let vm_err = run_source_bytecode_result(src)
-        .expect_err("bytecode dead-result must trap");
+    let vm_err = run_source_bytecode_result(src).expect_err("bytecode dead-result must trap");
     assert!(
         vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
         "bytecode dead-result trap missing E0813: {}",
@@ -131,7 +130,11 @@ func main() -> i32 {
     assert_eq!(interp_out.trim(), expected, "interp stdout mismatch");
     let codegen_out = compile_and_run(src).expect("codegen failed");
     assert_eq!(codegen_out.trim(), expected, "codegen stdout mismatch");
-    assert_eq!(interp_out.trim(), codegen_out.trim(), "dual-backend diverge");
+    assert_eq!(
+        interp_out.trim(),
+        codegen_out.trim(),
+        "dual-backend diverge"
+    );
 }
 
 /// ieee_float 块内的 op 不参与链收敛（其结果不在检查点集合），块外消费
