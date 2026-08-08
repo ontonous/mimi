@@ -2,6 +2,29 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.46 — 0.1.4 全面查缺补漏（登记面 / 记录面 / 代码面）
+
+> 0.1.4 收尾后对全部开发内容做系统性查缺补漏：登记完整性、记录完整性、
+> 代码卫生三面清理。无行为变更（探针验证 + 新增回归锁）。
+
+- **登记面**：dx-backlog 补 #19（strings/collections 模块体 trait 符号路由阻塞，
+  0.34.42 裁剪）+ #20（flow_order_system fails transition SIGSEGV，0.34.45）；
+  审计台账 §11-#45 回写 ✅（0.34.44 ADR-008 已闭：LSP 缓存键引擎隔离 + 双引擎
+  fail-closed）；台账新增 §12.1 移交登记表（8 项无去向 🔴 统一登记轨：§2-#20/
+  §4-#39/§4-#43/R-3/R-5/G-3/§1-#11/§13-#73）；
+- **记录面**：golden-document §10 补 Phase G 表（0.34.34-45 全量完成状态，此前
+  只到 0.34.33）；0.34.5a trivia 化排期行补 ⬜ 推迟 0.1.5 回写；0.34.3 的
+  "codegen E0700 登记缺口"实测已闭回写；CHANGELOG 补 0.34.1-23（Phase A–E）
+  合并条目（此前只到 0.34.24，发布需完整）；README 双语 0.1.4 行同步 Phase G
+  交付 + RC 测试数 4598→5285；
+- **代码面**：E0439 注册补全（codes.rs 常量 + describe 表，此前 verifier 硬编码
+  未登记）；码集合补 E0431（0.34.10 引入时漏加）+ E0439；5 处 `e2e_asan_*` 裸
+  `#[ignore]` 补裁决注释（§13.15 "0 未登记 ignore" 纪律）；if let / for (k,v)
+  解构 native codegen 实测已闭（探针 p13 双端对等，main 走 resolved）——补
+  dual 回归锁 ×2（dual_if_let_and_tuple_for_destructuring /
+  dual_if_let_none_arm_skips）；
+- **验证**：全量（含新 dual 测试）绿；clippy + fmt 干净；探针 p13 双端对等。
+
 ### 0.34.45 — AF-2 ABI 定稿 + pre-0.1 更名战役 + 0.1.4 RC 复核（G3 硬复核点）
 
 > Phase G 第七个 sprint（收尾）。AF-2 布局冻结定稿 + abi_version 握手登记、
@@ -570,6 +593,49 @@
 - **负测试**：`flow_do_keyword_rejected`（单行/多行 transition + func 三场景）——`do { }` 现被 checker 以「未定义类型 do 的结构体构造」拒绝（do 是普通 Ident）。
 - **文档同步**：spec §6.7 实施注记 + :518 示例改裸 return；syntax-reference.golden + syntax-reference.md（EBNF 删 do 行、关键字表删 do、差异表 81→80）；golden-document §1.4 达成 ≤80 标记 + §1.3/§10 Phase F。
 - **测试**：4597 lib / 13 real_world / 28 cli / 8 ignored（不变）；clippy + fmt 干净。
+
+### 0.34.1–0.34.23（Phase A–E：语法冻结 + 语义裁决 + Flow 补完 + 1.0 准备）
+
+> 0.34.24 之前的 0.1.4 主体 sprint。逐 sprint 权威记录在
+> `devdocs/v0.34/golden-document.md` §10（Phase A–E），此处为发布用合并条目。
+
+**Phase A（0.34.1-5）语法冻结前置**：
+- 僵尸语法删除（delegate / @transactional / metadata_shadow / `|>` 分隔符）+ CI 负测试；
+- 死关键字清理（subflow/steps/consume → Ident）+ `and`/`or`/`not` 软关键字化 +
+  `Expr::Range`/`BinOp::Assign` 变体删除；DEAD 代码清理（pinned 路径 ~400 行）；
+- `if let` 补实现 + `for (k, v)` 解构 + f-string BUG-5 修复；
+- ADR-004 实施（`'a` 生命周期标注删除）+ SD-3 修正（`#[abi(errno)]` → `#[errno]`）+
+  白皮书废止标注 + AGENTS §13.20 修正；
+- `docs/syntax-reference.md` 从 golden EBNF 再生成 + support.toml 矩阵刷新。
+
+**Phase B（0.34.6-10）语义决策落地**：
+- 数值强制统一：双向豁免删除 → 单向 `is_numeric_coercion`（i32→i64/f64、i64→f64），
+  stdlib 3 处修复（env::get_int / io::input_int / net::send）+ spec §6.13；
+- W013 newtype lint + newtype 虚假承诺注释删除；`nominal_is_flow_state()` 单一事实源；
+- `resolve()` release fallback 收紧为 `Type::unknown`（不再静默毒化下游）；
+  31 处调用点完整迁移 zonk 登记 0.1.5（dx-backlog #1）；
+- E0431 新码（escape 泄漏到边界外）+ `Any` 用户语法移除（builtin_type_names 删除）；
+- `ieee_float {}` 双后端实现（域准入证）+ quote!/ast_eval checker 注册（AST 类型）。
+
+**Phase C（0.34.11-18）Flow 补完 + 逃生舱**：
+- ADR-001 实施：become/stay 删除（唯一终止符 `return State {}`）；
+- View/Mutate 最小闭合（参数级强制 + payload 成员级真借用，双 checker 同步）；
+- Multi-target 实施（ADR-002）：`-> A | B` 语法 + E0419 反转 + E0226 闭合；
+- Fault 范围收缩（spec §3.12 实现驱动改写）+ @dense 删除 + `with` 子句删除（E0254）。
+
+**Phase D（0.34.19-22）1.0 准备**：
+- CHECKER-GAP 软测试审计：47 处 soft→hard 全处理（quote 1 处 R8 裁决豁免）；
+- `unsafe_cast_protocol` 逃生舱（checker/resolved/interp/codegen 四层 + dyn fat-pointer
+  存量 bug 修复）；
+- E0432 泛型×线性边界拒绝 + 文档化（后续 0.34.24 收紧为容器同拒）；
+- FFI 1.0 表面评估（盲审 P0 实质闭环，bindgen 残余登记 0.2）+ DX 积压登记表
+  （`devdocs/v0.34/dx-backlog-0.1.5.md` 8 项）。
+
+**Phase E（0.34.23）未评估特性评审 I**：
+- parasteps / actor / protocol / capability 1.0 决策清单（`feature-decision-0.34.23.md`）：
+  parasteps 收敛为结构化并发语法、actor 核心保留（runs_flow codegen 登记 0.2）、
+  protocol 编译期契约保留（session 桥登记 0.2）、capability 核心保留（codegen split
+  补齐）；认领 3 项（spawn_detached interp 置位 / cap split codegen / 文档漂移修正）。
 
 ### 0.34.24 审计战役（四份 audit-{codegen,flow,type,syntax} 报告驱动，原始报告存 /tmp 已被系统清理，以下条目为唯一留存记录）
 

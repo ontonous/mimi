@@ -15208,6 +15208,54 @@ fn dual_defer_variable_capture() {
 }
 
 #[test]
+fn dual_if_let_and_tuple_for_destructuring() {
+    // 0.1.4 查缺补漏（2026-08-08）：if let / for (k,v) 解构的 native codegen
+    // 此前只有 bytecode 测试（for_tuple_destructuring_bytecode）；探针实测
+    // 双端对等后补 dual 回归锁（0.34.3 的 "codegen E0700 登记缺口" 实测已闭）。
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let opt = Some(42)
+            if let Some(v) = opt {
+                println(v)
+            }
+            let pairs = [(1, "a"), (2, "b")]
+            for (k, v) in pairs {
+                println(k)
+                println(v)
+            }
+            0
+        }
+        "#,
+        "42\n1\na\n2\nb"
+    );
+}
+
+#[test]
+fn dual_if_let_none_arm_skips() {
+    // None 臂：if let 不匹配时跳过 then 块（双端一致）。
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let opt: Option<i32> = None
+            if let Some(v) = opt {
+                println(v)
+            }
+            println("done")
+            0
+        }
+        "#,
+        "done"
+    );
+}
+
+#[test]
 fn dual_mutate_param_record() {
     // v0.31.25: mutate parameter with record type — in-place modification
     // visible to caller after function returns.

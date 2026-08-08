@@ -302,15 +302,23 @@ fn merge_engine_verdicts(
         result.trusted_subset_domain = weaker.trusted_subset_domain;
         result.constraint_count = weaker.constraint_count;
         result.message = format!(
-            "[E0439] engine divergence for '{}': resolved={:?} vs flow_ast={:?}; \
+            "[{}] engine divergence for '{}': resolved={:?} vs flow_ast={:?}; \
              fail-closed to {:?} ({})",
-            result.func_name, primary_class, flow_class, result.status, weaker.message
+            crate::diagnostic::codes::E0439,
+            result.func_name,
+            primary_class,
+            flow_class,
+            result.status,
+            weaker.message
         );
         let divergence = crate::diagnostic::Diagnostic::error(
             format!(
-                "E0439: verification engines disagree on '{}' (resolved={:?}, \
+                "{}: verification engines disagree on '{}' (resolved={:?}, \
                  flow_ast={:?}); the weaker conclusion wins",
-                result.func_name, primary_class, flow_class
+                crate::diagnostic::codes::E0439,
+                result.func_name,
+                primary_class,
+                flow_class
             ),
             weaker
                 .diagnostic
