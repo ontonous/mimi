@@ -183,6 +183,23 @@
   报告 `devdocs/v0.35/contracts-slice-0.35.9.md`；
 - **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
 
+### 0.35.10 — dispatch 门禁复测 + 覆盖率曲线（Phase C 收官）
+
+> Phase C 收官：全语料 113 程序（demos + examples + tests/real_world）
+> dispatch 复测与覆盖率曲线。报告 `devdocs/v0.35/dispatch-coverage-0.35.10.md`。
+
+- **曲线**：0.9609（0.34.40 门禁建立）→ 0.3027（0.34.42 slice 放开）→
+  **0.2735**（0.35.7 strings/collections 模块体进 slice，−0.0292）；
+  eligible 202 → 3783 → **3974**（72.65%）；
+- **复测**：113 程序全部编译成功（0 emit_failed）；门禁 check 无静默回退
+  （0.2735 < 0.3027）；新增程序 json_parser 自动纳入（0.2667）；
+- **基线更新**：dispatch-baseline.json 更新至 3974/5470（0.2735）；
+- **剩余拆解**：legacy 1496 中 generics/qualified 1331（**89%**）——泛型函数
+  进 resolved slice 需单态化/泛型 emit（架构级），**登记 1.x 评估**；
+  module file 81（io/fs/net 未 lift 模块，登记 0.35.x 后续）；unsupported
+  type/expr 62；actor/nominal 15；
+- **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。
