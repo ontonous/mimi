@@ -5147,8 +5147,6 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
             format!("for:{:?}:{}", var.kind, expr_semantic_key(iterable))
         }
         Stmt::Block(_) => "block".into(),
-        Stmt::Desc(value, _) => format!("desc:{value}"),
-        Stmt::Rule(value, _) => format!("rule:{value}"),
         Stmt::Requires(expr, _) => format!("requires:{}", expr_semantic_key(expr)),
         Stmt::Ensures(expr, _) => format!("ensures:{}", expr_semantic_key(expr)),
         Stmt::Invariant(expr, _) => format!("invariant:{}", expr_semantic_key(expr)),
@@ -5163,7 +5161,6 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::OnFailure(_) => "on-failure".into(),
         Stmt::Pinned { var, .. } => format!("pinned:{}", var.as_deref().unwrap_or("_")),
         Stmt::Parasteps(_) => "parasteps".into(),
-        Stmt::MmsBlock { content, .. } => format!("mms:{:016x}", stable_text_hash(content)),
         Stmt::Func(function) => format!("function:{}", function.name),
         Stmt::Alloc { kind, .. } => format!("alloc:{kind:?}"),
         Stmt::Ellipsis => "ellipsis".into(),
@@ -5185,8 +5182,6 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::Loop(_) => "stmt.loop",
         Stmt::For { .. } => "stmt.for",
         Stmt::Block(_) => "stmt.block",
-        Stmt::Desc(_, _) => "stmt.desc",
-        Stmt::Rule(_, _) => "stmt.rule",
         Stmt::Requires(_, _) => "stmt.requires",
         Stmt::Ensures(_, _) => "stmt.ensures",
         Stmt::Invariant(_, _) => "stmt.invariant",
@@ -5201,7 +5196,6 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::OnFailure(_) => "stmt.on_failure",
         Stmt::Pinned { .. } => "stmt.pinned",
         Stmt::Parasteps(_) => "stmt.parasteps",
-        Stmt::MmsBlock { .. } => "stmt.mms",
         Stmt::Func(_) => "stmt.function",
         Stmt::Alloc { .. } => "stmt.alloc",
         Stmt::Ellipsis => "stmt.ellipsis",
@@ -5257,12 +5251,9 @@ pub(crate) fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrec
         Stmt::For { iterable, .. } => {
             expr_span(iterable).map(|span| (span, SpanPrecision::SourceAnchor))
         }
-        Stmt::Desc(_, span)
-        | Stmt::Rule(_, span)
-        | Stmt::Requires(_, span)
-        | Stmt::Ensures(_, span)
-        | Stmt::Invariant(_, span)
-        | Stmt::MmsBlock { span, .. } => anchored(*span),
+        Stmt::Requires(_, span) | Stmt::Ensures(_, span) | Stmt::Invariant(_, span) => {
+            anchored(*span)
+        }
         Stmt::Assign { target, .. } => {
             expr_span(target).map(|span| (span, SpanPrecision::SourceAnchor))
         }
@@ -5361,7 +5352,7 @@ fn collect_stmt_meta(
                 );
             }
         }
-        Stmt::Continue | Stmt::Ellipsis | Stmt::Desc(_, _) | Stmt::Rule(_, _) => {}
+        Stmt::Continue | Stmt::Ellipsis => {}
         Stmt::Expr(expr)
         | Stmt::Drop(expr)
         | Stmt::Requires(expr, _)
@@ -5630,7 +5621,6 @@ fn collect_stmt_meta(
                 errors,
             );
         }
-        Stmt::MmsBlock { .. } => {}
         Stmt::Func(function) => {
             let nested_owner = nested_function_owner(owner, function);
             let nested_fallback = function.meta.span.with_source(fallback.source_id);

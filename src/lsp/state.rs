@@ -558,10 +558,7 @@ impl LspServer {
         let has_contracts = func.body.iter().any(|s| {
             matches!(
                 s.unlocated(),
-                Stmt::Requires(_, _)
-                    | Stmt::Ensures(_, _)
-                    | Stmt::Invariant(_, _)
-                    | Stmt::MmsBlock { .. }
+                Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _)
             )
         });
         if !has_contracts {

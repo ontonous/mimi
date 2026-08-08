@@ -1018,9 +1018,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Continue => {
                     self.compile_continue_stmt()?;
                 }
-                Stmt::MmsBlock { .. } => {
-                    // Skip MMS blocks in codegen (they're for documentation/contracts)
-                }
                 Stmt::Parasteps(block) => {
                     // Parasteps: execute spawn statements in parallel, join at block end
                     self.enter_parasteps();
@@ -1110,9 +1107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified)
                     self.compile_block(body, vars)?;
                 }
-                Stmt::Desc(..)
-                | Stmt::Rule(..)
-                | Stmt::Requires(..)
+                Stmt::Requires(..)
                 | Stmt::Ensures(..)
                 | Stmt::Invariant(..)
                 | Stmt::Math(_)
@@ -2104,10 +2099,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.compile_expr(expr, vars)?;
                 }
-                Stmt::MmsBlock { .. }
-                | Stmt::Desc(..)
-                | Stmt::Rule(..)
-                | Stmt::Requires(..)
+                Stmt::Requires(..)
                 | Stmt::Ensures(..)
                 | Stmt::Invariant(..)
                 | Stmt::Math(_)

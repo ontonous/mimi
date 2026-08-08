@@ -240,10 +240,8 @@ impl VerifierCtx {
                 // to the caller's vars map and degrade to SolverUnknown in
                 // `check_extern_call` rather than being silently skipped.
                 Self::find_extern_calls_in_block(&nested.body, extern_names, calls);
-            }
-            // No expression positions: Desc/Rule are intent text, MmsBlock is
-            // a super-comment skipped by all tool paths (AGENTS.md §10).
-            Stmt::Desc(_, _) | Stmt::Rule(_, _) | Stmt::MmsBlock { .. } => {}
+            } // 0.35.13 trivia-ization: desc:/rule:/mms{} are consumed by the
+              // parser as trivia and no longer reach the AST.
         }
     }
 

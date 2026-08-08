@@ -464,11 +464,7 @@ impl<'a> Lowerer<'a> {
                 self.point(&current, meta, CfgPointKind::Statement, "stmt.nested_func");
                 Some(current)
             }
-            Stmt::Desc(..)
-            | Stmt::Rule(..)
-            | Stmt::MmsBlock { .. }
-            | Stmt::Ellipsis
-            | Stmt::Located { .. } => {
+            Stmt::Ellipsis | Stmt::Located { .. } => {
                 self.point(&current, meta, CfgPointKind::Statement, "stmt.noop");
                 Some(current)
             }

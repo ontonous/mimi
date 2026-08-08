@@ -332,9 +332,10 @@ impl VerifierCtx {
                     );
                 }
                 Stmt::Math(exprs) => math_exprs.extend(exprs.clone()),
-                // MmsBlock is a super-comment; contracts must use top-level
-                // requires:/ensures: statements for mimi verify.
-                Stmt::MmsBlock { .. } | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis => {}
+                // 0.35.13 trivia-ization: contracts must use top-level
+                // requires:/ensures: statements for mimi verify; desc:/rule:/
+                // mms{} are consumed by the parser as trivia.
+                Stmt::Ellipsis => {}
                 _ => {}
             }
         }

@@ -1585,13 +1585,7 @@ impl BytecodeCompiler {
                     fc.continue_jumps_mut().push(idx);
                 }
                 // Skip non-executable statements.
-                Stmt::Desc(..)
-                | Stmt::Rule(..)
-                | Stmt::Requires(..)
-                | Stmt::Ensures(..)
-                | Stmt::Invariant(..)
-                | Stmt::Math(..)
-                | Stmt::MmsBlock { .. } => {}
+                Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..) => {}
 
                 // Nested function definition: compile as a closure and bind
                 // the function name as a local variable holding the closure.

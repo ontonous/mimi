@@ -132,11 +132,7 @@ impl<'a> Checker<'a> {
             let has_contract = func.body.iter().any(|s| {
                 matches!(
                     s.unlocated(),
-                    Stmt::Requires(..)
-                        | Stmt::Ensures(..)
-                        | Stmt::Invariant(..)
-                        | Stmt::Math(_)
-                        | Stmt::MmsBlock { .. }
+                    Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(_)
                 )
             });
             if has_contract {
