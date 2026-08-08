@@ -11,6 +11,7 @@ pub(crate) mod closures;
 pub(crate) mod codegen_boundary;
 pub(crate) mod contracts;
 pub(crate) mod diagnostic_routing;
+pub(crate) mod float_chain;
 
 pub(crate) mod actors;
 pub(crate) mod builtin_funcs;

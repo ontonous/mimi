@@ -3,6 +3,7 @@ mod block;
 pub mod builtins;
 mod compile;
 mod expr;
+mod float_chain;
 mod func;
 pub mod gep;
 mod registry;
@@ -3439,6 +3440,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             // optimization pipeline (diagnostics; mirrors the test-side
             // MIMI_DUMP_IR hook but for the CLI build path).
             if let Ok(path) = std::env::var("MIMI_DUMP_MODULE") {
+                let _ = self.module.print_to_file(&path);
+            }
+            // 0.35.3 L1 (SD-9 chain convergence): fold per-op finiteness
+            // checks to chain-end points before the optimizer so the check
+            // branches no longer block vectorization. O0 keeps per-point
+            // checks (behavior unchanged).
+            crate::codegen::float_chain::converge_float_finiteness(&self.module);
+            // MIMI_DUMP_MODULE_CONVERGED=<path>: dump IR right after the
+            // chain-convergence pass (diagnostics for 0.35.3).
+            if let Ok(path) = std::env::var("MIMI_DUMP_MODULE_CONVERGED") {
                 let _ = self.module.print_to_file(&path);
             }
             let options = inkwell::passes::PassBuilderOptions::create();

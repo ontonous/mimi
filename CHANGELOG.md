@@ -47,6 +47,29 @@
   （E0802 是语言承诺，改变可观测 trap 行为违反 L1 不变量）；L6 跨函数链
   识别 0.35.4 评估不承诺。
 
+### 0.35.3 — SD-9 链式末端检查收敛（trap 成本消减 L1，Phase B）
+
+> 0.1.5 性能主线的第一个实现 sprint：链收敛 pass 落地，dsp 追平 C -O2。
+> 语义保持——trap 是语言承诺（SD-7/8/9），收敛只移动检查位置不改变可观测行为。
+
+- **float_chain pass**（`src/codegen/float_chain.rs`，O1 管线前 LLVM IR 层）：
+  收集全部 SD-9 检查点（`fcmp uno x,x` 特征指令）→ 被检值的所有用户（排除检查
+  部件）都是受检 f64/f32 代数 op → 链中继点删除检查；末端/观察点（比较/存储/
+  函数参数/返回/phi/不受检 op）保留；无逃逸 alloca store→load 转发入链（其他
+  store 仅允许常量初始化）；[零真实消费（dead 结果）保留检查——防止 DCE 丢失
+  trap 语义]；fallible 上下文（Fault 吸收）不收敛；
+- **性能（四象限复测）**：dsp O1 默认 402.1→108.9ms（**3.7×，1.07× 追平
+  C -O2**，较基线 3.97× 下降 73%）；mandelbrot O1 3.64×→1.80×（40.0→19.8ms）；
+  fib 持平（无 float 链）；O0 档不变（收敛仅 O1 路径）；dsp 默认档与 ieee 档
+  持平（108.9 vs 106.9）——链收敛达成 ieee_float 的全部收益且保留 trap 语义；
+- **修复回归**：`ieee_depth_does_not_leak_across_function_boundary`——dead 结果
+  的 fmul 检查被误删导致 Inf 偷偷通过（检查分支使 fmul 保持 live，删除后 LLVM
+  DCE 掉表达式丢失 trap 语义）；修复为零真实消费 → 保留检查；
+- **测试**：`src/tests/float_chain.rs` 探针 ×5（链中非有限末端 trap / dead 结果
+  保留检查 / 比较观察点保留 / 有限链双端对等 / ieee 块消费边界）+ 既有
+  ieee_depth 回归；全量 **5292 lib** 绿 / 15 real_world / 28 cli / clippy 零警告 /
+  fmt 干净；诊断钩子 MIMI_DUMP_MODULE_CONVERGED（pass 后 dump）。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。
