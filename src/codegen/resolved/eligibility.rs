@@ -354,16 +354,16 @@ pub(super) fn eligible_function_ids_with_stats(
 /// 2. `MIMI_RESOLVED_MODULE_BODIES=<csv>` lifts only sources whose disk
 ///    path / canonical URI / registry key contains one fragment (overrides
 ///    the default allowlist; an explicitly empty value lifts nothing);
-/// 3. unset: the BUILT-IN allowlist proven green by the 0.34.42 A/B corpus
-///    (120 programs, zero divergence): prelude + mymath. strings/collections
-///    remain filtered — their method bodies reach resolved callers through
-///    trait-dispatch symbols (`string_char_at` shape) whose bodies live under
-///    a differently-mangled legacy symbol (registered 0.1.5; the underlying
-///    partial-stub SIGSEGV itself was fixed this sprint).
+/// 3. unset: the BUILT-IN allowlist. 0.34.42: prelude + mymath (A/B corpus
+///    proven). 0.35.7 (dx-backlog #19): + strings + collections — the
+///    {ptr,i64}→ptr coercion that blocked their method bodies was fixed by
+///    routing the whole str_* builtin family through the string emitters
+///    (resolved/mod.rs STRING_ABI_BUILTINS), so trait-impl method bodies
+///    compile through the resolved slice again.
 fn module_bodies_lifted(program: &CheckedProgram, source_id: crate::span::SourceId) -> bool {
     let spec = match std::env::var("MIMI_RESOLVED_MODULE_BODIES") {
         Ok(explicit) => explicit.trim().to_string(),
-        Err(_) => "prelude,mymath".to_string(),
+        Err(_) => "prelude,mymath,strings,collections".to_string(),
     };
     if spec.is_empty() {
         return false;
