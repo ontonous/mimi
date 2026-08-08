@@ -25,10 +25,10 @@ impl LspServer {
                 collect_call_sites(&f.body, name, &lines, &mut call_lines);
 
                 if !call_lines.is_empty() {
-                    let func_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("func {}", f.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `func {name}` substring scan.
+                    let func_line = f.meta.span.start_line.saturating_sub(1);
+                    let name_char = f.meta.span.start_col.saturating_sub(1) + "func ".len();
                     calls.push(serde_json::json!({
                         "from": {
                             "name": f.name,
@@ -39,8 +39,8 @@ impl LspServer {
                                 "end": { "line": func_line, "character": 0 }
                             },
                             "selectionRange": {
-                                "start": { "line": func_line, "character": 5 },
-                                "end": { "line": func_line, "character": 5 + f.name.len() }
+                                "start": { "line": func_line, "character": name_char },
+                                "end": { "line": func_line, "character": name_char + f.name.len() }
                             }
                         },
                         "fromRanges": call_lines.iter().map(|&l| serde_json::json!({
@@ -151,13 +151,30 @@ fn collect_calls_from_expr(
             if let Expr::Ident(name) = callee.unlocated() {
                 if !visited.contains(name.as_str()) {
                     visited.insert(name.clone());
-                    let callee_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("func {}", name)))
+                    // 0.35.15 (DX backlog #3): callee definition line comes
+                    // from the target function's AST span; the call-site
+                    // line comes from THIS call expression's span (the old
+                    // `{name}(` scan landed on the first textual mention).
+                    let callee_line = items
+                        .iter()
+                        .find_map(|item| match item {
+                            Item::Func(f) if f.name == name.as_str() => Some(f),
+                            _ => None,
+                        })
+                        .map(|f| f.meta.span.start_line.saturating_sub(1))
                         .unwrap_or(0);
-                    let call_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("{}(", name)))
+                    let callee_name_char = items
+                        .iter()
+                        .find_map(|item| match item {
+                            Item::Func(f) if f.name == name.as_str() => Some(f),
+                            _ => None,
+                        })
+                        .map(|f| f.meta.span.start_col.saturating_sub(1) + "func ".len())
+                        .unwrap_or(5);
+                    let call_line = callee
+                        .meta()
+                        .filter(|meta| meta.span.start_line > 0)
+                        .map(|meta| meta.span.start_line.saturating_sub(1))
                         .unwrap_or(0);
                     calls.push(serde_json::json!({
                         "to": {
@@ -169,8 +186,8 @@ fn collect_calls_from_expr(
                                 "end": { "line": callee_line, "character": 0 }
                             },
                             "selectionRange": {
-                                "start": { "line": callee_line, "character": 5 },
-                                "end": { "line": callee_line, "character": 5 + name.len() }
+                                "start": { "line": callee_line, "character": callee_name_char },
+                                "end": { "line": callee_line, "character": callee_name_char + name.len() }
                             }
                         },
                         "fromRanges": [{
@@ -314,15 +331,15 @@ fn collect_call_sites_from_expr(
         Expr::Call(callee, args) => {
             if let Expr::Ident(name) = callee.unlocated() {
                 if name.as_str() == func_name {
-                    // Find the line number of this call expression
-                    // We use the source text to find where the call appears
-                    let call_text = format!("{}(", name);
-                    for (i, line) in lines.iter().enumerate() {
-                        // Only count if not already counted for this function
-                        if line.contains(&call_text) && !call_lines.contains(&i) {
-                            // Verify it's not in a comment or string (simple heuristic)
-                            if !line.trim().starts_with("//") && !line.contains("\"") {
-                                call_lines.push(i);
+                    // 0.35.15 (DX backlog #3): the callee span carries the
+                    // call line directly — the old `{name}(` substring scan
+                    // counted comment/string mentions and could not
+                    // distinguish repeated calls on different lines.
+                    if let Some(meta) = callee.meta() {
+                        if meta.span.start_line > 0 {
+                            let call_line = meta.span.start_line.saturating_sub(1);
+                            if call_line < lines.len() && !call_lines.contains(&call_line) {
+                                call_lines.push(call_line);
                             }
                         }
                     }

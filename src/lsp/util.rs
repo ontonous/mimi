@@ -80,11 +80,13 @@ pub(crate) fn percent_decode(s: &str) -> String {
 /// moving every cached range. Include the parser-provided declaration anchor
 /// to invalidate that stale location cache. The URI/SourceKey remains part of
 /// the caller's cache key; session-local `SourceId` deliberately is not hashed.
-/// func.meta.span.start_line is 1-indexed (from lexer), so we subtract 1 to convert to 0-indexed.
-/// find_func_end_line returns 0-indexed line number.
+/// func.meta.span lines are 1-indexed (from lexer).
+///
+/// 0.35.15 (DX backlog #3): the body window comes from the AST span
+/// (start_line..=end_line) instead of brace-counting the source text.
 pub(crate) fn hash_func_body(text: &str, func: &FuncDef) -> u64 {
-    let start_idx = func.meta.span.start_line.saturating_sub(1); // Convert 1-indexed to 0-indexed
-    let end_idx = find_func_end_line(text, func.meta.span.start_line); // Returns 0-indexed
+    let start_idx = func.meta.span.start_line.saturating_sub(1); // 0-indexed
+    let end_idx = func.meta.span.end_line.saturating_sub(1); // 0-indexed
     let lines: Vec<&str> = text.lines().collect();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     // Keep a tag in the in-memory identity too, independently of the on-disk
@@ -103,70 +105,27 @@ pub(crate) fn hash_func_body(text: &str, func: &FuncDef) -> u64 {
     hasher.finish()
 }
 
-/// Find the closing brace line for a function starting at `start_line`.
-/// `start_line` is 1-indexed (from lexer span), returns 0-indexed line number.
-///
-/// AU-LSP-5 (full audit 2026-08-05): brace counting ignores braces inside
-/// string/char literals and comments. The scan runs over the whole document
-/// via [`SourceScanner`] so regions that span lines (block comments,
-/// multi-line strings) are tracked correctly; `let s = "}"` no longer ends
-/// the function early (which corrupted the enclosing-func lookup and the
-/// verification cache hash).
-pub(crate) fn find_func_end_line(text: &str, start_line: usize) -> usize {
-    let line_count = text.lines().count();
-    let start_idx = start_line.saturating_sub(1); // Convert 1-indexed to 0-indexed
-    if start_idx >= line_count {
-        return start_line; // Return original 1-indexed value as fallback
-    }
-    let mut depth = 0usize;
-    let mut started = false;
-    let mut current_line = 0usize; // 0-indexed line of the char being scanned
-    for (ch, region) in SourceScanner::new(text).scan() {
-        if ch == '\n' {
-            current_line += 1;
-            continue;
-        }
-        if current_line >= start_idx && region == Region::Code {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    started = true;
-                }
-                '}' if depth > 0 => {
-                    depth -= 1;
-                    if started && depth == 0 {
-                        return current_line; // Returns 0-indexed
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    line_count.saturating_sub(1)
-}
-
 /// Find the function containing the cursor line, searching recursively through modules.
 ///
 /// AU-LSP-4 (full audit 2026-08-05): `cursor_line` is **1-indexed** — the
 /// caller (`compute_verification_diagnostics`) converts the 0-indexed LSP
-/// cursor to 1-indexed once at the boundary. All span math here stays
-/// 1-indexed: `find_func_end_line` returns a 0-indexed line, so it is
-/// converted back before comparison.
-pub(crate) fn find_enclosing_func_in_items<'a>(
-    items: &'a [Item],
-    text: &str,
-    cursor_line: usize,
-) -> Option<&'a FuncDef> {
+/// cursor to 1-indexed once at the boundary.
+///
+/// 0.35.15 (DX backlog #3): containment comes from the AST span
+/// (start_line..=end_line) instead of brace-counting the source text —
+/// spans track nested blocks exactly, so `let s = "}"` and friends can no
+/// longer truncate the region.
+pub(crate) fn find_enclosing_func_in_items(items: &[Item], cursor_line: usize) -> Option<&FuncDef> {
     for item in items {
         match item {
             Item::Func(f) => {
-                let end = find_func_end_line(text, f.meta.span.start_line).saturating_add(1);
+                let end = f.meta.span.end_line.max(f.meta.span.start_line);
                 if cursor_line >= f.meta.span.start_line && cursor_line <= end {
                     return Some(f);
                 }
             }
             Item::Module(m) => {
-                if let Some(f) = find_enclosing_func_in_items(&m.items, text, cursor_line) {
+                if let Some(f) = find_enclosing_func_in_items(&m.items, cursor_line) {
                     return Some(f);
                 }
             }
