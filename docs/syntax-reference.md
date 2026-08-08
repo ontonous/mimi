@@ -2,7 +2,7 @@
 
 > **Authority**: 本文档是 `devdocs/v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF）
 > 的渲染副本。语法以 golden 为准；本文档 0.34.5 起由 golden 重新生成。
-> **Semantic authority**: `docs/language-spec.md`（extracted from `devdocs/pre-1.0/`）。
+> **Semantic authority**: `docs/language-spec.md`（extracted from `devdocs/pre-0.1/`）。
 > When this file and `language-spec.md` conflict on semantics, `language-spec.md` prevails.
 >
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
