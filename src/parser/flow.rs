@@ -732,11 +732,12 @@ mod tests {
         }
     }
 
-    /// Regression test for the mms{} block parser.
-    /// Previously `first_col.unwrap_or(0)` masked an invariant — we want
-    /// the mms body to be preserved verbatim through the parser.
+    /// 0.35.13 (DX backlog #10 trivia-ization): mms{} blocks are consumed
+    /// as trivia — nested braces must still be balanced-consumed without
+    /// breaking the surrounding parse, and NO statement enters the AST.
+    /// (Previously this test asserted verbatim content preservation.)
     #[test]
-    fn mms_block_nested_braces_preserved() {
+    fn mms_block_nested_braces_consumed_as_trivia() {
         let src = r#"func test() -> i32 {
             mms{
                 desc {
@@ -761,20 +762,15 @@ mod tests {
                 _ => None,
             })
             .expect("expected first item to be a function");
-        let mms = func_body
-            .iter()
-            .find_map(|s| match s.unlocated() {
-                crate::ast::Stmt::MmsBlock { content, .. } => Some(content),
-                _ => None,
-            })
-            .expect("expected MmsBlock statement in function body");
-        assert!(
-            mms.contains("desc"),
-            "outer content should keep 'desc' marker: {mms:?}"
+        assert_eq!(
+            func_body.len(),
+            1,
+            "mms{{}} must be trivia: only the return statement survives, got {} stmts",
+            func_body.len()
         );
         assert!(
-            mms.contains("page 10"),
-            "outer content should keep nested page: {mms:?}"
+            matches!(func_body[0].unlocated(), crate::ast::Stmt::Return(..)),
+            "the surviving statement must be the return"
         );
     }
 }

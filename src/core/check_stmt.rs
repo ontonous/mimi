@@ -161,9 +161,6 @@ impl<'a> Checker<'a> {
             | Stmt::Continue
             | Stmt::Break(None)
             | Stmt::Let { init: None, .. }
-            | Stmt::Desc(..)
-            | Stmt::Rule(..)
-            | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis
             | Stmt::Pinned { .. } => {}
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
@@ -292,9 +289,6 @@ impl<'a> Checker<'a> {
             | Stmt::Break(None)
             | Stmt::Return(None)
             | Stmt::Let { init: None, .. }
-            | Stmt::Desc(..)
-            | Stmt::Rule(..)
-            | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis => {}
             Stmt::Pinned { expr, body, .. } => {
                 self.collect_shared_writes_in_expr(expr, scopes, writes);
@@ -1732,7 +1726,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
+            Stmt::Ellipsis => {}
             Stmt::OnFailure(body) => {
                 self.check_block(body, ret, scopes);
             }

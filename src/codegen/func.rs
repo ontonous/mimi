@@ -2789,9 +2789,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return Err(CompileError::ContinueOutsideLoop);
                     }
                 }
-                Stmt::MmsBlock { .. } => {
-                    // Skip MMS blocks in codegen (they're for documentation/contracts)
-                }
                 Stmt::Parasteps(block) => {
                     // Parasteps: execute spawn statements in parallel, join at block end
                     self.enter_parasteps();
@@ -2938,9 +2935,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.compile_nested_func_stmt(f, vars)?;
                     }
                 }
-                Stmt::Desc(..)
-                | Stmt::Rule(..)
-                | Stmt::Requires(..)
+                Stmt::Requires(..)
                 | Stmt::Ensures(..)
                 | Stmt::Invariant(..)
                 | Stmt::Math(_)

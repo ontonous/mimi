@@ -473,8 +473,8 @@ pub enum Stmt {
         body: Block,
     },
     Block(Block),
-    Desc(String, Span),
-    Rule(String, Span),
+    // 0.35.13 (DX backlog #10 trivia-ization): `desc:` / `rule:` demoted to
+    // trivia — the parser consumes them inside blocks without producing AST.
     Requires(Expr, Span),
     Ensures(Expr, Span),
     Invariant(Expr, Span),
@@ -524,11 +524,9 @@ pub enum Stmt {
     },
     /// Parallel steps block (parasteps)
     Parasteps(Block),
-    /// mms {} super-comment block containing MimiSpec intent
-    MmsBlock {
-        content: String,
-        span: crate::span::Span,
-    },
+    // 0.35.13 trivia-ization: `mms {}` super-comment blocks are consumed by
+    // the parser without producing AST (MimiSpec intent lives in the .mms
+    // toolchain; in .mimi they were always inert super-comments).
     /// Nested function definition inside a block
     Func(FuncDef),
     /// alloc(Kind) { ... } block using a specific allocator

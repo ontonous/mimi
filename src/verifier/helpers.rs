@@ -87,9 +87,6 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
             | Stmt::Ensures(_, _)
             | Stmt::Invariant(_, _)
             | Stmt::Math(_)
-            | Stmt::Desc(..)
-            | Stmt::Rule(..)
-            | Stmt::MmsBlock { .. }
             | Stmt::Let { .. }
             | Stmt::Assign { .. } => continue,
             _ => break,
@@ -422,7 +419,6 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                                 | Stmt::Ensures(_, _)
                                 | Stmt::Invariant(_, _)
                                 | Stmt::Math(_)
-                                | Stmt::MmsBlock { .. }
                         )
                     });
                     results.push(VerificationResult {

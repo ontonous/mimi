@@ -222,7 +222,7 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_stmt(s, uses);
                 }
             }
-            Stmt::MmsBlock { .. } | Stmt::Ellipsis | Stmt::Desc(..) | Stmt::Rule(..) => {}
+            Stmt::Ellipsis => {}
             Stmt::Loop(body) => {
                 for s in body {
                     Self::collect_uses_in_stmt(s, uses);

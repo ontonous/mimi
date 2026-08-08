@@ -528,7 +528,6 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             remap_expr_spans(iterable, remap)?;
             remap_block_spans(body, remap)
         }
-        Stmt::Desc(_, span) | Stmt::Rule(_, span) => remap_span_source(span, remap),
         Stmt::Requires(expr, span) | Stmt::Ensures(expr, span) | Stmt::Invariant(expr, span) => {
             remap_span_source(span, remap)?;
             remap_expr_spans(expr, remap)
@@ -553,7 +552,6 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             remap_expr_spans(expr, remap)?;
             remap_block_spans(body, remap)
         }
-        Stmt::MmsBlock { span, .. } => remap_span_source(span, remap),
         Stmt::Func(function) => remap_func_spans(function, remap),
         Stmt::Alloc { body, .. } => remap_block_spans(body, remap),
     }

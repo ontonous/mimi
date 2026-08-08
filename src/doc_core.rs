@@ -1,4 +1,4 @@
-use crate::ast::{Item, Stmt, Type, TypeDefKind};
+use crate::ast::{Item, Type, TypeDefKind};
 use crate::{lexer, parser};
 
 fn item_line(item: &Item) -> usize {
@@ -133,14 +133,8 @@ pub fn generate_markdown(source: &str) -> Result<String, String> {
                     params.join(", "),
                     ret
                 ));
-                for stmt in &f.body {
-                    if let Stmt::Desc(desc, _) = stmt.unlocated() {
-                        out.push_str(&format!("{}\n\n", desc));
-                    }
-                    if let Stmt::Rule(text, _) = stmt.unlocated() {
-                        out.push_str(&format!("rule: {}\n\n", text));
-                    }
-                }
+                // 0.35.13 trivia-ization: desc:/rule: no longer reach the
+                // AST (parser consumes them as trivia) — nothing to extract.
             }
             Item::Type(t) => {
                 out.push_str(&format!("## `type {}`\n\n", t.name));
@@ -225,14 +219,7 @@ pub fn generate_markdown(source: &str) -> Result<String, String> {
                                 params.join(", "),
                                 ret
                             ));
-                            for stmt in &f.body {
-                                if let Stmt::Desc(desc, _) = stmt.unlocated() {
-                                    out.push_str(&format!("{}\n\n", desc));
-                                }
-                                if let Stmt::Rule(text, _) = stmt.unlocated() {
-                                    out.push_str(&format!("rule: {}\n\n", text));
-                                }
-                            }
+                            // 0.35.13 trivia-ization: desc:/rule: are trivia.
                         }
                         Item::Type(t) => {
                             out.push_str(&format!("### `type {}`\n\n", t.name));

@@ -1331,7 +1331,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 br_result?;
                 self.builder.position_at_end(merge_bb);
             }
-            Stmt::MmsBlock { .. } => {}
             Stmt::Parasteps(block) => {
                 self.enter_parasteps();
                 self.compile_block(block, vars)?;
@@ -1394,9 +1393,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            Stmt::Desc(..)
-            | Stmt::Rule(..)
-            | Stmt::Requires(_, _)
+            Stmt::Requires(_, _)
             | Stmt::Ensures(_, _)
             | Stmt::Invariant(_, _)
             | Stmt::Math(_)

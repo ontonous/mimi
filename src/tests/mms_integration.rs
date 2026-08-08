@@ -1,8 +1,31 @@
 use super::*;
-use crate::ast::{Item, Stmt};
+use crate::ast::Item;
+
+// 0.35.13 (DX backlog #10 trivia-ization): `mms {}` blocks are consumed by
+// the parser as trivia — validated for brace structure but never entering
+// the AST (Stmt 33→30). These tests lock the new contract:
+//   1. mms{}-bearing sources still parse without errors;
+//   2. the mms block contributes ZERO statements to the enclosing body;
+//   3. runtime semantics of the surrounding code are unaffected.
+// Pre-0.35.13 this file asserted `Stmt::MmsBlock` presence and verbatim
+// content preservation; that surface no longer exists.
+
+fn first_func_body(src: &str) -> crate::ast::Block {
+    let file = parse(src);
+    file.items
+        .iter()
+        .find_map(|item| {
+            if let Item::Func(f) = item {
+                Some(f.body.clone())
+            } else {
+                None
+            }
+        })
+        .expect("expected a function item")
+}
 
 #[test]
-fn mms_block_exists() {
+fn mms_block_consumed_as_trivia() {
     let src = r#"
         func add(a: i32, b: i32) -> i32 {
             mms {
@@ -11,27 +34,12 @@ fn mms_block_exists() {
             a + b
         }
     "#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let Item::Func(f) = item {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:17 unwrap failed");
-    let mms_stmt = func
-        .body
-        .iter()
-        .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
-    assert!(mms_stmt.is_some(), "should have MMS block");
+    let body = first_func_body(src);
+    assert_eq!(body.len(), 1, "mms{{}} must not enter the AST");
 }
 
 #[test]
-fn mms_block_has_content() {
+fn mms_block_empty_body_after_trivia() {
     let src = r#"
         func main() {
             mms {
@@ -39,29 +47,8 @@ fn mms_block_has_content() {
             }
         }
     "#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let Item::Func(f) = item {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:34 unwrap failed");
-    let mms_stmt = func
-        .body
-        .iter()
-        .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
-    assert!(mms_stmt.is_some());
-    if let Stmt::MmsBlock { content, .. } = mms_stmt
-        .expect("src/tests/mms_integration.rs:37 unwrap failed")
-        .unlocated()
-    {
-        assert!(!content.is_empty(), "content should not be empty");
-    }
+    let body = first_func_body(src);
+    assert!(body.is_empty(), "only mms{{}} ⇒ empty function body");
 }
 
 #[test]
@@ -79,35 +66,19 @@ fn mms_block_runtime_accessible() {
 }
 
 #[test]
-fn mms_block_multiple() {
+fn mms_block_multiple_all_consumed() {
     let src = r#"
         func main() {
             mms { first block }
             mms { second block }
         }
     "#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let Item::Func(f) = item {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:67 unwrap failed");
-    let mms_count = func
-        .body
-        .iter()
-        .filter(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }))
-        .count();
-    assert!(mms_count >= 2, "should have at least 2 MMS blocks");
+    let body = first_func_body(src);
+    assert!(body.is_empty(), "both mms{{}} blocks must be trivia");
 }
 
 #[test]
-fn mms_block_in_module() {
+fn mms_block_in_module_consumed() {
     let src = r#"
         module Math {
             func add(a: i32, b: i32) -> i32 {
@@ -127,7 +98,7 @@ fn mms_block_in_module() {
                 None
             }
         })
-        .expect("src/tests/mms_integration.rs:85 unwrap failed");
+        .expect("expected a module item");
     let func = module
         .items
         .iter()
@@ -138,16 +109,15 @@ fn mms_block_in_module() {
                 None
             }
         })
-        .expect("src/tests/mms_integration.rs:88 unwrap failed");
-    let mms_stmt = func
-        .body
-        .iter()
-        .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
-    assert!(mms_stmt.is_some(), "should have MMS block in module");
+        .expect("expected a function in the module");
+    assert_eq!(func.body.len(), 1, "mms{{}} must be trivia in modules too");
 }
 
 #[test]
-fn mms_block_ast_token_content() {
+fn mms_block_contract_shaped_content_consumed() {
+    // Contract-shaped mms content (requires:/ensures:) was always inert in
+    // .mimi (AGENTS.md §10 super-comment ruling) — after trivia-ization it
+    // simply never reaches any tool path.
     let src = r#"
         func main() {
             mms {
@@ -158,42 +128,12 @@ fn mms_block_ast_token_content() {
             42
         }
     "#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let Item::Func(f) = item {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:108 unwrap failed");
-    let mms_stmt = func
-        .body
-        .iter()
-        .find_map(|s| {
-            if let Stmt::MmsBlock { content, .. } = s.unlocated() {
-                Some(content.clone())
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:115 unwrap failed");
-    assert!(!mms_stmt.is_empty(), "content should not be empty");
-    assert!(
-        mms_stmt.contains("func add"),
-        "content should contain original text"
-    );
-    assert!(
-        mms_stmt.contains("requires"),
-        "content should contain requires"
-    );
+    let body = first_func_body(src);
+    assert_eq!(body.len(), 1, "contract-shaped mms{{}} is trivia too");
 }
 
 #[test]
-fn mms_block_ast_with_desc() {
+fn mms_block_with_desc_rule_consumed() {
     let src = r#"
         func main() {
             mms {
@@ -203,81 +143,22 @@ fn mms_block_ast_with_desc() {
             42
         }
     "#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let Item::Func(f) = item {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:161 unwrap failed");
-    let mms_stmt = func
-        .body
-        .iter()
-        .find_map(|s| {
-            if let Stmt::MmsBlock { content, .. } = s.unlocated() {
-                Some(content.clone())
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:168 unwrap failed");
-    assert!(!mms_stmt.is_empty());
-    assert!(
-        mms_stmt.contains("desc"),
-        "content should contain desc text"
-    );
+    let body = first_func_body(src);
+    assert_eq!(body.len(), 1, "desc/rule inside mms{{}} are trivia");
 }
 
 #[test]
-fn mms_block_content_preserved() {
+fn desc_rule_statements_consumed_as_trivia() {
+    // Standalone desc/rule statements (outside mms{}) are trivia too —
+    // the parser validates and discards them inside blocks. Grammar is
+    // `desc "text"` / `desc { ... }` (no colon).
     let src = r#"
-        func main() {
-            mms {
-                func Pay(amount):
-                    desc "Process payment"
-                    requires: amount > 0
-            }
+        func main() -> i32 {
+            desc "Process the order"
+            rule "must validate inputs"
             42
         }
     "#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let Item::Func(f) = item {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:188 unwrap failed");
-    let mms_stmt = func
-        .body
-        .iter()
-        .find_map(|s| {
-            if let Stmt::MmsBlock { content, .. } = s.unlocated() {
-                Some(content.clone())
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/mms_integration.rs:195 unwrap failed");
-    assert!(
-        mms_stmt.contains("Pay"),
-        "content should contain function name"
-    );
-    assert!(
-        mms_stmt.contains("desc"),
-        "content should contain desc keyword"
-    );
-    assert!(
-        mms_stmt.contains("requires"),
-        "content should contain requires keyword"
-    );
+    let body = first_func_body(src);
+    assert_eq!(body.len(), 1, "desc/rule must not enter the AST");
 }

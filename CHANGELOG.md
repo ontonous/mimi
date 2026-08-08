@@ -263,6 +263,34 @@
 - **验证**：5292 lib 全绿（含 parser 92 / property 44）；clippy 零警告；
   fmt 干净。
 
+### 0.35.13 — trivia 化：desc/rule/mms{} 降注释，Stmt 33→30（Phase D）
+
+> dx-backlog #10（0.34.5a 推迟项）落地：`desc`/`rule`/`mms{}` 从 AST 降为
+> trivia——parser 消费即弃（验证括号结构但不产出语句），表面语法兼容
+> （旧源码继续可解析）。`math:` 保留 verifier 通道（P1 裁决）。#13（actor
+> runs_flow 三层集成）从本 sprint 拆出单独排期（曾有“超单 sprint 范围”
+> 回滚史）。
+
+- **parser**：`parse_stmt_kind` 删除 Desc/Rule/Mms 产出臂（块外出现报
+  trivia 诊断）；两个 block 循环（terminator/recovery）改为消费即弃；
+  `parse_mms_block` 改返回 `()`，删除文本重建逻辑（仅保留括号平衡消费）；
+- **AST**：`Stmt::Desc`/`Stmt::Rule`/`Stmt::MmsBlock` 三 variant 删除
+  （Stmt 33→30）；
+- **消费面清理（82 处 / 22 文件）**：resolved（语义键/节点标签/span 抽取
+  7 臂）/ checker（check_stmt×3、func 合约探测、borrow）/ codegen（block/
+  func/actors skip 臂）/ bytecode VM / CFG lower / resolved IR lower /
+  loader span remap / lint / verifier×4 文件 skip 臂；
+- **真实依赖处置**：`doc_core` desc/rule 文档提取循环删除（降注释后无
+  结构化意图文本可提取，属裁决内行为）；`core::verify_rules` 降为恒净
+  no-op（保留 CLI `--verify-rules` 接口）；LSP `has_contracts` 探测去
+  MmsBlock；
+- **测试重写**：`mms_integration.rs` 8 项全重写为 trivia 契约（解析无错 +
+  零 AST 语句 + 运行时语义不变，新增独立 desc/rule trivia 锁）；
+  parser/flow.rs mms 嵌套括号测试改为“消费后仅余 return”；语料实测
+  desc/rule/mms{} 使用量为零（demos/examples/tests/std/projects 全扫），
+  且新测试发现登记口径误差：真实语法为 `desc "text"` 无冒号；
+- **验证**：全量 5292 lib + 30 real_world + cli 绿；clippy 零警告；fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

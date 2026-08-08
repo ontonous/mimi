@@ -70,35 +70,28 @@ impl Parser {
             TokenKind::LocalShared => self.parse_shared_let(SharedKind::LocalShared),
             TokenKind::Weak => self.parse_shared_let(SharedKind::Weak),
             TokenKind::WeakLocal => self.parse_shared_let(SharedKind::WeakLocal),
-            TokenKind::Mms => self.parse_mms_block(),
+            // 0.35.13 (DX backlog #10 trivia-ization): desc:/rule:/mms{}
+            // no longer produce AST statements. Block loops consume them as
+            // trivia; reaching them outside a block is a syntax error.
+            TokenKind::Mms => Err(ParseError::new(
+                "`mms` blocks are trivia (consumed inside blocks only)",
+                self.peek().line,
+                self.peek().col,
+            )),
             TokenKind::LBrace => {
                 self.advance();
                 Ok(Stmt::Block(self.parse_block()?))
             }
-            TokenKind::Desc => {
-                let span = self.single_span(self.peek().line, self.peek().col);
-                self.advance();
-                if self.at(&TokenKind::LBrace) {
-                    let s = self.parse_brace_block_content()?;
-                    Ok(Stmt::Desc(s, span))
-                } else {
-                    let s = self.expect_string()?;
-                    self.match_semi();
-                    Ok(Stmt::Desc(s, span))
-                }
-            }
-            TokenKind::Rule => {
-                let span = self.single_span(self.peek().line, self.peek().col);
-                self.advance();
-                if self.at(&TokenKind::LBrace) {
-                    let s = self.parse_brace_block_content()?;
-                    Ok(Stmt::Rule(s, span))
-                } else {
-                    let s = self.expect_string()?;
-                    self.match_semi();
-                    Ok(Stmt::Rule(s, span))
-                }
-            }
+            TokenKind::Desc => Err(ParseError::new(
+                "`desc:` is trivia (consumed inside blocks only)",
+                self.peek().line,
+                self.peek().col,
+            )),
+            TokenKind::Rule => Err(ParseError::new(
+                "`rule:` is trivia (consumed inside blocks only)",
+                self.peek().line,
+                self.peek().col,
+            )),
             TokenKind::Ellipsis => {
                 self.advance();
                 if !self.is_sketch() {
@@ -428,22 +421,18 @@ impl Parser {
         Ok(text.trim().to_string())
     }
 
-    fn parse_mms_block(&mut self) -> Result<Stmt, ParseError> {
-        let mms_line = self.peek().line;
-        let mms_col = self.peek().col;
+    fn parse_mms_block(&mut self) -> Result<(), ParseError> {
         self.expect(TokenKind::Mms, "`mms`")?;
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
-        let content = if matches!(self.peek_kind(), TokenKind::String(_)) {
-            self.expect_string()?
+        if matches!(self.peek_kind(), TokenKind::String(_)) {
+            self.expect_string()?;
         } else {
-            let mut text = String::new();
+            // 0.35.13 trivia-ization: consume the body validating only the
+            // brace structure — the text is a super-comment, no AST node.
             let mut depth = 1u32;
-            let mut first_line = None;
-            let mut first_col = None;
             while !self.at(&TokenKind::Eof) {
-                let tok = self.peek();
-                match &tok.kind {
+                match self.peek_kind() {
                     TokenKind::LBrace => depth += 1,
                     TokenKind::RBrace => {
                         depth = depth.saturating_sub(1);
@@ -453,31 +442,14 @@ impl Parser {
                     }
                     _ => {}
                 }
-                let t = tok.kind.source_text();
-                if t == "\n" {
-                    text.push('\n');
-                } else if !t.is_empty() {
-                    if first_line.is_none() {
-                        first_line = Some(tok.line);
-                        first_col = Some(tok.col);
-                    }
-                    let base_col = first_col.unwrap_or(tok.col);
-                    let relative_col = tok.col.saturating_sub(base_col);
-                    if text.ends_with('\n') || text.is_empty() {
-                        text.push_str(&" ".repeat(relative_col));
-                    } else {
-                        text.push(' ');
-                    }
-                    text.push_str(t);
-                }
                 self.advance();
             }
-            text.trim().to_string()
-        };
+        }
         self.expect(TokenKind::RBrace, "`}`")?;
         self.match_semi();
-        let span = self.single_span(mms_line, mms_col);
-        Ok(Stmt::MmsBlock { content, span })
+        // 0.35.13 trivia-ization: the content is parsed (validating the
+        // brace structure) but discarded — mms{} is a super-comment.
+        Ok(())
     }
 
     fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {
@@ -1094,32 +1066,30 @@ impl Parser {
                 stmts.push(self.parsed_stmt_from(start_pos, Stmt::Math(exprs)));
                 continue;
             }
+            // 0.35.13 (DX backlog #10 trivia-ization): desc:/rule:/mms{}
+            // are consumed as trivia — validated but never enter the AST.
             if self.at(&TokenKind::Desc) {
-                let start_pos = self.pos;
-                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
-                    let s = self.parse_brace_block_content()?;
-                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
+                    self.parse_brace_block_content()?;
                 } else {
-                    let s = self.expect_string()?;
+                    self.expect_string()?;
                     self.match_semi();
-                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
                 }
                 continue;
             }
             if self.at(&TokenKind::Rule) {
-                let start_pos = self.pos;
-                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
-                    let s = self.parse_brace_block_content()?;
-                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
+                    self.parse_brace_block_content()?;
                 } else {
-                    let s = self.expect_string()?;
+                    self.expect_string()?;
                     self.match_semi();
-                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
                 }
+                continue;
+            }
+            if self.at(&TokenKind::Mms) {
+                self.parse_mms_block()?;
                 continue;
             }
             stmts.push(self.parse_stmt()?);
@@ -1226,32 +1196,27 @@ impl Parser {
                 }
                 continue;
             }
+            // 0.35.13 trivia-ization (recovery loop): consume-and-discard.
             if self.at(&TokenKind::Desc) {
-                let start_pos = self.pos;
-                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
-                    if let Ok(s) = self.parse_brace_block_content() {
-                        stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
-                    }
-                } else if let Ok(s) = self.expect_string() {
+                    let _ = self.parse_brace_block_content();
+                } else if self.expect_string().is_ok() {
                     self.match_semi();
-                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
                 }
                 continue;
             }
             if self.at(&TokenKind::Rule) {
-                let start_pos = self.pos;
-                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
-                    if let Ok(s) = self.parse_brace_block_content() {
-                        stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
-                    }
-                } else if let Ok(s) = self.expect_string() {
+                    let _ = self.parse_brace_block_content();
+                } else if self.expect_string().is_ok() {
                     self.match_semi();
-                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
                 }
+                continue;
+            }
+            if self.at(&TokenKind::Mms) {
+                let _ = self.parse_mms_block();
                 continue;
             }
             match self.parse_stmt() {

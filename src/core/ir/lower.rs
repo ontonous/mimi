@@ -1526,7 +1526,6 @@ impl BodyLowerer<'_> {
                     body,
                 }
             }
-            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
             Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         };

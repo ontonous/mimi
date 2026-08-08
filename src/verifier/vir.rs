@@ -493,8 +493,8 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
     match stmt.unlocated() {
         // Contracts are always allowed (they are the specification)
         Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..) => Ok(()),
-        // Super-comments are ignored
-        Stmt::MmsBlock { .. } | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis => Ok(()),
+        // 0.35.13 trivia-ization: desc:/rule:/mms{} no longer reach the AST.
+        Stmt::Ellipsis => Ok(()),
         // Let bindings: check the init expression; reject mutable bindings
         Stmt::Let { init, mut_, .. } => {
             if *mut_ {
@@ -1346,9 +1346,6 @@ fn lower_branch_block(stmts: &[crate::ast::Stmt], ctx: &mut LoweringCtx) -> Opti
             | Stmt::Ensures(..)
             | Stmt::Invariant(..)
             | Stmt::Math(..)
-            | Stmt::MmsBlock { .. }
-            | Stmt::Desc(..)
-            | Stmt::Rule(..)
             | Stmt::Ellipsis => {}
             Stmt::Let { pat, init, .. } => {
                 if let Some(init) = init {
