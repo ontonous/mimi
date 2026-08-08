@@ -5,6 +5,28 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.1 — 性能基线套件 + 四象限矩阵（0.1.5 首 sprint，Phase A）
+
+> 0.1.5 性能主线的第一步：建立可复现基线，锁定 trap 成本分解的第一个靶子。
+> 纯增量基建，零行为变更。基线报告 `devdocs/v0.35/perf-baseline-0.35.1.md`。
+
+- **基准套件扩展**：`benchmarks/` 新增 dsp 热循环（一阶低通 5×10^7，dogfood
+  M-014 同构场景）+ `dsp_ieee`/`mandelbrot_ieee` 变体（ieee_float 包裹悬浮
+  SD-9 finiteness trap）+ `dsp.c`（gcc -O2 对照）/ `dsp.py`（CPython 对照）；
+- **quadrant.sh**：四象限矩阵脚本——MIMI_OPT ∈ {0,1} × {默认, ieee_float}
+  对 fib/mandelbrot/dsp 计时（纳秒括弧，RUNS=3 中位数）+ MIMI_DUMP_MODULE
+  IR dump 静态 trap 调用点计数（trap 发射与优化档无关）；
+- **基线矩阵（2026-08-08，32 核机）**：dsp O1 默认 402.1ms（3.97× C -O2）→
+  O1+ieee 106.4ms（**1.06× 追平**）；mandelbrot O1 3.64× → ieee 1.88×；
+  fib O1 2.88×（O0 3.68×）；
+- **关键发现**：SD-9 float finiteness trap 占 dsp O1 默认耗时 **73.5%**
+  （295.7ms，每 f64 binop 发射 NaN/Inf 检查）；整数 trap（SD-7）在 O1 下被
+  LLVM 循环分析消除（ieee 版整数计数器仍 checked add 却追平 C）——整数
+  trap 不是主要靶子；trap 静态计数与动态成本定性吻合（dsp 28→24 /
+  mandelbrot 38→30）；
+- **0.35.2 输入**：SD-9 链式末端检查假设（f64 代数链中间非有限必传播到
+  末端，逐点检查可收敛为末端检查，语义保持）列入验证。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

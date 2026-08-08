@@ -1,0 +1,18 @@
+// Benchmark: first-order low-pass DSP loop (dogfood M-014 scenario)
+// Tests: f64 arithmetic chain + SD-7 integer overflow trap on loop counter
+//        (i = i + 1 emits checked add + trap branch every iteration)
+// Reference: devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md M-014
+func main() -> i32 {
+    let alpha = 0.01
+    let mut y = 0.0
+    let mut x = 0.0
+    let mut i = 0
+    while i < 50_000_000 {
+        x = (i as f64) * 0.000001
+        y = y + alpha * (x - y)
+        i = i + 1
+    }
+    let out = (y * 1_000_000.0) as i64
+    println(out)
+    0
+}

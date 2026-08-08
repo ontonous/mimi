@@ -1,0 +1,21 @@
+// Benchmark: first-order low-pass DSP loop — ieee_float variant
+// Same workload as dsp.mimi but float ops wrapped in ieee_float { } to
+// suspend the SD-9 finiteness trap (dogfood M-014: default 5.2x vs
+// ieee_float+O1 追平 C -O2). Integer counter trap (SD-7) still active,
+// isolating the float-trap vs int-trap cost split.
+func main() -> i32 {
+    let alpha = 0.01
+    let mut y = 0.0
+    let mut x = 0.0
+    let mut i = 0
+    while i < 50_000_000 {
+        ieee_float {
+            x = (i as f64) * 0.000001
+            y = y + alpha * (x - y)
+        }
+        i = i + 1
+    }
+    let out = (y * 1_000_000.0) as i64
+    println(out)
+    0
+}
