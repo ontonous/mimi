@@ -643,9 +643,17 @@ impl Parser {
             tail = Some(self.parse_block()?);
             break;
         }
-        // Fold right-to-left; the loop above guarantees ≥1 link.
+        // Fold right-to-left; the loop above guarantees ≥1 link. 0.35.12
+        // (DX backlog #2): invariant violation surfaces as a diagnostic
+        // instead of a panic — user input must never abort the compiler.
         let mut iter = links.into_iter().rev();
-        let (head, then_) = iter.next().expect("if-chain has at least one link");
+        let Some((head, then_)) = iter.next() else {
+            return Err(ParseError::new(
+                "internal: `if` chain lost its first link",
+                self.peek().line,
+                self.peek().col,
+            ));
+        };
         let mut current = match head {
             IfHead::Cond(cond) => Stmt::If {
                 cond,

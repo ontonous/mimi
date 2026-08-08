@@ -238,6 +238,31 @@
 - **验证**：05_lists O0/O1 与 bytecode 输出逐行对等（zip 行除外）；全量
   5292 lib + 29 real_world + cli 套件绿。
 
+### 0.35.12 — resolve→zonk 全量迁移 + parser panic 审计第一批（Phase D）
+
+> dx-backlog #1 关闭 + #2 第一批（parse_expr/parse_stmt）审计落地。
+> 两半各自独立提交（0.35.12a 迁移 / 0.35.12b 审计）。
+
+- **#1 resolve()→zonk_or_unknown() 全量迁移（31 处生产调用点清零）**：
+  infer_expr×2 / check_stmt×4 / checker·func×1 / checker·vars×6 /
+  checker·items×2 / checker×1 / infer·lambda×1 / infer·call·helpers×5 /
+  infer·call·simple×5 / infer·helpers×1 / infer·record×3。**语义裁决**：
+  迁移点均为推断内部（非定稿边界），游离 TypeVar（let 多态占位）/ForAll/
+  逃逸哨兵在迁移前 resolve 中原样透传——首版直接套 scan_residual 严格化
+  在 flow checker unknown 哨兵与 let 多态游离变量两类合法路径上触发
+  debug 断言（实证后回退）；`zonk_or_unknown` 最终对齐 pre-migration
+  resolve 语义（resolve_infer + unknown 兜底 + 可见 debug 断言），严格
+  定稿仍由真边界处的 `zonk` 承担；`resolve()` 降为 #[deprecated] 转发，
+  仅 unification.rs 模块测试消费；
+- **#2 parser panic 审计第一批（parse_expr/parse_stmt）**：审计结论矫正
+  登记口径——**51 处 `panic!` 全部位于 #[cfg(test)] 测试区**（原登记未
+  分离测试代码）；`unwrap()/expect(` 计数含 parser 自身的 Result 返回
+  `self.expect()` 辅助方法（非 Option::expect）。生产区真实残留仅 3 处
+  结构性不变量 unwrap（if-chain 首链 ×2 + token 索引 ×1），全部降级为
+  `ParseError` 诊断（用户输入永不 abort 编译器）；
+- **验证**：5292 lib 全绿（含 parser 92 / property 44）；clippy 零警告；
+  fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

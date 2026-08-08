@@ -254,16 +254,30 @@ impl Parser {
                 self.peek().col,
             ));
         }
-        // Fold right-to-left; the loop above guarantees ≥1 link.
+        // Fold right-to-left; the loop above guarantees ≥1 link. 0.35.12
+        // (DX backlog #2): invariant violation surfaces as a diagnostic
+        // instead of a panic — user input must never abort the compiler.
         let mut iter = links.into_iter().rev();
-        let (_, _, cond, then_) = iter.next().expect("if-chain has at least one link");
+        let Some((_, _, cond, then_)) = iter.next() else {
+            return Err(ParseError::new(
+                "internal: `if` chain lost its first link",
+                self.peek().line,
+                self.peek().col,
+            ));
+        };
         let mut current = Expr::If {
             cond: Box::new(cond),
             then_,
             else_: tail,
         };
         for (if_idx, end_idx, cond, then_) in iter {
-            let first = self.tokens.get(if_idx).expect("`if` token recorded");
+            let Some(first) = self.tokens.get(if_idx) else {
+                return Err(ParseError::new(
+                    "internal: recorded `if` token index out of range",
+                    self.peek().line,
+                    self.peek().col,
+                ));
+            };
             let last = self.tokens.get(end_idx.saturating_sub(1)).unwrap_or(first);
             // Per-link span: this link's own `if` token .. this link's own
             // tail. Using the WHOLE chain's last token for every link made
