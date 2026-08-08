@@ -58,6 +58,7 @@ fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
     vm.append_stdout(&s);
     vm.append_stdout("\n");
+    flush_c_stdio();
     println!("{}", s);
     Ok(Value::Unit)
 }
@@ -65,6 +66,7 @@ fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
 fn builtin_print(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
     vm.append_stdout(&s);
+    flush_c_stdio();
     print!("{}", s);
     Ok(Value::Unit)
 }
@@ -73,8 +75,26 @@ fn builtin_print_err(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     // B-7 (audit 2026-08-05): auto-deref Shared/LocalShared for dual-backend
     // parity with print/println (codegen loads the payload, not the wrapper).
     let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
+    flush_c_stdio();
     eprintln!("{}", s);
     Ok(Value::Unit)
+}
+
+/// 0.35.14 (DX backlog #16): C stdio and Rust stdout are SEPARATE buffers
+/// over the same fd. Under the VM, mimi prints go through Rust's stdout
+/// (flushed per line) while FFI callees' puts/printf sit in libc's
+/// block-buffered stdout — the C output then surfaces only at process
+/// exit, landing AFTER every mimi line (M-007 stream reordering). Flush
+/// the C buffers before every Rust-side write so program order holds at
+/// each interleaving point. A flush of an empty C buffer is a cheap no-op
+/// for the common FFI-free case.
+fn flush_c_stdio() {
+    // SAFETY: libc::stdout/stderr are process-lifetime FILE* globals;
+    // fflush(nullptr) drains every open output stream — the stronger
+    // form guards against C callees writing to streams we cannot name.
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+    }
 }
 
 fn builtin_input_line(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {

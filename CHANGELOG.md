@@ -291,6 +291,41 @@
   且新测试发现登记口径误差：真实语法为 `desc "text"` 无冒号；
 - **验证**：全量 5292 lib + 30 real_world + cli 绿；clippy 零警告；fmt 干净。
 
+### 0.35.14 — DX backlog 三项：#13 runs_flow 三层集成 + #16 C stdio 混流 + #18 tuple fn 取出（Phase D）
+
+> 质量次线三项落地。头条是 #13（0.34.29 曾有"超单 sprint 范围"回滚史）：
+> actor `runs` Flow 的 transition 方法调用（`a.inc()`）此前被 checker
+> 误报 E0221 "has no method"（合法程序被拒 = L2 假阳性），本次实测逐层
+> 推进完成类型检查层三层集成；`mimi check` 全通，bytecode dispatch 运行时
+> 行为不变。#3（LSP Span/Origin 迁移）顺延下个 sprint。
+
+- **#13 层①（checker + infer 方法注册）**：`collect_item_decls` 将 runs_flow
+  actor 的每个 transition 注册为合成方法（签名 `(self, event params…) ->
+  ToState`；`fails E` 时返回 `Result<ToState, (FromState, E)>`——与
+  codegen/VM dispatch 消费的形状一致）；显式同名方法优先。infer 新增
+  `runs_flow_transition` 辅助 + `is_actor_method` 扩展：调用点按 actor 方法
+  dispatch（E0221/E0257 误报消除），参数类型/元数照常 E0211/E0257，typo
+  建议含 transition 名；
+- **#13 层②（zonked 签名）**：无需额外注册——`finalize_zonked_func_types`
+  遍历 checker `funcs` 目录，自动覆盖合成条目；
+- **#13 层③（resolved callable identity）**：resolved 目录为每个 transition
+  注册 `function:{Actor}::{transition}` 的 `ResolvedFunction`（含 implicit
+  self + 参数 NodeMeta）与 `ResolvedActorMethod`（call-site KIND 事实因此
+  归类为 Method 而非 Unknown）；typed body lowering 对合成 callable 豁免
+  （无语义体，转移表由 VM/codegen 运行时 dispatch）。**边界**：`mimi build`
+  codegen 仍报 E0700（runs_flow codegen 维持 0.2 登记，spec §6.12）；
+- **#16（C stdio 混流乱序）**：VM `print`/`println`/`print_err` 每次 Rust
+  侧写前 `fflush(nullptr)` 抽干 C stdio 块缓冲——比"退出前单次 flush"更强，
+  在每个交错点保持程序序；无 FFI 场景空缓冲 flush 为廉价 no-op；
+- **#18（tuple fn 元素取出调用）**：tuple 字面量中的具名函数元素在绑定处
+  登记（`record_tuple_fn_elems`/`register_tuple_index_fn_binding`，Stmt::Let
+  双路径），`let f = t.0` 取出绑定走间接调用路径（i64 ptrtoint 槽 inttoptr
+  还原指针）——此前 codegen 报 E0700 "undefined function 'f'"（VM 可执行，
+  双后端分歧）；
+- **回归**：actors.rs 新增 3 项（dispatch typed check + 参数类型 E0211 +
+  fails Result 形状），real_world 新增 `real_world_tuple_fn_element_call`
+  双后端锁；全量 5294 lib + 31 real_world + cli 绿；clippy 零警告；fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

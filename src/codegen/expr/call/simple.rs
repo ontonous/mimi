@@ -109,9 +109,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let fn_ptr = self
-            .build_load(ty, alloca, &format!("{}_fn", name))?
-            .into_pointer_value();
+        // 0.35.14 (DX backlog #18): tuple-extracted fn bindings (`let f =
+        // t.0`) hold the pointer as a ptrtoint i64 slot — inttoptr it back.
+        // Direct `let f = func_name` bindings hold a pointer slot.
+        let loaded = self.build_load(ty, alloca, &format!("{}_fn", name))?;
+        let fn_ptr = match loaded {
+            BasicValueEnum::PointerValue(pv) => pv,
+            BasicValueEnum::IntValue(iv) => self
+                .builder
+                .build_int_to_ptr(
+                    iv,
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "fn_ptr_from_i64",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("fn ptr inttoptr: {e}")))?,
+            other => {
+                return Err(CompileError::Generic(format!(
+                    "fn-pointer variable '{}' holds an unexpected value {:?}",
+                    name,
+                    other.get_type()
+                )))
+            }
+        };
         let compiled_args = self.compile_arg_values(args, vars)?;
         let i64_ty = self.context.i64_type();
         let all_meta: Vec<_> = compiled_args

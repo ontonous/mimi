@@ -940,6 +940,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
                             }
                         }
+                        // 0.35.14 (DX backlog #18): tuple fn-element extraction.
+                        self.record_tuple_fn_elems(name, init);
+                        self.register_tuple_index_fn_binding(name, init);
                     }
                 }
                 Stmt::Let {
@@ -1741,6 +1744,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if matches!(init.unlocated(), Expr::MapLiteral { .. }) {
                             self.var_type_names.insert(name.clone(), "Map".to_string());
                         }
+                        // 0.35.14 (DX backlog #18): tuple fn-element extraction.
+                        self.record_tuple_fn_elems(name, init);
+                        self.register_tuple_index_fn_binding(name, init);
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());

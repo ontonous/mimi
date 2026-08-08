@@ -294,7 +294,12 @@ impl<'a> Checker<'a> {
                         Item::Actor(a) if a.name == *type_name => Some(a),
                         _ => None,
                     })
-                    .map(|a| a.methods.iter().any(|m| m.name == *method_name))
+                    .map(|a| {
+                        a.methods.iter().any(|m| m.name == *method_name)
+                            // 0.35.14 (DX backlog #13, layer ①): an actor that
+                            // `runs` a Flow dispatches transitions as methods.
+                            || self.runs_flow_transition(type_name, method_name).is_some()
+                    })
                     .unwrap_or(false);
                 if is_actor_method {
                     // Avoid .expect: re-resolve actor/method with if-let.
@@ -345,6 +350,62 @@ impl<'a> Checker<'a> {
                             }
                             return ret;
                         }
+                    }
+                    // 0.35.14 (DX backlog #13, layer ①): runs_flow transition
+                    // synthetic method — signature mirrors checker/items.rs
+                    // registration: (self, event params…) -> ToState; with
+                    // `fails E` the return is Result<ToState, (FromState, E)>.
+                    if let Some(transition) = self.runs_flow_transition(type_name, method_name) {
+                        let method_params: Vec<Type> = transition
+                            .params
+                            .iter()
+                            .map(|p| self.resolve_type(&p.ty))
+                            .collect();
+                        let target = transition
+                            .to_states
+                            .first()
+                            .map(|s| Type::Name(s.clone(), vec![]))
+                            .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                        let ret = if let Some(err_ty) = &transition.fails {
+                            let err_tuple = Type::Tuple(vec![
+                                Type::Name(transition.from_state.clone(), vec![]),
+                                self.resolve_type(err_ty),
+                            ]);
+                            Type::Result(Box::new(target), Box::new(err_tuple))
+                        } else {
+                            target
+                        };
+                        if args.len() != method_params.len() {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0257,
+                                format!(
+                                    "method '{}' of actor '{}' expects {} arguments, got {}",
+                                    method_name,
+                                    type_name,
+                                    method_params.len(),
+                                    args.len()
+                                ),
+                            );
+                        } else {
+                            for (i, (arg, param)) in
+                                args.iter().zip(method_params.iter()).enumerate()
+                            {
+                                let at = self.infer_expr(arg, scopes);
+                                if self.unification.unify(&at, param).is_err() {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0211,
+                                        format!(
+                                            "argument {} of method '{}' expected {}, found {}",
+                                            i + 1,
+                                            method_name,
+                                            fmt_type(param),
+                                            fmt_type(&at)
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        return ret;
                     }
                     return Type::Name("unknown".into(), vec![]);
                 }
@@ -640,6 +701,16 @@ impl<'a> Checker<'a> {
                 }
             }) {
                 method_candidates.extend(actor_def.methods.iter().map(|m| m.name.clone()));
+                // 0.35.14 (DX backlog #13): transitions are callable on
+                // runs_flow actors — include them in typo suggestions.
+                if let Some(flow_name) = actor_def.runs_flow.as_deref() {
+                    if let Some(flow) = self.file.items.iter().find_map(|item| match item {
+                        Item::Flow(f) if f.name == flow_name => Some(f),
+                        _ => None,
+                    }) {
+                        method_candidates.extend(flow.transitions.iter().map(|t| t.name.clone()));
+                    }
+                }
             }
             let suggestion = suggest_name(method_name, &method_candidates, 3);
             let help = if let Some(s) = suggestion {
@@ -1044,5 +1115,25 @@ impl<'a> Checker<'a> {
         } else {
             ret
         }
+    }
+
+    /// 0.35.14 (DX backlog #13, layer ①): find the flow transition an actor
+    /// dispatches through when it declares `runs FlowName`. Explicit actor
+    /// methods take precedence (mirrors the synthetic-method registration in
+    /// checker/items.rs), so a colliding name returns `None` here.
+    fn runs_flow_transition(&self, actor_name: &str, method_name: &str) -> Option<&TransitionDef> {
+        let actor = self.file.items.iter().find_map(|item| match item {
+            Item::Actor(a) if a.name == actor_name => Some(a),
+            _ => None,
+        })?;
+        if actor.methods.iter().any(|m| m.name == method_name) {
+            return None;
+        }
+        let flow_name = actor.runs_flow.as_deref()?;
+        let flow = self.file.items.iter().find_map(|item| match item {
+            Item::Flow(f) if f.name == flow_name => Some(f),
+            _ => None,
+        })?;
+        flow.transitions.iter().find(|t| t.name == method_name)
     }
 }

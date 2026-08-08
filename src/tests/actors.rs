@@ -350,12 +350,86 @@ func main() -> i32 {
     s3.n
 }
 "#;
-    // 0.34.29 analysis: bytecode runs runs_flow dispatch (a.inc() works at
-    // runtime); checker infer does NOT yet register flow transitions as actor
-    // methods (E0221 "has no method" false positive) — full typed check is
-    // registered for 0.1.5 (see golden-document §10 0.34.29).
+    // 0.35.14 (DX backlog #13): full typed check now passes — checker/infer
+    // register flow transitions as synthetic actor methods (layer ①) and the
+    // resolved directory carries `function:{Actor}::{transition}` callable
+    // identity (layer ③). Bytecode dispatch runs the program at runtime.
+    let checked = check_source(src);
+    assert!(
+        checked.is_ok(),
+        "runs_flow dispatch should check: {:?}",
+        checked
+    );
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(2));
+}
+
+#[test]
+fn actor_runs_flow_transition_arg_type_checked() {
+    // 0.35.14 (DX backlog #13): transition event params are typechecked at
+    // the actor method call site (E0211), arity mismatches emit E0257, and
+    // unknown methods keep E0221.
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    state Positive { n: i32 }
+    transition add(Zero, x: i32) -> Positive {
+        { return Positive { n: self.n + x } }
+    }
+}
+
+actor W runs Counter {
+}
+
+func main() -> i32 {
+    let a = W.spawn();
+    let s = a.add("oops");
+    0
+}
+"#;
+    let result = check_source(src);
+    let errors = result.expect_err("wrong-typed transition arg must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some(crate::diagnostic::codes::E0211)),
+        "expected E0211, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn actor_runs_flow_fails_transition_returns_result() {
+    // 0.35.14 (DX backlog #13): a `fails E` transition surfaces as
+    // Result<ToState, (FromState, E)> at the actor method call site — the
+    // same shape the VM dispatch returns.
+    let src = r#"
+flow F {
+    state A { n: i32 }
+    state B { n: i32 }
+    transition go(A) -> B fails string {
+        { return B { n: self.n + 1 } }
+    }
+}
+
+actor W runs F {
+}
+
+func main() -> i32 {
+    let a = W.spawn();
+    let r: i32 = a.go();
+    r
+}
+"#;
+    let result = check_source(src);
+    let errors = result.expect_err("fails transition returns Result, not i32");
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.message.contains("Result<B, (A, string)>")),
+        "expected Result<B, (A, string)> in diagnostic, got: {:?}",
+        errors
+    );
 }
 
 #[test]

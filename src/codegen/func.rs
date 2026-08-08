@@ -2524,6 +2524,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
                             }
                         }
+                        // 0.35.14 (DX backlog #18): tuple fn-element extraction.
+                        self.record_tuple_fn_elems(name, init);
+                        self.register_tuple_index_fn_binding(name, init);
 
                         // v0.28.15: Track heap-owned string variables so their
                         // data is freed at scope exit. String literals live in

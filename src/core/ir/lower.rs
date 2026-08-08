@@ -219,6 +219,21 @@ pub fn lower_checked_function_bodies(
             continue;
         };
         let Some(function) = syntax.get(owner) else {
+            // 0.35.14 (DX backlog #13, layer ③): synthetic runs_flow
+            // transition callables carry a canonical signature but no
+            // normalized body — their semantics live in the flow transition
+            // table and are dispatched by the VM/codegen at runtime. Skip
+            // body lowering instead of failing the whole program.
+            let is_runs_flow_synthetic = program.functions().get(owner).is_some_and(|func| {
+                matches!(
+                    &func.origin,
+                    crate::core::Origin::Desugared { rule, .. }
+                        if rule == "resolved.runs_flow_transition_method"
+                )
+            });
+            if is_runs_flow_synthetic {
+                continue;
+            }
             errors.push(ResolvedBodyError::new(
                 owner.clone(),
                 "canonical signature has no normalized function body",
