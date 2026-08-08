@@ -350,7 +350,7 @@ impl<'a> Checker<'a> {
                         );
                         return Type::Name("unknown".into(), vec![]);
                     }
-                    return self.unification.resolve(&t1);
+                    return self.unification.zonk_or_unknown(&t1);
                 }
                 "contains" => {
                     if args.len() != 2 {
@@ -2171,7 +2171,7 @@ impl<'a> Checker<'a> {
             .rev()
             .find_map(|scope| scope.get(name).cloned())
         {
-            let resolved = self.unification.resolve(&local_ty);
+            let resolved = self.unification.zonk_or_unknown(&local_ty);
             let local_ty = self.instantiate(&resolved);
             match local_ty.into_unlocated() {
                 Type::Func(param_types, ret_ty) => {
@@ -2242,7 +2242,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // Resolve return type after argument unification so TypeVars fill in.
-                    return self.unification.resolve(&ret_ty);
+                    return self.unification.zonk_or_unknown(&ret_ty);
                 }
                 _ => {
                     self.emit_code(
@@ -2266,7 +2266,7 @@ impl<'a> Checker<'a> {
                         .rev()
                         .find_map(|scope| scope.get(name).cloned());
                     raw.map(|ty| {
-                        let resolved = self.unification.resolve(&ty);
+                        let resolved = self.unification.zonk_or_unknown(&ty);
                         self.instantiate(&resolved)
                     })
                     .and_then(|ty| match ty.into_unlocated() {
@@ -2305,7 +2305,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    return self.unification.resolve(&ret_ty);
+                    return self.unification.zonk_or_unknown(&ret_ty);
                 }
                 // Try built-in Option/Result constructors as fallback.
                 // IF-C2: never use Type::Name("_") / Infer as payload — those are escape

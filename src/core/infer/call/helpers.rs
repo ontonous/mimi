@@ -66,7 +66,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                self.unification.resolve(inner)
+                self.unification.zonk_or_unknown(inner)
             }
             "is_some" | "is_none" => Type::Name("bool".into(), vec![]),
             "ok_or" => {
@@ -74,7 +74,7 @@ impl<'a> Checker<'a> {
                     .first()
                     .map(|arg| self.infer_expr(arg, scopes))
                     .unwrap_or_else(|| Type::Name("unknown".into(), vec![]));
-                Type::Result(Box::new(self.unification.resolve(inner)), Box::new(err_ty))
+                Type::Result(Box::new(self.unification.zonk_or_unknown(inner)), Box::new(err_ty))
             }
             "map" => {
                 if args.len() != 1 {
@@ -208,12 +208,12 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                self.unification.resolve(ok_ty)
+                self.unification.zonk_or_unknown(ok_ty)
             }
             "is_ok" | "is_err" => Type::Name("bool".into(), vec![]),
             "ok_or" => {
                 // Result::ok_or is not a standard combinator; treat it as producing Option<T>.
-                Type::Option(Box::new(self.unification.resolve(ok_ty)))
+                Type::Option(Box::new(self.unification.zonk_or_unknown(ok_ty)))
             }
             "map" => {
                 if args.len() != 1 {
@@ -601,7 +601,7 @@ impl<'a> Checker<'a> {
                 if method == "contains" {
                     Type::Name("bool".into(), vec![])
                 } else {
-                    Type::Name("Set".into(), vec![self.unification.resolve(inner)])
+                    Type::Name("Set".into(), vec![self.unification.zonk_or_unknown(inner)])
                 }
             }
             "to_list" => {

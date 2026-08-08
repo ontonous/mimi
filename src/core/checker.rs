@@ -776,7 +776,7 @@ impl<'a> Checker<'a> {
     /// v0.31.2: Uses `CollectVarsFolder` + `RemapFolder` from type_folder infrastructure.
     /// Also records a `TypeScheme` in `self.schemes` for checker artifacts.
     pub(crate) fn generalize(&mut self, ty: &Type, env: &HashMap<String, Type>) -> Type {
-        let resolved = self.unification.resolve(ty);
+        let resolved = self.unification.zonk_or_unknown(ty);
         if matches!(resolved.unlocated(), Type::ForAll(..)) {
             return resolved;
         }

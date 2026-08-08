@@ -222,7 +222,7 @@ impl<'a> Checker<'a> {
                     }
 
                     let ret = Type::Name(tdef.name.clone(), type_args);
-                    self.unification.resolve(&ret)
+                    self.unification.zonk_or_unknown(&ret)
                 }
                 _ => {
                     self.emit_code(
@@ -305,7 +305,7 @@ impl<'a> Checker<'a> {
                     ),
                 );
             } else {
-                elem_ty = self.unification.resolve(&elem_ty);
+                elem_ty = self.unification.zonk_or_unknown(&elem_ty);
             }
         }
         Type::Name("List".into(), vec![elem_ty])
@@ -375,7 +375,7 @@ impl<'a> Checker<'a> {
                     ),
                 );
             } else {
-                elem_ty = self.unification.resolve(&elem_ty);
+                elem_ty = self.unification.zonk_or_unknown(&elem_ty);
             }
         }
         Type::Name("Set".into(), vec![elem_ty])

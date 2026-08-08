@@ -75,7 +75,7 @@ impl<'a> Checker<'a> {
                 // Arch-4: resolve TypeVars before returning so downstream unify calls
                 // get concrete types rather than unresolved inference variables.
                 // CO-C1: instantiate ForAll so each use of a polymorphic let gets fresh vars.
-                let resolved = self.unification.resolve(t);
+                let resolved = self.unification.zonk_or_unknown(t);
                 return self.instantiate(&resolved);
             }
         }
@@ -84,7 +84,7 @@ impl<'a> Checker<'a> {
             let qualified = format!("{}::{}", module, name);
             if let Some((params, ret)) = self.funcs.get(&qualified) {
                 // Arch-4: resolve TypeVars in function signature
-                let ret = self.unification.resolve(ret);
+                let ret = self.unification.zonk_or_unknown(ret);
                 let func_ty = Type::Func(params.clone(), Box::new(ret));
                 return self.func_value_type(name, &qualified, func_ty);
             }
@@ -93,12 +93,12 @@ impl<'a> Checker<'a> {
         if let Some((params, ret)) = self.funcs.get(name) {
             if params.is_empty() {
                 // Zero-argument constructor (enum variant without payload)
-                return self.unification.resolve(ret);
+                return self.unification.zonk_or_unknown(ret);
             } else {
                 // Function reference: return func(T) -> U type
                 let resolved_params: Vec<Type> =
-                    params.iter().map(|p| self.unification.resolve(p)).collect();
-                let resolved_ret = self.unification.resolve(ret);
+                    params.iter().map(|p| self.unification.zonk_or_unknown(p)).collect();
+                let resolved_ret = self.unification.zonk_or_unknown(ret);
                 let func_ty = Type::Func(resolved_params, Box::new(resolved_ret));
                 return self.func_value_type(name, name, func_ty);
             }
@@ -116,7 +116,7 @@ impl<'a> Checker<'a> {
         }
         // Check if it's a top-level constant
         if let Some(const_ty) = self.const_types.get(name) {
-            return self.unification.resolve(const_ty);
+            return self.unification.zonk_or_unknown(const_ty);
         }
         // Capability name used as a value: `let c = FullAccess`. Both simple
         // (`cap FileReadCap;`) and combined-alias caps (`cap FullAccess = A + B`)

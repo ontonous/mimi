@@ -173,7 +173,7 @@ impl<'a> Checker<'a> {
         // Implicit return type check: last expression must match declared return type
         if let Some(last_ty) = implicit_return_ty {
             // Resolve through unification table before further comparison
-            let last_ty = self.unification.resolve(&last_ty);
+            let last_ty = self.unification.zonk_or_unknown(&last_ty);
             // Unwrap shared/aliasing wrappers for return type compatibility
             let last_ty_clean = match last_ty.unlocated() {
                 Type::Shared(i) | Type::LocalShared(i) | Type::CShared(i) => (**i).clone(),

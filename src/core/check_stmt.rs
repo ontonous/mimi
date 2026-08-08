@@ -726,7 +726,7 @@ impl<'a> Checker<'a> {
                                     )),
                                 );
                             }
-                            self.unification.resolve(&d)
+                            self.unification.zonk_or_unknown(&d)
                         }
                     }
                     None => {
@@ -893,7 +893,7 @@ impl<'a> Checker<'a> {
                     // C3: use check_expr with return type as expected
                     let t = self.check_expr(ret, e, scopes);
                     // Resolve through unification table to handle any TypeVars from C3
-                    let t = self.unification.resolve(&t);
+                    let t = self.unification.zonk_or_unknown(&t);
                     if self.unification.unify(ret, &t).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
@@ -906,7 +906,7 @@ impl<'a> Checker<'a> {
                 } else {
                     // Multi-target flow transition: check against any allowed type
                     let t = self.check_expr(ret, e, scopes);
-                    let t = self.unification.resolve(&t);
+                    let t = self.unification.zonk_or_unknown(&t);
                     let mut ok = false;
                     for target in &self.flow_return_targets {
                         if self.unification.unify(target, &t).is_ok() {
@@ -1550,7 +1550,7 @@ impl<'a> Checker<'a> {
                         }
                         let obj_ty = self.infer_expr(obj, scopes);
                         // Resolve obj_ty to handle TypeVar case
-                        let resolved_obj_ty = self.unification.resolve(&obj_ty);
+                        let resolved_obj_ty = self.unification.zonk_or_unknown(&obj_ty);
                         // Validate field exists and check type compatibility (Bug 8 fix)
                         if let Type::Name(name, _) = resolved_obj_ty.unlocated() {
                             if let Some(type_def) = self.types.get(name).cloned() {

@@ -246,49 +246,38 @@ impl UnificationTable {
         self.resolve_with_depth(ty, 0, &mut HashSet::new())
     }
 
-    /// Compatibility wrapper for inference code that has not yet been migrated
-    /// to structured resolution errors. Mandatory finalization uses `zonk`, not
-    /// this wrapper.
+    /// Compatibility wrapper kept for the unification.rs module tests.
+    /// 0.35.12 (DX backlog #1): all 31 production call sites migrated to
+    /// `zonk_or_unknown`; new code must not use this wrapper.
     ///
     /// T-6 (0.31.50): debug assertion fires when resolution fails silently.
     /// v0.34.9: release fallback tightened from "return the unresolved type"
     /// to "return Type::unknown" — a silently-returned unresolved TypeVar
     /// poisons downstream unification; unknown is at least visibly wrong and
     /// fails subsequent checked unification (unify/constrain reject escapes).
-    /// Full migration of remaining call sites to `zonk` is tracked in the
-    /// 0.1.5 DX backlog (golden-document §10 0.34.22 登记表).
+    #[deprecated(note = "migrated to zonk_or_unknown (0.35.12); test-only")]
     pub fn resolve(&mut self, ty: &Type) -> Type {
+        self.zonk_or_unknown(ty)
+    }
+
+    /// 0.1.5 (DX backlog #1): finalization entrypoint for migrated call
+    /// sites (0.35.12: all 31 production `resolve` sites). Semantics =
+    /// pre-migration `resolve`: structural resolution via `resolve_infer`,
+    /// unknown fallback on resolution failure. Unlike `resolve`, failure
+    /// goes through the visible `zonk` path; `scan_residual` strictness is
+    /// deliberately NOT applied here because the migrated sites are
+    /// inference-internal (not finalization boundaries) where free TypeVars
+    /// (let-polymorphism placeholders), ForAll quantifiers and escape
+    /// sentinels flow legitimately — pre-migration resolve forwarded them
+    /// verbatim. Strict finalization stays with `zonk` at true boundaries.
+    pub fn zonk_or_unknown(&mut self, ty: &Type) -> Type {
         match self.resolve_infer(ty) {
             Ok(resolved) => resolved,
             Err(e) => {
                 mimi_debug_assert!(
                     false,
-                    "resolve() silently swallowed resolution error: {} for type {} \
-                     (call site not yet migrated to zonk — 0.1.5 backlog)",
-                    e,
-                    crate::core::helpers::fmt_type(ty)
-                );
-                Type::Name("unknown".into(), vec![])
-            }
-        }
-    }
-
-    /// 0.1.5 (DX backlog #1): finalization entrypoint that fails *visibly*.
-    /// `zonk` additionally rejects residual `Infer` escapes that `resolve`
-    /// silently passed through (scan_residual), so a migrated call site that
-    /// hits an escape errs here instead of returning a poisonable type. The
-    /// unknown fallback matches the pre-migration `resolve` failure behaviour;
-    /// the debug assertion surfaces the escape during development so the call
-    /// site can be given a precise handling. Migrated call sites use this
-    /// instead of `resolve`.
-    pub fn zonk_or_unknown(&mut self, ty: &Type) -> Type {
-        match self.zonk(ty) {
-            Ok(resolved) => resolved,
-            Err(e) => {
-                mimi_debug_assert!(
-                    false,
-                    "zonk() failed at a migrated call site: {} for type {} \
-                     (residual Infer escape or resolution failure)",
+                    "zonk_or_unknown() resolution failed at a migrated call site: {} \
+                     for type {}",
                     e,
                     crate::core::helpers::fmt_type(ty)
                 );
@@ -802,6 +791,7 @@ pub fn scan_residual(ty: &Type) -> Result<(), ResolveError> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // resolve() is test-only since 0.35.12
 mod tests {
     use super::*;
 

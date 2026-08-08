@@ -76,7 +76,7 @@ impl<'a> Checker<'a> {
                 if matches!(rty.unlocated(), Type::Infer) {
                     body_type
                 } else {
-                    let body_type = self.unification.resolve(&body_type);
+                    let body_type = self.unification.zonk_or_unknown(&body_type);
                     self.unify_types(&rty, &body_type);
                     rty
                 }
