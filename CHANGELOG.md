@@ -1,6 +1,21 @@
 # Changelog
 
-## [Unreleased] — 0.1.4-dev
+## [Unreleased] — 0.1.5-dev
+
+> 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
+> `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
+
+## [0.1.4] — 2026-08-08
+
+> **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。
+> 0.1.4 里程碑：become/stay 删除（ADR-001）、multi-target 稳定 tagged-union ABI
+> （ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not
+> 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合、
+> O1 默认优化、诊断契约（diagnostics.md）。Phase G 架构冻结：ADR-005~008 四项正式
+> 裁决、resolved dispatch 度量门禁（fallback_rate 0.9609→0.3027）、contracts 与
+> stdlib 模块函数体进 resolved slice、view/mutate 借用参数 ABI 对齐、verifier 引擎
+> 隔离（E0439）、ABI 布局冻结 + abi_version 握手（native-abi-1 §7/§8）、pre-0.1 更名、
+> 0.minor=大版本战略。
 
 ### 0.34.46 — 0.1.4 全面查缺补漏（登记面 / 记录面 / 代码面）
 

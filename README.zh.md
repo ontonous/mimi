@@ -4,7 +4,7 @@
 
 **Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.4--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.5--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-4500%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
@@ -417,12 +417,13 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## 状态与关键文档
 
-**当前版本**：0.1.4-dev。0.1.3 已发布（Bytecode VM 成为唯一解释器，tree-walker 删除）。0.1.4（内部 sprint 0.34.x）聚焦语法冻结与语义裁决——见下方黄金文档与分版本路线图。
+**当前版本**：0.1.5-dev。0.1.4 已发布（语法冻结 + 语义裁决 + Phase G 架构冻结 + O1 默认优化）。0.1.5 主线为性能优化（trap 成本消减），质量次线见 `devdocs/v0.35/README.md`。
 
 ### 关键文档
 
 | 文档 | 角色 |
 |------|------|
+| [`devdocs/v0.35/README.md`](devdocs/v0.35/README.md) | 0.1.5 路线图：性能主线 + DX 质量次线（0.1.5 权威） |
 | [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 黄金文档：语义裁决 + sprint 规划（0.1.4 权威） |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | 权威路线图（31 项 requirement，退出条件） |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | 架构修正案：13 条款 + 10 不变量（优先于白皮书） |
@@ -440,7 +441,8 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 里程碑 |
 |------|--------|
-| **0.1.4-dev** | **当前**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。Phase G（架构冻结）：ADR-005~008、dispatch 门禁（fallback 0.3027）、contracts 进 resolved slice、view/mutate 借用 ABI、verifier 引擎隔离（E0439）、ABI 布局冻结（native-abi-1 §7/§8）、pre-0.1 更名、0.minor=大版本战略。RC 门禁全绿（5285 lib），tag 按裁决暂缓，保持 -dev。 |
+| **0.1.5-dev** | **当前**。性能主线：trap 成本消减（O1 默认基线）、resolved 覆盖扩展（strings/collections 模块体、合约守卫发射）、O1 正确性切片。质量次线：resolve→zonk 迁移（31 处）、parser panic 审计、LSP Span/Origin 迁移、`desc:`/`rule:`/`mms{}` trivia 化、actor runs_flow 三层集成、flow_order fails transition SIGSEGV 修复。详见 `devdocs/v0.35/README.md`。 |
+| **0.1.4** | **已发布（2026-08-08）**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。Phase G（架构冻结）：ADR-005~008、dispatch 门禁（fallback 0.3027，eligible 3783）、contracts + stdlib 模块函数体进 resolved slice、view/mutate 借用 ABI、verifier 引擎隔离（E0439）、ABI 布局冻结（native-abi-1 §7/§8）、pre-0.1 更名、0.minor=大版本战略、O1 默认优化。RC 门禁全绿（5287 lib）。 |
 | **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
 | **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |
 | **0.1.1** | 51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |

@@ -914,16 +914,14 @@ pub(crate) fn dual_assert_contract_violation(src: &str) {
     vm.verify_contracts = true;
     let vm_err = vm
         .run_value()
-        .err()
-        .expect("VM should trap on contract violation");
+        .expect_err("VM should trap on contract violation");
     let vm_err_str = vm_err.to_string();
     assert!(
         vm_err_str.contains("E0808"),
         "VM contract violation should carry E0808, got: {vm_err_str}"
     );
     let cg_err = compile_and_verify_contracts(src)
-        .err()
-        .expect("codegen should trap on contract violation");
+        .expect_err("codegen should trap on contract violation");
     assert!(
         cg_err.contains("E0808"),
         "codegen contract violation should carry E0808, got: {cg_err}"
