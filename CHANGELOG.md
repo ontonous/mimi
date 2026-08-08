@@ -351,6 +351,24 @@
   注释内括号假目标结构性免疫）；全量 5296 lib + 31 real_world + cli 绿；
   clippy 零警告；fmt 干净。
 
+### 0.35.16 — 全门禁复跑 + 四象限矩阵终测 + 0.1.5 RC 复核（Phase E）
+
+> RC 前全门禁复跑，零代码变更（仅治理文档）。终测报告
+> `devdocs/v0.35/quad-final-0.35.16.md`。
+
+- **门禁全绿**：全量 5296 lib + 15 main + 31 real_world + cli 绿；clippy
+  零警告；fmt 干净；language docs（31 requirements/support）有效；unsafe
+  SAFETY 门禁 OK；dispatch 门禁 fallback_rate 0.2735 = 基线（零静默回退）；
+- **四象限终测**：dsp O1 默认 112.7ms（1.06× C -O2，基线 402.1ms/3.97×——
+  0.35.3 链式末端检查收敛跨 13 个 sprint 稳定保持）；dsp O1+ieee 1.04×；
+  mandelbrot O1 1.81×；无象限回退超仪器方差——DX/质量次线 sprint
+  （0.35.12–15）零性能污染；
+- **RC 复核裁决**：#21（zip raw-pair 显示）/#22（resolved map builtin，
+  closure 桥接）经风险评估改登记 **0.2**——两者都需触碰 0.35.11 的 fragile
+  面（product formatter heap-pack 假设 / resolved 高阶内建 emit），RC 窗口
+  内引入 segfault 风险不对称；当前状态无 crash、输出语义正确（zip legacy
+  显示空行、map 函数体 fallback legacy），不阻断 RC。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。
