@@ -96,8 +96,10 @@ impl<'a> Checker<'a> {
                 return self.unification.zonk_or_unknown(ret);
             } else {
                 // Function reference: return func(T) -> U type
-                let resolved_params: Vec<Type> =
-                    params.iter().map(|p| self.unification.zonk_or_unknown(p)).collect();
+                let resolved_params: Vec<Type> = params
+                    .iter()
+                    .map(|p| self.unification.zonk_or_unknown(p))
+                    .collect();
                 let resolved_ret = self.unification.zonk_or_unknown(ret);
                 let func_ty = Type::Func(resolved_params, Box::new(resolved_ret));
                 return self.func_value_type(name, name, func_ty);
