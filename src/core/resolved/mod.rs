@@ -2712,7 +2712,7 @@ fn collect_items(
                         ));
                     }
                 }
-                let methods = actor
+                let mut methods = actor
                     .methods
                     .iter()
                     .map(|method| method.name.clone())
@@ -2824,6 +2824,109 @@ fn collect_items(
                         functions,
                         errors,
                     );
+                }
+                // 0.35.14 (DX backlog #13, layer ③): an actor that `runs` a
+                // Flow dispatches messages through the transition table —
+                // register each transition as a synthetic callable so the
+                // resolved directory carries `function:{Actor}::{transition}`
+                // identity and `lower_method_call` stops failing with "no
+                // callable identity". Mirrors the checker/items.rs synthetic
+                // signature: (self, event params…) -> ToState; with `fails E`
+                // the return is Result<ToState, (FromState, E)>. Explicit
+                // actor methods keep precedence on name collision.
+                if let Some(flow_name) = actor.runs_flow.as_deref() {
+                    if let Some(Item::Flow(flow)) = items
+                        .iter()
+                        .find(|item| matches!(item, Item::Flow(f) if f.name == flow_name))
+                    {
+                        for transition in &flow.transitions {
+                            if methods.contains(&transition.name) {
+                                continue;
+                            }
+                            let method_id =
+                                NodeId(format!("function:{qualified}::{}", transition.name));
+                            let self_param = implicit_self_param(
+                                actor.meta.span,
+                                Type::Name(actor.name.clone(), Vec::new()),
+                            );
+                            insert_child_meta(
+                                self_param.meta,
+                                &method_id,
+                                "decl.parameter",
+                                "parameter.self",
+                                span,
+                                &ids,
+                                node_meta,
+                                errors,
+                            );
+                            for param in &transition.params {
+                                insert_child_meta(
+                                    param.meta,
+                                    &method_id,
+                                    "decl.parameter",
+                                    &format!("parameter.{}", stable_id_fragment(&param.name)),
+                                    span,
+                                    &ids,
+                                    node_meta,
+                                    errors,
+                                );
+                            }
+                            let target = transition
+                                .to_states
+                                .first()
+                                .map(|state| Type::Name(state.clone(), Vec::new()))
+                                .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
+                            let ret = if let Some(err_ty) = &transition.fails {
+                                let err_tuple = Type::Tuple(vec![
+                                    Type::Name(transition.from_state.clone(), Vec::new()),
+                                    err_ty.clone(),
+                                ]);
+                                Type::Result(Box::new(target), Box::new(err_tuple))
+                            } else {
+                                target
+                            };
+                            let mut param_decls = vec![self_param];
+                            param_decls.extend(transition.params.clone());
+                            let params = param_decls
+                                .iter()
+                                .map(|param| (param.name.clone(), param.ty.clone()))
+                                .collect();
+                            functions.insert(
+                                method_id.clone(),
+                                ResolvedFunction {
+                                    node_id: method_id.clone(),
+                                    qualified_name: format!("{qualified}::{}", transition.name),
+                                    params,
+                                    param_decls,
+                                    ret: ret.clone(),
+                                    effects: Vec::new(),
+                                    pub_: actor.pub_,
+                                    is_comptime: false,
+                                    is_async: false,
+                                    extern_abi: None,
+                                    generics: Vec::new(),
+                                    generic_binders: Vec::new(),
+                                    where_clause: Vec::new(),
+                                    origin: Origin::Desugared {
+                                        parent: node_id.clone(),
+                                        rule: "resolved.runs_flow_transition_method".to_string(),
+                                        span,
+                                    },
+                                },
+                            );
+                            methods.push(transition.name.clone());
+                            method_signatures.push(ResolvedActorMethod {
+                                name: transition.name.clone(),
+                                params: std::iter::once(("self".to_string(), actor.name.clone()))
+                                    .chain(transition.params.iter().map(|param| {
+                                        (param.name.clone(), crate::core::fmt_type(&param.ty))
+                                    }))
+                                    .collect(),
+                                ret: crate::core::fmt_type(&ret),
+                                effects: Vec::new(),
+                            });
+                        }
+                    }
                 }
                 actors.insert(
                     node_id.clone(),

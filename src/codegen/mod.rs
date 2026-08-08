@@ -317,6 +317,11 @@ pub struct CodeGenerator<'ctx> {
     optimize: bool,
     /// Names of variables holding first-class function pointer values.
     fn_ptr_var_names: std::collections::HashSet<String>,
+    /// 0.35.14 (DX backlog #18): per tuple-literal binding, the element
+    /// index -> named-function map. `let f = t.0` consults this to register
+    /// `f` as a fn-pointer variable (the call dispatcher otherwise resolves
+    /// `f` as a NAMED function and dies with E0700).
+    tuple_fn_elems: HashMap<String, Vec<Option<String>>>,
     /// Stored extern function definitions for lazy code generation.
     extern_func_defs: HashMap<String, crate::ast::ExternFunc>,
     /// ABI per extern function name (e.g., "C", "stdcall").
@@ -632,6 +637,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap_or(true),
             contract_bb_counter: 0,
             fn_ptr_var_names: std::collections::HashSet::new(),
+            tuple_fn_elems: HashMap::new(),
             extern_func_defs: HashMap::new(),
             extern_block_abis: HashMap::new(),
             extern_wrapper_fns: HashMap::new(),
@@ -1802,6 +1808,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         Ok(())
+    }
+
+    /// 0.35.14 (DX backlog #18): record which elements of a tuple-literal
+    /// binding are named functions so a later `let f = t.N` can register `f`
+    /// as a fn-pointer variable.
+    pub(super) fn record_tuple_fn_elems(&mut self, name: &str, init: &crate::ast::Expr) {
+        if let crate::ast::Expr::Tuple(elems) = init.unlocated() {
+            let recorded: Vec<Option<String>> = elems
+                .iter()
+                .map(|e| match e.unlocated() {
+                    crate::ast::Expr::Ident(fn_name)
+                        if self.module.get_function(fn_name.as_str()).is_some() =>
+                    {
+                        Some(fn_name.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if recorded.iter().any(|e| e.is_some()) {
+                self.tuple_fn_elems.insert(name.to_string(), recorded);
+            }
+        }
+    }
+
+    /// 0.35.14 (DX backlog #18): `let f = t.N` where `t` was bound to a
+    /// tuple literal whose Nth element is a named function — register `f`
+    /// as a fn-pointer variable plus its declared Func signature (the
+    /// indirect-call path recovers the real return type from var_types;
+    /// without it an i64 signature reads garbage for f64/struct returns).
+    pub(super) fn register_tuple_index_fn_binding(&mut self, name: &str, init: &crate::ast::Expr) {
+        if let crate::ast::Expr::TupleIndex(base, idx) = init.unlocated() {
+            if let crate::ast::Expr::Ident(base_name) = base.unlocated() {
+                let fn_name = self
+                    .tuple_fn_elems
+                    .get(base_name.as_str())
+                    .and_then(|elems| elems.get(*idx))
+                    .and_then(|e| e.clone());
+                if let Some(fn_name) = fn_name {
+                    self.fn_ptr_var_names.insert(name.to_string());
+                    if let Some(fdef) = self.func_defs.get(fn_name.as_str()) {
+                        let params: Vec<crate::ast::Type> =
+                            fdef.params.iter().map(|p| p.ty.clone()).collect();
+                        let ret = fdef.ret.clone().unwrap_or(crate::ast::Type::Infer);
+                        self.var_types.insert(
+                            name.to_string(),
+                            crate::ast::Type::Func(params, Box::new(ret)),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {

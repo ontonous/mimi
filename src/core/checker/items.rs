@@ -728,6 +728,50 @@ impl<'a> Checker<'a> {
                         (params, ret),
                     );
                 }
+                // 0.35.14 (DX backlog #13, layer ①): an actor that `runs`
+                // a Flow dispatches messages through the transition table —
+                // register each transition as a synthetic method so typed
+                // checks stop emitting E0221 "has no method" false positives
+                // (bytecode dispatch already works at runtime). Signature:
+                // (self: Actor, event params…) -> ToState; with `fails E`
+                // the return becomes Result<ToState, (FromState, E)> — the
+                // same shape the codegen/VM dispatch paths consume. Name
+                // collisions with explicit actor methods keep the explicit
+                // method (registered above).
+                if let Some(flow_name) = &actor.runs_flow {
+                    if let Some(Item::Flow(flow)) = self
+                        .file
+                        .items
+                        .iter()
+                        .find(|item| matches!(item, Item::Flow(f) if &f.name == flow_name))
+                    {
+                        let self_type = Type::Name(actor.name.clone(), vec![]);
+                        for transition in &flow.transitions {
+                            let qualified = format!("{}::{}", actor_qualified, transition.name);
+                            if self.funcs.contains_key(&qualified) {
+                                continue;
+                            }
+                            let mut params = vec![self_type.clone()];
+                            params
+                                .extend(transition.params.iter().map(|p| self.resolve_type(&p.ty)));
+                            let target = transition
+                                .to_states
+                                .first()
+                                .map(|s| Type::Name(s.clone(), vec![]))
+                                .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                            let ret = if let Some(err_ty) = &transition.fails {
+                                let err_tuple = Type::Tuple(vec![
+                                    Type::Name(transition.from_state.clone(), vec![]),
+                                    self.resolve_type(err_ty),
+                                ]);
+                                Type::Result(Box::new(target), Box::new(err_tuple))
+                            } else {
+                                target
+                            };
+                            self.funcs.insert(qualified, (params, ret));
+                        }
+                    }
+                }
             }
             Item::Cap(c) => {
                 self.set_span(c.meta.span);

@@ -212,6 +212,39 @@ fn real_world_list_intrinsic_display_and_realloc() {
     );
 }
 
+// ===================== Tuple fn-element extraction call =====================
+// 0.35.14 (DX backlog #18): `let f = t.0` where t's first element is a
+// named function used to fail codegen with E0700 "undefined function 'f'"
+// (the dispatcher resolved f as a NAMED function; only direct
+// `let f = func_name` bindings were registered as fn-pointer vars). The
+// fix tracks tuple-literal function elements at bind time and routes the
+// extraction binding through the indirect-call path (i64 ptrtoint slot).
+
+#[test]
+fn real_world_tuple_fn_element_call() {
+    run_both(
+        r#"
+        func add_impl(a: i32, b: i32) -> i32 {
+            a + b
+        }
+
+        func half(x: f64) -> f64 {
+            x / 2.0
+        }
+
+        func main() {
+            let t = (add_impl, 7)
+            let f = t.0
+            println(f(1, 2))
+            let u = (half, 9)
+            let g = u.0
+            println(g(5.0))
+        }
+    "#,
+        "3\n2.5",
+    );
+}
+
 // ===================== Standard library: strings =====================
 // `use std::strings` merges pub functions into the current scope.
 
