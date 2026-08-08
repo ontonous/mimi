@@ -92,6 +92,57 @@
 - **验证**：全量 5292 lib 绿 / 15 real_world / 28 cli / clippy 零警告 / fmt 干净；
   矩阵终测 dsp 1.04× / mandelbrot 1.78× / fib 2.90×（O1）。
 
+### 0.35.5 — nsw/nuw 语义分级评估（裁剪登记，Phase B）
+
+> Phase B 可选工作项评估后裁剪：SD-7/8/9 trap 是语言承诺（E0802/E0801/E0813），
+> nsw/nuw 放宽会改变可观测 trap 行为，违反 L1 不变量（0.35.2 已否决）。
+> 无代码变更，仅为路线图/预算完整性登记。
+
+### 0.35.6 — 四象限矩阵终测 + 曲线报告（Phase B 收官）
+
+> Phase B（trap 成本消减）终测：链收敛 + cold 权重双項落地后的完整矩阵复测
+> 与收敛曲线报告。
+
+- **终测矩阵（O1，2026-08-08）**：dsp 402.1→104.5ms（**1.04× 追平 C -O2，降 74%**）；
+  mandelbrot 40.0→19.8ms（1.78×，降 50%）；fib 持平 2.90×（递归调用 + checked
+  intrinsic 组合开销，登记 0.1.5 范围外——需 emitter 架构级优化）；O0 全程不变
+  （收敛/cold 权重仅 O1 路径）；
+- **曲线**：trap 主导项（dsp）成本降 74% ≥ 30% 验收达成；dsp 默认档与 ieee 档
+  持平（104.5 vs 103.9ms）——链收敛 + cold 权重达成 ieee_float 全部收益且完整
+  保留 trap 语义；**Phase B 关闭**。
+
+### 0.35.7 — strings/collections 模块体进 resolved slice（Phase C）
+
+> dx-backlog #19：strings/collections 模块体（含 trait impl 方法体）进 resolved
+> slice。根因是 str_* builtin 的 {ptr,i64} 值 → runtime-direct ptr 的 coercion 失败
+> 拖垮所有调用它们的 stdlib 函数体。顺带修复了三个被真实程序暴露的既有 bug。
+
+- **STRING_ABI_BUILTINS**（resolved/mod.rs）：16 个 str_* builtin 跳过
+  runtime-direct 快捷路径，强制走 string emitters（compile_builtin_call）——
+  `str_char_at` 等 runtime helper 收 raw C-string ptr，而 resolved 传 Mimi
+  string 值 {ptr,i64}，coercion 失败导致每个调用它的 stdlib 函数体 resolved
+  编译失败落 legacy（0.34.38 只修了 str_substring 单点）；
+- **默认白名单扩展**（eligibility.rs `module_bodies_lifted`）：
+  prelude,mymath → +strings,collections。A/B 语料五程序（std_strings /
+  std_collections / 06_strings / 05_lists / json_parser）编译 + 运行全过，
+  dispatch 统计 eligible 34/45、零 module skip（legacy 11 全为
+  generics/qualified）；
+- **修复 1 — mimi_runtime_assert 缺失**（runtime/mod.rs）：legacy pattern
+  binder（func/pattern.rs `PatternKind::Literal`）早就在调用 `mimi_runtime_assert`
+  (bool, ptr)，但 runtime 从未定义该符号——任何带 literal 子模式
+  （`Bool(true) =>`）的程序链接失败。补实现（E0801 家族：失败打印 + abort）；
+- **修复 2 — 泛型参数名遮蔽用户类型**（func.rs `legacy_param_llvm_type`）：
+  `type T` + prelude `eq<T>` 时，legacy 编译泛型骨架把参数 T 解析成用户 enum
+  的 struct 布局，`a == b` 报 "eq requires same types"（E0700）。declare_func /
+  bind_func_params 统一走新 helper：泛型参数名 → i64 占位（骨架仅满足 legacy
+  声明 pass，真实调用走 monomorphize）；
+- **修复 3 — literal 子模式 fall-through**（expr/match.rs）：Constructor arm
+  只在 tag 匹配时进入，payload literal 比较被推迟到 pattern binding——
+  `B(false)` 值落到 `B(true)` arm 时 assert abort 而非落入下一 arm。修复：
+  literal 字段比较并入 arm 条件（tag AND payload）；
+- **回归测试**：real_world_literal_pattern_fallthrough（双后端，覆盖修复 2/3）；
+- **验证**：全量 5292 lib 绿 / 16 real_world / 29 cli / clippy 零警告 / fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

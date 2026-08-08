@@ -1577,7 +1577,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Ok((arm_bb, next_bb))
                 }
             }
-            PatternKind::Constructor(name, _) => {
+            PatternKind::Constructor(name, sub_patterns) => {
                 // Newtypes are transparent and have a single constructor, so
                 // the arm always matches.
                 if self
@@ -1608,14 +1608,105 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // K-2 family: tag constant at the scrutinee's own width
                 // (icmp operands must match).
                 let tag_val = scrutinee_iv.get_type().const_int(ordinal, false);
-                let cmp = self
+                let mut arm_cond = self
                     .builder
                     .build_int_compare(inkwell::IntPredicate::EQ, scrutinee_iv, tag_val, "cmp")
                     .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+                // 0.35.7-fix: literal sub-patterns (e.g. `B(true) => ...`) must
+                // be part of the ARM CONDITION, not deferred to pattern binding.
+                // The old flow entered the arm on tag match alone, then the
+                // binder's PatternKind::Literal branch asserted — so a
+                // `Bool(false)` value under a `Bool(true)` arm aborted the whole
+                // program instead of falling through to the next arm. Compare
+                // each literal field against the extracted payload and AND it
+                // into the branch condition.
+                let sv = match scrutinee_val {
+                    BasicValueEnum::StructValue(sv) => sv,
+                    BasicValueEnum::PointerValue(pv) => {
+                        let sty = self
+                            .llvm_type_for(scrutinee_type.unwrap_or(&crate::ast::Type::Infer))
+                            .or_else(|| {
+                                Some(BasicTypeEnum::StructType(self.context.struct_type(
+                                    &[
+                                        BasicTypeEnum::IntType(self.context.i32_type()),
+                                        BasicTypeEnum::IntType(self.context.i64_type()),
+                                    ],
+                                    false,
+                                )))
+                            })
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(
+                                    "literal-pattern arm: unknown scrutinee struct type".into(),
+                                )
+                            })?;
+                        self.build_load(sty, pv, "pat_scrutinee")?
+                            .into_struct_value()
+                    }
+                    _ => {
+                        return Err(CompileError::LlvmError(
+                            "literal-pattern arm requires a struct scrutinee".into(),
+                        ))
+                    }
+                };
+                for (i, (_, sub_pat)) in sub_patterns.iter().enumerate() {
+                    if let PatternKind::Literal(lit) = &sub_pat.kind {
+                        let payload = self
+                            .builder
+                            .build_extract_value(sv, (i + 1) as u32, "pat_payload")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("extract payload: {}", e))
+                            })?;
+                        let lit_val = self.compile_literal_expr(lit, &HashMap::new())?;
+                        let payload_cmp = match (payload, lit_val) {
+                            (BasicValueEnum::IntValue(p), BasicValueEnum::IntValue(l)) => {
+                                // Normalize widths: truncate/extend the payload
+                                // to the literal's width at match time.
+                                let p_norm = if p.get_type().get_bit_width()
+                                    > l.get_type().get_bit_width()
+                                {
+                                    self.builder
+                                        .build_int_truncate(p, l.get_type(), "pat_payload_trunc")
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("payload trunc: {}", e))
+                                        })?
+                                } else if p.get_type().get_bit_width()
+                                    < l.get_type().get_bit_width()
+                                {
+                                    self.builder
+                                        .build_int_z_extend(p, l.get_type(), "pat_payload_zext")
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("payload zext: {}", e))
+                                        })?
+                                } else {
+                                    p
+                                };
+                                self.builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        p_norm,
+                                        l,
+                                        "pat_payload_eq",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("payload cmp: {}", e))
+                                    })?
+                            }
+                            _ => {
+                                return Err(CompileError::LlvmError(
+                                    "literal sub-pattern: non-integer payload".into(),
+                                ))
+                            }
+                        };
+                        arm_cond = self
+                            .builder
+                            .build_and(arm_cond, payload_cmp, "pat_cond_and")
+                            .map_err(|e| CompileError::LlvmError(format!("and: {}", e)))?;
+                    }
+                }
                 let next_bb = self
                     .context
                     .append_basic_block(function, &format!("next{}", arm_idx));
-                self.build_cond_br(cmp, arm_bb, next_bb)?;
+                self.build_cond_br(arm_cond, arm_bb, next_bb)?;
                 Ok((arm_bb, next_bb))
             }
             PatternKind::Tuple(inner_pats) => {

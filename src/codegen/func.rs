@@ -1411,6 +1411,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
     }
 
+    /// 0.35.7-fix: LLVM type for a legacy-function parameter. A generic
+    /// parameter whose name collides with a user type (e.g. `type T` +
+    /// `func eq<T>(a: T, b: T)`) must NOT resolve through the user type table
+    /// — `llvm_type_for` looks up `Type::Name` in `self.type_llvm`, so the
+    /// generic skeleton would be declared/bound with the user enum's struct
+    /// layout and `a == b` (struct == struct) would fail with "eq requires
+    /// same types". The type-map-empty skeleton is only emitted to satisfy
+    /// the legacy declaration pass; real calls go through
+    /// `compile_generic_func` (monomorphized). i64 keeps the skeleton
+    /// compilable.
+    fn legacy_param_llvm_type(
+        &self,
+        func: &FuncDef,
+        param: &crate::ast::Param,
+    ) -> Option<BasicTypeEnum<'ctx>> {
+        let generic_param_names: std::collections::HashSet<&str> =
+            func.generics.iter().map(|g| g.name.as_str()).collect();
+        if matches!(
+            param.ty.unlocated(),
+            crate::ast::Type::Name(n, a) if a.is_empty() && generic_param_names.contains(n.as_str())
+        ) {
+            return Some(BasicTypeEnum::IntType(self.context.i64_type()));
+        }
+        let resolved = self.resolve_type(&param.ty);
+        self.llvm_type_for(&resolved)
+    }
+
     /// Bind all function parameters to stack allocas and track type metadata
     /// (type names, list element types, and capabilities).
     fn bind_func_params(
@@ -1430,7 +1457,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut llvm_param_idx: u32 = 0;
         for param in func.params.iter() {
             let resolved = self.resolve_type(&param.ty);
-            if let Some(ty) = self.llvm_type_for(&resolved) {
+            if let Some(ty) = self.legacy_param_llvm_type(func, param) {
                 let mut param_val = function.get_nth_param(llvm_param_idx).ok_or_else(|| {
                     CompileError::LlvmError(format!(
                         "param index {} out of range for function '{}' with {} params",
@@ -3064,7 +3091,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut param_types = Vec::new();
         for param in &func.params {
-            if let Some(ty) = self.llvm_type_for(&param.ty) {
+            if let Some(ty) = self.legacy_param_llvm_type(func, param) {
                 if param.borrow.is_some() {
                     param_types.push(BasicTypeEnum::PointerType(
                         self.context.ptr_type(AddressSpace::default()),

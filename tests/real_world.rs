@@ -140,6 +140,41 @@ fn run_both(src: &str, expected_stdout: &str) {
     fs::remove_dir_all(&dir).ok();
 }
 
+// ===================== Literal sub-pattern fall-through =====================
+// 0.35.7: `B(false)` under a `B(true)` arm must fall through to the next arm,
+// not abort. Before the fix the arm was entered on tag match alone and the
+// pattern binder asserted on the mismatched literal — crashing the program.
+// Also covers the generic-param/user-type name shadow (`type T` + prelude
+// `eq<T>`) that broke the legacy generic skeleton compile with
+// "eq requires same types".
+
+#[test]
+fn real_world_literal_pattern_fallthrough() {
+    run_both(
+        r#"
+        type T {
+            A
+            B(bool)
+        }
+
+        func f(t: T) -> string {
+            match t {
+                A => "a"
+                B(true) => "bt"
+                B(false) => "bf"
+            }
+        }
+
+        func main() {
+            println(f(A()))
+            println(f(B(true)))
+            println(f(B(false)))
+        }
+    "#,
+        "a\nbt\nbf",
+    );
+}
+
 // ===================== Standard library: strings =====================
 // `use std::strings` merges pub functions into the current scope.
 

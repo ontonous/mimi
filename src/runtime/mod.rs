@@ -19811,6 +19811,39 @@ pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
     std::process::abort();
 }
 
+/// 0.35.7-fix: literal pattern match assertion. The legacy pattern binder
+/// (codegen/func/pattern.rs, `PatternKind::Literal`) emits a call to
+/// `mimi_runtime_assert(cond, msg)` for literal sub-patterns — e.g.
+/// `Bool(true) => ...`, `Some(0) => ...` — but the symbol was declared with
+/// no definition, so any program with such a pattern failed to link.
+/// Pattern-match failures are a language-level trap (E0801 family), so on
+/// failure we print the message and abort — never silently fall through.
+#[no_mangle]
+pub extern "C" fn mimi_runtime_assert(cond: bool, msg: *const std::ffi::c_char) {
+    if cond {
+        return;
+    }
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    const PREFIX: &[u8] = b"[E0801] pattern match failed: ";
+    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
+        if !msg.is_null() {
+            let mut len = 0usize;
+            let base = msg as *const u8;
+            const MAX_MSG: usize = 128;
+            while len < MAX_MSG && *base.add(len) != 0 {
+                len += 1;
+            }
+            let _ = write(2, msg as *const std::ffi::c_void, len);
+        }
+        let _ = write(2, b"\n".as_ptr() as *const std::ffi::c_void, 1);
+    }
+    std::process::abort();
+}
+
 /// v0.29.38-fix: inject_fault(state_name) — prints a message and aborts.
 /// In the interp path, inject_fault constructs a proper Fault record with
 /// SystemTrace. In codegen, we cannot easily construct the record at runtime,

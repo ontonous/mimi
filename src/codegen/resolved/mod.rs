@@ -2266,8 +2266,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // compile_builtin_call → the string emitters, which
                         // extract the data pointer via extract_string_arg
                         // (handles both the struct and raw-ptr forms).
-                        const STRING_ABI_BUILTINS: &[&str] =
-                            &["str_substring", "str_substring_strict"];
+                        // 0.35.7 (dx-backlog #19): extended to the whole
+                        // str_* family — the same {ptr,i64}→ptr coercion failed
+                        // EVERY stdlib function body calling them (e.g. the
+                        // `impl Str for string` methods in std/strings.mimi)
+                        // during resolved compilation, demoting them to legacy
+                        // (strings/collections module-body slice blocked).
+                        const STRING_ABI_BUILTINS: &[&str] = &[
+                            "str_char_at",
+                            "str_contains",
+                            "str_starts_with",
+                            "str_ends_with",
+                            "str_parse_int",
+                            "str_parse_float",
+                            "str_index_of",
+                            "str_count_substring",
+                            "str_repeat",
+                            "str_trim",
+                            "str_to_upper",
+                            "str_to_lower",
+                            "str_substring",
+                            "str_substring_strict",
+                            "str_split",
+                            "str_replace",
+                        ];
                         let runtime_fn_name = if STRING_ABI_BUILTINS.contains(&name) {
                             String::new() // sentinel: no direct runtime call
                         } else {
