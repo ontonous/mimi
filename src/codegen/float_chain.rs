@@ -23,7 +23,7 @@
 
 use inkwell::llvm_sys::core::*;
 use inkwell::llvm_sys::prelude::*;
-use inkwell::llvm_sys::{LLVMRealPredicate, LLVMTypeKind, LLVMOpcode};
+use inkwell::llvm_sys::{LLVMOpcode, LLVMRealPredicate, LLVMTypeKind};
 use std::collections::HashSet;
 
 /// 检查点：`x` 被 `check_float_finite`/`enforce_float_finite` 检查。
@@ -37,6 +37,29 @@ struct CheckPoint {
     cond_br: LLVMValueRef,
     /// 分支后继续执行的块（非 trap 侧）
     ok_bb: LLVMBasicBlockRef,
+}
+
+/// 对条件分支附加 `branch_weights` metadata（{0, 1}：真分支极冷）。
+///
+/// 0.35.4 L2：trap/Fault 分支的执行概率趋近于零，显式 cold 权重让 LLVM
+/// 分支布局优化把 trap 代码移到函数尾部（热路径更紧凑，I-cache 友好），
+/// 不改任何语义。所有 SD-7/8/9 检查分支与 fallible Fault 分支共用此标记。
+pub(crate) fn mark_cold_trap_branch(
+    context: &inkwell::context::Context,
+    branch: inkwell::values::InstructionValue,
+) {
+    unsafe {
+        let kind_id = inkwell::llvm_sys::core::LLVMGetMDKindIDInContext(
+            context.raw(),
+            b"branch_weights\0".as_ptr() as *const std::ffi::c_char,
+            b"branch_weights".len() as u32,
+        );
+        let md_str = context.metadata_string("branch_weights");
+        let cold = context.i32_type().const_int(0, false);
+        let hot = context.i32_type().const_int(1, false);
+        let node = context.metadata_node(&[md_str.into(), cold.into(), hot.into()]);
+        let _ = branch.set_metadata(node, kind_id);
+    }
 }
 
 /// 对模块中所有函数执行 SD-9 链式末端检查收敛。

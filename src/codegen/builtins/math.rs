@@ -767,9 +767,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ok_bb = self
             .context
             .append_basic_block(function, "float_builtin_ok");
-        self.builder
+        let fin_br = self
+            .builder
             .build_conditional_branch(not_finite, trap_bb, ok_bb)
             .map_err(|e| format!("br error: {}", e))?;
+        // 0.35.4 L2: trap 分支 cold 权重
+        crate::codegen::float_chain::mark_cold_trap_branch(self.context, fin_br);
 
         // Trap block — or absorb into Fault in a fallible transition.
         self.builder.position_at_end(trap_bb);

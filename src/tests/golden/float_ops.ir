@@ -761,7 +761,7 @@ entry:
   %fabs = call double @llvm.fabs.f64(double %fmul)
   %is_inf = fcmp oeq double %fabs, 0x7FF0000000000000
   %not_finite = or i1 %is_nan, %is_inf
-  br i1 %not_finite, label %trap_float, label %float_ok
+  br i1 %not_finite, label %trap_float, label %float_ok, !branch_weights !0
 
 trap_float:                                       ; preds = %entry
   call void @mimi_trap_float_not_finite(ptr @float_op_name)
@@ -775,7 +775,7 @@ float_ok:                                         ; preds = %entry
   %fabs6 = call double @llvm.fabs.f64(double %fdiv)
   %is_inf7 = fcmp oeq double %fabs6, 0x7FF0000000000000
   %not_finite8 = or i1 %is_nan5, %is_inf7
-  br i1 %not_finite8, label %trap_float9, label %float_ok10
+  br i1 %not_finite8, label %trap_float9, label %float_ok10, !branch_weights !0
 
 trap_float9:                                      ; preds = %float_ok
   call void @mimi_trap_float_not_finite(ptr @float_op_name.10)
@@ -787,7 +787,7 @@ float_ok10:                                       ; preds = %float_ok
   %fabs12 = call double @llvm.fabs.f64(double %fadd)
   %is_inf13 = fcmp oeq double %fabs12, 0x7FF0000000000000
   %not_finite14 = or i1 %is_nan11, %is_inf13
-  br i1 %not_finite14, label %trap_float15, label %float_ok16
+  br i1 %not_finite14, label %trap_float15, label %float_ok16, !branch_weights !0
 
 trap_float15:                                     ; preds = %float_ok10
   call void @mimi_trap_float_not_finite(ptr @float_op_name.11)
@@ -911,3 +911,5 @@ declare double @llvm.fabs.f64(double) #1
 
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!0 = !{!"branch_weights", i32 0, i32 1}

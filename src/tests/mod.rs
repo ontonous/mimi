@@ -921,8 +921,8 @@ pub(crate) fn dual_assert_contract_violation(src: &str) {
         vm_err_str.contains("E0808"),
         "VM contract violation should carry E0808, got: {vm_err_str}"
     );
-    let cg_err = compile_and_verify_contracts(src)
-        .expect_err("codegen should trap on contract violation");
+    let cg_err =
+        compile_and_verify_contracts(src).expect_err("codegen should trap on contract violation");
     assert!(
         cg_err.contains("E0808"),
         "codegen contract violation should carry E0808, got: {cg_err}"
