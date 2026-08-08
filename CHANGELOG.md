@@ -143,6 +143,29 @@
 - **回归测试**：real_world_literal_pattern_fallthrough（双后端，覆盖修复 2/3）；
 - **验证**：全量 5292 lib 绿 / 16 real_world / 29 cli / clippy 零警告 / fmt 干净。
 
+### 0.35.8 — fails transition Result 布局对齐（Phase C）
+
+> dx-backlog #20：flow_order_system native SIGSEGV（`puts(0x1)` 整数当字符串
+> 指针，gdb 实证）。fails transition 返回 Result<Target,(Source,E)> 中 string
+> 字段布局错位——0.34.25a 只修了 Err 臂（Q1），Ok 臂 + 事件参数路径未修。
+> 两个独立根因，双双修复。
+
+- **修复 1 — Ok payload coach load**（func.rs `coerce_field_to_type`）：
+  `compile_ok_constructor` 打包 `{i1, ptr, i64}`（payload 槽存目标地址），
+  coerce 到声明布局 `{i1, T, E}` 时把裸指针 store 进 T 槽位——struct payload
+  （含 string 字段的 Flow state）地址位被当字段读。新增 ptr→struct 分支：
+  build_load 解引用（mimi-string wrap 分支在前保持 C-string 指针语义）；
+- **修复 2 — flow transition 字符串字面量参数**（method.rs
+  `compile_flow_transition_call`）：字符串字面量参数编译为 raw global-string
+  指针，旧代码按参数类型 `{ptr,i64}` 直接 load——把字符串自身字节读成
+  {data_ptr, len}（"TXN-42" → data_ptr=0x32342D4E5854）。改为 wrap_c_string
+  （非 string struct 参数仍 load）；
+- **回归**：flow_order_system + flow_system_trace 从 dual-backend
+  known_limitations 移除（两个 SIGSEGV 均修复），纳入双后端套件；
+- **验证**：flow_ 365 测试全过；全量 5292 lib 绿 / 15 real_world / 29 cli /
+  clippy 零警告 / fmt 干净；flow_order_system native 输出与 VM 逐行一致
+  （TXN-42/TRK-001/book/invalid price/0）。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。
