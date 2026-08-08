@@ -59,30 +59,41 @@ impl LspServer {
                         }));
                     }
                     Item::Type(t) if t.name == word => {
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("type {}", word)))
-                            .unwrap_or(0);
-                        let keyword_len = "type ".len();
+                        // 0.35.15 (DX backlog #3): consume the AST span
+                        // instead of a whole-file `type {word}` substring
+                        // scan (false positives on same-name mentions).
+                        let def_line = t.meta.span.start_line.saturating_sub(1);
+                        let def_line_text = text.lines().nth(def_line).unwrap_or("");
+                        let start_byte = crate::lsp::util::char_col_to_byte(
+                            def_line_text,
+                            t.meta.span.start_col.saturating_sub(1),
+                        );
+                        // Keywords and identifiers are ASCII (V-10), so byte
+                        // addition from the keyword anchor is exact.
+                        let name_byte = start_byte + "type ".len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": keyword_len + t.name.len() }
+                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, name_byte) },
+                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, name_byte + t.name.len()) }
                             }
                         }));
                     }
                     Item::Module(m) if m.name == word => {
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("module {}", word)))
-                            .unwrap_or(0);
-                        let keyword_len = "module ".len();
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `module {word}` substring scan.
+                        let def_line = m.meta.span.start_line.saturating_sub(1);
+                        let def_line_text = text.lines().nth(def_line).unwrap_or("");
+                        let start_byte = crate::lsp::util::char_col_to_byte(
+                            def_line_text,
+                            m.meta.span.start_col.saturating_sub(1),
+                        );
+                        let name_byte = start_byte + "module ".len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": keyword_len + m.name.len() }
+                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, name_byte) },
+                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, name_byte + m.name.len()) }
                             }
                         }));
                     }
@@ -120,43 +131,25 @@ impl LspServer {
                             }
                         }));
                     }
-                    // Check let bindings: find `let name =` or `let name:` via
-                    // text scan (fast, avoids deep AST traversal)
-                    // L-H9: restrict text scan to the enclosing function region
-                    // (not whole-file first match).
-                    let func_start = f.meta.span.start_line.saturating_sub(1);
-                    let text_lines: Vec<&str> = text.lines().collect();
-                    let func_end = text_lines
-                        .iter()
-                        .enumerate()
-                        .skip(func_start + 1)
-                        .find(|(i, l)| {
-                            *i > func_start
-                                && (l.starts_with("func ")
-                                    || l.starts_with("type ")
-                                    || l.starts_with("flow ")
-                                    || l.starts_with("actor "))
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(text_lines.len());
+                    // Check let bindings: the pattern carries a span anchored
+                    // at the binding name (0.35.15, DX backlog #3) — replaces
+                    // the `let {name}` line scan that could land on a mention
+                    // in a comment or an unrelated binding with the same name
+                    // earlier in the function.
                     for stmt in f.body.iter() {
                         if let Stmt::Let { pat, .. } = stmt.unlocated() {
                             if let PatternKind::Variable(name) = &pat.kind {
-                                if name != word {
+                                if name != word || pat.meta.span.start_line == 0 {
                                     continue;
                                 }
-                                let text_line = text_lines
-                                    .iter()
-                                    .enumerate()
-                                    .skip(func_start)
-                                    .take(func_end.saturating_sub(func_start))
-                                    .find(|(_, l)| l.contains(&format!("let {}", name)))
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(func_start);
-                                let line_text = text_lines.get(text_line).copied().unwrap_or("");
-                                let byte = line_text.find(&format!("let {}", name)).unwrap_or(0);
-                                let start_u = byte_col_to_utf16(line_text, byte + 4);
-                                let end_u = byte_col_to_utf16(line_text, byte + 4 + name.len());
+                                let text_line = pat.meta.span.start_line.saturating_sub(1);
+                                let line_text = text.lines().nth(text_line).unwrap_or("");
+                                let byte = crate::lsp::util::char_col_to_byte(
+                                    line_text,
+                                    pat.meta.span.start_col.saturating_sub(1),
+                                );
+                                let start_u = byte_col_to_utf16(line_text, byte);
+                                let end_u = byte_col_to_utf16(line_text, byte + name.len());
                                 return Some(serde_json::json!({
                                     "uri": uri,
                                     "range": {
@@ -209,15 +202,22 @@ impl LspServer {
                 for impl_def in &file.items {
                     if let Item::Impl(imp) = impl_def {
                         if imp.trait_name == word {
-                            let impl_line = doc_text
-                                .lines()
-                                .position(|l| l.contains("impl") && l.contains(&word))
-                                .unwrap_or(0);
+                            // 0.35.15 (DX backlog #3): AST span replaces the
+                            // `contains("impl")` line scan (which could land
+                            // on an unrelated impl or a comment).
+                            let impl_line = imp.meta.span.start_line.saturating_sub(1);
+                            let impl_line_text = doc_text.lines().nth(impl_line).unwrap_or("");
+                            let start_byte = crate::lsp::util::char_col_to_byte(
+                                impl_line_text,
+                                imp.meta.span.start_col.saturating_sub(1),
+                            );
+                            let end_byte =
+                                start_byte.saturating_add("impl ".len() + imp.trait_name.len());
                             locations.push(serde_json::json!({
                                 "uri": doc_uri,
                                 "range": {
-                                    "start": { "line": impl_line, "character": 0 },
-                                    "end": { "line": impl_line, "character": 100 }
+                                    "start": { "line": impl_line, "character": byte_col_to_utf16(impl_line_text, start_byte) },
+                                    "end": { "line": impl_line, "character": byte_col_to_utf16(impl_line_text, end_byte) }
                                 }
                             }));
                         }
@@ -249,64 +249,48 @@ impl LspServer {
 
         // First, find the definition location
         if let Some(file) = self.parse_with_recovery(text) {
-            // CL-H1 (audit): prefer AST positions over text search when the
-            // AST is available. The audit notes this is a broad LSP rewrite;
-            // here we at least consume the parsed AST position when present
-            // and fall back to text search only for legacy/unparsed sources.
+            // CL-H1 + 0.35.15 (DX backlog #3): consume AST spans for every
+            // item kind — the old substring scans landed on comments and
+            // same-name mentions; spans are always populated by the parser.
             for item in &file.items {
                 match item {
                     Item::Func(f) if f.name == word => {
-                        // CL-H1: use the AST-recorded position (f.pos) when
-                        // available to avoid substring-search false positives.
-                        // Parser positions are 1-indexed; LSP is 0-indexed.
-                        if f.meta.span.start_line > 0 || f.meta.span.start_col > 0 {
-                            def_line = Some(f.meta.span.start_line.saturating_sub(1));
-                            // AU-LSP-2: span columns are lexer char counts, but
-                            // the usage scan below yields byte offsets; normalize
-                            // to a byte offset within the definition line.
-                            def_col = def_line.and_then(|l| {
-                                lines.get(l).map(|line| {
-                                    crate::lsp::util::char_col_to_byte(
-                                        line,
-                                        f.meta.span.start_col.saturating_sub(1),
-                                    )
-                                })
-                            });
-                            break;
-                        }
-                        def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("func {}", word)));
+                        def_line = Some(f.meta.span.start_line.saturating_sub(1));
+                        // AU-LSP-2: span columns are lexer char counts, but
+                        // the usage scan below yields byte offsets; normalize
+                        // to a byte offset of the NAME within the definition
+                        // line (keyword anchor + "func " — ASCII, V-10).
                         def_col = def_line.and_then(|l| {
-                            lines
-                                .get(l)
-                                .map(|line| line.find(&format!("func {}", word)).unwrap_or(0) + 5)
+                            lines.get(l).map(|line| {
+                                crate::lsp::util::char_col_to_byte(
+                                    line,
+                                    f.meta.span.start_col.saturating_sub(1),
+                                ) + "func ".len()
+                            })
                         });
                         break;
                     }
                     Item::Type(t) if t.name == word => {
-                        // CL-H1: TypeDef doesn't carry pos in the AST; fall
-                        // back to text search. Future v0.31+ may extend
-                        // TypeDef with a pos field to enable AST-based lookup.
-                        def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("type {}", word)));
+                        def_line = Some(t.meta.span.start_line.saturating_sub(1));
                         def_col = def_line.and_then(|l| {
-                            lines
-                                .get(l)
-                                .map(|line| line.find(&format!("type {}", word)).unwrap_or(0) + 5)
+                            lines.get(l).map(|line| {
+                                crate::lsp::util::char_col_to_byte(
+                                    line,
+                                    t.meta.span.start_col.saturating_sub(1),
+                                ) + "type ".len()
+                            })
                         });
                         break;
                     }
                     Item::Module(m) if m.name == word => {
-                        // Module doesn't carry a pos in current AST; fall back.
-                        def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("module {}", word)));
+                        def_line = Some(m.meta.span.start_line.saturating_sub(1));
                         def_col = def_line.and_then(|l| {
-                            lines
-                                .get(l)
-                                .map(|line| line.find(&format!("module {}", word)).unwrap_or(0) + 7)
+                            lines.get(l).map(|line| {
+                                crate::lsp::util::char_col_to_byte(
+                                    line,
+                                    m.meta.span.start_col.saturating_sub(1),
+                                ) + "module ".len()
+                            })
                         });
                         break;
                     }
@@ -377,28 +361,26 @@ impl LspServer {
         // (let binding or function parameter).  Only local variables get
         // renamed; global symbols (func/type/module names) are skipped to
         // avoid false positives.
-        let is_local = if let Some(file) = self.parse_with_recovery(text) {
-            let mut found = false;
-            for item in &file.items {
-                if let Item::Func(f) = item {
-                    if f.params.iter().any(|p| p.name == word) {
-                        found = true;
-                    }
-                    for stmt in &f.body {
-                        if let Stmt::Let { pat, .. } = stmt.unlocated() {
-                            if let PatternKind::Variable(vname) = &pat.kind {
-                                if vname.as_str() == word {
-                                    found = true;
-                                }
+        let Some(file) = self.parse_with_recovery(text) else {
+            return None;
+        };
+        let mut is_local = false;
+        for item in &file.items {
+            if let Item::Func(f) = item {
+                if f.params.iter().any(|p| p.name == word) {
+                    is_local = true;
+                }
+                for stmt in &f.body {
+                    if let Stmt::Let { pat, .. } = stmt.unlocated() {
+                        if let PatternKind::Variable(vname) = &pat.kind {
+                            if vname.as_str() == word {
+                                is_local = true;
                             }
                         }
                     }
                 }
             }
-            found
-        } else {
-            false
-        };
+        }
 
         if !is_local {
             return None;
@@ -408,7 +390,7 @@ impl LspServer {
         // (not whole-file text replace of every occurrence).
         let lines: Vec<&str> = text.lines().collect();
         let (range_start, range_end) =
-            enclosing_func_line_range(text, line).unwrap_or((0, lines.len()));
+            enclosing_func_line_range(&file, line).unwrap_or((0, lines.len()));
 
         let mut changes = Vec::new();
         // AU-LSP-1 (full audit 2026-08-05): exclude non-code regions from the
@@ -668,64 +650,46 @@ impl LspServer {
 
         // Find definition location
         if let Some(file) = self.parse_with_recovery(text) {
-            // CL-H1 (audit): prefer AST positions over text search when the
-            // AST is available. The audit notes this is a broad LSP rewrite;
-            // here we at least consume the parsed AST position when present
-            // and fall back to text search only for legacy/unparsed sources.
+            // CL-H1 + 0.35.15 (DX backlog #3): AST spans for every item kind
+            // (see compute_references — same migration rationale).
             for item in &file.items {
                 match item {
                     Item::Func(f) if f.name == word => {
-                        // CL-H1: use the AST-recorded position (f.pos) when
-                        // available to avoid substring-search false positives.
-                        // Parser positions are 1-indexed; LSP is 0-indexed.
-                        if f.meta.span.start_line > 0 || f.meta.span.start_col > 0 {
-                            def_line = Some(f.meta.span.start_line.saturating_sub(1));
-                            // AU-LSP-2: span columns are lexer char counts, but
-                            // the usage scan below yields byte offsets; normalize
-                            // to a byte offset within the definition line.
-                            def_col = def_line.and_then(|l| {
-                                lines.get(l).map(|line| {
-                                    crate::lsp::util::char_col_to_byte(
-                                        line,
-                                        f.meta.span.start_col.saturating_sub(1),
-                                    )
-                                })
-                            });
-                            break;
-                        }
-                        def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("func {}", word)));
+                        def_line = Some(f.meta.span.start_line.saturating_sub(1));
+                        // AU-LSP-2: normalize to a byte offset of the NAME
+                        // within the definition line (keyword anchor +
+                        // "func " — ASCII, V-10).
                         def_col = def_line.and_then(|l| {
-                            lines
-                                .get(l)
-                                .map(|line| line.find(&format!("func {}", word)).unwrap_or(0) + 5)
+                            lines.get(l).map(|line| {
+                                crate::lsp::util::char_col_to_byte(
+                                    line,
+                                    f.meta.span.start_col.saturating_sub(1),
+                                ) + "func ".len()
+                            })
                         });
                         break;
                     }
                     Item::Type(t) if t.name == word => {
-                        // CL-H1: TypeDef doesn't carry pos in the AST; fall
-                        // back to text search. Future v0.31+ may extend
-                        // TypeDef with a pos field to enable AST-based lookup.
-                        def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("type {}", word)));
+                        def_line = Some(t.meta.span.start_line.saturating_sub(1));
                         def_col = def_line.and_then(|l| {
-                            lines
-                                .get(l)
-                                .map(|line| line.find(&format!("type {}", word)).unwrap_or(0) + 5)
+                            lines.get(l).map(|line| {
+                                crate::lsp::util::char_col_to_byte(
+                                    line,
+                                    t.meta.span.start_col.saturating_sub(1),
+                                ) + "type ".len()
+                            })
                         });
                         break;
                     }
                     Item::Module(m) if m.name == word => {
-                        // Module doesn't carry a pos in current AST; fall back.
-                        def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("module {}", word)));
+                        def_line = Some(m.meta.span.start_line.saturating_sub(1));
                         def_col = def_line.and_then(|l| {
-                            lines
-                                .get(l)
-                                .map(|line| line.find(&format!("module {}", word)).unwrap_or(0) + 7)
+                            lines.get(l).map(|line| {
+                                crate::lsp::util::char_col_to_byte(
+                                    line,
+                                    m.meta.span.start_col.saturating_sub(1),
+                                ) + "module ".len()
+                            })
                         });
                         break;
                     }
@@ -771,40 +735,21 @@ impl LspServer {
     }
 }
 
-/// Approximate line range of the function containing `cursor_line` (0-based).
-fn enclosing_func_line_range(text: &str, cursor_line: usize) -> Option<(usize, usize)> {
-    let lines: Vec<&str> = text.lines().collect();
-    // Walk upward for `func` / `fn` starter.
-    let mut start = None;
-    for i in (0..=cursor_line.min(lines.len().saturating_sub(1))).rev() {
-        let t = lines[i].trim_start();
-        if t.starts_with("func ") || t.starts_with("fn ") {
-            start = Some(i);
-            break;
-        }
-    }
-    let start = start?;
-    // Walk downward until next top-level-ish func or end.
-    let mut end = lines.len();
-    for i in (start + 1)..lines.len() {
-        let t = lines[i].trim_start();
-        if (t.starts_with("func ")
-            || t.starts_with("fn ")
-            || t.starts_with("type ")
-            || t.starts_with("flow "))
-            && !t.starts_with("func main")
-            && i > cursor_line
-        {
-            // Only cut if this looks like a new top-level item at column 0.
-            if lines[i].starts_with("func ")
-                || lines[i].starts_with("fn ")
-                || lines[i].starts_with("type ")
-                || lines[i].starts_with("flow ")
-            {
-                end = i;
-                break;
-            }
-        }
-    }
+/// Line range of the function containing `cursor_line` (0-based).
+/// 0.35.15 (DX backlog #3): AST spans replace the `starts_with("func ")`
+/// upward/downward text walk (which broke on methods, `pub func`, and
+/// keyword mentions inside comments).
+fn enclosing_func_line_range(
+    file: &crate::ast::File,
+    cursor_line: usize,
+) -> Option<(usize, usize)> {
+    let enclosing =
+        crate::lsp::util::find_enclosing_func_in_items(&file.items, cursor_line.saturating_add(1))?;
+    let start = enclosing.meta.span.start_line.saturating_sub(1);
+    let end = enclosing
+        .meta
+        .span
+        .end_line
+        .max(enclosing.meta.span.start_line);
     Some((start, end))
 }

@@ -66,38 +66,35 @@ impl LspServer {
                             _ => "",
                         };
                         if !type_str.is_empty() {
-                            // Find the `=` position on the let line using AST info
-                            let lines: Vec<&str> = text.lines().collect();
                             let pat_name = match &pat.kind {
                                 PatternKind::Variable(n) => n.as_str(),
                                 _ => "",
                             };
-                            if !pat_name.is_empty() {
-                                // Find the line with `let <pat_name>` that also has `=`
-                                // (skip `=` inside string literals)
-                                if let Some(let_line) = lines.iter().position(|l| {
-                                    let trimmed = l.trim();
-                                    if !trimmed.starts_with("let") || !trimmed.contains(pat_name) {
-                                        return false;
-                                    }
-                                    // Check for `=` outside of string literals
-                                    let mut in_str = false;
-                                    for ch in l.chars() {
-                                        if ch == '"' {
-                                            in_str = !in_str;
-                                        } else if ch == '=' && !in_str {
-                                            return true;
-                                        }
-                                    }
-                                    false
-                                }) {
-                                    let line_text = lines[let_line];
-                                    // Find the = sign, not in a comment
-                                    if let Some(eq_pos) = line_text.find('=') {
+                            // 0.35.15 (DX backlog #3): the pattern span
+                            // anchors at the binding name — the old
+                            // `let <name>` line scan could land on a
+                            // different binding with the same name earlier
+                            // in the file.
+                            if !pat_name.is_empty() && pat.meta.span.start_line > 0 {
+                                let let_line = pat.meta.span.start_line.saturating_sub(1);
+                                if let Some(line_text) = text.lines().nth(let_line) {
+                                    let name_byte = crate::lsp::util::char_col_to_byte(
+                                        line_text,
+                                        pat.meta.span.start_col.saturating_sub(1),
+                                    );
+                                    // Scan for `=` AFTER the binding name so a
+                                    // `==` comparison inside the initializer
+                                    // cannot win over the assignment operator.
+                                    let tail_start =
+                                        (name_byte + pat_name.len()).min(line_text.len());
+                                    if let Some(eq_off) = line_text[tail_start..].find('=') {
+                                        let eq_byte = tail_start + eq_off;
+                                        let map =
+                                            crate::lsp::position_map::PositionMap::new(line_text);
                                         hints.push(serde_json::json!({
                                             "position": {
                                                 "line": let_line,
-                                                "character": eq_pos + 1
+                                                "character": map.byte_to_lsp(eq_byte + 1).1
                                             },
                                             "label": format!(": {}", type_str),
                                             "kind": 1,  // Type
@@ -180,22 +177,30 @@ impl LspServer {
                     Some(p) => p,
                     None => return,
                 };
-                // Find the call line
-                let call_line = text
-                    .lines()
-                    .position(|l| l.contains(func_name) && l.contains('('));
-                let cl = match call_line {
+                // Find the call line from the callee span (0.35.15, DX
+                // backlog #3) — the old text scan always landed on the
+                // FIRST line mentioning the callee, corrupting hints for
+                // repeated calls.
+                let Some(callee_meta) = callee.meta() else {
+                    return;
+                };
+                if callee_meta.span.start_line == 0 {
+                    return;
+                }
+                let cl = callee_meta.span.start_line.saturating_sub(1);
+                let line_content = match text.lines().nth(cl) {
                     Some(l) => l,
                     None => return,
                 };
-                let line_text: Vec<&str> = text.lines().collect();
-                let line_content = match line_text.get(cl) {
-                    Some(l) => l,
-                    None => return,
-                };
-                // Find opening paren position
-                let paren_pos = match line_content.find('(') {
-                    Some(p) => p,
+                // Opening paren: scan from the callee name end so an earlier
+                // call on the same line cannot supply its paren.
+                let callee_byte = crate::lsp::util::char_col_to_byte(
+                    line_content,
+                    callee_meta.span.start_col.saturating_sub(1),
+                );
+                let paren_search_start = callee_byte.min(line_content.len());
+                let paren_pos = match line_content[paren_search_start..].find('(') {
+                    Some(p) => paren_search_start + p,
                     None => return,
                 };
                 // For each argument that is non-trivial, add a param hint

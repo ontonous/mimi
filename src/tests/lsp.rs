@@ -820,3 +820,160 @@ fn lsp_verification_cache_persistent_roundtrip_preserves_span_and_origin() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+// 0.35.15 (DX backlog #3): the LSP text-search migration consumes AST
+// spans instead of re-scanning source text. These tests lock the span
+// anchor contract the migration relies on.
+#[test]
+fn lsp_span_anchors_for_lsp_queries() {
+    use crate::ast::{Item, PatternKind, Stmt};
+    let src = "type Point { x: i32 }\n\
+               module util {\n\
+               \x20   func id(a: i32) -> i32 { a }\n\
+               }\n\
+               impl Clone for Point {\n\
+               \x20   func clone() -> Point { self }\n\
+               }\n\
+               func main() -> i32 {\n\
+               \x20   let n = 1\n\
+               \x20   n\n\
+               }\n";
+    let file = crate::tests::parse(src);
+    // TypeDef span anchors at the `type` keyword (line 1, col 1).
+    let t = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Type(t) => Some(t),
+            _ => None,
+        })
+        .expect("type item");
+    assert_eq!(
+        (t.meta.span.start_line, t.meta.span.start_col),
+        (1, 1),
+        "TypeDef span must anchor at the `type` keyword"
+    );
+    // ModuleDef span anchors at the `module` keyword (line 2).
+    let m = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Module(m) => Some(m),
+            _ => None,
+        })
+        .expect("module item");
+    assert_eq!(
+        (m.meta.span.start_line, m.meta.span.start_col),
+        (2, 1),
+        "ModuleDef span must anchor at the `module` keyword"
+    );
+    // ImplDef span anchors at the `impl` keyword (line 5).
+    let imp = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Impl(i) => Some(i),
+            _ => None,
+        })
+        .expect("impl item");
+    assert_eq!(
+        (imp.meta.span.start_line, imp.meta.span.start_col),
+        (5, 1),
+        "ImplDef span must anchor at the `impl` keyword"
+    );
+    // The let-binding pattern span anchors at the binding name.
+    let main = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Func(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main func");
+    let let_stmt = main
+        .body
+        .iter()
+        .find(|s| matches!(s.unlocated(), Stmt::Let { .. }))
+        .expect("let statement");
+    if let Stmt::Let { pat, .. } = let_stmt.unlocated() {
+        assert!(
+            matches!(&pat.kind, PatternKind::Variable(n) if n == "n"),
+            "expected binding `n`"
+        );
+        assert_eq!(
+            pat.meta.span.start_line, 9,
+            "let pattern span must carry the binding line"
+        );
+        // `    let n = 1` — 4 spaces + `let ` → `n` at col 9 (1-indexed).
+        assert_eq!(
+            pat.meta.span.start_col, 9,
+            "let pattern span must anchor at the binding name"
+        );
+    }
+}
+
+#[test]
+fn lsp_span_anchors_func_end_and_call_expr() {
+    use crate::ast::{Expr, Item, Stmt};
+    let src = "func helper(v: i32) -> i32 {\n\
+               \x20   v + 1\n\
+               }\n\
+               \n\
+               func main() -> i32 {\n\
+               \x20   let r = helper(3)\n\
+               \x20   r\n\
+               }\n";
+    let file = crate::tests::parse(src);
+    let helper = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Func(f) if f.name == "helper" => Some(f),
+            _ => None,
+        })
+        .expect("helper func");
+    // FuncDef span runs from the `func` keyword to the closing brace line.
+    assert_eq!(
+        (helper.meta.span.start_line, helper.meta.span.start_col),
+        (1, 1),
+        "FuncDef span must anchor at the `func` keyword"
+    );
+    assert_eq!(
+        helper.meta.span.end_line, 3,
+        "FuncDef span must end on the closing-brace line"
+    );
+    // The call expression carries a span anchored at the callee name.
+    let main = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Func(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main func");
+    let let_stmt = main
+        .body
+        .iter()
+        .find(|s| matches!(s.unlocated(), Stmt::Let { .. }))
+        .expect("let statement");
+    let Stmt::Let {
+        init: Some(init), ..
+    } = let_stmt.unlocated()
+    else {
+        panic!("expected an initializer");
+    };
+    assert!(
+        matches!(init.unlocated(), Expr::Call(..)),
+        "expected a call initializer"
+    );
+    let meta = init.meta().expect("call expr must carry metadata");
+    assert_eq!(
+        meta.span.start_line, 6,
+        "call span must carry the call line"
+    );
+    // `    let r = helper(3)` — 4 spaces + `let r = ` → callee at col 13.
+    assert_eq!(
+        meta.span.start_col, 13,
+        "call span must anchor at the callee name"
+    );
+}

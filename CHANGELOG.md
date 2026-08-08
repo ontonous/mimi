@@ -326,6 +326,31 @@
   fails Result 形状），real_world 新增 `real_world_tuple_fn_element_call`
   双后端锁；全量 5294 lib + 31 real_world + cli 绿；clippy 零警告；fmt 干净。
 
+### 0.35.15 — LSP 文本搜索 → Span/Origin 迁移（dx-backlog #3，Phase D 顺延项）
+
+> A6 基础设施（Span/Origin/AstNodeMeta + PositionMap）的消费端收尾：LSP
+> 内全部“文本扫描定位 AST 位置”的调用点迁移到 AST span（探针测试锁定锚点
+> 契约后逐文件迁移）。顺带修掉一批潜伏假阳性：`contains("impl")` 落在
+> 首个 impl、`func {name}` 落在注释/调用点、let 绑定落在同名先行绑定、
+> 括号计数被 `let s = "}"` 截断。
+
+- **探针测试**（`src/tests/lsp.rs` +2 项）：锁定迁移依赖的 span 锚点契约
+  ——FuncDef/TypeDef/ModuleDef/ImplDef 锚定关键字、let pattern 锚定绑定名、
+  Call 表达式锚定 callee、FuncDef.end_line 到闭括号行；
+- **references.rs**：goto-definition/references/highlight 的 Type/Module/
+  let 绑定定位全部 span 化（删除死文本回退）；impl 跳转位置精确到块行；
+  `enclosing_func_line_range` 改 AST 包含（rename 作用域不再依赖
+  `starts_with("func ")` 启发式）；
+- **util.rs**：`find_func_end_line` 删除（SourceScanner 括号计数被
+  `span.end_line` 平替），`find_enclosing_func_in_items`/`hash_func_body`
+  span 化（签名去 text 参数）；
+- **symbols.rs / lens.rs / hierarchy.rs / inlay.rs**：文档符号/工作区符号/
+  code lens/调用层级/inlay 提示的 def-line 与 call-line 全部 span 化；
+  inlay 参数提示的 call-line 不再落在首次提及，括号扫描从 callee 名尾开始；
+- **测试更新**：audit_fix_lsp 括号计数测试重写为 span 包含测试（字符串/
+  注释内括号假目标结构性免疫）；全量 5296 lib + 31 real_world + cli 绿；
+  clippy 零警告；fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

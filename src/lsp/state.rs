@@ -548,8 +548,9 @@ impl LspServer {
             parser::Parser::new_with_source_registry(tokens, source_id, source_registry)
                 .parse_file_with_recovery();
 
-        // Find the enclosing function at cursor line
-        let func = match find_enclosing_func_in_items(&file.items, text, cursor_line) {
+        // Find the enclosing function at cursor line (AST span containment,
+        // 0.35.15 DX backlog #3 — no more text brace counting).
+        let func = match find_enclosing_func_in_items(&file.items, cursor_line) {
             Some(f) => f,
             None => return diagnostics,
         };

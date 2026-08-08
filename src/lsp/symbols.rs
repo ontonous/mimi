@@ -34,11 +34,9 @@ impl LspServer {
             for item in &file.items {
                 match item {
                     Item::Func(f) => {
-                        // Find the line where the function is defined
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("func {}", f.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `func {name}` substring scan.
+                        let def_line = f.meta.span.start_line.saturating_sub(1);
                         let keyword_len = "func ".len();
                         symbols.push(serde_json::json!({
                             "name": f.name,
@@ -54,10 +52,9 @@ impl LspServer {
                         }));
                     }
                     Item::Type(t) => {
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("type {}", t.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `type {name}` substring scan.
+                        let def_line = t.meta.span.start_line.saturating_sub(1);
                         let keyword_len = "type ".len();
                         symbols.push(serde_json::json!({
                             "name": t.name,
@@ -73,10 +70,9 @@ impl LspServer {
                         }));
                     }
                     Item::Module(m) => {
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("module {}", m.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `module {name}` substring scan.
+                        let def_line = m.meta.span.start_line.saturating_sub(1);
                         let keyword_len = "module ".len();
                         symbols.push(serde_json::json!({
                             "name": m.name,
@@ -140,10 +136,9 @@ impl LspServer {
                         {
                             continue;
                         }
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("func {}", f.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `func {name}` substring scan.
+                        let def_line = f.meta.span.start_line.saturating_sub(1);
                         symbols.push(ws_symbol(&f.name, 12, uri, def_line, ""));
                     }
                     Item::Type(t) => {
@@ -151,10 +146,9 @@ impl LspServer {
                         {
                             continue;
                         }
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("type {}", t.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `type {name}` substring scan.
+                        let def_line = t.meta.span.start_line.saturating_sub(1);
                         let kind = match &t.kind {
                             TypeDefKind::Record(_) => 23,
                             TypeDefKind::Enum(_) => 10,
@@ -169,10 +163,14 @@ impl LspServer {
                                 {
                                     continue;
                                 }
-                                let v_line = text
-                                    .lines()
-                                    .position(|l| l.contains(&variant.name))
-                                    .unwrap_or(def_line);
+                                // 0.35.15 (DX backlog #3): variant spans
+                                // replace the whole-file name scan (which
+                                // landed on the first mention anywhere).
+                                let v_line = if variant.meta.span.start_line > 0 {
+                                    variant.meta.span.start_line.saturating_sub(1)
+                                } else {
+                                    def_line
+                                };
                                 symbols.push(ws_symbol(
                                     &format!("{}::{}", t.name, variant.name),
                                     23,
@@ -188,10 +186,9 @@ impl LspServer {
                         {
                             continue;
                         }
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("trait {}", t.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `trait {name}` substring scan.
+                        let def_line = t.meta.span.start_line.saturating_sub(1);
                         symbols.push(ws_symbol(&t.name, 17, uri, def_line, ""));
                     }
                     Item::Impl(i) => {
@@ -200,7 +197,9 @@ impl LspServer {
                         {
                             continue;
                         }
-                        let def_line = text.lines().position(|l| l.contains("impl")).unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `contains("impl")` scan.
+                        let def_line = i.meta.span.start_line.saturating_sub(1);
                         symbols.push(ws_symbol(&i.type_name, 26, uri, def_line, &i.trait_name));
                     }
                     Item::Actor(a) => {
@@ -208,10 +207,9 @@ impl LspServer {
                         {
                             continue;
                         }
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("actor {}", a.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `actor {name}` substring scan.
+                        let def_line = a.meta.span.start_line.saturating_sub(1);
                         symbols.push(ws_symbol(&a.name, 23, uri, def_line, ""));
                     }
                     Item::Module(m) => {
@@ -219,10 +217,9 @@ impl LspServer {
                         {
                             continue;
                         }
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("module {}", m.name)))
-                            .unwrap_or(0);
+                        // 0.35.15 (DX backlog #3): AST span replaces the
+                        // `module {name}` substring scan.
+                        let def_line = m.meta.span.start_line.saturating_sub(1);
                         symbols.push(ws_symbol(&m.name, 2, uri, def_line, ""));
                     }
                     _ => {}
@@ -251,10 +248,10 @@ impl LspServer {
         for item in &file.items {
             match item {
                 Item::Func(f) if f.name == word => {
-                    let def_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("func {}", f.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `func {name}` substring scan.
+                    let def_line = f.meta.span.start_line.saturating_sub(1);
+                    let name_char = f.meta.span.start_col.saturating_sub(1) + "func ".len();
                     return vec![serde_json::json!({
                         "name": f.name,
                         "kind": 12,
@@ -264,16 +261,16 @@ impl LspServer {
                             "end": { "line": def_line, "character": 0 }
                         },
                         "selectionRange": {
-                            "start": { "line": def_line, "character": 5 },
-                            "end": { "line": def_line, "character": 5 + f.name.len() }
+                            "start": { "line": def_line, "character": name_char },
+                            "end": { "line": def_line, "character": name_char + f.name.len() }
                         }
                     })];
                 }
                 Item::Type(t) if t.name == word => {
-                    let def_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("type {}", t.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `type {name}` substring scan.
+                    let def_line = t.meta.span.start_line.saturating_sub(1);
+                    let name_char = t.meta.span.start_col.saturating_sub(1) + "type ".len();
                     return vec![serde_json::json!({
                         "name": t.name,
                         "kind": match t.kind {
@@ -287,8 +284,8 @@ impl LspServer {
                             "end": { "line": def_line, "character": 0 }
                         },
                         "selectionRange": {
-                            "start": { "line": def_line, "character": 5 },
-                            "end": { "line": def_line, "character": 5 + t.name.len() }
+                            "start": { "line": def_line, "character": name_char },
+                            "end": { "line": def_line, "character": name_char + t.name.len() }
                         }
                     })];
                 }

@@ -261,30 +261,36 @@ fn lsp_enclosing_func_found_on_signature_line() {
     // The caller converts the 0-indexed LSP cursor line 0 to 1-indexed 1 at
     // the boundary; the old code rejected cursor_line == 0 outright and
     // compared 0 >= start_line(1) → enclosing func never found.
-    let found = crate::lsp::util::find_enclosing_func_in_items(&file.items, text, 1);
+    let found = crate::lsp::util::find_enclosing_func_in_items(&file.items, 1);
     assert!(found.is_some(), "cursor on the signature line must match");
     assert_eq!(found.unwrap().name, "foo");
     // Closing-brace line (0-indexed 2 → 1-indexed 3) is still inside.
-    assert!(crate::lsp::util::find_enclosing_func_in_items(&file.items, text, 3).is_some());
+    assert!(crate::lsp::util::find_enclosing_func_in_items(&file.items, 3).is_some());
     // Beyond the function (1-indexed 4) is outside.
-    assert!(crate::lsp::util::find_enclosing_func_in_items(&file.items, text, 4).is_none());
+    assert!(crate::lsp::util::find_enclosing_func_in_items(&file.items, 4).is_none());
 }
 
-// --- Fix 5 (MEDIUM): brace counting must ignore strings/comments ---
+// --- Fix 5 (MEDIUM): containment must ignore braces in strings/comments ---
 
 #[test]
-fn lsp_find_func_end_line_ignores_braces_in_strings_and_comments() {
-    // `let s = "}"` used to close the function at line 1.
-    let text = "func f() -> i32 {\n    let s = \"}\"\n    0\n}\n";
-    assert_eq!(crate::lsp::util::find_func_end_line(text, 1), 3);
-
-    // Braces inside line/block comments must not count either.
-    let text = "func g() -> i32 {\n    /* } */\n    // }\n    0\n}\n";
-    assert_eq!(crate::lsp::util::find_func_end_line(text, 1), 4);
-
-    // Plain function (no braces in literals) — unchanged behavior.
-    let text = "func h() -> i32 {\n    0\n}\n";
-    assert_eq!(crate::lsp::util::find_func_end_line(text, 1), 2);
+fn lsp_enclosing_func_ignores_braces_in_strings_and_comments() {
+    // 0.35.15 (DX backlog #3): containment is now span-based, so
+    // `let s = "}"` and comment braces can no longer truncate the region
+    // (the original brace-counting regression, now structurally impossible).
+    let server = crate::lsp::LspServer::new();
+    let text = "func f() -> i32 {\n    let s = \"}\"\n    /* } */\n    // }\n    0\n}\n";
+    let file = server.parse_with_recovery(text).expect("parses");
+    // The `0` line (1-indexed 5) sits after three brace decoys and must
+    // still resolve to the enclosing function.
+    let found = crate::lsp::util::find_enclosing_func_in_items(&file.items, 5);
+    assert!(
+        found.is_some(),
+        "braces in strings/comments must not cut the span"
+    );
+    assert_eq!(found.unwrap().name, "f");
+    // Closing-brace line (1-indexed 6) is inside; line 7 is outside.
+    assert!(crate::lsp::util::find_enclosing_func_in_items(&file.items, 6).is_some());
+    assert!(crate::lsp::util::find_enclosing_func_in_items(&file.items, 7).is_none());
 }
 
 #[test]

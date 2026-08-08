@@ -16,10 +16,10 @@ impl LspServer {
         for item in &file.items {
             match item {
                 Item::Func(f) => {
-                    let def_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("func {}", f.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `func {name}` substring scan (which landed on the
+                    // first mention, e.g. a call site or comment).
+                    let def_line = f.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
                         count_text_references(text, &f.name),
@@ -60,27 +60,29 @@ impl LspServer {
                     }
                 }
                 Item::Type(t) => {
-                    let def_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("type {}", t.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `type {name}` substring scan.
+                    let def_line = t.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
                         count_text_references(text, &t.name),
                     ));
                 }
                 Item::Trait(t) => {
-                    let def_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("trait {}", t.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `trait {name}` substring scan.
+                    let def_line = t.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
                         count_text_references(text, &t.name),
                     ));
                 }
                 Item::Impl(i) => {
-                    let def_line = text.lines().position(|l| l.contains("impl")).unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `contains("impl")` scan, which landed on the FIRST
+                    // impl in the file regardless of which item was being
+                    // rendered.
+                    let def_line = i.meta.span.start_line.saturating_sub(1);
                     lenses.push(serde_json::json!({
                         "range": {
                             "start": { "line": def_line, "character": 0 },
@@ -93,10 +95,9 @@ impl LspServer {
                     }));
                 }
                 Item::Actor(a) => {
-                    let def_line = text
-                        .lines()
-                        .position(|l| l.contains(&format!("actor {}", a.name)))
-                        .unwrap_or(0);
+                    // 0.35.15 (DX backlog #3): AST span replaces the
+                    // `actor {name}` substring scan.
+                    let def_line = a.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
                         count_text_references(text, &a.name),
