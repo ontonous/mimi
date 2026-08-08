@@ -426,7 +426,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 | [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 golden document: semantic rulings + sprint plan (authoritative for 0.1.4) |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | Authoritative roadmap (31 requirements, exit conditions) |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | Architecture Amendment: 13 clauses + 10 invariants (supersedes white paper) |
-| [`devdocs/pre-1.0/`](devdocs/pre-1.0/) | Pre-1.0 design contract: core goals, Flow-first model, error algebra, Verified Core, Component Boundary |
+| [`devdocs/pre-0.1/`](devdocs/pre-0.1/) | Pre-0.1 design contract: core goals, Flow-first model, error algebra, Verified Core, Component Boundary |
 | [`devdocs/debt-report-2026-07-25.md`](devdocs/debt-report-2026-07-25.md) | Debt panorama: 9 architecture + 10 engineering debts + 9-round blind review corrections |
 | [`docs/language-spec.md`](docs/language-spec.md) | Normative language specification (single entry point) |
 
@@ -440,7 +440,7 @@ Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurre
 
 | Version | Highlight |
 |---------|-----------|
-| **0.1.4-dev** | **Current**. Syntax freeze + semantic rulings + language self-consistency (golden document): become/stay removal (ADR-001, sole terminal `return State {}`), multi-target stable tagged-union ABI (ADR-002), `'a` removal (ADR-004), `do` wrapper removal (keywords 81→80), and/or/not soft keywords, if-let/for-destructuring, `ieee_float {}`, single-direction numeric coercion, View/Mutate closure. Doc-sync campaign closed the four verdicts across spec/pre-1.0/support/syntax-reference; trivia-ization of `desc:`/`rule:`/`mms{}` is registered for 0.1.5. RC gates green (4598 lib); tag deferred by ruling, kept as -dev. |
+| **0.1.4-dev** | **Current**. Syntax freeze + semantic rulings + language self-consistency (golden document): become/stay removal (ADR-001, sole terminal `return State {}`), multi-target stable tagged-union ABI (ADR-002), `'a` removal (ADR-004), `do` wrapper removal (keywords 81→80), and/or/not soft keywords, if-let/for-destructuring, `ieee_float {}`, single-direction numeric coercion, View/Mutate closure. Doc-sync campaign closed the four verdicts across spec/pre-0.1/support/syntax-reference; trivia-ization of `desc:`/`rule:`/`mms{}` is registered for 0.1.5. RC gates green (4598 lib); tag deferred by ruling, kept as -dev. |
 | **0.1.3** | Bytecode VM becomes the sole interpreter: tree-walker (24,976 LOC) + ResolvedInterpreter (4,375 lines) deleted, `--legacy` removed, FFI/Actor/quote fully on bytecode. |
 | **0.1.2** | Codegen full migration: `raw_ast()` privatized (3 permanent consumers), gap filling, performance baseline. |
 | **0.1.1** | 51-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. Codegen per-function dispatch active. |

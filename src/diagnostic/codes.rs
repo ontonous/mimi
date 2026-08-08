@@ -135,7 +135,7 @@ pub const E0433: &str = "E0433"; // fails E combined with a multi-target transit
 pub const E0434: &str = "E0434"; // mutate argument is not a valid place (must be Ident or single-level Ident.field)
 pub const E0435: &str = "E0435"; // two mutate arguments alias the same place (exclusive borrow violation)
 pub const E0436: &str = "E0436"; // generic parameter name shadows a builtin type name
-pub const E0437: &str = "E0437"; // trait method call on a bounded generic parameter (no monomorphization pre-1.0)
+pub const E0437: &str = "E0437"; // trait method call on a bounded generic parameter (no monomorphization pre-0.1)
 pub const E0438: &str = "E0438"; // generic type argument count mismatch (§3-诊断卫生: split from polysemous E0231)
 
 /// Contract/intention error codes (E05xx)

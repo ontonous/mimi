@@ -1,7 +1,7 @@
 # Mimi Language Specification (1.0 Draft)
 
 > **Authority**: This document is the single canonical specification entry point for Mimi 1.0.
-> It is extracted from the Pre-1.0 design contracts in `devdocs/pre-1.0/` (00–08).
+> It is extracted from the Pre-0.1 design contracts in `devdocs/pre-0.1/` (00–08).
 > All other documentation must defer to this file for semantic definitions.
 >
 > **Target status**: Normative sections are `stable` unless explicitly marked `experimental`, `reserved`, or `removed`. Current implementation maturity is non-normative and lives only in `docs/language-support.toml`.
@@ -20,7 +20,7 @@
 > | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | ✅ 0.34.1 删除：`\|>` 现为专用拒绝诊断（top_level.rs:1357-1368），`-> A \| B` 为唯一多目标分隔符（golden §1.1） |
 > | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | ✅ ADR-001 实施（0.34.11）：`become`/`stay` 均删除，唯一终止符 `return S{}`（golden §1.2） |
 
-Normative requirements use stable IDs defined in `docs/language-requirements.toml`. Design rationale lives in `devdocs/pre-1.0/`; implementation structure and progress live in `docs/ast-appendix.md` and `docs/language-support.toml`. Parser acceptance and an existing implementation do not grant stable status.
+Normative requirements use stable IDs defined in `docs/language-requirements.toml`. Design rationale lives in `devdocs/pre-0.1/`; implementation structure and progress live in `docs/ast-appendix.md` and `docs/language-support.toml`. Parser acceptance and an existing implementation do not grant stable status.
 
 Normative implementation profiles are defined in:
 
@@ -70,7 +70,7 @@ These appendices refine this specification and are normative only for the requir
 
 ## 1. Language Positioning
 
-*[source: devdocs/pre-1.0/00-core-goals.md §1–§3]*
+*[source: devdocs/pre-0.1/00-core-goals.md §1–§3]*
 
 Mimi is a **Flow-first, Typestate-Oriented** systems programming language.
 
@@ -132,7 +132,7 @@ Different constructs must not compete for the same responsibility. For example, 
 
 ## 2. Design Invariants
 
-*[source: devdocs/pre-1.0/00-core-goals.md §4]*
+*[source: devdocs/pre-0.1/00-core-goals.md §4]*
 
 ### 2.1 State Invariants `[stable]`
 
@@ -208,7 +208,7 @@ The capability surface remains experimental until issuance/delegation/revocation
 
 ## 3. Flow-first Core Model
 
-*[source: devdocs/pre-1.0/01-flow-first-model.md §2–§12]*
+*[source: devdocs/pre-0.1/01-flow-first-model.md §2–§12]*
 
 ### 3.1 Flow Instance and Linear Identity `[stable]`
 
@@ -624,7 +624,7 @@ Rules:
 
 ## 4. Error Model and Debug Prevention
 
-*[source: devdocs/pre-1.0/02-errors-and-debug-prevention.md §2–§12]*
+*[source: devdocs/pre-0.1/02-errors-and-debug-prevention.md §2–§12]*
 
 ### 4.1 Single Failure Algebra `[stable]`
 
@@ -845,7 +845,7 @@ Backend capability gaps should report stable diagnostics at checker's capability
 
 ## 5. Verified Core
 
-*[source: devdocs/pre-1.0/03-verified-core.md §1–§14]*
+*[source: devdocs/pre-0.1/03-verified-core.md §1–§14]*
 
 ### 5.1 Definition `[stable]`
 
@@ -1042,7 +1042,7 @@ source/IR hash: ...
 
 ## 6. Language Coherence Decisions
 
-*[source: devdocs/pre-1.0/04-language-coherence.md §2–§14]*
+*[source: devdocs/pre-0.1/04-language-coherence.md §2–§14]*
 
 ### 6.1 Functions: `func` and `fn` `[stable]`
 
@@ -1309,7 +1309,7 @@ Mimi 数值隐式转换**只允许单向 widening**：
 
 ## 7. Component Boundary, Native ABI, and Wire Schema
 
-*[source: devdocs/pre-1.0/07-first-class-ffi.md §1–§21]*
+*[source: devdocs/pre-0.1/07-first-class-ffi.md §1–§21]*
 
 ### 7.1 Definition `[stable]`
 Component Boundary is a first-class citizen of Mimi 1.0. FFI is its in-process native transport; IPC, WebSocket, and worker process use wire transport. Both share Protocol, Session, error, capability, and trace semantics, but native ABI tokens, pointers, and allocators never enter wire.
@@ -1504,7 +1504,7 @@ External code cannot read or write private Flow payload; can only receive versio
 
 ## 8. Multi-language Strategy
 
-*[source: devdocs/pre-1.0/06-multilanguage-strategy.md §1–§12]*
+*[source: devdocs/pre-0.1/06-multilanguage-strategy.md §1–§12]*
 
 ### 8.1 Core Positioning `[stable]`
 
@@ -1583,7 +1583,7 @@ Any business fact has only one commit authority. Mimi business state authority i
 
 ## 9. RC Acceptance Conditions
 
-*[source: devdocs/pre-1.0/05-rc-migration-and-gates.md §4, §12]*
+*[source: devdocs/pre-0.1/05-rc-migration-and-gates.md §4, §12]*
 
 ### 9.1 P0 RC Blockers
 
@@ -1679,7 +1679,7 @@ RC requires all of the following:
 
 ## 10. Non-goals
 
-*[source: devdocs/pre-1.0/00-core-goals.md §7, README.md §非目标]*
+*[source: devdocs/pre-0.1/00-core-goals.md §7, README.md §非目标]*
 
 1.0 does not pursue:
 

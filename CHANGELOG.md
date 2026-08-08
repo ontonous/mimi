@@ -2,6 +2,39 @@
 
 ## [Unreleased] — 0.1.4-dev
 
+### 0.34.45 — AF-2 ABI 定稿 + pre-0.1 更名战役 + 0.1.4 RC 复核（G3 硬复核点）
+
+> Phase G 第七个 sprint（收尾）。AF-2 布局冻结定稿 + abi_version 握手登记、
+> pre-1.0 → pre-0.1 更名战役、0.minor=大版本战略、Phase G 验收清单全绿。
+> **Phase G 至此全部关闭**（AF-1/2/3/4 + 度量门禁 + 三假边界 + 引擎隔离）。
+
+- **① ABI 布局定稿**（ADR-007 落地）：`docs/spec/native-abi-1.md` 新增 §7 布局冻结
+  声明（string `{ptr,len}` 无 capacity / list `has_header` 显式标志禁裸读
+  `data[-1]` / handle tag 位永驻 / nominal handle slot+generation）+ §7.2
+  “布局内解决”约束清单（**A2** 指针往返 loss → handle 化路径禁 ptr↔int；
+  **A3** tag 永驻是正式语义；**B10** has_header fail-closed）；
+- **② abi_version 握手登记**：`ComponentIdentity.abi_version`（当前值 **1**）与
+  本文件布局绑定；1.x 布局变更（胖指针/tag 剥离/capacity）→ 新 version，旧组件
+  以旧版本继续加载——**Two-Way Door**（0.2 随 bindgen 回归铁律实施）；
+- **③ pre-1.0 → pre-0.1 更名战役**：git 跟踪文件 pre-1.0 **零残留**（grep 门禁：
+  `git grep "pre-1.0" -- ':!devdocs' ':!CHANGELOG.md'` = 0）；spec 同步闸
+  `check_language_docs.py` 指向 `devdocs/pre-0.1`（修掉 glob 扫空脱闸）；
+  docs×6 + README×2 + codes.rs 注释 + devdocs 路径引用全清（CHANGELOG
+  历史条目豁免）；
+- **④ 0.minor=大版本战略入 AGENTS §13.1.1**：minor 即大版本边界（0.1.x 是 1.0
+  的 pre-阶段）、每 minor 冻结点表、breaking 政策（1.0.0 起需 major）、迁移
+  注记纪律（无迁移注记的 breaking 禁止合入）；
+- **⑤ Phase G 验收**：全门禁复跑通过——lib 全量 5285 绿 / clippy 零警告 / fmt 干净 /
+  `check_language_docs.py` 31+31 绿 / dispatch 门禁 0.3027 无回退 / unsafe gate 通过；
+  fallback 率曲线收尾（0.9609 → 0.3030 → 0.3027，eligible 212 → 3783）；
+- **登记 0.1.5（real_world 存量缺陷，非本次回归）**：`flow_order_system.mimi`
+  native 产物 SIGSEGV（`puts(0x1)` 整数当字符串指针）——2026-07-27 `9d4f17f3`
+  已登记同族缺陷（string event parameter + fails transition → SIGSEGV，
+  VM run 正常）；0.34.44 后 codegen/core 零改动（diff=0）证明存量；
+  `flow_system_trace.mimi`（同形态无 fails）PASS 锁定差异面在 fails 路径。
+  修复排 0.1.5 codegen 轨；
+- **工具**：`dispatch_stat.py` 开头清理容错修复（残留时 rmtree 竞态抛错）。
+
 ### 0.34.44 — verifier 引擎隔离治理（AF-3 落地，ADR-008）
 
 > Phase G 第六个 sprint。resolved 主引擎 + 缓存引擎隔离 + 双引擎分歧

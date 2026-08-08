@@ -461,7 +461,7 @@ verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test migrate -- --test-threads=1"
-evidence = "The bounded pre-1.0 migration command and fix-it suite do not exist."
+evidence = "The bounded pre-0.1 migration command and fix-it suite do not exist."
 
 [[support]]
 requirement = "MULTILANG-AUTHORITY-001"

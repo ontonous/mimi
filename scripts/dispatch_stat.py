@@ -102,7 +102,9 @@ def collect_all() -> dict:
     # 工作区内临时目录（sandbox 下 /tmp 可能只读）。
     tmp_root = ROOT / "target" / "dispatch-stat-tmp"
     if tmp_root.exists():
-        shutil.rmtree(tmp_root)
+        # 0.34.45：开头清理同样容错（上次运行中断残留时 rmtree 可能
+        # 在子目录上失败——Linux _rmtree_safe_fd 的 os.rmdir 竞态）。
+        shutil.rmtree(tmp_root, ignore_errors=True)
     tmp_root.mkdir(parents=True, exist_ok=True)
     # mimi build 的 temp_dir()（TMPDIR）也需指向工作区可写目录。
     build_tmpdir = tmp_root / "build-tmp"

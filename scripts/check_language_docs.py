@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "docs/language-spec.md"
 REQUIREMENTS = ROOT / "docs/language-requirements.toml"
 SUPPORT = ROOT / "docs/language-support.toml"
-PRE_1_0 = ROOT / "devdocs/pre-1.0"
+# 0.34.45：design contract 目录已更名（同步闸必须指向新路径，否则
+# glob 静默扫空——规范合同脱闸）。
+PRE_0_1 = ROOT / "devdocs/pre-0.1"
 GOLDEN_SYNTAX = ROOT / "devdocs/v0.34/golden/syntax-reference.golden.md"
 SYNTAX_REFERENCE = ROOT / "docs/syntax-reference.md"
 
@@ -73,7 +75,7 @@ MULTI_TARGET_PATTERN = re.compile(r"multi[- ]?target", re.IGNORECASE)
 def check_semantic_freshness(errors: list[str]) -> None:
     scanned: list[tuple[str, str]] = []
     doc_paths = [SPEC, REQUIREMENTS, SUPPORT, SYNTAX_REFERENCE, GOLDEN_SYNTAX]
-    doc_paths.extend(sorted(PRE_1_0.glob("*.md")))
+    doc_paths.extend(sorted(PRE_0_1.glob("*.md")))
     # Extended surface (0.34.33): flagship READMEs, normative spec profiles,
     # implementation appendix.
     doc_paths.extend([ROOT / "README.md", ROOT / "README.zh.md", ROOT / "docs/ast-appendix.md"])

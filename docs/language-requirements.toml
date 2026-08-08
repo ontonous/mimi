@@ -231,7 +231,7 @@ id = "MIGRATION-PRE1-001"
 target = "stable"
 spec = "9"
 gate = ["migration"]
-summary = "Removed pre-1.0 syntax has diagnostics and a bounded mechanical migration path."
+summary = "Removed pre-0.1 syntax has diagnostics and a bounded mechanical migration path."
 
 [[requirement]]
 id = "MULTILANG-AUTHORITY-001"

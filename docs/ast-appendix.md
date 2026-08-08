@@ -103,7 +103,7 @@ flow Main {
 
 **Injected nodes**: 无 fallback transition（废止）；仅确保 `Fault` state 存在（recovery verb 源态）。
 
-**Design intent** (pre-1.0): Stable mode prohibits auto-completing undeclared combinations into business transitions. **已达成（0.34.18b）**：稀疏图 + E0211 fail-closed；@dense 标记删除（parser 拒绝），16 个 @dense 测试迁移。
+**Design intent** (pre-0.1): Stable mode prohibits auto-completing undeclared combinations into business transitions. **已达成（0.34.18b）**：稀疏图 + E0211 fail-closed；@dense 标记删除（parser 拒绝），16 个 @dense 测试迁移。
 
 ### 2.3 System Verb Injection (reset / recover)
 
@@ -180,7 +180,7 @@ User-written transitions have both `is_fallback: false` and `is_ffi_pinned: fals
 
 ### 3.4 Missing Markers
 
-The pre-1.0 design requires:
+The pre-0.1 design requires:
 - System injected nodes distinguished by AST flags (04 §13) — **partially implemented** (only `is_fallback` and `is_ffi_pinned`)
 - User Flow transition must have body while Protocol transition signatures may be body-less — **not enforced consistently; do not claim complete**
 - `is_system_verb` field — **not implemented**; system verbs (reset/recover/peer_fault) use `is_fallback: true` instead
@@ -189,7 +189,7 @@ The pre-1.0 design requires:
 
 ## 4. Required Next Layer: Typed Resolved IR
 
-*[source: devdocs/pre-1.0/05-rc-migration-and-gates.md §2 Phase 2]*
+*[source: devdocs/pre-0.1/05-rc-migration-and-gates.md §2 Phase 2]*
 
 The normative requirement `TOOL-RESOLUTION-001` requires a typed resolved IR layer between checker and backends. The current implementation is partial: declaration catalogs and finalized function signatures exist, while body-level calls, conversions, effects, Session residuals, and general resource facts are not yet fully typed. The target semantics remain authoritative in the language specification.
 
