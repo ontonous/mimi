@@ -74,7 +74,10 @@ impl<'a> Checker<'a> {
                     .first()
                     .map(|arg| self.infer_expr(arg, scopes))
                     .unwrap_or_else(|| Type::Name("unknown".into(), vec![]));
-                Type::Result(Box::new(self.unification.zonk_or_unknown(inner)), Box::new(err_ty))
+                Type::Result(
+                    Box::new(self.unification.zonk_or_unknown(inner)),
+                    Box::new(err_ty),
+                )
             }
             "map" => {
                 if args.len() != 1 {
