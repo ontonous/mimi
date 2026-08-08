@@ -144,7 +144,7 @@ impl<'a> Checker<'a> {
             // This allows the expected type to propagate into both branches, so
             // `Some(1)` in an `Option<i64>` context can infer i64 from the expected type.
             if self.unification.unify(&then_ty, &else_ty).is_ok() {
-                self.unification.resolve(&then_ty)
+                self.unification.zonk_or_unknown(&then_ty)
             } else {
                 self.emit_code(
                     crate::diagnostic::codes::E0214,

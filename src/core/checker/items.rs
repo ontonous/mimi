@@ -1724,7 +1724,7 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
-                    self.unification.resolve(&resolved)
+                    self.unification.zonk_or_unknown(&resolved)
                 } else {
                     value_ty
                 };
@@ -2310,7 +2310,7 @@ impl<'a> Checker<'a> {
         implicit: Option<Type>,
     ) {
         let Some(actual) = implicit else { return };
-        let actual = self.unification.resolve(&actual);
+        let actual = self.unification.zonk_or_unknown(&actual);
         let actual = match actual.into_unlocated() {
             Type::Shared(inner) | Type::LocalShared(inner) | Type::CShared(inner) => *inner,
             other => other,

@@ -165,7 +165,7 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
-                    self.unification.resolve(&then_ty)
+                    self.unification.zonk_or_unknown(&then_ty)
                 } else {
                     then_ty
                 }
@@ -292,7 +292,7 @@ impl<'a> Checker<'a> {
                 // resolved layer rejected it later with an opaque internal
                 // message). Exempt only genuinely unresolved inference
                 // variables (they may still unify with Option/Result).
-                let resolved = self.unification.resolve(&inner_ty);
+                let resolved = self.unification.zonk_or_unknown(&inner_ty);
                 let base_ty = match resolved.unlocated() {
                     Type::Option(t) => t.as_ref().clone(),
                     Type::Result(ok, _) => ok.as_ref().clone(),
