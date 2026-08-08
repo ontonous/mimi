@@ -1387,6 +1387,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             {
                 self.wrap_c_string(pv)
             }
+            // 0.35.8-fix (dx-backlog #20): pointer payload -> structured
+            // target, load the pointee. `compile_ok_constructor` packs
+            // {i1, ptr, i64} with the Ok payload ADDRESS in the ptr slot;
+            // coercing to the declared Result<T,E> layout ({i1, T, E} with a
+            // by-value T) previously stored the raw pointer into the T slot,
+            // corrupting every struct payload (e.g. a Flow state with string
+            // fields: `puts(0x1)` — the state's address bits read as the
+            // first string's data pointer). The mimi-string wrap above keeps
+            // raw C-string pointers intact; any other ptr-vs-struct mismatch
+            // here is a boxed/alloca payload and must be dereferenced.
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => self
+                .build_load(BasicTypeEnum::StructType(st), pv, "coerce_load_struct")
+                .map_err(|e| CompileError::LlvmError(format!("coerce load: {}", e))),
             // Generic pad (i64 zero) -> structured payload: zero-initialize the target.
             (BasicValueEnum::IntValue(_), BasicTypeEnum::StructType(st)) => {
                 Ok(BasicValueEnum::StructValue(st.const_zero()))

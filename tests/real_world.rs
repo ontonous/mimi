@@ -856,10 +856,10 @@ fn real_world_flow_dual_backend_suite() {
     // 0.31.46: known language limitations — these tests document intended
     // behavior that the checker does not yet support. They are excluded
     // from the dual-backend suite until the limitation is resolved.
-    let known_limitations = [
-        "flow_order_system.mimi", // E0304: fails E + match on Result (linear resource CFG gap)
-        "flow_system_trace.mimi", // CODEGEN: string event param in flow transition → SIGSEGV
-    ];
+    // 0.35.8: flow_order_system + flow_system_trace removed — the fails E
+    // string-event-param SIGSEGV (dx-backlog #20) is fixed; both now run
+    // through the dual-backend suite.
+    let known_limitations = [];
     let mut sources: Vec<PathBuf> = fs::read_dir(&root)
         .expect("read tests/real_world")
         .filter_map(|e| e.ok())

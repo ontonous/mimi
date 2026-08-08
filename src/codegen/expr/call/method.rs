@@ -527,8 +527,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(param) = function.get_nth_param(i as u32) {
                 if let BasicTypeEnum::StructType(sty) = param.get_type() {
                     if let BasicValueEnum::PointerValue(pv) = val {
-                        val =
-                            self.build_load(BasicTypeEnum::StructType(sty), pv, "flow_arg_load")?;
+                        // 0.35.8-fix (dx-backlog #20): a string LITERAL
+                        // argument compiles to a raw global-string
+                        // pointer; the parameter is the Mimi string
+                        // struct {ptr, i64}. The old code `load`ed the
+                        // struct straight from the global — reading the
+                        // string's own bytes as {data_ptr, len} (e.g.
+                        // "TXN-42" → data_ptr = 0x32342D4E5854),
+                        // corrupting every string event parameter on
+                        // flow transitions. Wrap the pointer into the
+                        // canonical {ptr, len} struct instead; non-string
+                        // struct payloads (state records) still load.
+                        let fields = sty.get_field_types();
+                        let is_string_struct = fields.len() == 2
+                            && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                            && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                        if is_string_struct {
+                            val = self.wrap_c_string(pv)?;
+                        } else {
+                            val = self.build_load(
+                                BasicTypeEnum::StructType(sty),
+                                pv,
+                                "flow_arg_load",
+                            )?;
+                        }
                     }
                 }
             }
