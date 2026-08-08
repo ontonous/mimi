@@ -166,6 +166,23 @@
   clippy 零警告 / fmt 干净；flow_order_system native 输出与 VM 逐行一致
   （TXN-42/TRK-001/book/invalid price/0）。
 
+### 0.35.9 — contracts 守卫发射性能切片（Phase C）
+
+> 0.34.41 第二档（resolved 运行时守卫发射）第一个性能回访。结论：
+> **守卫成本 < 噪声，零优化空间**。
+
+- **基准**：`benchmarks/contracts.mimi`——`validated_sum(n, lo)` 带双合约
+  （requires n>=lo + ensures result>=0），300 万次调用（参数 k%20 防
+  LICM 提升、lo 来自 argv[1] 防常量折叠）；`plain_sum` 同构无合约对照；
+- **数据（O1，3 次中位数）**：擦除 0.02s vs `--verify-contracts` 0.02s——
+  守卫被内联 + 分支预测近全命中，双向无差异；
+- **IR 验证**：requires/ensures 的 icmp + contract_pass/fail 双块 +
+  mimi_runtime_abort（E0808）完整存活，与 0.34.41 设计一致；循环内 checked
+  add 的 trap_overflow + branch_weights（0.35.4）与守卫共存；
+- **登记**：无优化空间（重守卫 = 用户表达式成本，非机制开销，不预优化）；
+  报告 `devdocs/v0.35/contracts-slice-0.35.9.md`；
+- **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

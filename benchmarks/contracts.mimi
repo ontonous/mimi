@@ -1,0 +1,41 @@
+// Benchmark: contract guard overhead
+// Tests: requires/ensures runtime guard cost under --verify-contracts.
+// `validated_sum` carries two contracts; `plain_sum` is the erasure baseline.
+// The guard threshold comes from argv[1] so O1 cannot constant-fold it away.
+use std::env
+
+func validated_sum(n: i32, lo: i32) -> i32 {
+    requires: n >= lo
+    ensures: result >= 0
+    let mut acc = 0
+    let mut i = lo
+    while i < n {
+        acc = acc + i
+        i = i + 1
+    }
+    acc
+}
+
+func plain_sum(n: i32, lo: i32) -> i32 {
+    let mut acc = 0
+    let mut i = lo
+    while i < n {
+        acc = acc + i
+        i = i + 1
+    }
+    acc
+}
+
+func main() -> i32 {
+    let lo = to_int_safe(first_arg(), 0)
+    let mut total = 0
+    let mut k = 0
+    while k < 3000000 {
+        // k % 20 varies per iteration: the call is NOT loop-invariant, so
+        // LLVM's LICM cannot hoist the (inlined) guard+body out of the loop.
+        total = total + validated_sum(k % 20, lo)
+        k = k + 1
+    }
+    println(total)
+    0
+}
