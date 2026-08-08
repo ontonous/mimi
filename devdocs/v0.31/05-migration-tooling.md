@@ -4,7 +4,7 @@
 
 - **0.31.22**：错误代数、func/fn、签名合约、pure comptime、attribute fail-closed、removed syntax 收敛。
 - **0.31.36–37**（deferred to post-1.0）：~~自举可行性 spike / MimiSpec parser 自举 / HM 自举闭环~~。不阻塞 0.1.1。
-- **0.31.39**：`mimi migrate --from pre-1.0` 与 fix-it，仓库/stdlib 一次迁移。
+- **0.31.39**：`mimi migrate --from pre-0.1` 与 fix-it，仓库/stdlib 一次迁移。
 - **0.31.40**：token/CST formatter、LSP CheckedProgram/Origin、自动 support probes。
 - **0.31.41**：multi-target、dynamic Protocol、Effect/Capability、raw extern experimental 隔离。
 

@@ -1,7 +1,7 @@
 # v0.31 Verified Core 1
 
 > v2 更新（2026-07-25）：基于外部盲审反馈，补充 f64 opaque sort、typestate 公理注入、
-> 验证域隔离、语义规范化 Hash 等设计需求。权威设计见 `devdocs/pre-1.0/03-verified-core.md`。
+> 验证域隔离、语义规范化 Hash 等设计需求。权威设计见 `devdocs/pre-0.1/03-verified-core.md`。
 
 ## 版本
 
