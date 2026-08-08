@@ -200,6 +200,44 @@
   type/expr 62；actor/nominal 15；
 - **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
 
+### 0.35.11 — O1 正确性切片：O1/O0 双档对等三连修（Phase D）
+
+> O1 默认化后的 dual 对等扫描发现 `demos/05_lists.mimi` 双档分歧：O0
+> tcache double free abort、O1 静默输出错。三连根因各自独立，修复后
+> 05_lists O0/O1 与 bytecode 逐行对等（除 zip 行，见已知限制）。
+
+- **修复 1：resolved slice trap 块缺 terminator**（`src/codegen/resolved/mod.rs`
+  `emit_bounds_trap`）：slice OOB trap 块以 noreturn call 结尾但无 terminator
+  → LLVM verify 拒绝整个函数 → **静默降级 legacy emitter**（连带 print
+  dispatch 错乱）。补 `build_unreachable`；`sort(data)` + `data[1..4]` 同函数
+  复现；
+- **修复 2：legacy print dispatch 对 list 返回内建的类型推断缺口**
+  （`src/codegen/expr.rs` + `func.rs` + `block.rs`）：`map`/`filter`（编译期
+  内建）与 `reverse`/`sort`/`range`（无 func_defs 条目的运行时 builtin）的
+  调用结果被推断为 **被调名**（"map"、"reverse"…）或空 → `{i64 len, ptr data}`
+  list struct 误入字符串快速路径（printf 对结构体字节 strlen，输出
+  空/垃圾，O0 下可触发 double free）。新增共享 helper
+  `infer_list_builtin_return_type`（从源参数推导 List<T>；map 优先取 lambda
+  声明返回型），接入 `infer_object_type` Call 分支 + 两处 let 绑定追踪；
+  另补 `SliceExpr` arm（`xs[1..5]` 同源类型）；**zip 不入 helper**：其裸
+  {i64,i64} pair 布局与 product-tuple formatter 的 heap-pack 假设不符，
+  强类型化会 segfault（已知限制：legacy 下 zip 显示为空，O1 不 crash）；
+- **修复 3：list 字面量绑定 local 后 realloc 所有权陈旧**（resolved，
+  `src/codegen/resolved/mod.rs`）：`let mut ys = [1,2,3]; push(ys, 4)` 先在
+  构造临时 alloca 建表并注册为 buffer 所有者，再值拷贝进 local；push/pop
+  的 realloc 更新的是 **local** 槽，注册槽残留 realloc 前旧指针 → scope
+  退出 free 旧指针（realloc 搬移时已内部释放）→ tcache double free。
+  O1 仅因 SROA 合并两 alloca 侥幸不炸。新增 `emit_list_literal(target)`
+  直接构造模式 + Bind 快速路径：字面量直接绑定简单 local 时就地构造，
+  注册所有者 = 被 mutator 更新的槽；
+- **诊断钩子**：`MIMI_DUMP_MODULE` 提升到 optimize gate 之外（O0 构建
+  也可 dump IR，此前 O1-only 位置使默认 debug opt-out 构建不可见）；
+- **回归锁**：`real_world_list_intrinsic_display_and_realloc`（sort/slice/
+  reverse/map/filter 内联+绑定显示 + push/pop realloc 所有权，run/build
+  双后端对等）；临时复现文件 dblfree_min.mimi 已转正删除；
+- **验证**：05_lists O0/O1 与 bytecode 输出逐行对等（zip 行除外）；全量
+  5292 lib + 29 real_world + cli 套件绿。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

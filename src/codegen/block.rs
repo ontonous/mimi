@@ -787,6 +787,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         {
                                             self.var_type_names.insert(name.clone(), tn.clone());
                                         }
+                                        // 0.35.11-fix: nested-block counterpart
+                                        // of the func.rs list-builtin tracker
+                                        // (map/filter/reverse/sort/range).
+                                        if let Some(list_ty) = self.infer_list_builtin_return_type(
+                                            func_name, call_args, vars,
+                                        ) {
+                                            self.var_type_names.insert(name.clone(), list_ty);
+                                        }
                                         // Track return types for builtins
                                         match func_name.as_str() {
                                             "listdir" | "walk_dir" | "str_split" | "keys" => {

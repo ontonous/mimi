@@ -876,6 +876,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if name == "Err" {
                         return "Result".to_string();
                     }
+                    // 0.35.11-fix (O1/O0 dual parity): list-returning builtins
+                    // have no declared signature visible to legacy inference
+                    // (map/filter are compile-time intrinsics; reverse/sort/
+                    // range are runtime builtins absent from func_defs),
+                    // so the fall-through below returned the CALLEE NAME
+                    // ("map", "reverse", …) as the type. The print-family
+                    // dispatch then misrouted the {i64 len, ptr data} list
+                    // struct to the string fast path — printf strlen'd struct
+                    // bytes (empty/garbage output, free() double free at O0).
+                    // Derive the display type from the source argument.
+                    if let Some(list_ty) = self.infer_list_builtin_return_type(name, args, vars) {
+                        return list_ty;
+                    }
                     if let Some(ret_name) = self.infer_call_return_type_name(name) {
                         return ret_name;
                     }
@@ -987,6 +1000,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 name.clone()
             }
+            // 0.35.11-fix: `xs[1..5]` is a List<T> of the source type —
+            // without this the print dispatch saw an empty type name and
+            // puts'd the list struct pointer (empty line / double free).
+            Expr::SliceExpr { target, .. } => self.infer_object_type(target, vars),
             Expr::List(elems) => {
                 if let Some(first) = elems.first() {
                     let elem = self.infer_object_type(first, vars);
@@ -1028,6 +1045,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                 })
                 .unwrap_or_default(),
             _ => String::new(),
+        }
+    }
+
+    /// 0.35.11-fix: display-type inference for list-returning builtins that
+    /// carry no declared signature on the legacy path. Shared by
+    /// `infer_object_type` (inline print args) and the let-binding trackers
+    /// (func.rs / block.rs). Returns `None` for anything else so callers
+    /// keep their existing fall-throughs.
+    pub(super) fn infer_list_builtin_return_type(
+        &self,
+        name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Option<String> {
+        match name {
+            // Element-preserving: List<T> -> List<T>.
+            "filter" | "reverse" | "sort" => {
+                let src = args.first().map(|a| self.infer_object_type(a, vars))?;
+                src.starts_with("List").then_some(src)
+            }
+            // map: the element type follows the lambda's declared return
+            // type when present; otherwise fall back to the source list's
+            // type (element-preserving maps).
+            "map" => {
+                let lambda_ret = args.get(1).and_then(|lam| match lam.unlocated() {
+                    Expr::Lambda { ret: Some(ret), .. } => Some(crate::core::fmt_type(ret)),
+                    _ => None,
+                });
+                if let Some(elem) = lambda_ret {
+                    return Some(format!("List<{}>", elem));
+                }
+                let src = args.first().map(|a| self.infer_object_type(a, vars))?;
+                src.starts_with("List").then_some(src)
+            }
+            "range" => Some("List<i64>".to_string()),
+            // NOTE: `zip` deliberately NOT covered here. compile_zip packs
+            // each pair as two raw i64 slots (string elems are pointer
+            // bit patterns), which does not match the heap-packed layout
+            // `emit_list_product_tuple_to_string` expects — typing it as
+            // `List<(A, B)>` segfaults the formatter. zip display stays a
+            // known limitation until the formatter grows a raw-pair mode.
+            _ => None,
         }
     }
 

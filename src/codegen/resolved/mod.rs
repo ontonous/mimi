@@ -1126,6 +1126,39 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 pattern,
                 initializer: Some(initializer),
             } => {
+                // 0.35.11-fix (O0 double free): list literal bound directly
+                // to a simple local — construct into the local's storage so
+                // the registered heap owner is the slot push/pop reallocs
+                // update. The generic path below would construct a temp,
+                // register the temp, then value-copy into the local; after a
+                // realloc the temp slot holds the stale pointer and the
+                // scope-exit free double-frees it (see emit_list_literal).
+                if let (
+                    crate::core::ResolvedExprKind::List(elements),
+                    crate::core::ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    },
+                ) = (&initializer.kind, &pattern.kind)
+                {
+                    let metadata = body.locals.get(local).ok_or_else(|| {
+                        CompileError::Unsupported(format!(
+                            "resolved binding local '{}' is absent",
+                            local.0 .0
+                        ))
+                    })?;
+                    let llvm_type = self.lower_type(&metadata.ty)?;
+                    if matches!(llvm_type, BasicTypeEnum::StructType(_)) {
+                        let storage = self
+                            .generator
+                            .build_alloca(llvm_type, &metadata.display_name)?;
+                        self.emit_list_literal(elements, frame, Some(storage))?;
+                        frame
+                            .locals
+                            .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
+                        return Ok(None);
+                    }
+                }
                 let value = self.emit_expr(initializer, frame)?;
                 self.bind_pattern(body, pattern, value, frame)?;
                 Ok(None)
@@ -1281,6 +1314,79 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "resolved statement {other:?} escaped resolved native eligibility for '{}'",
                 frame.owner.0
             ))),
+        }
+    }
+
+    /// 0.35.11-fix (O0 double free): emit a list literal, either into a fresh
+    /// construction temp (`target: None`, inline uses — the temp keeps
+    /// ownership and is freed at scope exit) or DIRECTLY into an existing
+    /// storage slot (`target: Some`, used by the Bind fast path below).
+    ///
+    /// Why the direct mode exists: `let mut ys = [1, 2, 3]; push(ys, 4)`
+    /// used to construct the literal into a temp, register the temp as the
+    /// buffer owner, then copy the struct VALUE into the local. push/pop
+    /// realloc through the LOCAL, leaving the registered temp slot holding
+    /// the stale pre-realloc pointer — freed again at scope exit (realloc
+    /// already released it when it moved the chunk) → tcache double free.
+    /// O1 only survived because SROA merged the two allocas. Constructing
+    /// into the local makes the registered owner the very slot the
+    /// mutators update.
+    fn emit_list_literal(
+        &mut self,
+        elements: &[crate::core::ResolvedExpr],
+        frame: &mut ResolvedFrame<'ctx>,
+        target: Option<inkwell::values::PointerValue<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let count = elements.len() as u64;
+        let i64_ty = self.generator.context.i64_type();
+        let len_val = i64_ty.const_int(count, false);
+        // Allocate data buffer: count * 8 bytes.
+        let sizeof_i64 = i64_ty.const_int(8, false);
+        let alloc_size = self
+            .generator
+            .builder
+            .build_int_mul(len_val, sizeof_i64, "list_alloc_size")
+            .map_err(|e| CompileError::LlvmError(format!("list alloc mul: {e}")))?;
+        let data_ptr = self.generator.malloc_or_abort(alloc_size, "list_malloc")?;
+        // Store each element as i64.
+        for (i, element) in elements.iter().enumerate() {
+            let value = self.emit_expr(element, frame)?;
+            let iv = self.coerce_to_i64(value)?;
+            let idx = i64_ty.const_int(i as u64, false);
+            let elem_ptr =
+                self.generator
+                    .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "list_elem")?;
+            self.generator.build_store(elem_ptr, iv)?;
+        }
+        match target {
+            None => self.generator.build_list_struct(len_val, data_ptr),
+            Some(storage) => {
+                let list_ty = self.generator.list_struct_type();
+                let len_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(list_ty, storage, 0, "list_len")
+                    .map_err(|e| CompileError::LlvmError(format!("list len gep: {e}")))?;
+                self.generator.build_store(len_gep, len_val)?;
+                let data_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(list_ty, storage, 1, "list_data")
+                    .map_err(|e| CompileError::LlvmError(format!("list data gep: {e}")))?;
+                let data_void_ptr = self.generator.build_bit_cast(
+                    data_ptr.into(),
+                    self.generator
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .into(),
+                    "data_void",
+                )?;
+                self.generator.build_store(data_gep, data_void_ptr)?;
+                // The LOCAL is the buffer owner: push/pop reallocs write this
+                // slot, so the scope-exit free must read this slot.
+                self.generator.register_heap_slot(storage, list_ty, 1);
+                Ok(storage.into())
+            }
         }
     }
 
@@ -1462,34 +1568,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // compile_list_expr: malloc data buffer, store elements as i64,
             // build {i64 len, ptr data} struct.
             ResolvedExprKind::List(elements) => {
-                let count = elements.len() as u64;
-                let i64_ty = self.generator.context.i64_type();
-                let len_val = i64_ty.const_int(count, false);
-                // Allocate data buffer: count * 8 bytes.
-                let sizeof_i64 = i64_ty.const_int(8, false);
-                let alloc_size = self
-                    .generator
-                    .builder
-                    .build_int_mul(len_val, sizeof_i64, "list_alloc_size")
-                    .map_err(|e| CompileError::LlvmError(format!("list alloc mul: {e}")))?;
-                let data_ptr = self.generator.malloc_or_abort(alloc_size, "list_malloc")?;
-                // Store each element as i64.
-                for (i, element) in elements.iter().enumerate() {
-                    let value = self.emit_expr(element, frame)?;
-                    let iv = self.coerce_to_i64(value)?;
-                    let idx = i64_ty.const_int(i as u64, false);
-                    let elem_ptr = self.generator.build_in_bounds_gep(
-                        i64_ty,
-                        data_ptr,
-                        &[idx],
-                        "list_elem",
-                    )?;
-                    self.generator.build_store(elem_ptr, iv)?;
-                }
+                let list_ptr = self.emit_list_literal(elements, frame, None)?;
                 // build_list_struct returns a pointer to the alloca'd struct.
                 // Load the struct value so the resolved emitter can store it
                 // in local variables (matching tuple semantics).
-                let list_ptr = self.generator.build_list_struct(len_val, data_ptr)?;
                 let list_ty = self.generator.list_struct_type();
                 self.generator.build_load(
                     BasicTypeEnum::StructType(list_ty),
@@ -6165,6 +6247,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 )],
                 "slice_trap",
             )?;
+            // 0.35.11-fix (dx-backlog #20 follow-up): the trap block must be
+            // terminated. `mimi_runtime_abort` is declared `noreturn`, but a
+            // block ending in a plain call has no terminator — LLVM verify
+            // rejects the function and the whole main body silently demotes
+            // to the legacy emitter (where list print dispatch breaks).
+            this.generator
+                .builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("slice trap unreachable: {e}")))?;
             Ok(())
         };
 
