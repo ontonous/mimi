@@ -789,14 +789,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let pair_ty = pair_ty_str
-            .and_then(|ts| crate::codegen::expr::call::helpers::parse_type_str(ts))
+            .and_then(crate::codegen::expr::call::helpers::parse_type_str)
             .and_then(|ty| self.llvm_type_for(&ty));
         if let Some(BasicTypeEnum::StructType(sty)) = pair_ty {
             let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-            let pair_heap = self.malloc_or_abort(
-                i64_ty.const_int(size, false),
-                "zip_pair_heap",
-            )?;
+            let pair_heap = self.malloc_or_abort(i64_ty.const_int(size, false), "zip_pair_heap")?;
             let fields = sty.get_field_types();
             let srcs = [elem_a, elem_b];
             for (i, ft) in fields.iter().enumerate() {
@@ -875,9 +872,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let p = self
                                 .builder
                                 .build_int_to_ptr(src, i8_ptr, "zip_pair_str_ptr")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("inttoptr: {}", e))
-                                })?;
+                                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
                             let ptr_gep = self
                                 .gep()
                                 .build_struct_gep(*fsty, field_gep, 0, "zip_pair_str_p")
@@ -895,9 +890,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     &[BasicMetadataValueEnum::PointerValue(p)],
                                     "zip_pair_strlen",
                                 )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("strlen: {}", e))
-                                })?
+                                .map_err(|e| CompileError::LlvmError(format!("strlen: {}", e)))?
                                 .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
@@ -923,9 +916,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let p = self
                                 .builder
                                 .build_int_to_ptr(src, i8_ptr, "zip_pair_list_ptr")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("inttoptr: {}", e))
-                                })?;
+                                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
                             let loaded = self
                                 .build_load(
                                     BasicTypeEnum::StructType(*fsty),
@@ -943,9 +934,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let p = self
                                 .builder
                                 .build_int_to_ptr(src, i8_ptr, "zip_pair_rec_ptr")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("inttoptr: {}", e))
-                                })?;
+                                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
                             self.builder
                                 .build_store(field_gep, p)
                                 .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
@@ -973,7 +962,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         let pair_a_ptr = self
             .gep()
-            .build_in_bounds_gep(i64_ty, pair_i64, &[i64_ty.const_int(0, false)], "zip_pair_a")
+            .build_in_bounds_gep(
+                i64_ty,
+                pair_i64,
+                &[i64_ty.const_int(0, false)],
+                "zip_pair_a",
+            )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder
             .build_store(pair_a_ptr, elem_a)

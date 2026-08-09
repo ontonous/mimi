@@ -24,7 +24,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Unary(op, inner) => self.compile_unary_expr(*op, inner, vars),
             Expr::Call(callee, args) => self.compile_call_expr(callee, args, vars),
             Expr::Turbofish(name, type_args, args) => self.compile_turbofish_expr(name, type_args, args, vars),
-            Expr::Match(scrutinee, arms) => self.compile_match_expr(scrutinee, arms, vars),
+            Expr::Match(scrutinee, arms) => {
+                self.compile_match_expr(scrutinee, arms, vars, false)
+            }
             Expr::Record { ty, fields } => self.compile_record_expr(ty, fields, vars),
             Expr::Field(obj, field_name) => self.compile_field_expr(obj, field_name, vars),
             Expr::List(elems) => self.compile_list_expr(elems, vars),
@@ -937,6 +939,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                if let Some(actor) = self.actor_defs.get(&obj_type) {
+                    if let Some(f) = actor.fields.iter().find(|f| f.name == *field_name) {
+                        return crate::core::fmt_type(&f.ty);
+                    }
+                }
                 obj_type
             }
             // PA-H3: `x?.field` has type Option<field_ty>; track as Option<…>
@@ -1044,6 +1051,81 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 })
                 .unwrap_or_default(),
+            // 0.35.23 deep-eval: `let r0 = if n > 0 { parse_one(..) } else {
+            // Rule { .. } }` — the init is the If itself, so the else-branch
+            // record literal's type name never reached var_type_names and
+            // `r0.target` failed E0707 ("cannot access field on type 'r0'").
+            // Line 187 control.rs branch-unify makes the phi a struct VALUE,
+            // but the let-binding type tracking must know the type too.
+            // Prefer the else branch (record literal is unambiguous); fall
+            // back to the then branch tail.
+            Expr::If { then_, else_, .. } => {
+                let tail = |blk: &Block| {
+                    blk.last().and_then(|last| {
+                        if let Stmt::Expr(e) = last.unlocated() {
+                            Some(self.infer_object_type(e, vars))
+                        } else {
+                            None
+                        }
+                    })
+                };
+                else_
+                    .as_ref()
+                    .and_then(tail)
+                    .or_else(|| tail(then_))
+                    .unwrap_or_default()
+            }
+            // 0.35.23 deep-eval: `map_get(map, k)` returns (bool, Any); the
+            // tuple element `r.1` previously fell through to String::new(),
+            // so `to_string(r.1)` lost its is_any flag and formatted the
+            // heap handle as a plain integer (mimi-todo printed the raw
+            // pointer "606716752" instead of the stored string; VM printed
+            // the string — dual-backend divergence).
+            Expr::TupleIndex(obj, idx) => {
+                let obj_ty = self.infer_object_type(obj, vars);
+                // Tuple literal: element types are directly known.
+                if let Expr::Tuple(elems) = obj.unlocated() {
+                    return elems
+                        .get(*idx)
+                        .map(|e| self.infer_object_type(e, vars))
+                        .unwrap_or_default();
+                }
+                // Named tuple type string "(A, B)": split on top-level commas.
+                if obj_ty.starts_with('(') && obj_ty.ends_with(')') {
+                    let inner = &obj_ty[1..obj_ty.len() - 1];
+                    let mut depth = 0u32;
+                    let mut parts = Vec::new();
+                    let mut start = 0usize;
+                    for (i, ch) in inner.char_indices() {
+                        match ch {
+                            '<' | '(' | '[' => depth += 1,
+                            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+                            ',' if depth == 0 => {
+                                parts.push(inner[start..i].trim().to_string());
+                                start = i + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    parts.push(inner[start..].trim().to_string());
+                    return parts.get(*idx).cloned().unwrap_or_else(|| "any".into());
+                }
+                // map_get returns (bool, any) — element 1 is the type-erased
+                // heap handle.
+                if let Expr::Call(callee, _) = obj.unlocated() {
+                    if let Expr::Ident(name) = callee.unlocated() {
+                        if name == "map_get" {
+                            return if *idx == 0 {
+                                "bool".into()
+                            } else {
+                                "any".into()
+                            };
+                        }
+                    }
+                }
+                // Conservative: tuple payloads are type-erased at LLVM level.
+                "any".to_string()
+            }
             _ => String::new(),
         }
     }
@@ -1376,16 +1458,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             "str_count_substring" => return Some("i32".to_string()),
             "str_replace" | "str_substring" | "str_join" | "str_trim" | "str_to_upper"
             | "str_to_lower" | "str_repeat" | "to_string" | "int_to_string" | "float_to_string"
-            | "chr" | "type_name" | "c_str_to_string" | "from_json" => {
+            | "chr" | "type_name" | "c_str_to_string" | "from_json" | "input" => {
                 return Some("string".to_string())
             }
-            "input" | "read_file" | "read_file_partial" | "read_file_bytes" => {
+            "read_file" | "read_file_partial" | "read_file_bytes" => {
                 return Some("Result<string,string>".to_string())
             }
             "write_file" | "write_file_bytes" => return Some("Result<(), string>".to_string()),
             "listdir" | "walk_dir" | "str_split" | "keys" | "values" | "sort_str" => {
                 return Some("List<string>".to_string())
             }
+            // 0.35.23 deep-eval: `let files = args()` (mimi-lint) — the
+            // missing mapping made legacy codegen fall back to an i64
+            // element type for `for f in files`, and `read_file(f)` then
+            // hard-failed the string argument check (E0200).
+            "args" | "argv" => return Some("List<string>".to_string()),
             // Deprecated std::array wrappers are loaded from another source file,
             // so their declarations are not always present in `func_defs` here.
             "array_new" | "array_set" | "array_fill" | "array_slice" | "array_reverse"

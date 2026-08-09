@@ -159,21 +159,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let loaded = self
                                     .builder
                                     .build_load(elem_ty, pv, "push_list_load")
-                                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("load error: {}", e))
+                                    })?
                                     .into_struct_value();
                                 let len = self
                                     .builder
                                     .build_extract_value(loaded, 0, "push_list_len")
-                                    .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("extract: {}", e))
+                                    })?
                                     .into_int_value();
                                 let data = self
                                     .builder
                                     .build_extract_value(loaded, 1, "push_list_data")
-                                    .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("extract: {}", e))
+                                    })?
                                     .into_pointer_value();
                                 let bytes = self
                                     .builder
-                                    .build_int_mul(len, i64_ty.const_int(8, false), "push_list_bytes")
+                                    .build_int_mul(
+                                        len,
+                                        i64_ty.const_int(8, false),
+                                        "push_list_bytes",
+                                    )
                                     .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
                                 let new_data = self.malloc_or_abort(bytes, "push_list_data")?;
                                 let memcpy_fn = self.get_runtime_fn("memcpy")?;
@@ -204,28 +214,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         0,
                                         "push_list_val_len",
                                     )
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("insert: {}", e))
-                                    })?
+                                    .map_err(|e| CompileError::LlvmError(format!("insert: {}", e)))?
                                     .into_struct_value();
                                 let new_list = self
                                     .builder
-                                    .build_insert_value(
-                                        new_list,
-                                        new_data,
-                                        1,
-                                        "push_list_val_data",
-                                    )
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("insert: {}", e))
-                                    })?
+                                    .build_insert_value(new_list, new_data, 1, "push_list_val_data")
+                                    .map_err(|e| CompileError::LlvmError(format!("insert: {}", e)))?
                                     .into_struct_value();
                                 let size = self.llvm_type_size_bytes(elem_ty);
                                 let size_val = i64_ty.const_int(size, false);
                                 let heap_ptr = self.malloc_or_abort(size_val, "push_list_box")?;
-                                self.builder
-                                    .build_store(heap_ptr, new_list)
-                                    .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                                self.builder.build_store(heap_ptr, new_list).map_err(|e| {
+                                    CompileError::LlvmError(format!("store: {}", e))
+                                })?;
                                 BasicValueEnum::PointerValue(heap_ptr)
                             } else {
                                 let size = self.llvm_type_size_bytes(elem_ty);
@@ -235,7 +236,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let loaded = self
                                     .builder
                                     .build_load(elem_ty, pv, "push_struct_load")
-                                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("load error: {}", e))
+                                    })?
                                     .into_struct_value();
                                 self.builder.build_store(heap_ptr, loaded).map_err(|e| {
                                     CompileError::LlvmError(format!("store error: {}", e))

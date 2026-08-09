@@ -198,8 +198,8 @@ func main() -> i32 { a() + b() }
 fn codegen_ir_has_main() {
     let ir = compile_to_ir("func main() -> i32 { 42 }");
     assert!(
-        ir.contains("define i32 @main()"),
-        "i32 returns i32 (A1 restoration)"
+        ir.contains("define i32 @main(i32"),
+        "i32 returns i32 (A1 restoration); main carries the C (argc, argv) pair since 0.35.23"
     );
 }
 

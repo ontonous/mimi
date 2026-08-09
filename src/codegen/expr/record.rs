@@ -36,7 +36,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => None,
             });
         for (i, field) in fields.iter().enumerate() {
-            let val = self.compile_expr(&field.value, vars)?;
+            let mut val = self.compile_expr(&field.value, vars)?;
+            // 0.35.23 deep-eval: a string-LITERAL field (`Rule { target: "" }`
+            // in mimi-make) compiles to a raw C-string pointer, but the
+            // record field is the {ptr,i64} struct — without wrapping, the
+            // literal-constructed record diverges from the layout produced by
+            // function returns, and an if-expression merging the two fails
+            // E0200 ("branches have incompatible types").
+            val = self.normalize_string_value(val, &field.value)?;
             // AUDIT FIX (full-audit-2026-08-05 §7, record.rs:26-41): store each
             // field at its DECLARED position, not its write-order position. The
             // checker validates record literals by name (core/infer/record.rs)

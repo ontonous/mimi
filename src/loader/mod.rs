@@ -320,11 +320,8 @@ pub fn merge_prelude_into(dest: &mut File) {
     if prelude_items.is_empty() {
         return;
     }
-    let existing: std::collections::HashSet<String> = dest
-        .items
-        .iter()
-        .filter_map(|i| item_name(i))
-        .collect();
+    let existing: std::collections::HashSet<String> =
+        dest.items.iter().filter_map(item_name).collect();
     let mut new_items: Vec<Item> = Vec::new();
     for item in prelude_items {
         if let Some(name) = item_name(&item) {
@@ -697,7 +694,12 @@ pub(crate) mod legacy {
                             let dup_modules: Vec<String> = self
                                 .modules
                                 .values()
-                                .filter(|m| m.file.items.iter().any(|i| item_name(i).as_deref() == Some(&name[..])))
+                                .filter(|m| {
+                                    m.file
+                                        .items
+                                        .iter()
+                                        .any(|i| item_name(i).as_deref() == Some(&name[..]))
+                                })
                                 .map(|m| m.path.display().to_string())
                                 .collect();
                             return Err(format!(

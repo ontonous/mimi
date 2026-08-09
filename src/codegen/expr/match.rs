@@ -1313,6 +1313,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         scrutinee: &Expr,
         arms: &[MatchArm],
         vars: &HashMap<String, VarEntry<'ctx>>,
+        ignore_arm_values: bool,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let scrutinee_val = self.compile_expr(scrutinee, vars)?;
         // Check if the scrutinee is a string (which needs strcmp-based comparison).
@@ -1459,9 +1460,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Merge block - use phi to select the right value
-        let merged = self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)?;
-        self.pending_scrutinee_result_ty = saved_pending_scrutinee_result_ty;
-        Ok(merged)
+        if ignore_arm_values {
+            // 0.35.23 deep-eval: statement-position match (value discarded)
+            // skips arm-value unification — heterogeneous arm tails
+            // (assignments of different types, e.g. mimi-log `Ok(data) => {
+            // lines = .. }` vs `Err(_) => { read_ok = false }`) previously
+            // hard-errored E0200 ("match arm values have incompatible types",
+            // i1 vs ptr). The arm bodies still branch to merge_bb; the value
+            // is simply never consumed.
+            self.builder.position_at_end(merge_bb);
+            let zero = self.context.i64_type().const_int(0, false);
+            self.pending_scrutinee_result_ty = saved_pending_scrutinee_result_ty;
+            Ok(zero.into())
+        } else {
+            let merged = self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)?;
+            self.pending_scrutinee_result_ty = saved_pending_scrutinee_result_ty;
+            Ok(merged)
+        }
     }
 
     /// Compile a single match arm's dispatch block: create the arm block, build

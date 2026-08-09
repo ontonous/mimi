@@ -135,10 +135,19 @@ fn lower_resolved_type<'ctx>(
         ResolvedType::Nominal {
             item, arguments, ..
         } => {
-            // Validate element types are lowerable (fail-closed).
-            for arg in arguments {
-                let _ = lower_resolved_type(context, types, arg, active)?;
-            }
+            // 0.35.23 deep-eval: the container's LLVM layout is INDEPENDENT
+            // of its element type ({i64 len, ptr} for List; opaque i64 handle
+            // for Map/Set), so a user-record element (List<LogEntry>) must
+            // not fail the container lowering — the old strict recursion
+            // made llvm_type_for_resolved(List<LogEntry>) error, mimi-log's
+            // main fell back to legacy, and the legacy emitter then hit its
+            // List<record> for-loop gap (E0700 field access on an i64 slot).
+            // The emitter's lower_type record fallback handles the element
+            // layout at the actual use site.
+            let _ = arguments
+                .iter()
+                .map(|arg| lower_resolved_type(context, types, arg, active))
+                .collect::<Vec<_>>();
             match item.as_str() {
                 "builtin:type:List" => {
                     let i64_ty = BasicTypeEnum::IntType(context.i64_type());
@@ -148,8 +157,8 @@ fn lower_resolved_type<'ctx>(
                         context.struct_type(&[i64_ty, ptr_ty], false),
                     ))
                 }
-                "builtin:type:Map" | "builtin:type:Set" => {
-                    // Map/Set are opaque handles (i64) at the LLVM level.
+                "builtin:type:Map" | "builtin:type:Set" | "builtin:type:Record" => {
+                    // Map/Set/Record are opaque handles (i64) at the LLVM level.
                     Ok(BasicTypeEnum::IntType(context.i64_type()))
                 }
                 other => Err(CompileError::Unsupported(format!(

@@ -160,7 +160,7 @@ func main() -> i32 {
                     let _ = send(cfd, "+BYE\n")
                 }
             }
-            close_fd(cfd)
+            let _ = close_fd(cfd)
         }
     }
 

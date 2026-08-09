@@ -461,8 +461,29 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             ),
                         ));
                     }
-                    let sty = self.record_llvm_type(item)?;
-                    Ok(BasicTypeEnum::StructType(sty))
+                    // 0.35.23 deep-eval: builtin containers
+                    // (builtin:type:List / Map / Set) have NO record type def —
+                    // record_llvm_type would fail "type definition not found"
+                    // (mimi-log main fell back to legacy, then hit the legacy
+                    // List<record> for-loop gap). Only identities with an
+                    // actual record def reach the record path; everything else
+                    // falls back to the pure lookup, which knows the builtin
+                    // container layouts ({i64 len, ptr} for List, handles for
+                    // Map/Set).
+                    let has_record_def = self.program.type_defs().values().any(|td| {
+                        (td.qualified_name == type_name || td.qualified_name == item_str)
+                            && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Record)
+                    });
+                    if has_record_def {
+                        let sty = self.record_llvm_type(item)?;
+                        Ok(BasicTypeEnum::StructType(sty))
+                    } else {
+                        llvm_type_for_resolved(
+                            self.generator.context,
+                            self.program.resolved_types(),
+                            id,
+                        )
+                    }
                 } else {
                     // Re-propagate the original error.
                     llvm_type_for_resolved(
@@ -481,7 +502,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<(), CompileError> {
         let symbol = self.callable_symbol(&callable.owner)?.to_string();
         let result = self.lower_type(&callable.signature.result)?;
-        let parameters = callable
+        let mut parameters = callable
             .signature
             .parameters
             .iter()
@@ -507,6 +528,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .map(BasicMetadataTypeEnum::from)
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
+        // 0.35.23 deep-eval: main carries the C (argc, argv) pair (legacy
+        // declare_func parity) so the native entry seeds mimi_args_init.
+        if symbol == "main" {
+            parameters.insert(
+                0,
+                BasicMetadataTypeEnum::IntType(self.generator.context.i32_type()),
+            );
+            parameters.insert(
+                1,
+                BasicMetadataTypeEnum::PointerType(
+                    self.generator
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default()),
+                ),
+            );
+        }
         let function_type = match result {
             BasicTypeEnum::IntType(ty) => ty.fn_type(&parameters, false),
             BasicTypeEnum::FloatType(ty) => ty.fn_type(&parameters, false),
@@ -545,6 +582,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
         let entry = self.generator.context.append_basic_block(function, "entry");
         self.generator.builder.position_at_end(entry);
+        // 0.35.23 deep-eval: resolved native entry — seed mimi_args_init
+        // (declare_callable added the (argc: i32, argv: ptr) pair).
+        if symbol == "main" {
+            if let Some(args_init_fn) = self.generator.module.get_function("mimi_args_init") {
+                if let (Some(argc), Some(argv)) =
+                    (function.get_nth_param(0), function.get_nth_param(1))
+                {
+                    let argc_64 = self
+                        .generator
+                        .builder
+                        .build_int_z_extend(
+                            argc.into_int_value(),
+                            self.generator.context.i64_type(),
+                            "main_argc_64",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("argc zext: {e}")))?;
+                    self.generator.build_call(
+                        args_init_fn,
+                        &[argc_64.into(), argv.into()],
+                        "mimi_args_init",
+                    )?;
+                }
+            }
+        }
         // Function-level heap scope with a boundary marker (legacy B9 shape,
         // func.rs begin_function_heap_scope): every return path emits its own
         // frees via flush_heap_scopes_to_boundary (frees without popping), and
@@ -1255,7 +1316,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 )?;
                 Ok(value)
             }
-            ResolvedStmtKind::Expr(expression) => self.emit_expr(expression, frame).map(Some),
+            ResolvedStmtKind::Expr(expression) => {
+                // 0.35.23 deep-eval: statement-position if runs in statement
+                // mode — branch values are discarded instead of coerced into
+                // the unit result (mimi-log collect_latencies: `if e.latency
+                // > 0.0 { push(lats, e.latency) }` — push returns a list
+                // pointer, the if's type is unit(i64), ptr→i64 coerce failed
+                // and the whole function fell back to legacy E0700).
+                if let ResolvedExprKind::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } = &expression.kind
+                {
+                    let value =
+                        self.emit_if(expression, condition, then_block, else_block, frame, true)?;
+                    return Ok(Some(value));
+                }
+                self.emit_expr(expression, frame).map(Some)
+            }
             ResolvedStmtKind::Bind {
                 pattern,
                 initializer: None,
@@ -2088,6 +2167,41 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 }
                             }
                         }
+                        // 0.35.23 deep-eval (mimi-log main): read_lines_each
+                        // takes a closure — the legacy compile_read_lines_each
+                        // call emitter builds the C thunk, stores the closure
+                        // {fn_ptr, env_ptr} in TLS and calls the runtime with
+                        // the thunk pointer. The generic runtime call path
+                        // would coerce the closure struct to a bare ptr
+                        // (numeric_convert {ptr,ptr} → ptr fails) and the
+                        // whole function fell back to legacy.
+                        if name == "read_lines_each" {
+                            let mut compiled_args: Vec<BasicValueEnum<'ctx>> =
+                                Vec::with_capacity(arguments.len());
+                            for argument in &arguments {
+                                match *argument {
+                                    BasicMetadataValueEnum::IntValue(iv) => {
+                                        compiled_args.push(iv.into())
+                                    }
+                                    BasicMetadataValueEnum::FloatValue(fv) => {
+                                        compiled_args.push(fv.into())
+                                    }
+                                    BasicMetadataValueEnum::PointerValue(pv) => {
+                                        compiled_args.push(pv.into())
+                                    }
+                                    BasicMetadataValueEnum::StructValue(sv) => {
+                                        compiled_args.push(sv.into())
+                                    }
+                                    _ => {
+                                        return Err(CompileError::Unsupported(
+                                            "resolved read_lines_each: unsupported argument kind"
+                                                .into(),
+                                        ))
+                                    }
+                                }
+                            }
+                            return self.generator.compile_read_lines_each_call(&compiled_args);
+                        }
                         // to_int/to_float aggregate guard (VM message parity):
                         // a statically known aggregate argument cannot be
                         // converted; reject with the VM-aligned E0800 message
@@ -2291,6 +2405,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .map(|arg| resolved_type_display_name(self.program, &arg.value.ty))
                                 .collect();
                         }
+                        // 0.35.23 deep-eval: `len(string)` must pick strlen, not
+                        // the list-length helper. The legacy call-site setter
+                        // (expr/call/simple.rs) does this via expr_is_string;
+                        // the resolved emitter has the canonical type at hand.
+                        if name == "len" && call.arguments.len() == 1 {
+                            self.generator.pending_len_is_string = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            ) == "string";
+                        }
                         // 0.32.18: Builtin/module-function name shadowing.
                         // The checker may resolve a call to a module function
                         // (e.g. `contains` from std::strings) as
@@ -2388,7 +2512,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             "str_split",
                             "str_replace",
                         ];
-                        let runtime_fn_name = if STRING_ABI_BUILTINS.contains(&name) {
+                        let runtime_fn_name = if STRING_ABI_BUILTINS.contains(&name)
+                            // 0.35.23 deep-eval: the print family goes through
+                            // compile_builtin_call's io emitters, which accept
+                            // the {ptr,i64} string struct directly. The
+                            // runtime-direct parameter coerce below would try
+                            // to coerce a string struct → raw C ptr
+                            // (mimi_print_line params are i8*) and fail with
+                            // "resolved numeric conversion {ptr,i64} → ptr"
+                            // for `println(to_string(n))` (mimi-log main).
+                            || matches!(name, "println" | "print" | "eprintln" | "format")
+                            // len: compile_len dispatches on pending_len_is_string
+                            // (strlen vs list helper); the runtime-direct coerce
+                            // would demand a raw ptr for `len(str_trim(line))`
+                            // (mimi-log main) and fail the same way.
+                            || name == "len"
+                        {
                             String::new() // sentinel: no direct runtime call
                         } else {
                             let runtime_fn_name = format!("mimi_{name}");
@@ -2431,6 +2570,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         _ => continue,
                                     };
                                     if arg_basic.get_type() != param_ty {
+                                        if std::env::var("MIMI_VERBOSE").is_ok() {
+                                            eprintln!("DBG runtime param coerce: fn={runtime_fn_name} arg#{i} {:?} → {param_ty:?} owner={}", arg_basic.get_type(), frame.owner.0);
+                                        }
                                         let coerced = self.coerce_to(arg_basic, param_ty)?;
                                         *arg = BasicMetadataValueEnum::from(coerced);
                                     }
@@ -2685,7 +2827,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 condition,
                 then_block,
                 else_block,
-            } => self.emit_if(expression, condition, then_block, else_block, frame),
+            } => self.emit_if(expression, condition, then_block, else_block, frame, false),
             ResolvedExprKind::Block(block) => {
                 // A nested block expression: emit inline and return its value.
                 let value = self.emit_block(
@@ -4168,10 +4310,56 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .map(BasicValueEnum::from)
                     .map_err(|e| CompileError::LlvmError(format!("ptr struct load: {e}")))
             }
-            _ => Err(CompileError::Unsupported(format!(
-                "resolved numeric conversion {:?} → {target:?} is not supported",
-                value.get_type()
-            ))),
+            // 0.35.23 deep-eval: string struct {ptr,i64} ↔ raw C-string ptr.
+            // The resolved emitter feeds string structs into runtime-direct
+            // builtins whose params are i8* (mimi-log main: json_get_string /
+            // to_int over args_list elements), and if-branches merge a string
+            // VALUE with a literal's raw ptr (`let cmd = if .. { parts[0] }
+            // else { "" }`). Without these two arms every such site failed
+            // "resolved numeric conversion" and the whole function fell back
+            // to legacy (which then hit its own List<record> gaps).
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::PointerType(_))
+                if sv.get_type().get_field_types().len() == 2
+                    && matches!(
+                        sv.get_type().get_field_types()[0],
+                        BasicTypeEnum::PointerType(_)
+                    )
+                    && matches!(
+                        sv.get_type().get_field_types()[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    ) =>
+            {
+                let ptr = self
+                    .generator
+                    .builder
+                    .build_extract_value(sv, 0, "resolved_str_unwrap")
+                    .map_err(|e| CompileError::LlvmError(format!("resolved str unwrap: {e}")))?
+                    .into_pointer_value();
+                Ok(BasicValueEnum::PointerValue(ptr))
+            }
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(sty))
+                if sty.get_field_types().len() == 2
+                    && matches!(sty.get_field_types()[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        sty.get_field_types()[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    ) =>
+            {
+                self.generator.wrap_c_string(pv).map(BasicValueEnum::from)
+            }
+            _ => {
+                if std::env::var("MIMI_VERBOSE").is_ok() {
+                    eprintln!(
+                        "DBG numeric_convert fail: {:?} → {target:?}",
+                        value.get_type()
+                    );
+                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                }
+                Err(CompileError::Unsupported(format!(
+                    "resolved numeric conversion {:?} → {target:?} is not supported",
+                    value.get_type()
+                )))
+            }
         }
     }
 
@@ -5267,6 +5455,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(idx)
     }
 
+    /// Compile a resolved if expression. When `as_statement` is true the
+    /// branch values are discarded (statement-position if — legacy
+    /// `compile_if_stmt` merge_vars=true parity). Branch values are NOT
+    /// coerced into the unit result type: e.g. `if cond { push(list, x) }`
+    /// yields push's list pointer in the then branch while the if's type is
+    /// unit (i64) — coercing ptr→i64 failed and dropped the whole function
+    /// to the legacy emitter (mimi-log collect_latencies, 2026-08-09).
     fn emit_if(
         &mut self,
         expression: &ResolvedExpr,
@@ -5274,9 +5469,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         then_block: &ResolvedBlock,
         else_block: &ResolvedBlock,
         frame: &mut ResolvedFrame<'ctx>,
+        as_statement: bool,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let result_type = self.lower_type(&expression.ty)?;
-        let result_alloca = self.generator.build_alloca(result_type, "if_result")?;
+        let result_alloca = if as_statement {
+            None
+        } else {
+            Some(self.generator.build_alloca(result_type, "if_result")?)
+        };
 
         let cond_value = self.emit_expr(condition, frame)?;
         let cond_bool = self.ensure_bool(cond_value)?;
@@ -5302,12 +5502,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let then_value = self.emit_block(&body.body, then_block, frame)?;
         let then_terminated = self.current_block_terminated();
         if !then_terminated {
-            if let Some(value) = then_value {
-                let value = self.coerce_to(value, result_type)?;
-                self.generator.build_store(result_alloca, value)?;
-            } else {
-                self.generator
-                    .build_store(result_alloca, result_type.const_zero())?;
+            if !as_statement {
+                let result_alloca = result_alloca.expect("if alloca present in expr mode");
+                if let Some(value) = then_value {
+                    let value = self.coerce_to(value, result_type)?;
+                    self.generator.build_store(result_alloca, value)?;
+                } else {
+                    self.generator
+                        .build_store(result_alloca, result_type.const_zero())?;
+                }
             }
             self.generator.build_br(merge_bb)?;
         }
@@ -5317,20 +5520,28 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let else_value = self.emit_block(&body.body, else_block, frame)?;
         let else_terminated = self.current_block_terminated();
         if !else_terminated {
-            if let Some(value) = else_value {
-                let value = self.coerce_to(value, result_type)?;
-                self.generator.build_store(result_alloca, value)?;
-            } else {
-                self.generator
-                    .build_store(result_alloca, result_type.const_zero())?;
+            if !as_statement {
+                let result_alloca = result_alloca.expect("if alloca present in expr mode");
+                if let Some(value) = else_value {
+                    let value = self.coerce_to(value, result_type)?;
+                    self.generator.build_store(result_alloca, value)?;
+                } else {
+                    self.generator
+                        .build_store(result_alloca, result_type.const_zero())?;
+                }
             }
             self.generator.build_br(merge_bb)?;
         }
 
         // Merge
         self.generator.builder.position_at_end(merge_bb);
-        self.generator
-            .build_load(result_type, result_alloca, "if_val")
+        if as_statement {
+            Ok(result_type.const_zero())
+        } else {
+            let result_alloca = result_alloca.expect("if alloca present in expr mode");
+            self.generator
+                .build_load(result_type, result_alloca, "if_val")
+        }
     }
 
     fn emit_while(
@@ -7234,7 +7445,7 @@ func main() -> i32 { add(40, 2) }
         generator.module.verify().expect("valid LLVM");
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("define i32 @add(i32"), "{ir}");
-        assert!(ir.contains("define i32 @main()"), "{ir}");
+        assert!(ir.contains("define i32 @main(i32"), "{ir}");
         assert!(ir.contains("call i32 @add"), "{ir}");
     }
 

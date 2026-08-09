@@ -365,12 +365,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
+                    if let Expr::Ident(src_name) = value.unlocated() {
+                        let is_list_var = self
+                            .var_type_names
+                            .get(src_name)
+                            .map(|t| t == "List" || t.starts_with("List<"))
+                            .unwrap_or(false);
+                        if is_list_var {
+                            if let Some(&(src_alloca, src_ty)) = vars.get(src_name) {
+                                let list_ty = self.list_struct_type();
+                                let struct_ptr = match src_ty {
+                                    BasicTypeEnum::StructType(_) => src_alloca,
+                                    BasicTypeEnum::PointerType(_) => {
+                                        match self.build_load(
+                                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                                            src_alloca,
+                                            &format!("{}_assign_list", src_name),
+                                        ) {
+                                            Ok(BasicValueEnum::PointerValue(p)) => p,
+                                            _ => src_alloca,
+                                        }
+                                    }
+                                    _ => src_alloca,
+                                };
+                                if let Ok(data_gep) = self.gep().build_struct_gep(
+                                    list_ty,
+                                    struct_ptr,
+                                    1,
+                                    &format!("{}_assign_list_data", src_name),
+                                ) {
+                                    let null_ptr = self
+                                        .context
+                                        .ptr_type(inkwell::AddressSpace::default())
+                                        .const_null();
+                                    let _ = self.build_store(data_gep, null_ptr);
+                                }
+                            }
+                        }
+                    }
                     self.assign_to_var(name, val, alloca, ty)?;
                 }
             }
             Expr::Field(obj, field_name) => {
                 let val = self.compile_expr(value, vars)?;
                 self.compile_field_assign(obj, field_name, val, vars)?;
+                self.claim_returned_lists(Some(value), vars);
             }
             Expr::Index(obj, idx) => {
                 let val = self.compile_expr(value, vars)?;
@@ -545,10 +584,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // After A1 restoration, i32 fields need i32 values (not i64).
                     let field_ty = fields[idx].ty.clone();
                     let field_llvm = self.llvm_type_for(&field_ty).unwrap_or(val.get_type());
-                    let val = self.adjust_int_value_width(val, field_llvm, "field_assign")?;
+                    let val = match (val, field_llvm) {
+                        (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) => {
+                            self.build_load(field_llvm, pv, &format!("{}_field_load", field_name))?
+                        }
+                        _ => self.adjust_int_value_width(val, field_llvm, "field_assign")?,
+                    };
                     self.build_store(gep, val)?;
                     return Ok(());
                 }
+            }
+        }
+        if let Some(actor) = self.actor_defs.get(obj_type) {
+            if let Some(idx) = actor.fields.iter().position(|f| f.name == *field_name) {
+                let gep = self
+                    .gep()
+                    .build_struct_gep(sty, struct_ptr, idx as u32, field_name)
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let field_ty = actor.fields[idx].ty.clone();
+                let field_llvm = self.llvm_type_for(&field_ty).unwrap_or(val.get_type());
+                let val = match (val, field_llvm) {
+                    (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) => {
+                        self.build_load(field_llvm, pv, &format!("{}_field_load", field_name))?
+                    }
+                    _ => self.adjust_int_value_width(val, field_llvm, "field_assign")?,
+                };
+                self.build_store(gep, val)?;
+                return Ok(());
             }
         }
         if let Ok(idx) = field_name.parse::<u32>() {
@@ -1026,6 +1088,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "loop_elem_struct")?;
             return Ok(Some(struct_val));
         }
+        if std::env::var("MIMI_VERBOSE").is_ok() {
+            eprintln!(
+                "DBG try_convert_loop_elem: elem_ty={:?} concrete={:?} llvm_type_for=None",
+                elem_ty, concrete_ty
+            );
+        }
         Ok(None)
     }
 
@@ -1037,6 +1105,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         iterable: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<Type> {
+        if std::env::var("MIMI_VERBOSE").is_ok() {
+            if let Expr::Ident(n) = iterable.unlocated() {
+                eprintln!(
+                    "DBG resolve_loop_elem_type: var={} var_types={:?} var_type_names={:?}",
+                    n,
+                    self.var_types.get(n),
+                    self.var_type_names.get(n)
+                );
+            }
+        }
         // Check var_types first (handles Type::Ref for generic trait method self)
         if let Expr::Ident(name) = iterable.unlocated() {
             if let Some(ty) = self.var_types.get(name) {

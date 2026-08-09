@@ -5,7 +5,7 @@ func process_data() -> i32 {
         let ref x: i32 = 42;
         // In a real implementation, ref would be a borrowing reference
         // For now, just return the value
-        return x;
+        return *x;
     }
 }
 

@@ -259,6 +259,16 @@ impl<'a> BytecodeVM<'a> {
         match result {
             Ok(Value::Int(code)) => Ok(code),
             Ok(Value::Unit) => Ok(0),
+            // 0.35.23 deep-eval: `main() -> f64` (examples/records, shapes) and
+            // `main() -> bool` compile fine on the native backend (the LLVM
+            // entry point carries the declared return type); the VM previously
+            // hard-errored E0800 "main returned non-integer". Accept them and
+            // derive a process exit code. A float/bool main has no meaningful
+            // exit-code semantics (the native ABI's truncation of the
+            // entry-point return is bit-pattern garbage: records 5.0 → 0,
+            // shapes 24.57 → 96) — treat it like unit (0).
+            Ok(Value::Float(_)) => Ok(0),
+            Ok(Value::Bool(b)) => Ok(if b { 1 } else { 0 }),
             Ok(other) => Err(InterpError::new(format!(
                 "main returned non-integer: {}",
                 other

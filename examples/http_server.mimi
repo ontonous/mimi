@@ -13,7 +13,7 @@ type NetError {
     HttpPostFailed
 }
 
-func handle_client(client_fd: i32) {
+func handle_client(client_fd: i32) -> i64 {
     recv(client_fd, 1024)
     let body = "Hello from Mimi!"
     let content_len = to_string(body.len())

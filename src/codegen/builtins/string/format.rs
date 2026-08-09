@@ -91,6 +91,80 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
                     Ok(result)
                 } else {
+                    // 0.35.23 deep-eval: bool (i1) must render as "true"/"false"
+                    // (bytecode `Value::Bool.to_string()`), not sprintf "%ld"
+                    // which produced "1"/"0". Per call-site the checked path
+                    // canonicalizes bool to i1, so a real i1 here is a bool.
+                    if iv.get_type().get_bit_width() == 1 {
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let true_g = self
+                            .builder
+                            .build_global_string_ptr("true", "bool_true")
+                            .map_err(|e| CompileError::LlvmError(format!("bool true fmt: {}", e)))?
+                            .as_pointer_value();
+                        let false_g = self
+                            .builder
+                            .build_global_string_ptr("false", "bool_false")
+                            .map_err(|e| CompileError::LlvmError(format!("bool false fmt: {}", e)))?
+                            .as_pointer_value();
+                        let i1_ty = self.context.bool_type();
+                        let cond = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                iv,
+                                i1_ty.const_zero(),
+                                "bool_cond",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("bool compare: {}", e)))?;
+                        let i64_ty = self.context.i64_type();
+                        let ptr = self
+                            .builder
+                            .build_select(cond, true_g, false_g, "bool_ptr")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("bool select ptr: {}", e))
+                            })?
+                            .into_pointer_value();
+                        let len = self
+                            .builder
+                            .build_select(
+                                cond,
+                                i64_ty.const_int(4, false),
+                                i64_ty.const_int(5, false),
+                                "bool_len",
+                            )
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("bool select len: {}", e))
+                            })?
+                            .into_int_value();
+                        let str_ty = self.context.struct_type(
+                            &[
+                                BasicTypeEnum::PointerType(i8_ptr),
+                                BasicTypeEnum::IntType(i64_ty),
+                            ],
+                            false,
+                        );
+                        let alloca = self.build_entry_alloca(str_ty, "bool_str")?;
+                        let ptr_gep = self
+                            .gep()
+                            .build_struct_gep(str_ty, alloca, 0, "bool_str_ptr")
+                            .map_err(|e| CompileError::LlvmError(format!("bool gep ptr: {}", e)))?;
+                        self.builder.build_store(ptr_gep, ptr).map_err(|e| {
+                            CompileError::LlvmError(format!("bool store ptr: {}", e))
+                        })?;
+                        let len_gep = self
+                            .gep()
+                            .build_struct_gep(str_ty, alloca, 1, "bool_str_len")
+                            .map_err(|e| CompileError::LlvmError(format!("bool gep len: {}", e)))?;
+                        self.builder.build_store(len_gep, len).map_err(|e| {
+                            CompileError::LlvmError(format!("bool store len: {}", e))
+                        })?;
+                        let result = self
+                            .builder
+                            .build_load(BasicTypeEnum::StructType(str_ty), alloca, "bool_str")
+                            .map_err(|e| CompileError::LlvmError(format!("bool load: {}", e)))?;
+                        return Ok(result);
+                    }
                     // Known integer type: format directly with sprintf to avoid
                     // mimi_any_to_string's tagged-integer heuristic which would
                     // misidentify odd positive integers (e.g. 5 → 5>>1 = 2).

@@ -616,6 +616,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self.module.add_function(&spawn_name, spawn_fn_type, None);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
+        self.begin_function_heap_scope();
 
         // Allocate actor struct on heap (not stack) for cross-thread safety.
         // C5: alloca is invalid after the spawning function returns, but the
@@ -623,24 +624,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // (via malloc_or_abort) to keep memory alive for the worker.
         let struct_size_val_full = match actor_ty {
             BasicTypeEnum::StructType(sty) => {
-                if let Some(s) = sty.size_of() {
-                    if let Some(const_size) = s.get_zero_extended_constant() {
-                        i64_ty.const_int(const_size, false)
-                    } else {
-                        let s_ty = s.get_type();
-                        if s_ty.get_bit_width() < 64 {
-                            self.builder
-                                .build_int_z_extend(s, i64_ty, "struct_size")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("size error: {}", e))
-                                })?
-                        } else {
-                            s
-                        }
-                    }
-                } else {
-                    i64_ty.const_int(64, false)
-                }
+                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                i64_ty.const_int(size.max(8), false)
             }
             _ => i64_ty.const_int(0, false),
         };
@@ -823,6 +808,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         self.build_return(Some(&handle_val))?;
+        self.end_function_heap_scope();
 
         Ok(())
     }
@@ -834,7 +820,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
         let last_val = self.compile_actor_method_body(method, &mut vars)?;
-        let result = self.emit_actor_method_epilogue(&mut vars, ret_type, last_val);
+        let last_expr = method.body.last().and_then(|s| {
+            if let Stmt::Expr(e) = s.unlocated() {
+                Some(e)
+            } else {
+                None
+            }
+        });
+        let result = self.emit_actor_method_epilogue(&mut vars, ret_type, last_val, last_expr);
         self.end_function_heap_scope();
         result
     }
@@ -961,6 +954,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         method: &FuncDef,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // 0.35.23 deep-eval: refresh the borrow-param guard set for this
+        // method body (claim_returned_lists skips caller-owned list storage;
+        // stale entries from a previous legacy body could mask a legit claim).
+        self.borrow_param_names = method
+            .params
+            .iter()
+            .filter(|p| p.borrow.is_some())
+            .map(|p| p.name.clone())
+            .collect();
         let ret_type = self
             .current_fn_ret_type()
             .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
@@ -1019,6 +1021,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // L6: claim a returned custom-enum payload box (caller
                 // re-registers via EnumBox). Mirrors func.rs emit_return.
                 self.claim_returned_enum_box(val, ret_type)?;
+                val = self.load_return_value_if_needed(val)?;
+                self.claim_returned_lists(Some(expr), vars);
+                val = self.claim_returned_list_literals(val, Some(expr))?;
                 // 0.34.41 第二档: ensures with `result` binding (was unbound
                 // here — "undefined variable 'result'" family).
                 self.compile_ensures_asserts(Some(val), ret_type, vars)?;
@@ -1029,7 +1034,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.pop_defer_scope(vars)?;
                 self.pop_comp_scope();
                 self.pop_cap_scope();
-                val = self.load_return_value_if_needed(val)?;
                 self.build_return(Some(&val))?;
                 return Ok(true);
             }
@@ -1086,6 +1090,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 val = self.normalize_string_value(val, init)?;
                 if let PatternKind::Variable(name) = &pat.kind {
+                    // 0.35.23 deep-eval: turbofish-typed bindings
+                    // (from_json::<List<string>> etc.) — the block.rs let
+                    // paths track these, the actor-method path did not, so
+                    // `for x in parsed { if x == nick }` bound `x` as bare
+                    // i64 and the string equality failed E0700 (mimichat
+                    // RoomManager::join).
+                    if let Expr::Turbofish(_func_name, turbo_type_args, _) = init.unlocated() {
+                        if let Some(ta) = turbo_type_args.first() {
+                            if let Type::Name(tn, args) = ta.unlocated() {
+                                if tn == "List" && !args.is_empty() {
+                                    if let Some(full) = self.get_full_type_name(ta) {
+                                        self.var_type_names.insert(name.clone(), full);
+                                    }
+                                    self.var_types.insert(name.clone(), ta.clone());
+                                    self.register_list_elem_type(name, ta);
+                                } else if (tn == "Map" || tn == "Set") && !args.is_empty() {
+                                    if let Some(full) = self.get_full_type_name(ta) {
+                                        self.var_type_names.insert(name.clone(), full);
+                                    } else {
+                                        self.var_type_names.insert(name.clone(), tn.clone());
+                                    }
+                                    self.var_types.insert(name.clone(), ta.clone());
+                                } else {
+                                    self.var_type_names.insert(name.clone(), tn.clone());
+                                    self.var_types.insert(name.clone(), ta.clone());
+                                }
+                            }
+                        }
+                    }
+                    if let Expr::Field(_, _) = init.unlocated() {
+                        let field_ty = self.infer_object_type(init, vars);
+                        if !field_ty.is_empty() {
+                            self.var_type_names.insert(name.clone(), field_ty);
+                        }
+                    }
                     if let Expr::Record { ty: Some(tn), .. } = init.unlocated() {
                         self.var_type_names.insert(name.clone(), tn.clone());
                     } else if let Expr::Call(callee, _) = init.unlocated() {
@@ -1172,6 +1211,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Track list element type for nested List<List<T>> indexing
                 if let PatternKind::Variable(name) = &pat.kind {
                     if let Some(decl_ty) = &ty {
+                        // 0.35.23 deep-eval: annotated bindings must also
+                        // register var_type_names (block.rs parity) —
+                        // `let mut members: List<string> = []` left members
+                        // untyped in the actor-method path, so `for x in
+                        // members { if x == nick }` bound `x` as bare i64 and
+                        // the string equality failed E0700 (mimichat
+                        // RoomManager::is_member / remove_from_all).
+                        if let Some(full) = self.get_full_type_name(decl_ty) {
+                            self.var_type_names.insert(name.clone(), full);
+                        } else if let Type::Name(tn, args) = decl_ty.unlocated() {
+                            if args.is_empty() {
+                                self.var_type_names.insert(name.clone(), tn.clone());
+                            }
+                        }
                         self.register_list_elem_type(name, decl_ty);
                     }
                 }
@@ -1201,6 +1254,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(then_bb);
                 let mut then_vars = vars.clone();
                 let then_val = self.compile_block_last_val(then_, &mut then_vars)?;
+                // 0.35.23 deep-eval: branch-value normalization (block.rs /
+                // resolved compile_if_expr parity). `if found { to_string(
+                // val) } else { "" }` yields a {ptr,i64} struct in one arm
+                // and a raw C-string pointer in the other — with mismatched
+                // types the phi below is skipped and the actor method's tail
+                // value silently became i64 0 (get_nick returned a NULL
+                // string ptr → strcmp(NULL, …) SIGSEGV in mimichat
+                // test_user_manager_basic). Wrap raw string pointers so both
+                // arms share the canonical {ptr,len} layout.
+                let then_val = self.normalize_block_last_string(then_val, then_)?;
                 let then_reaches = !self.block_has_terminator();
                 if then_reaches {
                     self.build_br(merge_bb)?;
@@ -1212,6 +1275,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let (else_val, else_reaches) = if let Some(else_block) = else_ {
                     let mut else_vars = vars.clone();
                     let v = self.compile_block_last_val(else_block, &mut else_vars)?;
+                    let v = self.normalize_block_last_string(v, else_block)?;
                     let reaches = !self.block_has_terminator();
                     if reaches {
                         self.build_br(merge_bb)?;
@@ -1414,12 +1478,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
         ret_type: BasicTypeEnum<'ctx>,
         last_val: BasicValueEnum<'ctx>,
+        last_expr: Option<&Expr>,
     ) -> MimiResult<()> {
         if self.block_has_terminator() {
             // An early `return` already popped the method's defer scope on its
             // own path; nothing left to balance here.
             return Ok(());
         }
+        let last_val = self.adjust_int_val(last_val, ret_type)?;
+        // Same string-struct detection as emit_implicit_return (func.rs:1777-1809).
+        // When the return type is string struct {ptr,i64} but last_val is a raw C
+        // string pointer (from literal), wrap it into a proper struct before loading.
+        let last_val = match (last_val, ret_type) {
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
+                let field_types = st.get_field_types();
+                let is_string_struct = field_types.len() == 2
+                    && matches!(&field_types[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&field_types[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if is_string_struct {
+                    self.wrap_c_string(pv)?
+                } else {
+                    self.load_return_value_if_needed(BasicValueEnum::PointerValue(pv))?
+                }
+            }
+            _ => self.load_return_value_if_needed(last_val)?,
+        };
+        // Claim returned List variables' data buffers & literals before flushing heap scopes.
+        self.claim_returned_lists(last_expr, vars);
+        let last_val = self.claim_returned_list_literals(last_val, last_expr)?;
+
         self.check_unconsumed_caps()?;
         self.release_all_shared()?;
         self.flush_heap_scopes_to_boundary()?;
@@ -1438,24 +1525,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     super::scope::ContractPhase::Ensures,
                 )?;
             }
-            let last_val = self.adjust_int_val(last_val, ret_type)?;
-            // Same string-struct detection as emit_implicit_return (func.rs:1777-1809).
-            // When the return type is string struct {ptr,i64} but last_val is a raw C
-            // string pointer (from literal), wrap it into a proper struct before loading.
-            let last_val = match (last_val, ret_type) {
-                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
-                    let field_types = st.get_field_types();
-                    let is_string_struct = field_types.len() == 2
-                        && matches!(&field_types[0], BasicTypeEnum::PointerType(_))
-                        && matches!(&field_types[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
-                    if is_string_struct {
-                        self.wrap_c_string(pv)?
-                    } else {
-                        self.load_return_value_if_needed(BasicValueEnum::PointerValue(pv))?
-                    }
-                }
-                _ => self.load_return_value_if_needed(last_val)?,
-            };
             self.build_return(Some(&last_val))?;
         }
         Ok(())

@@ -191,6 +191,13 @@ pub struct CodeGenerator<'ctx> {
     var_type_names: HashMap<String, String>,
     /// Type objects for variables (avoids string re-parsing for Arch-2).
     var_types: HashMap<String, Type>,
+    /// 0.35.23 deep-eval: names bound via `let ref x = ...` (or annotated
+    /// `let ref x: T = ...`). The legacy emitter stores a ref-bound value in
+    /// a plain slot (surfaced type `&T`, value layout T), so `*x` must pass
+    /// the value through unchanged — matching the bytecode VM's Mov/DerefValue
+    /// identity semantics. Only the surface deref cares; ordinary reads of `x`
+    /// also yield the value.
+    ref_bound_vars: std::collections::HashSet<String>,
     /// Variables whose value is the result of a `weak.upgrade()` call.
     /// These Options hold a pointer payload even when the inner type is a
     /// primitive, so `unwrap()` must load the value through the pointer.
@@ -226,6 +233,12 @@ pub struct CodeGenerator<'ctx> {
     /// `free_heap_allocs` emits runtime guards so these envs survive scope
     /// exit (the caller owns them). Cleared on every `free_heap_allocs` call.
     claimed_returned_envs: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// 0.35.23 deep-eval: names of the current legacy-body function's
+    /// view/mutate borrow params. Their list storage IS the caller's struct
+    /// (pointer ABI) — `claim_returned_lists` must not null their data
+    /// fields (that destroyed caller state: push on a mutate List param
+    /// followed by the implicit-return claim → caller SIGSEGV on indexing).
+    borrow_param_names: std::collections::HashSet<String>,
     /// Q2 (rc-quality-gate-0.34.25b): display-formatter scratch buffers
     /// (Result/List/Tuple/Record print paths) that are consumed by exactly
     /// one print-family call. Registered at malloc time, freed immediately
@@ -595,6 +608,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             nested_shadow_counter: 0,
             var_type_names: HashMap::new(),
             var_types: HashMap::new(),
+            ref_bound_vars: std::collections::HashSet::new(),
             upgrade_option_vars: std::collections::HashSet::new(),
             spawn_counter: 0,
             strict: false,
@@ -611,6 +625,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             shared_var_names: std::collections::HashSet::new(),
             heap_allocs: std::cell::RefCell::new(vec![Vec::new()]),
             claimed_returned_envs: std::cell::RefCell::new(Vec::new()),
+            borrow_param_names: std::collections::HashSet::new(),
             heap_boundaries: std::cell::RefCell::new(Vec::new()),
             ensures_stmts: Vec::new(),
             old_snapshots: HashMap::new(),
@@ -1412,6 +1427,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Zero/unit value for a return type. A bare `return` in a unit function
+    /// must `ret i64 0` — the unit signature is i64 (compile_func), so the
+    /// old `ret void` produced invalid IR (mismatched terminator) that O0
+    /// tolerated but O1's CalledValuePropagationPass SIGSEGV'd on
+    /// ("func f() { if true { return } }" crash, 0.35.23 deep-eval).
+    pub(super) fn zero_value_for(&self, ty: BasicTypeEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        match ty {
+            BasicTypeEnum::IntType(t) => t.const_zero().into(),
+            BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
+            BasicTypeEnum::PointerType(t) => t.const_null().into(),
+            BasicTypeEnum::StructType(t) => t.const_zero().into(),
+            BasicTypeEnum::ArrayType(t) => t.const_zero().into(),
+            _ => self.context.i64_type().const_zero().into(),
+        }
+    }
+
     /// Build an `extractvalue` instruction.
     pub(super) fn build_extract_value(
         &self,
@@ -1732,6 +1763,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_signed_int_to_float(iv, slot_ft, &format!("{}_assign_sitofp", name))
                 .map_err(|e| CompileError::LlvmError(format!("assign sitofp: {}", e)))?
                 .into(),
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) => {
+                self.build_load(ty, pv, &format!("{}_assign_load", name))?
+            }
             _ => val,
         };
         if self.shared_var_names.contains(name) {
@@ -1741,6 +1775,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))?
                 .into_pointer_value();
             self.build_store(heap_ptr, val)?;
+        } else if matches!(val, BasicValueEnum::StructValue(_))
+            && matches!(ty, BasicTypeEnum::PointerType(_))
+        {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let dest_ptr = self
+                .build_load(ptr_ty, alloca, &format!("{}_assign_dest", name))?
+                .into_pointer_value();
+            self.build_store(dest_ptr, val)?;
         } else {
             self.build_store(alloca, val)?;
         }

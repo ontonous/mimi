@@ -749,7 +749,20 @@ impl<'a> Checker<'a> {
                                     )),
                                 );
                             }
-                            self.unification.zonk_or_unknown(&d)
+                            let zonked = self.unification.zonk_or_unknown(&d);
+                            if *ref_ {
+                                // 0.35.23 deep-eval: `let ref x: T = ...` (annotated)
+                                // previously took the declared-type branch and dropped
+                                // the reference wrapper — x was typed as a bare `T`
+                                // (`*x` → E0204 cannot dereference T), while the
+                                // unannotated `let ref x = ...` branch wrapped
+                                // `Type::Ref`. Wrap the annotated type too so both
+                                // forms produce a reference binding (and the
+                                // lowering-side canonical Reference lookup succeeds).
+                                Type::Ref(None, Box::new(zonked))
+                            } else {
+                                zonked
+                            }
                         }
                     }
                     None => {

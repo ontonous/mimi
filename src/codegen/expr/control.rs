@@ -49,6 +49,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let then_val = self
             .compile_block_last_val(then_, &mut then_vars)
             .map_err(|e| CompileError::Generic(e.to_string()))?;
+        // 0.35.23 deep-eval: a string-literal branch (e.g. `else { "ERROR" }`
+        // in mimi-log's level fallback chain) yields a raw C-string pointer
+        // while a sibling branch yields the {ptr,i64} struct — the mismatch
+        // made the merge phi E0200 ("branches have incompatible types").
+        // Mirror the func.rs if-statement path's normalization.
+        let then_val = self.normalize_block_last_string(then_val, then_)?;
         let then_reaches = !self.block_has_terminator();
         if then_reaches {
             self.builder
@@ -62,9 +68,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(else_bb);
         let (mut else_val, else_reaches) = if let Some(eb) = else_ {
             let mut else_vars = vars.clone();
-            let v = self
+            let mut v = self
                 .compile_block_last_val(eb, &mut else_vars)
                 .map_err(|e| CompileError::Generic(e.to_string()))?;
+            // 0.35.23 deep-eval: same string-literal normalization as the
+            // then branch (mimi-log `else { "INFO" }` vs `{ lvl }`).
+            v = self.normalize_block_last_string(v, eb)?;
             let reaches = !self.block_has_terminator();
             if reaches {
                 self.builder
@@ -103,10 +112,117 @@ impl<'ctx> CodeGenerator<'ctx> {
                     else_val = Some(w);
                 } else if let Some(w) = self.widen_option_none_to_layout(then_val, ev.get_type())? {
                     then_val = w;
-                    ty = ev.get_type();
                 }
             }
         }
+        // Unify integer widths (mirror of the block.rs if-statement path):
+        // branches may produce different-width integers (e.g. i64 literal vs
+        // i32 expression — mimi-log percentile `if idx < 0 { 0 } else if … {
+        // len(..) - 1 } else { idx }`). Extend the narrower value in its OWN
+        // predecessor block (before the terminator) so the phi stays
+        // type-uniform without SSA dominance violations.
+        let then_bw = match &then_val {
+            BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(),
+            _ => 0,
+        };
+        let else_bw = match &else_val {
+            Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(),
+            _ => 0,
+        };
+        if then_bw > 0 && else_bw > 0 && then_bw != else_bw && then_reaches && else_reaches {
+            let target_bw = then_bw.max(else_bw);
+            let nz_bw = std::num::NonZeroU32::new(target_bw as u32)
+                .ok_or_else(|| CompileError::LlvmError("ifexpr target width is zero".into()))?;
+            let target_ty = self
+                .context
+                .custom_width_int_type(nz_bw)
+                .map_err(|e| CompileError::LlvmError(format!("ifexpr target width: {}", e)))?;
+            if then_bw < target_bw {
+                let bb =
+                    then_bb_end.ok_or_else(|| CompileError::LlvmError("ifexpr then bb".into()))?;
+                self.builder.position_at_end(bb);
+                if let Some(term) = bb.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                let tv = then_val.into_int_value();
+                let widened = if tv.get_type().get_bit_width() == 1 {
+                    self.builder
+                        .build_int_z_extend(tv, target_ty, "ifexpr_then_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("ifexpr z_ext: {}", e)))?
+                } else {
+                    self.builder
+                        .build_int_s_extend(tv, target_ty, "ifexpr_then_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("ifexpr s_ext: {}", e)))?
+                };
+                then_val = BasicValueEnum::IntValue(widened);
+            }
+            if else_bw < target_bw {
+                let bb =
+                    else_bb_end.ok_or_else(|| CompileError::LlvmError("ifexpr else bb".into()))?;
+                self.builder.position_at_end(bb);
+                if let Some(term) = bb.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                let ev = else_val
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("ifexpr-else ext: missing value".into())
+                    })?
+                    .into_int_value();
+                let widened = if ev.get_type().get_bit_width() == 1 {
+                    self.builder
+                        .build_int_z_extend(ev, target_ty, "ifexpr_else_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("ifexpr z_ext: {}", e)))?
+                } else {
+                    self.builder
+                        .build_int_s_extend(ev, target_ty, "ifexpr_else_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("ifexpr s_ext: {}", e)))?
+                };
+                else_val = Some(BasicValueEnum::IntValue(widened));
+            }
+            self.builder.position_at_end(merge_bb);
+        }
+        // Record-literal branches compile to alloca POINTERS while a sibling
+        // branch (function return, nested expr) yields the struct VALUE
+        // directly (mimi-make `if n > 0 { parse_one(..) } else { Rule { .. } }`
+        // — the Rule literal is a ptr, parse_one returns the struct). Load the
+        // pointer branch inside its own predecessor block so the phi unifies.
+        let (then_val, else_val) = match (&then_val, &else_val) {
+            (BasicValueEnum::PointerValue(tv), Some(BasicValueEnum::StructValue(ev)))
+                if then_reaches =>
+            {
+                let bb =
+                    then_bb_end.ok_or_else(|| CompileError::LlvmError("ifexpr rec bb".into()))?;
+                self.builder.position_at_end(bb);
+                if let Some(term) = bb.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                let loaded = self.build_load(
+                    BasicTypeEnum::StructType(ev.get_type()),
+                    *tv,
+                    "ifexpr_rec_then",
+                )?;
+                (loaded, else_val)
+            }
+            (BasicValueEnum::StructValue(tv), Some(BasicValueEnum::PointerValue(ev)))
+                if else_reaches =>
+            {
+                let bb =
+                    else_bb_end.ok_or_else(|| CompileError::LlvmError("ifexpr rec bb".into()))?;
+                self.builder.position_at_end(bb);
+                if let Some(term) = bb.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                let loaded = self.build_load(
+                    BasicTypeEnum::StructType(tv.get_type()),
+                    *ev,
+                    "ifexpr_rec_else",
+                )?;
+                (then_val, Some(loaded))
+            }
+            _ => (then_val, else_val),
+        };
+        self.builder.position_at_end(merge_bb);
+        ty = then_val.get_type();
         let phi = self
             .builder
             .build_phi(ty, "ifexpr_result")

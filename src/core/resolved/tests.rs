@@ -118,7 +118,7 @@ fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
         .compile_checked(&program)
         .expect("production typed cohort must not inspect legacy body");
     let ir = codegen.module.print_to_string().to_string();
-    assert!(ir.contains("define i32 @main()"), "{ir}");
+    assert!(ir.contains("define i32 @main(i32"), "{ir}");
     assert!(ir.contains("ret i32 42"), "{ir}");
 }
 

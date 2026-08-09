@@ -401,6 +401,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+        if let Some(actor) = self.actor_defs.get(&base_type) {
+            if let Some(idx) = actor.fields.iter().position(|f| f.name == *field_name) {
+                let gep = self
+                    .gep()
+                    .build_struct_gep(sty, field_ptr, idx as u32, field_name)
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let (load_ty, ext) = match actor.fields[idx].ty.unlocated() {
+                    Type::Name(n, _) if n == "i32" => {
+                        (BasicTypeEnum::IntType(self.context.i32_type()), true)
+                    }
+                    _ => (
+                        self.llvm_type_for(&actor.fields[idx].ty)
+                            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
+                        false,
+                    ),
+                };
+                let loaded = self.build_load(load_ty, gep, field_name)?;
+                if ext {
+                    if let BasicValueEnum::IntValue(iv) = loaded {
+                        return Ok(self
+                            .builder
+                            .build_int_s_extend(iv, self.context.i64_type(), "i32_sext")
+                            .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                            .into());
+                    }
+                }
+                return Ok(loaded);
+            }
+        }
 
         // Fallback: numeric field index
         if let Ok(idx) = field_name.parse::<u32>() {
@@ -439,6 +468,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     return Ok(gep);
                 }
+            }
+        }
+        if let Some(actor) = self.actor_defs.get(&obj_type) {
+            if let Some(idx) = actor.fields.iter().position(|f| f.name == *field_name) {
+                let gep = self
+                    .gep()
+                    .build_struct_gep(sty, field_ptr, idx as u32, field_name)
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                return Ok(gep);
             }
         }
         if let Ok(idx) = field_name.parse::<u32>() {
@@ -528,10 +566,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Err(format!("[E0707] cannot access field on type '{}'", obj_type).into())
                 }
             }
-            _ => Err(CompileError::Generic(format!(
-                "field access requires a struct or actor type, got {}",
-                obj_val.get_type()
-            ))),
+            _ => {
+                if std::env::var("MIMI_VERBOSE").is_ok() {
+                    eprintln!(
+                        "DBG E0700 field access: obj_type={} value={:?}",
+                        obj_type,
+                        obj_val.get_type()
+                    );
+                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                }
+                Err(CompileError::Generic(format!(
+                    "field access requires a struct or actor type, got {}",
+                    obj_val.get_type()
+                )))
+            }
         }
     }
 

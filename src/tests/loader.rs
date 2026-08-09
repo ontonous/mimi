@@ -567,7 +567,9 @@ func main() -> i32 {
     loader
         .load_main(&main_path)
         .expect("loading main with std::strings + std::fs should succeed");
-    let merged = loader.merge_all().expect("merge should not report duplicate item");
+    let merged = loader
+        .merge_all()
+        .expect("merge should not report duplicate item");
     // Both impls must be present (Str on string AND FsOps on string).
     let impl_types: Vec<String> = merged
         .items

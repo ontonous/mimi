@@ -1372,11 +1372,11 @@ impl BytecodeCompiler {
                             };
                             fc.emit(Op::CheckI32 { rd: r, kind });
                         } else if ty.is_none()
-                            && !matches!(init_expr.unlocated(), Expr::List(_) | Expr::Literal(Lit::Int(_)))
-                            && matches!(
+                            && !matches!(
                                 init_expr.unlocated(),
-                                Expr::Binary(..) | Expr::Unary(..)
+                                Expr::List(_) | Expr::Literal(Lit::Int(_))
                             )
+                            && matches!(init_expr.unlocated(), Expr::Binary(..) | Expr::Unary(..))
                             && self.infer_expr_type(fc, init_expr) == VarType::Int32
                         {
                             // 0.35.21 (#8): inferred-width i32 bindings (no
@@ -3125,8 +3125,7 @@ impl BytecodeCompiler {
             // "either operand Int32" OR — which over-eagerly marked
             // `10000000000 + 1` (Int + Int32) as i32-width while codegen
             // unifies to i64 and never traps.
-            let i32_ctx = fc.i32_ctx_active
-                || self.binop_is_i32_width(l, r, &lw, &rw);
+            let i32_ctx = fc.i32_ctx_active || self.binop_is_i32_width(l, r, &lw, &rw);
             if i32_ctx && matches!(op, BinOp::Div | BinOp::Mod) {
                 // i32::MIN / -1 overflows i32 but not i64 — pre-op operand
                 // guard with the codegen-matching message (also covers %).
@@ -5977,13 +5976,7 @@ impl BytecodeCompiler {
     /// the 0.34.34 "either operand Int32" OR, which marked `10000000000 + 1`
     /// (Int + Int32) as i32-width while codegen unifies to i64 and never
     /// traps.
-    fn binop_is_i32_width(
-        &self,
-        l: &Expr,
-        r: &Expr,
-        lw: &VarType,
-        rw: &VarType,
-    ) -> bool {
+    fn binop_is_i32_width(&self, l: &Expr, r: &Expr, lw: &VarType, rw: &VarType) -> bool {
         // A literal is elastic (adapts to the other operand) — including
         // NEGATIVE literals, which parse as Unary(Neg, Literal(Int)): `a:i64
         // << -1` must mask by 64, not 31 (dual_i64_shl_masked_parity).

@@ -311,6 +311,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     };
                     Ok(self.build_load(pointee_ty, ptr, "deref")?)
+                } else if let Expr::Ident(name) = inner.unlocated() {
+                    // 0.35.23 deep-eval (examples/ref_type_test.mimi):
+                    // (the checker types it `&i32`, but the legacy binding
+                    // path does not manufacture a pointer for a literal
+                    // initializer). `*x` on such a value-level ref must pass
+                    // the value through unchanged — mirroring the bytecode
+                    // VM: UnOp::Ref/RefMut lower to Mov (identity) and
+                    // DerefValue returns the plain value as-is. A non-pointer
+                    // deref of a NON-ref binding stays a hard E0700.
+                    let is_ref_typed = self.ref_bound_vars.contains(name)
+                        || self.var_types.get(name).is_some_and(|t| {
+                            matches!(t.unlocated(), Type::Ref(..) | Type::RefMut(..))
+                        });
+                    if !is_ref_typed {
+                        let ty_desc = type_description(&v.get_type());
+                        return Err(
+                            format!("dereference requires pointer type, got {}", ty_desc).into(),
+                        );
+                    }
+                    Ok(v)
                 } else {
                     let ty_desc = type_description(&v.get_type());
                     Err(format!("dereference requires pointer type, got {}", ty_desc).into())
@@ -722,6 +742,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BinOp::Div => "div requires same numeric types",
                     _ => "arithmetic requires same numeric types",
                 };
+                if std::env::var("MIMI_VERBOSE").is_ok() {
+                    eprintln!(
+                        "DBG arithmetic fail: op={op:?} lhs={:?} rhs={:?}",
+                        lhs.get_type(),
+                        rhs.get_type()
+                    );
+                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                }
                 Err(msg.into())
             }
         }
@@ -1160,7 +1188,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
                         .into())
                 }
-                _ => Err("eq requires same types".into()),
+                _ => {
+                    if std::env::var("MIMI_VERBOSE").is_ok() {
+                        eprintln!(
+                            "DBG eq fail: lhs={:?} rhs={:?} op={:?}",
+                            lhs.get_type(),
+                            rhs.get_type(),
+                            op
+                        );
+                        eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                    }
+                    Err("eq requires same types".into())
+                }
             },
         }
     }
