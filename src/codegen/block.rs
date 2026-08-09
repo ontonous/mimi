@@ -608,10 +608,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if matches!(
                                             func_name.as_str(),
                                             "read_file"
-                                                | "write_file"
                                                 | "read_file_partial"
                                                 | "read_file_bytes"
-                                                | "write_file_bytes"
                                                 | "input"
                                                 | "getenv"
                                                 | "base64_decode"
@@ -621,6 +619,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.var_type_names.insert(
                                                 name.clone(),
                                                 "Result<string,string>".to_string(),
+                                            );
+                                        } else if matches!(
+                                            func_name.as_str(),
+                                            "write_file" | "write_file_bytes"
+                                        ) {
+                                            self.var_type_names.insert(
+                                                name.clone(),
+                                                "Result<(), string>".to_string(),
                                             );
                                         } else if let Some((type_name, _)) =
                                             self.find_variant_owner(func_name)
@@ -1402,6 +1408,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                 then_val.unwrap_or(self.context.i64_type().const_int(0, false).into()),
                 else_val.unwrap_or(self.context.i64_type().const_int(0, false).into()),
             )
+        };
+        // Deep-eval 2026-08-09 (demos/04 describe_point; nested `else if`
+        // with a concat arm + literal final else): string branch mismatch —
+        // one branch yields a raw C-string pointer (plain literal) while the
+        // other yields the Mimi string struct {ptr,i64} (concat/to_string).
+        // The old path fell into the zero-fill below and silently dropped
+        // the literal branch (printed empty). Wrap the raw pointer into a
+        // string struct inside its own predecessor block so the phi stays
+        // type-uniform and the value survives.
+        let is_str_struct = |t: BasicTypeEnum<'ctx>| {
+            matches!(t, BasicTypeEnum::StructType(st) if {
+                let f = st.get_field_types();
+                f.len() == 2
+                    && matches!(f[0], BasicTypeEnum::PointerType(_))
+                    && matches!(f[1], BasicTypeEnum::IntType(_))
+            })
+        };
+        let (then_val, else_val) = match (&then_val, &else_val) {
+            (BasicValueEnum::PointerValue(tv), ev)
+                if is_str_struct(ev.get_type()) && then_reaches =>
+            {
+                self.builder.position_at_end(then_bb_end);
+                if let Some(term) = then_bb_end.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                let wrapped = self.wrap_c_string(*tv)?;
+                (wrapped, else_val)
+            }
+            (tv, BasicValueEnum::PointerValue(ev))
+                if is_str_struct(tv.get_type()) && else_reaches =>
+            {
+                self.builder.position_at_end(else_bb_end);
+                if let Some(term) = else_bb_end.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                let wrapped = self.wrap_c_string(*ev)?;
+                (then_val, wrapped)
+            }
+            _ => (then_val, else_val),
         };
         self.builder.position_at_end(merge_bb);
         // Determine the authoritative phi type from a branch that actually

@@ -122,22 +122,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // shapes are unverified.
                 let err_expected_ty: Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> =
                     if payload_idx == 2 && variant_owner.is_none() {
-                        scrutinee_type.and_then(|st| {
-                            let err_ty: Option<&crate::ast::Type> = match st.unlocated() {
-                                crate::ast::Type::Result(_, err) => Some(err.as_ref()),
-                                // AST surface form: Result<T, E> parses as
-                                // Name("Result", [T, E]) in legacy paths.
-                                crate::ast::Type::Name(n, args)
-                                    if n == "Result" && args.len() == 2 =>
-                                {
-                                    Some(&args[1])
-                                }
-                                _ => None,
+                        let derive =
+                            |st: &crate::ast::Type|
+                             -> Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> {
+                                let err_ty: Option<&crate::ast::Type> = match st.unlocated() {
+                                    crate::ast::Type::Result(_, err) => Some(err.as_ref()),
+                                    // AST surface form: Result<T, E> parses as
+                                    // Name("Result", [T, E]) in legacy paths.
+                                    crate::ast::Type::Name(n, args)
+                                        if n == "Result" && args.len() == 2 =>
+                                    {
+                                        Some(&args[1])
+                                    }
+                                    _ => None,
+                                };
+                                err_ty
+                                    .filter(|t| crate::core::helpers::is_string(t))
+                                    .and_then(|t| {
+                                        self.llvm_type_for(t).map(|llvm| (t.clone(), llvm))
+                                    })
                             };
-                            err_ty
-                                .filter(|t| crate::core::helpers::is_string(t))
-                                .and_then(|t| self.llvm_type_for(t).map(|llvm| (t.clone(), llvm)))
-                        })
+                        scrutinee_type
+                            .and_then(derive)
+                            // Deep-eval 2026-08-09: builtin-call scrutinees
+                            // (read_file etc.) miss the AST probe; the side
+                            // channel published by compile_match_expr carries
+                            // the declared Result<T, E> shape instead.
+                            .or_else(|| self.pending_scrutinee_result_ty.as_ref().and_then(derive))
                     } else {
                         None
                     };
@@ -1381,6 +1392,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         // variant-ordinal resolution to the scrutinee's enum (disambiguates the
         // shared `Fault` variant across per-flow __MultiTarget unions).
         let scrutinee_type = self.expr_type_of(scrutinee, vars);
+        // Deep-eval 2026-08-09 (use std::fs E0700): scrutinee_type stays on
+        // the historical probe (arm unification depends on its shapes), but
+        // `Err(e)` bindings over a BUILTIN call's Result<string,string> need
+        // the precise E type to decode the i64 error handle. Publish it as a
+        // side channel consumed only by the Err-payload decode (Q1 block).
+        let saved_pending_scrutinee_result_ty = self.pending_scrutinee_result_ty.take();
+        self.pending_scrutinee_result_ty = if scrutinee_type.is_none() {
+            self.expr_type_of_scrutinee(scrutinee, vars)
+        } else {
+            None
+        };
 
         // Build if-else chain for each arm
         for (i, arm) in arms.iter().enumerate() {
@@ -1437,7 +1459,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Merge block - use phi to select the right value
-        self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)
+        let merged = self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)?;
+        self.pending_scrutinee_result_ty = saved_pending_scrutinee_result_ty;
+        Ok(merged)
     }
 
     /// Compile a single match arm's dispatch block: create the arm block, build

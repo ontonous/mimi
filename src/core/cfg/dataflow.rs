@@ -411,7 +411,16 @@ fn predecessors_ready(
     cfg.predecessors(block)
         .into_iter()
         .filter(|edge| cfg.reachable.contains(&edge.from))
-        .filter(|edge| edge.kind != EdgeKind::Backedge)
+        // Loop-carried edges (Backedge AND Continue) are exempt: their source
+        // blocks sit inside the loop body and are only reachable AFTER the
+        // target header runs. Requiring them here deadlocks the worklist —
+        // `while { if c { continue } … }` pops the header before the
+        // continue-source has any out-state, drops the header, and the
+        // `queued.insert` gate then never re-pushes it once the source is
+        // done (the header's own out never changes again). The fixed point
+        // still converges: each loop-carried source re-pushes the target
+        // when its own out-state lands, and the join picks the new state up.
+        .filter(|edge| !matches!(edge.kind, EdgeKind::Backedge | EdgeKind::Continue))
         .all(|edge| out.contains_key(&edge.from))
 }
 

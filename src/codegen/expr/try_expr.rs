@@ -183,6 +183,60 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.compile_compensations(&mut comp_vars)
             .map_err(|e| CompileError::Generic(e.to_string()))?;
 
+        // Deep-eval 2026-08-09 (demos/07 native abort): when the enclosing
+        // function returns the SAME custom enum type as the `?` scrutinee,
+        // the VM propagates the Err by early-returning the enum value — the
+        // native path must do the same instead of exiting the process
+        // (mimi_try_exit). Claim the payload box so the heap cleanup below
+        // skips it (ownership moves up with the returned value), flush the
+        // remaining registrations, and return the {tag, payload} struct.
+        let propagates = is_user_enum
+            && inner_type_name
+                .as_ref()
+                .zip(self.current_fn_ret_ty_ast.as_ref())
+                .is_some_and(|(inner_name, ret_ty)| crate::core::fmt_type(ret_ty) == *inner_name);
+        if propagates {
+            let payload_i64 = match payload {
+                BasicValueEnum::IntValue(iv) => iv,
+                _ => i64_ty.const_zero(),
+            };
+            // Claim the payload box so flush_heap_scopes_to_boundary below
+            // skips its free (the value escapes upward with the return).
+            let box_ptr = self
+                .builder
+                .build_int_to_ptr(
+                    payload_i64,
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "try_prop_box",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("try prop ptr: {e}")))?;
+            self.claim_closure_env(box_ptr);
+            let ret_struct_ty = self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(self.context.i32_type()),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            );
+            let mut ret_val = ret_struct_ty.get_undef();
+            ret_val = self
+                .builder
+                .build_insert_value(ret_val, disc_int, 0, "try_prop_tag")
+                .map_err(|e| CompileError::LlvmError(format!("try prop tag: {e}")))?
+                .into_struct_value();
+            ret_val = self
+                .builder
+                .build_insert_value(ret_val, payload_i64, 1, "try_prop_payload")
+                .map_err(|e| CompileError::LlvmError(format!("try prop payload: {e}")))?
+                .into_struct_value();
+            self.flush_heap_scopes_to_boundary()?;
+            self.builder
+                .build_return(Some(&ret_val))
+                .map_err(|e| CompileError::LlvmError(format!("try prop ret: {e}")))?;
+            self.builder.position_at_end(ok_bb);
+            return Ok(payload);
+        }
+
         // Determine if the error type is string (Result<T, string>) to display
         // the actual error message instead of a numeric pointer value.
         let is_string_err = is_result

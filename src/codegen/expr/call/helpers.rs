@@ -278,6 +278,35 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
     /// Determine the Mimi Type of an expression by resolving through the
     /// caller's type_map. Used to infer callee generic bindings at call sites.
+    /// Deep-eval 2026-08-09 (use std::fs E0700): scrutinee-only variant of
+    /// `expr_type_of` that additionally recovers Result/Option shapes for
+    /// builtin calls (read_file etc. are absent from func_defs). Without it,
+    /// `Err(e)` bindings on a builtin's Result<string,string> keep the raw
+    /// i64 handle and a later `"..." + e` fails codegen. Deliberately NOT
+    /// folded into expr_type_of: the wider probe feeds arm-unification and
+    /// signature matching, where a newly precise T-slot layout ({i1,ptr,i64})
+    /// collides with the historical {i1,i64,i64} heuristic shapes.
+    pub(in crate::codegen) fn expr_type_of_scrutinee(
+        &self,
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Option<Type> {
+        if let Some(ty) = self.expr_type_of(expr, vars) {
+            return Some(ty);
+        }
+        if let Expr::Call(callee, _) = expr.unlocated() {
+            if let Expr::Ident(_) = callee.unlocated() {
+                let tn = self.infer_object_type(expr, vars);
+                if tn.starts_with("Result<") || tn.starts_with("Option<") {
+                    if let Some(parsed) = crate::codegen::expr::call::helpers::parse_type_str(&tn) {
+                        return Some(self.resolve_type(&parsed));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub(in crate::codegen) fn expr_type_of(
         &self,
         expr: &Expr,

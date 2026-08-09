@@ -292,6 +292,10 @@ pub struct CodeGenerator<'ctx> {
     /// Inferred Mimi type names for arguments of the current `print`/`println` call.
     /// Used to choose the correct runtime list-to-string helper (string vs i32 elements).
     pending_print_arg_types: Vec<String>,
+    /// Deep-eval 2026-08-09: side channel from compile_match_expr to the
+    /// Err-payload decode: the declared Result/Option type of a builtin-call
+    /// scrutinee that the AST probe (expr_type_of) cannot see.
+    pending_scrutinee_result_ty: Option<crate::ast::Type>,
     /// Inferred Mimi element type name for the current `push(list, elem)` call.
     /// Used so that nested lists and other struct elements are heap-copied before
     /// their pointer is stored, preventing stack-use-after-return.
@@ -305,6 +309,14 @@ pub struct CodeGenerator<'ctx> {
     /// element type `T` so Result/Option constructors can be inflated to a
     /// uniform layout before heap packing.
     pending_list_elem_type: Option<Type>,
+    /// Deep-eval 2026-08-09 (std/fs read_lines E0200): the Ok payload type of
+    /// the enclosing Result-returning function, set while compiling the
+    /// function body and consumed by the legacy Err constructor. Err builds
+    /// `{i1, ok_pad, i64}` — the pad must match the Ok slot's value shape
+    /// (string→struct zero, List/Map/Set→ptr zero, scalars→i64 zero) or the
+    /// two arms of a `match` producing the same Result type split layouts
+    /// (`{i1,ptr,i64}` vs `{i1,i64,i64}`) and the phi unification rejects them.
+    pending_result_ok_ty: Option<Type>,
     pending_to_string_is_any: bool,
     /// Set when `to_int`/`to_float` receives an `Any`-typed argument (e.g. a
     /// `map_get` value). `Any` is lowered to an untyped i64 handle at LLVM
@@ -621,10 +633,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             tuple_type_stack: Vec::new(),
             pending_len_is_string: false,
             pending_print_arg_types: Vec::new(),
+            pending_scrutinee_result_ty: None,
             display_frees: std::cell::RefCell::new(Vec::new()),
             pending_push_elem_type: None,
             pending_sum_elem_type: None,
             pending_list_elem_type: None,
+            pending_result_ok_ty: None,
             pending_to_string_is_any: false,
             pending_to_number_is_any: false,
             // 0.34.34: O1 is the default. 0.31.21 fixed the O1 codegen bugs
@@ -1866,13 +1880,32 @@ impl<'ctx> CodeGenerator<'ctx> {
         // emitted in a later basic block (merge block, function return), and
         // free(ptr) on a branch-local SSA value would violate SSA dominance
         // (LLVM crashes under O1). The slot dominates all uses; frees load it.
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let slot = self
-            .build_entry_alloca(
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "heap_alloc_slot",
-            )
+            .build_entry_alloca(ptr_ty, "heap_alloc_slot")
             .unwrap_or(ptr);
         if slot != ptr {
+            // Deep-eval 2026-08-09 (demos/04 describe_point segv): null-init
+            // the slot at the entry block, mirroring register_heap_box. The
+            // registration is often emitted inside a conditional branch (the
+            // concat arm of an if/match returning string); a sibling path
+            // that never executes the allocation would otherwise load stack
+            // garbage at cleanup and free(garbage) → munmap_chunk abort /
+            // segfault.
+            let saved = self.builder.get_insert_block();
+            if let Some(slot_inst) = slot.as_instruction() {
+                if let Some(next) = slot_inst.get_next_instruction() {
+                    self.builder.position_before(&next);
+                } else if let Some(parent) = slot_inst.get_parent() {
+                    self.builder.position_at_end(parent);
+                }
+                if let Err(e) = self.build_store(slot, ptr_ty.const_null()) {
+                    eprintln!("[mimi codegen] warning: heap-slot null-init failed: {}", e);
+                }
+            }
+            if let Some(saved) = saved {
+                self.builder.position_at_end(saved);
+            }
             if let Err(e) = self.build_store(slot, ptr) {
                 // L2 (audit-codegen 2026-08-03): do not silently swallow —
                 // a failed store leaves the slot undef → free(undef) at
@@ -2032,6 +2065,45 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         None
+    }
+
+    /// Deep-eval 2026-08-09: collect the runtime pointer values of every
+    /// live heap registration in the current function scope as i64, for the
+    /// resolved string-return ownership probe (`claim_resolved_string_return`,
+    /// func.rs). `Ptr` entries materialize their allocation pointer in an
+    /// entry-block alloca (register_heap_alloc); the RUNTIME ownership value
+    /// is the slot's contents, so probe by loading the slot (entry allocas
+    /// dominate every return point, and the new null-init makes untaken
+    /// branch slots load null — a safe no-match). `Slot` entries are
+    /// skipped: registration sites are not contract-uniform (some pass
+    /// loaded values instead of allocas as the base), and a struct GEP on
+    /// such a base crashes LLVM; missing them only means the probe falls
+    /// back to a heap copy (same semantics as the legacy Ident-return claim).
+    pub(super) fn heap_probe_candidates(&self) -> Vec<inkwell::values::IntValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let mut out = Vec::new();
+        let scopes = self.heap_allocs.borrow();
+        // Scan only the scopes above the innermost function boundary: scopes
+        // below belong to an enclosing/earlier callable and their values are
+        // dangling by now (probing them loads garbage and crashes LLVM).
+        let boundary = self.heap_boundaries.borrow().last().copied().unwrap_or(0);
+        for scope in scopes.iter().skip(boundary) {
+            for entry in scope.iter() {
+                if let HeapEntry::Ptr(slot) = entry {
+                    let Ok(loaded) = self.build_load(ptr_ty, *slot, "res_ret_probe_ld") else {
+                        continue;
+                    };
+                    let BasicValueEnum::PointerValue(pv) = loaded else {
+                        continue;
+                    };
+                    if let Ok(iv) = self.build_ptr_to_int(pv, i64_ty, "res_ret_cand_i") {
+                        out.push(iv);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// B9 (audit): record an escaping closure env pointer so the next
