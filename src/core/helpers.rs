@@ -297,13 +297,18 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         // Previous code fell through to inner-type comparison via the
         // catch-all below, allowing Newtype("UserId", i32) == Newtype("OrderId", i32).
         (Type::Newtype(n1, a), Type::Newtype(n2, b)) => n1 == n2 && same_type(a, b),
-        // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner
-        (Type::Newtype(n, inner), Type::Name(n2, _))
-        | (Type::Name(n2, _), Type::Newtype(n, inner)) => {
+        // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner.
+        // AUDIT FIX (0.35.20): the else branch must keep the Name's type arguments —
+        // stripping them made `Newtype("a", Name("Option", []))` structurally equal to
+        // `Name("Option", [i32])` (both funnel to Name("Option", [])), while fmt_type
+        // renders them differently ("Option" vs "Option<i32>"). Proptest regression
+        // 0b73fde9 seed: a = Name("Option",[i32]), b = Newtype("a", Name("Option",[])).
+        (Type::Newtype(n, inner), Type::Name(n2, args))
+        | (Type::Name(n2, args), Type::Newtype(n, inner)) => {
             if n == n2 {
                 true
             } else {
-                same_type(inner, &Type::Name(n2.clone(), vec![]))
+                same_type(inner, &Type::Name(n2.clone(), args.clone()))
             }
         }
         // Newtype is transparent — same_type with non-Name, non-Newtype types

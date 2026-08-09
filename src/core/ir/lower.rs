@@ -5284,14 +5284,14 @@ impl BodyLowerer<'_> {
             })
             .collect::<Vec<_>>();
         let [reference] = matches.as_slice() else {
-            // V-1 (audit 2026-08-05, Wave-3): a bare `let ref` outside arena
-            // has no checker-finalized canonical Reference in the type table.
-            // Fail closed rather than fabricate a table-less id (BodyValidator
-            // requires every referenced type to be interned). Wave-3 work item:
-            // materialize canonical Reference at lowering time.
+            // 0.35.22 (#2): a bare `let ref` outside an arena block has no
+            // checker-finalized canonical Reference in the type table. Fail
+            // closed rather than fabricate a table-less id (BodyValidator
+            // requires every referenced type to be interned). The message is
+            // user-facing: no internal work-item identifiers may leak.
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
-                "reference binding has no unique checker-finalized canonical reference type (V-1, Wave-3)",
+                "reference binding has no canonical reference type: `let ref` requires an enclosing arena block (a bare ref binding outside an arena is not supported)",
             )]);
         };
         Ok(reference.clone())

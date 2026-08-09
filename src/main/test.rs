@@ -65,12 +65,24 @@ pub(crate) fn test(
         }
     };
 
-    // Find test functions (functions starting with "test_")
+    // Find test functions (functions starting with "test_"). 0.35.22 (#1):
+    // only ZERO-PARAMETER functions are collected — a helper named
+    // `test_color(c: Color)` is not a runnable test; calling it with zero
+    // args used to fail with E0800 (arg-count mismatch) and mark the run
+    // failed. Skipped helpers are reported once below.
+    let mut skipped_helpers: Vec<String> = Vec::new();
     let test_funcs: Vec<String> = merged_file
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Func(f) if f.name.starts_with("test_") => Some(f.name.clone()),
+            Item::Func(f) if f.name.starts_with("test_") => {
+                if f.params.is_empty() {
+                    Some(f.name.clone())
+                } else {
+                    skipped_helpers.push(f.name.clone());
+                    None
+                }
+            }
             _ => None,
         })
         .collect();
@@ -92,6 +104,14 @@ pub(crate) fn test(
             println!("No test functions found.");
         }
         return Ok(());
+    }
+
+    if !skipped_helpers.is_empty() {
+        println!(
+            "Skipped {} test_-prefixed helper(s) with parameters (not runnable as tests): {}",
+            skipped_helpers.len(),
+            skipped_helpers.join(", ")
+        );
     }
 
     println!("Running {} test(s)...\n", test_funcs.len());

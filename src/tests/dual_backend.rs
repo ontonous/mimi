@@ -15414,7 +15414,11 @@ fn assert_both_backends_trap_e0802(src: &str, what: &str) {
     if !can_link() {
         return;
     }
-    let cg = compile_and_run(src);
+    // 0.35.21 (#8): use the CHECKED (resolved) codegen path — the same one
+    // `mimi build` runs — so inferred-width i32 traps (which need the
+    // checker's canonical i32 types, absent from the legacy compile_file
+    // harness) are asserted on the real production path.
+    let cg = checked_codegen_compile_and_run(src);
     assert!(cg.is_err(), "codegen must trap on {what}");
     let cg_err = cg.unwrap_err();
     assert!(
@@ -15698,5 +15702,181 @@ fn dual_fn_ref_record_field_lambda_still_parity() {
         }",
         "101",
         "capturing lambda in record field (regression)",
+    );
+}
+
+// ─── 0.35.20 (#6) nested-container codegen regressions ────────
+// zip/enumerate heap-pack pair layout, partition/chunks List-of-List
+// ownership, and user functions returning (List, List) tuples.
+// See devdocs/v0.35/README.md sprint 0.35.20.
+
+#[test]
+fn dual_zip_strings_ints() {
+    assert_both_backends_stdout(
+        "func main() {
+            let z = zip([\"a\", \"b\", \"c\"], [1, 2, 3]);
+            println(z);
+            0
+        }",
+        "[(a, 1), (b, 2), (c, 3)]",
+        "zip string/i32 heap-pack pair (string first field)",
+    );
+}
+
+#[test]
+fn dual_enumerate_strings() {
+    assert_both_backends_stdout(
+        "func main() {
+            let e = enumerate([\"x\", \"y\"]);
+            println(e);
+            0
+        }",
+        "[(0, x), (1, y)]",
+        "enumerate string heap-pack pair (string second field)",
+    );
+}
+
+#[test]
+fn dual_zip_then_enumerate_same_fn() {
+    // Regression: two type-aware heap-pack pairs in one function. The string
+    // field GEPs used pair_heap (offset 0) instead of the field address; for
+    // zip the string is field 0 so the write landed on its own slot and the
+    // bug stayed silent, but enumerate's string is field 1 — the misplaced
+    // writes clobbered idx/ptr and the formatter strlen'd a non-pointer
+    // (SIGSEGV) once a preceding zip call primed the type channel.
+    assert_both_backends_stdout(
+        "func main() {
+            let z = zip([\"a\", \"b\"], [1, 2]);
+            println(z);
+            let e = enumerate([\"x\", \"y\"]);
+            println(e);
+            0
+        }",
+        "[(a, 1), (b, 2)]\n[(0, x), (1, y)]",
+        "zip then enumerate (string in second field) in one function",
+    );
+}
+
+#[test]
+fn dual_partition_ints() {
+    // The test harness does not load std via `use std::collections`;
+    // concatenate the module like dual_maps_stdlib_wrapper_any does so both
+    // backends see the real partition wrapper (which calls the builtin
+    // xs.partition trait method internally).
+    let stdlib = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/collections.mimi"),
+    )
+    .expect("read std/collections.mimi");
+    let src = format!(
+        r#"{stdlib}
+func main() -> i32 {{
+    let p = partition([1, 2, 3, 4], fn(x: i32) -> bool {{ x % 2 == 0 }});
+    println(p);
+    0
+}}
+"#
+    );
+    assert_both_backends_stdout(
+        &src,
+        "([2, 4], [1, 3])",
+        "partition returning (List, List) tuple",
+    );
+}
+
+#[test]
+fn dual_chunks_ints() {
+    let stdlib = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/collections.mimi"),
+    )
+    .expect("read std/collections.mimi");
+    let src = format!(
+        r#"{stdlib}
+func main() -> i32 {{
+    let c = chunks([1, 2, 3, 4, 5], 2);
+    println(c);
+    0
+}}
+"#
+    );
+    assert_both_backends_stdout(
+        &src,
+        "[[1, 2], [3, 4], [5]]",
+        "chunks returning List<List<i32>>",
+    );
+}
+
+#[test]
+fn dual_user_func_returns_list_tuple() {
+    // Regression: a user function returning a (List, List) tuple — the
+    // scratch list alloca was freed at scope exit while the tuple still
+    // referenced its data (use-after-free → garbage). claim_returned_lists
+    // nulls the data slot so the scope cleanup frees nothing.
+    assert_both_backends_stdout(
+        "func f() -> (List<i32>, List<i32>) {
+            ([1, 2], [3, 4])
+        }
+        func main() -> i64 {
+            println(f());
+            0
+        }",
+        "([1, 2], [3, 4])",
+        "user function returning (List, List) tuple",
+    );
+}
+
+// ─── 0.35.21 (#8) inferred-width i32 overflow guards ──────────
+// CheckI32 (0.34.34) only covered explicitly annotated `let x: i32`;
+// un-annotated bindings silently wrapped in the i64 register domain while
+// codegen's checked i32 addition trapped (E0802). The inference path now
+// assigns literal widths (in-range → i32) and emits let-level CheckI32 for
+// inferred-i32 bindings, so both backends trap identically.
+
+#[test]
+fn dual_inferred_i32_fold_overflow_trap_parity() {
+    // Un-annotated `let big = 2147483647 + 1` — the binop folds to
+    // 2147483648 at compile time (no op site for the binop guard); the
+    // let-level CheckI32 must catch it in both backends. Pre-fix: VM
+    // silently printed 2147483648.
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let big = 2147483647 + 1;
+            println(big);
+            0
+        }",
+        "inferred-i32 constant-folded addition overflow",
+    );
+}
+
+#[test]
+fn dual_inferred_i32_var_mul_overflow_trap_parity() {
+    // Un-annotated binding (inferred i32) multiplied past MAX — the binop
+    // guard must trap in both backends.
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let big = 2147483647;
+            let r = big * 2;
+            println(r);
+            0
+        }",
+        "inferred-i32 variable multiplication overflow",
+    );
+}
+
+#[test]
+fn dual_inferred_i64_literal_no_trap() {
+    // Out-of-range literals unify to i64 — must NOT trap (the old
+    // "either operand Int32" OR would have mis-marked this as i32-width).
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let big = 10000000000 + 1;
+            println(big);
+            let ok = 2147483647;
+            println(ok);
+            let f = 1.5 + 1;
+            println(f);
+            0
+        }",
+        "10000000001\n2147483647\n2.5",
+        "i64 literal / float mix stay un-trapped",
     );
 }

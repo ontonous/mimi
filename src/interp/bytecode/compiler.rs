@@ -1371,6 +1371,36 @@ impl BytecodeCompiler {
                                 _ => 3,
                             };
                             fc.emit(Op::CheckI32 { rd: r, kind });
+                        } else if ty.is_none()
+                            && !matches!(init_expr.unlocated(), Expr::List(_) | Expr::Literal(Lit::Int(_)))
+                            && matches!(
+                                init_expr.unlocated(),
+                                Expr::Binary(..) | Expr::Unary(..)
+                            )
+                            && self.infer_expr_type(fc, init_expr) == VarType::Int32
+                        {
+                            // 0.35.21 (#8): inferred-width i32 bindings (no
+                            // annotation) get the same let-level CheckI32 the
+                            // annotated path has. Constant folding
+                            // (`let big = 2147483647 + 1` folds to
+                            // 2147483648) produces a value with no op site —
+                            // the binop guard never runs — so without this
+                            // the binding silently wrapped while codegen's
+                            // checked i32 addition trapped (E0802). Scoped to
+                            // scalar arithmetic expressions (Binary/Unary):
+                            // a Call that returns a mis-typed value (e.g. a
+                            // closure under a bogus i32 annotation) must not
+                            // trip it.
+                            let kind = match init_expr.unlocated() {
+                                Expr::Binary(op, _, _) => match op {
+                                    BinOp::Add => 0,
+                                    BinOp::Sub => 1,
+                                    BinOp::Mul => 2,
+                                    _ => 3,
+                                },
+                                _ => 3,
+                            };
+                            fc.emit(Op::CheckI32 { rd: r, kind });
                         }
                         // Track variable type for int/float dispatch.
                         if let PatternKind::Variable(name) = &pat.kind {
@@ -3085,14 +3115,18 @@ impl BytecodeCompiler {
             // of silently computing in the i64 register domain.
             let lw = self.infer_expr_type(fc, l);
             let rw = self.infer_expr_type(fc, r);
-            let int_like = |t: &VarType| !matches!(t, VarType::Float | VarType::String);
             // Audit fix #9: the enclosing declared-i32 place (annotated let /
             // i32-var assign) forces i32 width even when both operands are
             // literals (which infer as generic Int) — so the suspended Pow/Shl
             // folds pick up MaskShiftAmt/WrapI32, matching codegen.
+            // 0.35.21 (#8): inference now assigns literal widths (in-range →
+            // Int32), so the operand-based test uses the checker's unification
+            // rule (literals elastic, non-literals fixed) instead of the old
+            // "either operand Int32" OR — which over-eagerly marked
+            // `10000000000 + 1` (Int + Int32) as i32-width while codegen
+            // unifies to i64 and never traps.
             let i32_ctx = fc.i32_ctx_active
-                || (lw == VarType::Int32 && int_like(&rw))
-                || (rw == VarType::Int32 && int_like(&lw));
+                || self.binop_is_i32_width(l, r, &lw, &rw);
             if i32_ctx && matches!(op, BinOp::Div | BinOp::Mod) {
                 // i32::MIN / -1 overflows i32 but not i64 — pre-op operand
                 // guard with the codegen-matching message (also covers %).
@@ -5934,10 +5968,60 @@ impl BytecodeCompiler {
         }
     }
 
+    /// 0.35.21 (#8): unified int-width resolution for a binop, matching the
+    /// checker's operand unification. Literals are elastic (they adapt to the
+    /// other operand's fixed width); non-literal operands are fixed. Both
+    /// literals unify to i32 only when BOTH fit i32 (in-range literals now
+    /// infer Int32; an out-of-range one infers Int and forces i64). A fixed
+    /// i32 operand forces i32; a fixed i64 operand forces i64. This replaced
+    /// the 0.34.34 "either operand Int32" OR, which marked `10000000000 + 1`
+    /// (Int + Int32) as i32-width while codegen unifies to i64 and never
+    /// traps.
+    fn binop_is_i32_width(
+        &self,
+        l: &Expr,
+        r: &Expr,
+        lw: &VarType,
+        rw: &VarType,
+    ) -> bool {
+        // A literal is elastic (adapts to the other operand) — including
+        // NEGATIVE literals, which parse as Unary(Neg, Literal(Int)): `a:i64
+        // << -1` must mask by 64, not 31 (dual_i64_shl_masked_parity).
+        let is_int_lit = |e: &Expr| match e.unlocated() {
+            Expr::Literal(Lit::Int(_)) => true,
+            Expr::Unary(UnOp::Neg, inner) => {
+                matches!(inner.unlocated(), Expr::Literal(Lit::Int(_)))
+            }
+            _ => false,
+        };
+        let l_is_lit = is_int_lit(l);
+        let r_is_lit = is_int_lit(r);
+        match (l_is_lit, r_is_lit) {
+            (true, true) => lw == &VarType::Int32 && rw == &VarType::Int32,
+            // Literal adapts to the FIXED non-literal side: i32 only when
+            // that side is i32. A fixed i64 operand (`a: i64 << 65`) forces
+            // i64 even though the literal infers Int32.
+            (true, false) => rw == &VarType::Int32 && lw != &VarType::Int,
+            (false, true) => lw == &VarType::Int32 && rw != &VarType::Int,
+            (false, false) => lw == &VarType::Int32 || rw == &VarType::Int32,
+        }
+    }
+
     /// Infer the VarType of an expression (lightweight, for int/float dispatch).
     fn infer_expr_type(&self, fc: &FuncCompiler, expr: &Expr) -> VarType {
         match expr.unlocated() {
-            Expr::Literal(Lit::Int(_)) => VarType::Int,
+            Expr::Literal(Lit::Int(v)) => {
+                // 0.35.21 (#8): inferred int literal width must match the
+                // checker's default — in-range literals are i32, out-of-range
+                // are i64. Previously all literals inferred as generic Int,
+                // so `let big = 2147483647 + 1` silently wrapped (i64 domain)
+                // while codegen's checked i32 addition trapped (E0802).
+                if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                    VarType::Int32
+                } else {
+                    VarType::Int
+                }
+            }
             Expr::Literal(Lit::Float(_)) => VarType::Float,
             Expr::Literal(Lit::Bool(_)) => VarType::Bool,
             Expr::Literal(Lit::String(_)) => VarType::String,
@@ -5976,24 +6060,31 @@ impl BytecodeCompiler {
                     BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
                 ) {
                     VarType::Bool
+                } else if matches!(op, BinOp::Range) {
+                    // 1..10 materializes a List value — never a scalar, so
+                    // never Int32 (0.35.21 #8: a let-level CheckI32 would
+                    // otherwise fire on the range's list value).
+                    VarType::Unknown
+                } else if self.expr_is_float(fc, l) || self.expr_is_float(fc, r) {
+                    VarType::Float
                 } else {
                     let lt = self.infer_expr_type(fc, l);
                     let rt = self.infer_expr_type(fc, r);
-                    if lt == VarType::Float || rt == VarType::Float {
-                        VarType::Float
-                    } else if lt == VarType::Int && rt == VarType::Int {
-                        VarType::Int
-                    } else if lt == VarType::Int32 || rt == VarType::Int32 {
-                        // 0.34.34: width propagation for i32 arithmetic. The
-                        // checker unifies binop operand types, so an Int32
-                        // operand means the whole op is i32-width (literals
-                        // infer as generic Int and are unified into i32).
+                    // 0.35.21 (#8): operands are unified with the checker's
+                    // width rule — literals are elastic (adapt to the other
+                    // operand), non-literals are fixed. Both-literal ops unify
+                    // to i32 only when both fit; a fixed i32 operand forces
+                    // i32; a fixed i64 / out-of-range literal forces i64.
+                    if self.binop_is_i32_width(l, r, &lt, &rt) {
                         VarType::Int32
+                    } else if lt == VarType::Int || rt == VarType::Int {
+                        VarType::Int
                     } else {
                         VarType::Unknown
                     }
                 }
             }
+            Expr::Lambda { .. } => VarType::Unknown,
             Expr::Unary(_, e) => self.infer_expr_type(fc, e),
             // C-3 (record hot spot): a record literal is a nominal User type.
             // Pre-fix this arm was `_ => Unknown`, so `let p = Pair { ... }`

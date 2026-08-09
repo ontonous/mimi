@@ -17,3 +17,4 @@ cc 97a5c0a23d3d759d2e1de154cec1260d194fb9f37956568f7aa11db99514b224 # shrinks to
 cc 4e024a777f8f91f6e077275bef1d7c4e80491ee913797fce951e7b6e266554af # shrinks to a = Name("f64", []), b = Newtype("a", Name("f64", []))
 cc 4fff0c02e027b36430d7f674e7be0633ddd3c552dc3ec7ff3af734f2a4d1d9ab # shrinks to a = Newtype("a", Name("unknown", [])), b = Name("unknown", [])
 cc 2fed8bc7bad11b92a6eaed8fb74dda279b533846f48a4922106e969fd19d848b # shrinks to expr_str = "[]"
+cc 0b73fde95b3f854389cc3f62950d44e1aa33524f97683ee40891ccb2fc88e5d7 # shrinks to a = Name("Option", [Name("i32", [])]), b = Newtype("a", Name("Option", []))

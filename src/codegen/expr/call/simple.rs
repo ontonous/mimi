@@ -431,6 +431,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             let list_type = self.infer_object_type(&args[0], vars);
             self.pending_sum_elem_type = Self::strip_list_element_type(&list_type);
         }
+        // 0.35.20 (#6): zip/enumerate — hand the product-tuple element type to
+        // the builtin so pairs are heap-packed with the formatter's layout
+        // (string fields inline {ptr,len}); raw i64-slot pairs misdisplay.
+        if name == "zip" && args.len() == 2 {
+            let a = self.infer_object_type(&args[0], vars);
+            let b = self.infer_object_type(&args[1], vars);
+            if let (Some(ea), Some(eb)) = (
+                Self::strip_list_element_type(&a),
+                Self::strip_list_element_type(&b),
+            ) {
+                self.pending_zip_pair_type = Some(format!("({}, {})", ea, eb));
+            }
+        }
+        if name == "enumerate" && args.len() == 1 {
+            let src = self.infer_object_type(&args[0], vars);
+            if let Some(elem) = Self::strip_list_element_type(&src) {
+                self.pending_zip_pair_type = Some(format!("(i32, {})", elem));
+            }
+        }
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {

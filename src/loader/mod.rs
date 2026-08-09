@@ -323,12 +323,12 @@ pub fn merge_prelude_into(dest: &mut File) {
     let existing: std::collections::HashSet<String> = dest
         .items
         .iter()
-        .filter_map(|i| item_name(i).map(String::from))
+        .filter_map(|i| item_name(i))
         .collect();
     let mut new_items: Vec<Item> = Vec::new();
     for item in prelude_items {
         if let Some(name) = item_name(&item) {
-            if !existing.contains(name) {
+            if !existing.contains(&name) {
                 new_items.push(item);
             }
         } else {
@@ -338,20 +338,24 @@ pub fn merge_prelude_into(dest: &mut File) {
     dest.items.splice(0..0, new_items);
 }
 
-fn item_name(item: &Item) -> Option<&str> {
+fn item_name(item: &Item) -> Option<String> {
     match item {
-        Item::Func(f) => Some(&f.name),
-        Item::Module(m) => Some(&m.name),
-        Item::Type(t) => Some(&t.name),
-        Item::Actor(a) => Some(&a.name),
-        Item::Cap(c) => Some(&c.name),
-        Item::Trait(t) => Some(&t.name),
-        Item::Impl(i) => Some(i.type_name.as_str()),
+        Item::Func(f) => Some(f.name.clone()),
+        Item::Module(m) => Some(m.name.clone()),
+        Item::Type(t) => Some(t.name.clone()),
+        Item::Actor(a) => Some(a.name.clone()),
+        Item::Cap(c) => Some(c.name.clone()),
+        Item::Trait(t) => Some(t.name.clone()),
+        // 0.35.21 (#3): dedup key = (trait, type) pair. Using type_name alone
+        // collided across modules that impl traits on the SAME type (e.g.
+        // std/strings + std/fs both impl on `string`) — `use std::strings` +
+        // `use std::fs` failed with "duplicate item 'string'".
+        Item::Impl(i) => Some(format!("impl:{}:{}", i.trait_name, i.type_name)),
         Item::ExternBlock(_) => None,
-        Item::Const { name, .. } => Some(name),
-        Item::Flow(f) => Some(&f.name),
-        Item::Protocol(p) => Some(&p.name),
-        Item::Session(s) => Some(&s.name),
+        Item::Const { name, .. } => Some(name.clone()),
+        Item::Flow(f) => Some(f.name.clone()),
+        Item::Protocol(p) => Some(p.name.clone()),
+        Item::Session(s) => Some(s.name.clone()),
     }
 }
 
@@ -689,11 +693,11 @@ pub(crate) mod legacy {
             for module in self.modules.values() {
                 for item in &module.file.items {
                     if let Some(name) = item_name(item) {
-                        if !seen_names.insert(name.to_string()) {
+                        if !seen_names.insert(name.clone()) {
                             let dup_modules: Vec<String> = self
                                 .modules
                                 .values()
-                                .filter(|m| m.file.items.iter().any(|i| item_name(i) == Some(name)))
+                                .filter(|m| m.file.items.iter().any(|i| item_name(i).as_deref() == Some(&name[..])))
                                 .map(|m| m.path.display().to_string())
                                 .collect();
                             return Err(format!(
@@ -721,21 +725,8 @@ pub(crate) mod legacy {
         }
     }
 
-    fn item_name(item: &Item) -> Option<&str> {
-        match item {
-            Item::Func(f) => Some(&f.name),
-            Item::Module(m) => Some(&m.name),
-            Item::Type(t) => Some(&t.name),
-            Item::Actor(a) => Some(&a.name),
-            Item::Cap(c) => Some(&c.name),
-            Item::Trait(t) => Some(&t.name),
-            Item::Impl(i) => Some(i.type_name.as_str()),
-            Item::ExternBlock(_) => None,
-            Item::Const { name, .. } => Some(name),
-            Item::Flow(f) => Some(&f.name),
-            Item::Protocol(p) => Some(&p.name),
-            Item::Session(s) => Some(&s.name),
-        }
+    fn item_name(item: &Item) -> Option<String> {
+        super::item_name(item)
     }
 }
 

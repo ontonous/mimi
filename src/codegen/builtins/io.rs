@@ -790,180 +790,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     // Mimi list struct: {i64 len, ptr data} — require i64 len
                     // so Option {i1, ptr} is not misclassified as List.
-                    let str_ptr = if arg_type == "List<string>"
-                        || arg_type.starts_with("List<string>")
-                    {
-                        self.emit_list_string_to_string(*sv)?
-                    } else if arg_type.starts_with("List<List<")
-                        || arg_type
-                            .strip_prefix("List<")
-                            .is_some_and(|s| s.starts_with("List<"))
-                    {
-                        // Nested list: pick inner-list formatter from element type.
-                        let mid = Self::strip_first_type_arg(arg_type, "List")
-                            .unwrap_or_else(|| "List".to_string());
-                        let elem = Self::strip_first_type_arg(&mid, "List").unwrap_or_default();
-                        if elem.starts_with('(') {
-                            // List of List of product tuples.
-                            self.emit_list_list_product_tuple_to_string(*sv, &elem)?
-                        } else if elem == "f64" || elem == "f32" {
-                            // Audit wave2 (D-5b): the runtime-callback path
-                            // only has an i32 element formatter; List<List<f64>>
-                            // routed through it printed f64 bit patterns as
-                            // i32 garbage. Render inner lists with the sized
-                            // scalar emitter instead (kind-correct).
-                            self.emit_list_list_scalar_to_string(*sv, ScalarListKind::F64)?
-                        } else if elem == "i64" {
-                            self.emit_list_list_scalar_to_string(*sv, ScalarListKind::I64)?
-                        } else if elem == "bool" {
-                            self.emit_list_list_scalar_to_string(*sv, ScalarListKind::Bool)?
-                        } else {
-                            let inner_fn = if elem == "string" {
-                                "mimi_list_to_string"
-                            } else if elem.starts_with("Map") {
-                                "mimi_list_map_to_string"
-                            } else if elem.starts_with("Set") {
-                                "mimi_list_set_to_string"
-                            } else {
-                                "mimi_list_i32_to_string"
-                            };
-                            self.emit_list_list_to_string(*sv, inner_fn)?
-                        }
-                    } else if let Some(inner) = arg_type
-                        .strip_prefix("List<")
-                        .and_then(|s| s.strip_suffix('>'))
-                    {
-                        if self
-                            .type_defs
-                            .get(inner)
-                            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
-                        {
-                            self.emit_list_record_to_string(*sv, inner)?
-                        } else if inner.starts_with("Option") {
-                            self.emit_list_option_to_string(*sv, inner)?
-                        } else if inner.starts_with("Result") {
-                            // Result of product uses uniform heap pack runtime.
-                            if let Some(ok_ty) = inner.strip_prefix("Result<").and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            }) {
-                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
-                                    let elem = if self.is_product_tuple_alias(ok_ty) {
-                                        self.resolve_alias_type_name(ok_ty)
-                                    } else {
-                                        ok_ty.to_string()
-                                    };
-                                    let list_alloca = self.build_alloca(
-                                        BasicTypeEnum::StructType(self.list_struct_type()),
-                                        "list_res_prod_disp",
-                                    )?;
-                                    self.build_store(list_alloca, *sv)?;
-                                    self.emit_list_result_product_runtime(list_alloca, &elem, 1)?
-                                } else if ok_ty.starts_with("Map<string, ") {
-                                    if let Some(inner_val) = ok_ty
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if inner_val.starts_with('(')
-                                            || self.is_product_tuple_alias(inner_val)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(inner_val) {
-                                                self.resolve_alias_type_name(inner_val)
-                                            } else {
-                                                inner_val.to_string()
-                                            };
-                                            let list_alloca = self.build_alloca(
-                                                BasicTypeEnum::StructType(self.list_struct_type()),
-                                                "list_res_map_prod_disp",
-                                            )?;
-                                            self.build_store(list_alloca, *sv)?;
-                                            self.emit_list_result_map_product_runtime(
-                                                list_alloca,
-                                                &elem,
-                                                1,
-                                            )?
-                                        } else {
-                                            self.emit_list_result_to_string(*sv, inner)?
-                                        }
-                                    } else {
-                                        self.emit_list_result_to_string(*sv, inner)?
-                                    }
-                                } else if let Some(set_elem) =
-                                    ok_ty.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if set_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(set_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(set_elem) {
-                                            self.resolve_alias_type_name(set_elem)
-                                        } else {
-                                            set_elem.to_string()
-                                        };
-                                        let list_alloca = self.build_alloca(
-                                            BasicTypeEnum::StructType(self.list_struct_type()),
-                                            "list_res_set_prod_disp",
-                                        )?;
-                                        self.build_store(list_alloca, *sv)?;
-                                        self.emit_list_result_set_product_runtime(
-                                            list_alloca,
-                                            &elem,
-                                            1,
-                                        )?
-                                    } else {
-                                        self.emit_list_result_to_string(*sv, inner)?
-                                    }
-                                } else {
-                                    self.emit_list_result_to_string(*sv, inner)?
-                                }
-                            } else {
-                                self.emit_list_result_to_string(*sv, inner)?
-                            }
-                        } else if self
-                            .type_defs
-                            .get(inner)
-                            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Enum(_)))
-                        {
-                            self.emit_list_enum_to_string(*sv, inner)?
-                        } else if inner.starts_with("Map") {
-                            self.emit_list_map_to_string(*sv, inner)?
-                        } else if inner.starts_with("Set") || inner == "set" {
-                            self.emit_list_set_to_string(*sv, inner)?
-                        } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
-                            // List of product tuples (or alias of them) as ptrtoint.
-                            let elem = if self.is_product_tuple_alias(inner) {
-                                self.resolve_alias_type_name(inner)
-                            } else {
-                                inner.to_string()
-                            };
-                            self.emit_list_product_tuple_to_string(*sv, &elem)?
-                        } else if inner == "f64" || inner == "f32" {
-                            // Wave-1 audit fix (§8, FIX: i32 fallback read the
-                            // f64 slot bits as i32 → garbage): dispatch on the
-                            // actual element type.
-                            self.emit_list_scalar_to_string(*sv, ScalarListKind::F64)?
-                        } else if inner == "i64" {
-                            self.emit_list_scalar_to_string(*sv, ScalarListKind::I64)?
-                        } else if inner == "bool" {
-                            self.emit_list_scalar_to_string(*sv, ScalarListKind::Bool)?
-                        } else {
-                            // TODO(#audit-wave2): remaining scalar element kinds
-                            // (i8/i16/i32 and anything unrecognized) still route
-                            // to the i32 helper; i32 is correct for these.
-                            self.emit_list_i32_to_string(*sv)?
-                        }
-                    } else {
-                        self.emit_list_i32_to_string(*sv)?
-                    };
+                    let str_ptr = self.emit_list_typed_to_string(*sv, &arg_type)?;
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
@@ -1102,7 +929,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         && matches!(fields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
                     if (!is_named || is_product_alias) && !is_enum_layout {
-                        let str_ptr = self.emit_product_tuple_to_string(*sv)?;
+                        let str_ptr = self.emit_product_tuple_to_string(*sv, Some(&arg_type))?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -2732,6 +2559,166 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
+    /// 0.35.20 (#6): serialize a list struct value to a C string, dispatching
+    /// on the full `List<...>` type name. Extracted from the print path so
+    /// nested containers inside product tuples (e.g. `(List<i32>, List<i32>)`)
+    /// can reuse the same element-kind dispatch.
+    fn emit_list_typed_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        list_ty: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let str_ptr = if list_ty == "List<string>" || list_ty.starts_with("List<string>") {
+            self.emit_list_string_to_string(sv)?
+        } else if list_ty.starts_with("List<List<")
+            || list_ty
+                .strip_prefix("List<")
+                .is_some_and(|s| s.starts_with("List<"))
+        {
+            // Nested list: pick inner-list formatter from element type.
+            let mid = Self::strip_first_type_arg(list_ty, "List")
+                .unwrap_or_else(|| "List".to_string());
+            let elem = Self::strip_first_type_arg(&mid, "List").unwrap_or_default();
+            if elem.starts_with('(') {
+                // List of List of product tuples.
+                self.emit_list_list_product_tuple_to_string(sv, &elem)?
+            } else if elem == "f64" || elem == "f32" {
+                self.emit_list_list_scalar_to_string(sv, ScalarListKind::F64)?
+            } else if elem == "i64" {
+                self.emit_list_list_scalar_to_string(sv, ScalarListKind::I64)?
+            } else if elem == "bool" {
+                self.emit_list_list_scalar_to_string(sv, ScalarListKind::Bool)?
+            } else {
+                let inner_fn = if elem == "string" {
+                    "mimi_list_to_string"
+                } else if elem.starts_with("Map") {
+                    "mimi_list_map_to_string"
+                } else if elem.starts_with("Set") {
+                    "mimi_list_set_to_string"
+                } else {
+                    "mimi_list_i32_to_string"
+                };
+                self.emit_list_list_to_string(sv, inner_fn)?
+            }
+        } else if let Some(inner) =
+            list_ty.strip_prefix("List<").and_then(|s| s.strip_suffix('>'))
+        {
+            if self
+                .type_defs
+                .get(inner)
+                .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+            {
+                self.emit_list_record_to_string(sv, inner)?
+            } else if inner.starts_with("Option") {
+                self.emit_list_option_to_string(sv, inner)?
+            } else if inner.starts_with("Result") {
+                // Result of product uses uniform heap pack runtime.
+                if let Some(ok_ty) = inner.strip_prefix("Result<").and_then(|s| {
+                    let mut depth = 0i32;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' | '(' => depth += 1,
+                            '>' | ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                return Some(s[..i].trim());
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }) {
+                    if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                        let elem = if self.is_product_tuple_alias(ok_ty) {
+                            self.resolve_alias_type_name(ok_ty)
+                        } else {
+                            ok_ty.to_string()
+                        };
+                        let list_alloca = self.build_alloca(
+                            BasicTypeEnum::StructType(self.list_struct_type()),
+                            "list_res_prod_disp",
+                        )?;
+                        self.build_store(list_alloca, sv)?;
+                        self.emit_list_result_product_runtime(list_alloca, &elem, 1)?
+                    } else if ok_ty.starts_with("Map<string, ") {
+                        if let Some(inner_val) = ok_ty
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val) {
+                                let elem = if self.is_product_tuple_alias(inner_val) {
+                                    self.resolve_alias_type_name(inner_val)
+                                } else {
+                                    inner_val.to_string()
+                                };
+                                let list_alloca = self.build_alloca(
+                                    BasicTypeEnum::StructType(self.list_struct_type()),
+                                    "list_res_map_prod_disp",
+                                )?;
+                                self.build_store(list_alloca, sv)?;
+                                self.emit_list_result_map_product_runtime(list_alloca, &elem, 1)?
+                            } else {
+                                self.emit_list_result_to_string(sv, inner)?
+                            }
+                        } else {
+                            self.emit_list_result_to_string(sv, inner)?
+                        }
+                    } else if let Some(set_elem) =
+                        ok_ty.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
+                    {
+                        if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                            let elem = if self.is_product_tuple_alias(set_elem) {
+                                self.resolve_alias_type_name(set_elem)
+                            } else {
+                                set_elem.to_string()
+                            };
+                            let list_alloca = self.build_alloca(
+                                BasicTypeEnum::StructType(self.list_struct_type()),
+                                "list_res_set_prod_disp",
+                            )?;
+                            self.build_store(list_alloca, sv)?;
+                            self.emit_list_result_set_product_runtime(list_alloca, &elem, 1)?
+                        } else {
+                            self.emit_list_result_to_string(sv, inner)?
+                        }
+                    } else {
+                        self.emit_list_result_to_string(sv, inner)?
+                    }
+                } else {
+                    self.emit_list_result_to_string(sv, inner)?
+                }
+            } else if self
+                .type_defs
+                .get(inner)
+                .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Enum(_)))
+            {
+                self.emit_list_enum_to_string(sv, inner)?
+            } else if inner.starts_with("Map") {
+                self.emit_list_map_to_string(sv, inner)?
+            } else if inner.starts_with("Set") || inner == "set" {
+                self.emit_list_set_to_string(sv, inner)?
+            } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+                // List of product tuples (or alias of them) as ptrtoint.
+                let elem = if self.is_product_tuple_alias(inner) {
+                    self.resolve_alias_type_name(inner)
+                } else {
+                    inner.to_string()
+                };
+                self.emit_list_product_tuple_to_string(sv, &elem)?
+            } else if inner == "f64" || inner == "f32" {
+                self.emit_list_scalar_to_string(sv, ScalarListKind::F64)?
+            } else if inner == "i64" {
+                self.emit_list_scalar_to_string(sv, ScalarListKind::I64)?
+            } else if inner == "bool" {
+                self.emit_list_scalar_to_string(sv, ScalarListKind::Bool)?
+            } else {
+                self.emit_list_i32_to_string(sv)?
+            }
+        } else {
+            self.emit_list_i32_to_string(sv)?
+        };
+        Ok(str_ptr)
+    }
+
     /// Format `List<(…)>` product tuples (ptrtoint slots) as `[(1, 2), …]`.
     fn emit_list_product_tuple_to_string(
         &self,
@@ -2784,7 +2771,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let loaded = self
                     .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "list_tup_ld")?
                     .into_struct_value();
-                self.emit_product_tuple_to_string(loaded)
+                self.emit_product_tuple_to_string(loaded, Some(elem_type_str))
             },
             "list_tup",
         )?;
@@ -4312,13 +4299,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.emit_display_wrap("Ok(", enum_str, "res_ok_enum_wrap")?;
                             self.build_store(out_slot, wrap)?;
                         } else {
-                            let tup_str =
-                                self.emit_product_tuple_to_string(val.into_struct_value())?;
+                            let tup_str = self.emit_product_tuple_to_string(
+                                val.into_struct_value(),
+                                Some(&ok_ty),
+                            )?;
                             let wrap = self.emit_display_wrap("Ok(", tup_str, "res_ok_tup_wrap")?;
                             self.build_store(out_slot, wrap)?;
                         }
                     } else {
-                        let tup_str = self.emit_product_tuple_to_string(val.into_struct_value())?;
+                        let ok_ty2 = Self::strip_first_type_arg(arg_type, "Result");
+                        let tup_str = self.emit_product_tuple_to_string(
+                            val.into_struct_value(),
+                            ok_ty2.as_deref(),
+                        )?;
                         let wrap = self.emit_display_wrap("Ok(", tup_str, "res_ok_tup_wrap")?;
                         self.build_store(out_slot, wrap)?;
                     }
@@ -5618,7 +5611,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     // Product tuple / multi-field struct by-value (not nested
                     // Option/Result and not List {i64,ptr}).
-                    let tup_str = self.emit_product_tuple_to_string(psv)?;
+                    let tup_str = self.emit_product_tuple_to_string(psv, Some(&arg_type))?;
                     OptPay::StrPtr(tup_str)
                 } else {
                     OptPay::Int(i64_ty.const_int(0, false))
@@ -7601,9 +7594,44 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Format a heterogeneous product/tuple (ints, bools, strings, nested structs).
+    /// 0.35.20 (#6): extract the `idx`-th field type of a product-tuple type
+    /// string like `(List<i32>, (i32, string))`, honoring nested brackets and
+    /// parens. Returns `None` when `ts` is not a tuple or `idx` is out of
+    /// range.
+    fn tuple_field_type(ts: &str, idx: usize) -> Option<String> {
+        let ts = ts.trim();
+        if !ts.starts_with('(') || !ts.ends_with(')') {
+            return None;
+        }
+        let inner = &ts[1..ts.len() - 1];
+        let mut depth = 0i32;
+        let mut start = 0;
+        let mut cur = 0;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    if cur == idx {
+                        return Some(inner[start..i].trim().to_string());
+                    }
+                    cur += 1;
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if cur == idx {
+            Some(inner[start..].trim().to_string())
+        } else {
+            None
+        }
+    }
+
     fn emit_product_tuple_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        type_str: Option<&str>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         // Wave-1 audit fix (§8, FIX: fixed 4096-byte strcat assembly):
         // exact-size assembly — one piece per field, computed lengths, one
@@ -7678,9 +7706,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_extract_value(fsv.into(), 0, "prod_str_ptr")?
                             .into_pointer_value();
                         parts.push(CatPart::Dyn(ptr));
+                    } else if ffields.len() == 2
+                        && matches!(
+                            ffields[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                        )
+                        && matches!(ffields[1], BasicTypeEnum::PointerType(_))
+                    {
+                        // 0.35.20 (#6): Mimi list struct {i64 len, ptr data}
+                        // by-value inside a product tuple (e.g. partition's
+                        // `(List<T>, List<T>)` or a user function returning
+                        // `(List<i32>, List<i32>)`). The old fallback recursed
+                        // into the product formatter and printed `(len, ptr)`
+                        // garbage. Dispatch on the field's List<...> type when
+                        // the tuple type string is available.
+                        let field_ty = type_str.and_then(|ts| Self::tuple_field_type(ts, i));
+                        let list_str = match field_ty {
+                            Some(ft) => self.emit_list_typed_to_string(fsv, &ft)?,
+                            None => self.emit_list_i32_to_string(fsv)?,
+                        };
+                        parts.push(CatPart::Dyn(list_str));
                     } else {
-                        // Nested product / list-like — recurse product formatter.
-                        let nested = self.emit_product_tuple_to_string(fsv)?;
+                        // Nested product — recurse with the sub-field type.
+                        let sub = type_str.and_then(|ts| Self::tuple_field_type(ts, i));
+                        let nested =
+                            self.emit_product_tuple_to_string(fsv, sub.as_deref())?;
                         parts.push(CatPart::Dyn(nested));
                     }
                 }
