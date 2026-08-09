@@ -1216,6 +1216,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (Ident of a List-typed var, or a tuple of such), covering the common
     /// `return xs` / `(yes, no)` patterns; unrecognized shapes keep the old
     /// scope-exit free.
+    ///
+    /// 0.35.24 (deep-eval): the walk intentionally stops at Call — the callee's
+    /// arguments are INPUTS, not part of the returned value's ownership shape.
+    /// Recursing into them (0.35.23) nulled local List variables that never
+    /// escape (mutate-builtin tail calls return unit at the language level, so
+    /// `return push(data, n)` cannot typecheck; for user functions the callee's
+    /// own return path claims whatever it hands back). That nulled the slot and
+    /// turned the scope-exit free into free(null): a per-call leak. Borrow
+    /// params were guarded (K3), locals were not.
     pub(in crate::codegen) fn claim_returned_lists(
         &self,
         expr: Option<&Expr>,
@@ -1286,11 +1295,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.claim_returned_lists(Some(&f.value), vars);
                 }
             }
-            Some(Expr::Call(_, args)) => {
-                for a in args {
-                    self.claim_returned_lists(Some(a), vars);
-                }
-            }
+            // 0.35.24: Call args are inputs — do not recurse (see fn doc).
+            Some(Expr::Call(..)) => {}
             Some(Expr::Block(stmts)) => {
                 if let Some(last) = stmts.last() {
                     if let Stmt::Expr(e) = last.unlocated() {
@@ -3741,6 +3747,27 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn compile_func_legacy_inner(&mut self, func: &FuncDef) -> MimiResult<()> {
+        // 0.35.24 (deep-eval): snapshot the caller's per-function variable type
+        // tracking before the fresh-start clears below. When a caller body
+        // (e.g. a generic `f`) is being emitted, its monomorphized callee
+        // instances are compiled NESTED inside it (call-site instantiation);
+        // without this snapshot the callee's clears wiped the caller's
+        // registrations mid-body — `claim_returned_lists` then silently
+        // skipped List vars after the nested call (`is_list_var` → None),
+        // freeing an escaping buffer (latent use-after-free on `return xs`).
+        let saved_var_types = std::mem::take(&mut self.var_types);
+        let saved_var_type_names = std::mem::take(&mut self.var_type_names);
+        let saved_list_elem_llvm_types = std::mem::take(&mut self.list_elem_llvm_types);
+        let saved_type_map = std::mem::take(&mut self.type_map);
+        let result = self.compile_func_legacy_clean(func);
+        self.var_types = saved_var_types;
+        self.var_type_names = saved_var_type_names;
+        self.list_elem_llvm_types = saved_list_elem_llvm_types;
+        self.type_map = saved_type_map;
+        result
+    }
+
+    fn compile_func_legacy_clean(&mut self, func: &FuncDef) -> MimiResult<()> {
         // Per-function variable type tracking must start fresh so that parameters
         // with common names (e.g. `xs`) don't inherit types from other functions.
         // Also clear the generic substitution map: non-generic functions must not
@@ -3936,6 +3963,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         func: &FuncDef,
         type_map: &HashMap<String, crate::ast::Type>,
     ) -> MimiResult<()> {
+        // 0.35.24 (deep-eval): this is the monomorphized-instance entry — a
+        // callee instance is compiled NESTED inside the caller's body. The
+        // fresh-start clears below must not destroy the caller's per-function
+        // variable type tracking: without this snapshot, `claim_returned_lists`
+        // silently skipped List vars after the nested call (`is_list_var` →
+        // None) and the scope-exit free freed an escaping buffer (latent
+        // use-after-free on `return xs`).
+        let saved_var_types = std::mem::take(&mut self.var_types);
+        let saved_var_type_names = std::mem::take(&mut self.var_type_names);
+        let saved_list_elem_llvm_types = std::mem::take(&mut self.list_elem_llvm_types);
+
         // Per-function variable type tracking must start fresh.
         self.var_types.clear();
         self.var_type_names.clear();
@@ -4037,6 +4075,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
         self.end_function_heap_scope();
+        // Restore the caller's per-function variable type tracking (see the
+        // snapshot comment at the top of this function).
+        self.var_types = saved_var_types;
+        self.var_type_names = saved_var_type_names;
+        self.list_elem_llvm_types = saved_list_elem_llvm_types;
         self.type_map = prev_type_map;
         if let Some(bb) = saved_block {
             self.builder.position_at_end(bb);

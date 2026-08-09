@@ -5,6 +5,35 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.24 — claim_returned_lists / 赋值路径 claim 收口（deep-eval 遗留观察 1 + 根因家族）
+
+- **Call 分支删除**（`src/codegen/func.rs`）：`claim_returned_lists` 不再
+  递归 Call 的 args——args 是输入，不属于返回值所有权形状。0.35.23 的递归
+  会把局部 List 变量（非 borrow）误置 null：尾调用场景 scope-exit free
+  变 free(null) → 每次调用泄漏；字段赋值 `rec.field = g(local)` 场景
+  local 后续索引读 null data（native 输出 0，VM 不受影响 → 双后端分歧）。
+  mutate-builtin 尾调用语言层返回 unit（`return push(data, n)` 无法
+  typecheck），用户函数由 callee 自身返回路径 claim，删除无正确性损失；
+- **赋值路径 claim 删除**（`src/codegen/func/body.rs`）：0.35.23 同批在
+  `compile_assign_stmt` 加的“RHS list 置 null”（变量赋值 `dst = xs` 与
+  字段赋值 `rec.field = xs`）同样违反 COW 共享语义（List 赋值是浅拷贝，
+  push 时 realloc 分离，不是所有权转移）——`xs` 被置 null 后后续
+  `xs[0]` 读 null data（native 0 vs VM 1）；
+- **var_type_names 嵌套污染修复**（`src/codegen/func.rs`）：
+  `compile_func_legacy_inner` 与 `compile_generic_func`（monomorphized
+  实例入口）现在对 `var_types` / `var_type_names` / `list_elem_llvm_types`
+  做入口快照、出口恢复——嵌套编译 callee 实例时不再清掉 caller 已登记的
+  局部 List 类型，`claim_returned_lists` 在嵌套调用后不再静默跳过
+  （`return data` 场景从 latent use-after-free 变为正确所有权转移）；
+- **回归锁 ×4**：`dual_claim_stops_at_call_args_in_legacy_body`（修复前
+  native 0 ≠ VM 1）、`dual_var_assign_keeps_rhs_list_alive`、
+  `dual_field_assign_keeps_rhs_list_alive`、
+  `ir_nested_compile_keeps_caller_var_type_registration`（IR 断言：
+  嵌套调用后 claim 的 null-store 必须存在）；
+- **验证**：5330 lib + 31 real_world 全绿；golden 无漂移；projects 差分
+  mimi-make / mimi-stat / mimichat MATCH；devdocs/v0.35/
+  deep-eval-projects-0.35.23.md 遗留观察 1 标记已修。
+
 ### 0.35.22 — 可用性修复收官：E0439 提示 + 文档语法 + 错误消息 + test 参数（Phase H）
 
 - **#5 E0439 帮助文本**：`codes.rs` 与 `docs/error-codes.md` 同步——算术属性

@@ -766,3 +766,34 @@ fn ir_b9_closure_env_guard_on_scope_exit() {
         ir
     );
 }
+
+#[test]
+fn ir_nested_compile_keeps_caller_var_type_registration() {
+    // Regression (0.35.24): compiling a monomorphized callee instance NESTED
+    // inside a generic caller used to wipe the caller's var_type_names — the
+    // callee's fresh-start clears destroyed `data`'s List registration, so
+    // claim_returned_lists skipped `return data` and the scope-exit free
+    // freed the escaping buffer (latent use-after-free; values survived only
+    // because the freed memory was not yet reused). The claim's null-store
+    // must be present after the nested call.
+    let ir = compile_to_ir(
+        r#"
+        func g<T>(x: T) -> i32 { 1 }
+        func f<T>(x: T) -> List<i32> {
+            let data = [1, 2, 3]
+            g(0)
+            return data
+        }
+        func main() -> i64 {
+            f(0)
+            0
+        }
+        "#,
+    );
+    assert!(
+        ir.contains("data_ret_list_data"),
+        "claim_returned_lists must null the returned list slot even after a \
+         nested callee compile, got:\n{}",
+        ir
+    );
+}

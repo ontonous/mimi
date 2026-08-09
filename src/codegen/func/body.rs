@@ -365,51 +365,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
-                    if let Expr::Ident(src_name) = value.unlocated() {
-                        let is_list_var = self
-                            .var_type_names
-                            .get(src_name)
-                            .map(|t| t == "List" || t.starts_with("List<"))
-                            .unwrap_or(false);
-                        if is_list_var {
-                            if let Some(&(src_alloca, src_ty)) = vars.get(src_name) {
-                                let list_ty = self.list_struct_type();
-                                let struct_ptr = match src_ty {
-                                    BasicTypeEnum::StructType(_) => src_alloca,
-                                    BasicTypeEnum::PointerType(_) => {
-                                        match self.build_load(
-                                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                                            src_alloca,
-                                            &format!("{}_assign_list", src_name),
-                                        ) {
-                                            Ok(BasicValueEnum::PointerValue(p)) => p,
-                                            _ => src_alloca,
-                                        }
-                                    }
-                                    _ => src_alloca,
-                                };
-                                if let Ok(data_gep) = self.gep().build_struct_gep(
-                                    list_ty,
-                                    struct_ptr,
-                                    1,
-                                    &format!("{}_assign_list_data", src_name),
-                                ) {
-                                    let null_ptr = self
-                                        .context
-                                        .ptr_type(inkwell::AddressSpace::default())
-                                        .const_null();
-                                    let _ = self.build_store(data_gep, null_ptr);
-                                }
-                            }
-                        }
-                    }
+                    // 0.35.24 (deep-eval): removed the 0.35.23 "claim RHS list"
+                    // here — `dst = xs` is a COW shallow copy (push on either
+                    // side reallocs its own slot), NOT an ownership transfer.
+                    // Nulling `xs`'s data field destroyed a live variable: a
+                    // later `xs[0]` read through null (native printed 0, VM 1).
                     self.assign_to_var(name, val, alloca, ty)?;
                 }
             }
             Expr::Field(obj, field_name) => {
                 let val = self.compile_expr(value, vars)?;
                 self.compile_field_assign(obj, field_name, val, vars)?;
-                self.claim_returned_lists(Some(value), vars);
             }
             Expr::Index(obj, idx) => {
                 let val = self.compile_expr(value, vars)?;
