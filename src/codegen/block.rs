@@ -66,7 +66,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             match stmt.unlocated() {
                 Stmt::Expr(expr) => {
-                    self.compile_expr(expr, vars)?;
+                    // 0.35.23 deep-eval: statement-position match arms have no
+                    // value semantics (mimi-log `match content { Ok(d) => {
+                    // lines = .. } Err(_) => { ok = false } }` — arm tails
+                    // are heterogeneous assignments; forcing a phi rejected
+                    // i1 vs ptr). Skip arm-value unification.
+                    if let Expr::Match(scrutinee, arms) = expr.unlocated() {
+                        self.compile_match_expr(scrutinee, arms, vars, true)?;
+                    } else {
+                        self.compile_expr(expr, vars)?;
+                    }
                 }
                 Stmt::Return(Some(expr)) => {
                     let mut val = self.compile_expr(expr, vars)?;
@@ -151,24 +160,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Return(None) => {
-                    self.compile_ensures_asserts(
-                        None,
-                        self.current_fn_ret_type()
-                            .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
-                        vars,
-                    )?;
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
+                    self.compile_ensures_asserts(None, ret_type, vars)?;
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
                     self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
-                    self.build_return(None)?;
+                    // 0.35.23 (deep-eval): bare `return` in a unit function —
+                    // the unit signature is i64, so `ret void` (old) was
+                    // invalid IR: O1 CalledValuePropagationPass SIGSEGV'd on
+                    // "func f() { if true { return } }". Return the i64 zero.
+                    let zero = self.zero_value_for(ret_type);
+                    self.build_return(Some(&zero))?;
                     return Ok(());
                 }
                 Stmt::Let {
                     pat,
                     init: Some(init),
                     ty,
+                    ref_: ref_flag,
                     ..
                 } => {
                     // dyn Trait let-binding: build fat pointer from concrete value (requires Variable pattern)
@@ -343,6 +356,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // For simple Variable patterns, track type info
                     if let PatternKind::Variable(name) = &pat.kind {
+                        if *ref_flag {
+                            // 0.35.23 deep-eval: `let ref x = ...` stores the
+                            // value in a plain slot (value layout T, surface
+                            // type &T). Record it so `*x` derefs by identity.
+                            self.ref_bound_vars.insert(name.clone());
+                        }
+                        if let Expr::Field(_, _) = init.unlocated() {
+                            let field_ty = self.infer_object_type(init, vars);
+                            if !field_ty.is_empty() {
+                                self.var_type_names.insert(name.clone(), field_ty);
+                            }
+                        }
                         if let Some(decl_ty) = ty.as_ref() {
                             if let Some(full) = self.get_full_type_name(decl_ty) {
                                 self.var_type_names.insert(name.clone(), full);
@@ -390,6 +415,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .insert(name.clone(), Type::Name(tn.clone(), args));
                                     }
                                 }
+                            }
+                        } else if let Expr::Ident(src_name) = init.unlocated() {
+                            // 0.35.23 deep-eval (mimi-log main): `let y = x`
+                            // must inherit the source variable's tracked
+                            // type. `let mut display = filtered` above a
+                            // `for e in display` lost the List<LogEntry>
+                            // element type, so `e` bound as bare i64 and
+                            // `e.timestamp` failed E0700 in the legacy
+                            // emitter (the resolved/legacy split left main
+                            // with the legacy for-loop path).
+                            if let Some(src_ty) = self.var_type_names.get(src_name).cloned() {
+                                self.var_type_names.insert(name.clone(), src_ty);
+                            }
+                            if let Some(src_ty) = self.var_types.get(src_name).cloned() {
+                                self.var_types.insert(name.clone(), src_ty);
                             }
                         } else if matches!(init.unlocated(), Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "set".to_string());
@@ -610,7 +650,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             "read_file"
                                                 | "read_file_partial"
                                                 | "read_file_bytes"
-                                                | "input"
                                                 | "getenv"
                                                 | "base64_decode"
                                                 | "mimi_lexer_tokenize"
@@ -903,6 +942,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
+                        // 0.35.23 deep-eval (mimi-make E0707): `let r0 =
+                        // if n > 0 { parse_one(..) } else { Rule { .. } }`
+                        // — the chain above has no Expr::If / Expr::Block
+                        // arm, so `r0` stayed unregistered in
+                        // var_type_names and `r0.target` failed E0707.
+                        // Backfill from infer_object_type (which walks the
+                        // branch tails) when nothing else registered a type.
+                        if !self.var_type_names.contains_key(name)
+                            && matches!(init.unlocated(), Expr::If { .. } | Expr::Block(_))
+                        {
+                            let inferred = self.infer_object_type(init, vars);
+                            if !inferred.is_empty() {
+                                self.var_type_names.insert(name.clone(), inferred);
+                            }
+                        }
                     }
                     // Track list element type for nested List<List<T>> indexing
                     if let PatternKind::Variable(name) = &pat.kind {
@@ -935,8 +989,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
-                    let val = self.normalize_string_value(val, init)?;
+                    // 0.35.23 deep-eval: `let y = x` inherits the source
+                    // variable's tracked type — the compile_block_last_val
+                    // counterpart of the compile_block fix above (mimi-log
+                    // main's `let mut display = filtered` inside an if/else
+                    // branch compiles through THIS path; without it
+                    // `for e in display` bound `e` as bare i64 and field
+                    // access failed E0700).
+                    if let (PatternKind::Variable(name), Expr::Ident(src_name)) =
+                        (&pat.kind, init.unlocated())
+                    {
+                        if !self.var_type_names.contains_key(name.as_str()) {
+                            if let Some(src_ty) = self.var_type_names.get(src_name).cloned() {
+                                self.var_type_names.insert(name.clone(), src_ty);
+                            }
+                        }
+                        if !self.var_types.contains_key(name.as_str()) {
+                            if let Some(src_ty) = self.var_types.get(src_name).cloned() {
+                                self.var_types.insert(name.clone(), src_ty);
+                            }
+                        }
+                    }
                     self.compile_pattern_bind(pat, val, vars)?;
+                    if let PatternKind::Tuple(sub_pats) = &pat.kind {
+                        if let Expr::Call(callee, _) = init.unlocated() {
+                            if let Expr::Ident(func_name) = callee.unlocated() {
+                                if func_name == "map_get" && sub_pats.len() == 2 {
+                                    if let PatternKind::Variable(name) = &sub_pats[1].kind {
+                                        self.var_type_names.insert(name.clone(), "any".to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let PatternKind::Variable(name) = &pat.kind {
                         if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name).is_some() {
@@ -1544,7 +1629,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 body: else_body,
             },
         ];
-        self.compile_match_expr(init, &arms, vars)?;
+        self.compile_match_expr(init, &arms, vars, true)?;
         Ok(())
     }
 
@@ -1710,18 +1795,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(None) => {
                     // 0.34.36 (audit §6.7): same cleanup parity as the
                     // valued-Return arm above (mirrors compile_block:144-159).
-                    self.compile_ensures_asserts(
-                        None,
-                        self.current_fn_ret_type()
-                            .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
-                        vars,
-                    )?;
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
+                    self.compile_ensures_asserts(None, ret_type, vars)?;
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.flush_heap_scopes_to_boundary()?;
                     self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
-                    self.build_return(None)?;
+                    // 0.35.23 (deep-eval): bare `return` in a unit function —
+                    // the unit signature is i64, so `ret void` (old) was
+                    // invalid IR: O1 CalledValuePropagationPass SIGSEGV'd on
+                    // "func f() { if true { return } }". Return the i64 zero.
+                    let zero = self.zero_value_for(ret_type);
+                    self.build_return(Some(&zero))?;
                     return Ok(self.context.i64_type().const_int(0, false).into());
                 }
                 Stmt::Let {
@@ -1729,8 +1817,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     init: Some(init),
                     ty,
                     mut_: _,
-                    ref_: _,
+                    ref_,
                 } => {
+                    let ref_flag = *ref_;
+                    // 0.35.23 deep-eval: `let ref x: i32 = 42` in the
+                    // compile_block_last_val path (legacy funcs with bare
+                    // `return`) binds the value into a plain slot; record it
+                    // so `*x` derefs by identity (VM parity).
+                    if ref_flag {
+                        if let PatternKind::Variable(name) = &pat.kind {
+                            self.ref_bound_vars.insert(name.clone());
+                        }
+                    }
                     // Typed list literals: seed pending_list_elem_type so
                     // Result/Option list elements pack with a uniform layout.
                     let saved_list_elem = self.pending_list_elem_type.take();
@@ -1772,10 +1870,73 @@ impl<'ctx> CodeGenerator<'ctx> {
                         val
                     };
                     self.compile_pattern_bind(pat, val, vars)?;
+                    if let PatternKind::Tuple(sub_pats) = &pat.kind {
+                        if let Expr::Call(callee, _) = init.unlocated() {
+                            if let Expr::Ident(func_name) = callee.unlocated() {
+                                if func_name == "map_get" && sub_pats.len() == 2 {
+                                    if let PatternKind::Variable(name) = &sub_pats[1].kind {
+                                        self.var_type_names.insert(name.clone(), "any".to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let PatternKind::Variable(name) = &pat.kind {
+                        // 0.35.23 deep-eval: `let y = x` inherits the source
+                        // variable's tracked type — the compile_block_last_val
+                        // counterpart (mimi-log main's `let mut display =
+                        // filtered` inside an if/else branch compiles through
+                        // THIS path; without it `for e in display` bound `e`
+                        // as bare i64 and field access failed E0700).
+                        if let Expr::Ident(src_name) = init.unlocated() {
+                            if !self.var_type_names.contains_key(name.as_str()) {
+                                if let Some(src_ty) = self.var_type_names.get(src_name).cloned() {
+                                    self.var_type_names.insert(name.clone(), src_ty);
+                                }
+                            }
+                            if !self.var_types.contains_key(name.as_str()) {
+                                if let Some(src_ty) = self.var_types.get(src_name).cloned() {
+                                    self.var_types.insert(name.clone(), src_ty);
+                                }
+                            }
+                        }
                         if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
+                        }
+                        // 0.35.23 deep-eval: turbofish-typed bindings in the
+                        // compile_block_last_val path (mimichat
+                        // display_server_message's `let room_list =
+                        // from_json::<List<string>>(rooms_json)` inside an
+                        // if-branch) — without this `for r in room_list {
+                        // println("    - " + r) }` bound `r` as bare i64 and
+                        // the string concat failed "add requires same numeric
+                        // types".
+                        if let Expr::Turbofish(_func_name, turbo_type_args, _) = init.unlocated() {
+                            if let Some(ta) = turbo_type_args.first() {
+                                if let Type::Name(tn, args) = ta.unlocated() {
+                                    if tn == "List" && !args.is_empty() {
+                                        if let Some(full) = self.get_full_type_name(ta) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        } else {
+                                            self.var_type_names
+                                                .insert(name.clone(), crate::core::fmt_type(ta));
+                                        }
+                                        self.var_types.insert(name.clone(), ta.clone());
+                                        self.register_list_elem_type(name, ta);
+                                    } else if (tn == "Map" || tn == "Set") && !args.is_empty() {
+                                        if let Some(full) = self.get_full_type_name(ta) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        } else {
+                                            self.var_type_names.insert(name.clone(), tn.clone());
+                                        }
+                                        self.var_types.insert(name.clone(), ta.clone());
+                                    } else {
+                                        self.var_type_names.insert(name.clone(), tn.clone());
+                                        self.var_types.insert(name.clone(), ta.clone());
+                                    }
+                                }
+                            }
                         }
                         // 2026-08-06 (audit 1j): Set literals `{1, 2}` compile
                         // to an opaque i64 handle with no var_type_names entry,
@@ -1858,6 +2019,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                                 match fn_name.as_str() {
+                                    // 0.35.23 deep-eval: `let rr = read_file(..)`
+                                    // inside an if/then branch (compile_block_last_val
+                                    // path) left rr untyped, so `rr.is_ok()` failed
+                                    // with "method 'is_ok' not compiled for type 'rr'"
+                                    // (mimi-todo load_tasks). Mirror compile_block's
+                                    // builtin Result registration here.
+                                    "read_file"
+                                    | "read_file_partial"
+                                    | "read_file_bytes"
+                                    | "getenv"
+                                    | "base64_decode"
+                                    | "mimi_lexer_tokenize"
+                                    | "mimi_parse_source" => {
+                                        self.var_type_names.insert(
+                                            name.clone(),
+                                            "Result<string,string>".to_string(),
+                                        );
+                                    }
+                                    "write_file" | "write_file_bytes" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "Result<(), string>".to_string());
+                                    }
                                     "words" | "lines" | "split" | "str_split" | "listdir"
                                     | "walk_dir" | "sort_str" | "keys" => {
                                         self.var_type_names
@@ -1987,75 +2170,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
+                        // 0.35.23 deep-eval (mimi-make E0707): the
+                        // compile_block_last_val counterpart of the
+                        // compile_block If/Block backfill — `let r0 =
+                        // if n > 0 { parse_one(..) } else { Rule {..} }`
+                        // in a value-position body (main) flows through
+                        // THIS path; without it `r0.target` fails E0707.
+                        if !self.var_type_names.contains_key(name.as_str())
+                            && matches!(init.unlocated(), Expr::If { .. } | Expr::Block(_))
+                        {
+                            let inferred = self.infer_object_type(init, vars);
+                            if !inferred.is_empty() {
+                                self.var_type_names.insert(name.clone(), inferred);
+                            }
+                        }
                     }
                 }
                 Stmt::Assign { target, value } => {
-                    // v0.31.6: match on `target.unlocated()`. Span/Origin (v0.31.1)
-                    // wraps the assignment target in `Expr::Located`, so the previous
-                    // per-shape patterns (`target: Expr::Ident(..)` / `Field` / `Index`
-                    // / `Unary(Deref)`) missed Located-wrapped targets and silently
-                    // dropped the store into the `_ => {}` arm — e.g. `if true { x = 5 }`
-                    // compiled to an empty then-block. Mirrors `compile_assign_stmt`,
-                    // which already unlocates the target.
-                    match target.unlocated() {
-                        Expr::Ident(name) => {
-                            let val = self.compile_expr(value, vars)?;
-                            // Normalize string values for consistent alloca types
-                            let val = self.normalize_string_value(val, value)?;
-                            // Inflate narrow variant structs (from Err/None) to match the
-                            // variable's declared struct layout (e.g. {i1,i64,i64} → {i1,{ptr,i64},i64}).
-                            let val = if let Some(decl_ty) = self.var_types.get(name) {
-                                self.inflate_variant_struct(val, decl_ty)?
-                            } else {
-                                val
-                            };
-                            if let Some(&(alloca, ty)) = vars.get(name) {
-                                // Transfer ownership: for string concat/fstring results,
-                                // pop the heap registration and register the variable
-                                // slot so the data is not freed at end of scope.
-                                let is_string_val = self
-                                    .var_type_names
-                                    .get(name)
-                                    .map(|t| t == "string")
-                                    .unwrap_or(false);
-                                let is_temp = matches!(
-                                    value.unlocated(),
-                                    Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
-                                );
-                                if is_string_val && is_temp {
-                                    self.pop_last_heap_ptr();
-                                    if let BasicTypeEnum::StructType(st) = ty {
-                                        if st.get_field_types().len() == 2 {
-                                            self.register_heap_slot_root(alloca, st, 0);
-                                        }
-                                    }
-                                }
-                                self.assign_to_var(name, val, alloca, ty)?;
-                                last_val = val;
-                            }
-                        }
-                        Expr::Field(obj, field_name) => {
-                            let val = self.compile_expr(value, vars)?;
-                            self.compile_field_assign(obj, field_name, val, vars)?;
-                            last_val = val;
-                        }
-                        Expr::Index(obj, idx) => {
-                            let val = self.compile_expr(value, vars)?;
-                            self.compile_index_assign(obj, idx, val, vars)?;
-                            last_val = val;
-                        }
-                        Expr::Unary(crate::ast::UnOp::Deref, inner) => {
-                            let val = self.compile_expr(value, vars)?;
-                            self.compile_deref_assign(inner, val, vars)?;
-                            last_val = val;
-                        }
-                        other => {
-                            return Err(CompileError::LlvmError(format!(
-                                "unsupported assignment target in value position: {:?}",
-                                other
-                            )));
-                        }
-                    }
+                    self.compile_assign_stmt(target, value, vars)?;
                 }
                 Stmt::If { cond, then_, else_ } => {
                     if let Some(v) = self.compile_if_stmt(cond, then_, else_, vars, false)? {

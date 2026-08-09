@@ -790,7 +790,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     // Mimi list struct: {i64 len, ptr data} — require i64 len
                     // so Option {i1, ptr} is not misclassified as List.
-                    let str_ptr = self.emit_list_typed_to_string(*sv, &arg_type)?;
+                    let str_ptr = self.emit_list_typed_to_string(*sv, arg_type)?;
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
@@ -929,7 +929,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         && matches!(fields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
                     if (!is_named || is_product_alias) && !is_enum_layout {
-                        let str_ptr = self.emit_product_tuple_to_string(*sv, Some(&arg_type))?;
+                        let str_ptr = self.emit_product_tuple_to_string(*sv, Some(arg_type))?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -2576,8 +2576,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .is_some_and(|s| s.starts_with("List<"))
         {
             // Nested list: pick inner-list formatter from element type.
-            let mid = Self::strip_first_type_arg(list_ty, "List")
-                .unwrap_or_else(|| "List".to_string());
+            let mid =
+                Self::strip_first_type_arg(list_ty, "List").unwrap_or_else(|| "List".to_string());
             let elem = Self::strip_first_type_arg(&mid, "List").unwrap_or_default();
             if elem.starts_with('(') {
                 // List of List of product tuples.
@@ -2600,8 +2600,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 self.emit_list_list_to_string(sv, inner_fn)?
             }
-        } else if let Some(inner) =
-            list_ty.strip_prefix("List<").and_then(|s| s.strip_suffix('>'))
+        } else if let Some(inner) = list_ty
+            .strip_prefix("List<")
+            .and_then(|s| s.strip_suffix('>'))
         {
             if self
                 .type_defs
@@ -2644,7 +2645,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .strip_prefix("Map<string, ")
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val) {
+                            if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val)
+                            {
                                 let elem = if self.is_product_tuple_alias(inner_val) {
                                     self.resolve_alias_type_name(inner_val)
                                 } else {
@@ -5611,7 +5613,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     // Product tuple / multi-field struct by-value (not nested
                     // Option/Result and not List {i64,ptr}).
-                    let tup_str = self.emit_product_tuple_to_string(psv, Some(&arg_type))?;
+                    let tup_str = self.emit_product_tuple_to_string(psv, Some(arg_type))?;
                     OptPay::StrPtr(tup_str)
                 } else {
                     OptPay::Int(i64_ty.const_int(0, false))
@@ -7729,8 +7731,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         // Nested product — recurse with the sub-field type.
                         let sub = type_str.and_then(|ts| Self::tuple_field_type(ts, i));
-                        let nested =
-                            self.emit_product_tuple_to_string(fsv, sub.as_deref())?;
+                        let nested = self.emit_product_tuple_to_string(fsv, sub.as_deref())?;
                         parts.push(CatPart::Dyn(nested));
                     }
                 }

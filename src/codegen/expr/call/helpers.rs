@@ -112,7 +112,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap_or(false),
             Expr::Call(callee, _) => {
                 if let Expr::Ident(name) = callee.unlocated() {
-                    matches!(
+                    if matches!(
                         name.as_str(),
                         "to_string"
                             | "int_to_string"
@@ -126,10 +126,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                             | "str_repeat"
                             | "str_replace"
                             | "str_join"
+                            | "str_pad_start"
+                            | "str_pad_end"
+                            | "str_reverse"
                             | "type_name"
                             | "from_json"
+                            | "to_json"
+                            | "json_get_string"
+                            | "json_to_string"
                             | "c_str_to_string"
-                    )
+                            | "base64_encode"
+                            | "base64_decode"
+                            | "sha256"
+                            | "hex_encode"
+                            | "hex_decode"
+                            | "fs_read"
+                            | "env_get_var"
+                            | "template_render"
+                            | "regex_replace"
+                            | "regex_find"
+                    ) {
+                        return true;
+                    }
+                    if let Some(fdef) = self.func_defs.get(name.as_str()) {
+                        if let Some(ret_ty) = &fdef.ret {
+                            if let Type::Name(tn, args) = ret_ty.unlocated() {
+                                if tn == "string" && args.is_empty() {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    false
                 } else if let Expr::Field(_, method) = callee.unlocated() {
                     matches!(
                         method.as_str(),

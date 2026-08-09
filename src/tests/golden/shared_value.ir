@@ -745,9 +745,11 @@ declare void @mimi_trap_div_overflow()
 
 declare void @mimi_trap_float_not_finite(ptr)
 
-define i32 @main() {
+define i32 @main(i32 %0, ptr %1) {
 entry:
   %x = alloca i64, align 8
+  %main_argc_64 = zext i32 %0 to i64
+  call void @mimi_args_init(i64 %main_argc_64, ptr %1)
   store i64 42, ptr %x, align 4
   %x1 = load i64, ptr %x, align 4
   %trunc = trunc i64 %x1 to i32
@@ -789,41 +791,98 @@ entry:
   %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %self = alloca {}, align 8
   store {} %0, ptr %self, align 1
+  %strlen_call = call i64 @strlen(ptr @str)
+  %str_wrap_len = insertvalue { ptr, i64 } { ptr @str, i64 undef }, i64 %strlen_call, 1
   %last_state = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
-  store ptr @str, ptr %last_state, align 8
+  store { ptr, i64 } %str_wrap_len, ptr %last_state, align 8
+  %strlen_call1 = call i64 @strlen(ptr @str.1)
+  %str_wrap_len2 = insertvalue { ptr, i64 } { ptr @str.1, i64 undef }, i64 %strlen_call1, 1
   %unexpected_event = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
-  store ptr @str.1, ptr %unexpected_event, align 8
+  store { ptr, i64 } %str_wrap_len2, ptr %unexpected_event, align 8
+  %strlen_call3 = call i64 @strlen(ptr @str.2)
+  %str_wrap_len4 = insertvalue { ptr, i64 } { ptr @str.2, i64 undef }, i64 %strlen_call3, 1
   %snapshot = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
-  store ptr @str.2, ptr %snapshot, align 8
+  store { ptr, i64 } %str_wrap_len4, ptr %snapshot, align 8
+  %strlen_call5 = call i64 @strlen(ptr @str.3)
+  %str_wrap_len6 = insertvalue { ptr, i64 } { ptr @str.3, i64 undef }, i64 %strlen_call5, 1
   %last_state_name = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 0
-  store ptr @str.3, ptr %last_state_name, align 8
-  %unexpected_event1 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 1
-  store ptr @str.4, ptr %unexpected_event1, align 8
-  %snapshot2 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 2
-  store ptr @str.5, ptr %snapshot2, align 8
+  store { ptr, i64 } %str_wrap_len6, ptr %last_state_name, align 8
+  %strlen_call7 = call i64 @strlen(ptr @str.4)
+  %str_wrap_len8 = insertvalue { ptr, i64 } { ptr @str.4, i64 undef }, i64 %strlen_call7, 1
+  %unexpected_event9 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 1
+  store { ptr, i64 } %str_wrap_len8, ptr %unexpected_event9, align 8
+  %strlen_call10 = call i64 @strlen(ptr @str.5)
+  %str_wrap_len11 = insertvalue { ptr, i64 } { ptr @str.5, i64 undef }, i64 %strlen_call10, 1
+  %snapshot12 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 2
+  store { ptr, i64 } %str_wrap_len11, ptr %snapshot12, align 8
+  %strlen_call13 = call i64 @strlen(ptr @str.6)
+  %str_wrap_len14 = insertvalue { ptr, i64 } { ptr @str.6, i64 undef }, i64 %strlen_call13, 1
   %fields = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 0
-  store ptr @str.6, ptr %fields, align 8
+  store { ptr, i64 } %str_wrap_len14, ptr %fields, align 8
   %count = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 1
   store i32 0, ptr %count, align 4
   %memory_dump = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 3
   %load_memory_dump = load { { ptr, i64 }, i32 }, ptr %MemoryDump, align 8
   store { { ptr, i64 }, i32 } %load_memory_dump, ptr %memory_dump, align 8
+  %strlen_call15 = call i64 @strlen(ptr @str.7)
+  %str_wrap_len16 = insertvalue { ptr, i64 } { ptr @str.7, i64 undef }, i64 %strlen_call15, 1
   %error_type = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 0
-  store ptr @str.7, ptr %error_type, align 8
+  store { ptr, i64 } %str_wrap_len16, ptr %error_type, align 8
+  %strlen_call17 = call i64 @strlen(ptr @str.8)
+  %str_wrap_len18 = insertvalue { ptr, i64 } { ptr @str.8, i64 undef }, i64 %strlen_call17, 1
   %file = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 1
-  store ptr @str.8, ptr %file, align 8
+  store { ptr, i64 } %str_wrap_len18, ptr %file, align 8
   %line = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 2
   store i32 0, ptr %line, align 4
+  %strlen_call19 = call i64 @strlen(ptr @str.9)
+  %str_wrap_len20 = insertvalue { ptr, i64 } { ptr @str.9, i64 undef }, i64 %strlen_call19, 1
   %stack = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 3
-  store ptr @str.9, ptr %stack, align 8
+  store { ptr, i64 } %str_wrap_len20, ptr %stack, align 8
   %panic_payload = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 4
   %load_panic_payload = load { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, align 8
   store { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %load_panic_payload, ptr %panic_payload, align 8
   %trace = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 3
   %load_trace = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %load_trace, ptr %trace, align 8
+  %agg_claim_ld = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
+  %agg_str_field = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 0
+  %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  %agg_str_field21 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 1
+  %agg_str_data22 = extractvalue { ptr, i64 } %agg_str_field21, 0
+  %agg_str_field23 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
+  %agg_str_data24 = extractvalue { ptr, i64 } %agg_str_field23, 0
   %ret_load = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
-  ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
+  %ret_rec_f = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
+  %ret_rec_nf = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { ptr, i64 } %ret_rec_f, 0
+  %ret_rec_f25 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
+  %ret_rec_nf26 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { ptr, i64 } %ret_rec_f25, 1
+  %ret_rec_f27 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf26, 2
+  %ret_rec_nf28 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf26, { ptr, i64 } %ret_rec_f27, 2
+  %ret_rec_f29 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf28, 3
+  %ret_rec_f30 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f29, 0
+  %ret_rec_nf31 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f29, { ptr, i64 } %ret_rec_f30, 0
+  %ret_rec_f32 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, 1
+  %ret_rec_nf33 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, { ptr, i64 } %ret_rec_f32, 1
+  %ret_rec_f34 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf33, 2
+  %ret_rec_nf35 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf33, { ptr, i64 } %ret_rec_f34, 2
+  %ret_rec_f36 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf35, 3
+  %ret_rec_f37 = extractvalue { { ptr, i64 }, i32 } %ret_rec_f36, 0
+  %ret_rec_nf38 = insertvalue { { ptr, i64 }, i32 } %ret_rec_f36, { ptr, i64 } %ret_rec_f37, 0
+  %ret_rec_f39 = extractvalue { { ptr, i64 }, i32 } %ret_rec_nf38, 1
+  %ret_rec_nf40 = insertvalue { { ptr, i64 }, i32 } %ret_rec_nf38, i32 %ret_rec_f39, 1
+  %ret_rec_nf41 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf35, { { ptr, i64 }, i32 } %ret_rec_nf40, 3
+  %ret_rec_f42 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf41, 4
+  %ret_rec_f43 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f42, 0
+  %ret_rec_nf44 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f42, { ptr, i64 } %ret_rec_f43, 0
+  %ret_rec_f45 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, 1
+  %ret_rec_nf46 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, { ptr, i64 } %ret_rec_f45, 1
+  %ret_rec_f47 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf46, 2
+  %ret_rec_nf48 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf46, i32 %ret_rec_f47, 2
+  %ret_rec_f49 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf48, 3
+  %ret_rec_nf50 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf48, { ptr, i64 } %ret_rec_f49, 3
+  %ret_rec_nf51 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf41, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf50, 4
+  %ret_rec_nf52 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf28, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf51, 3
+  ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf52
 }
 
 define { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
@@ -859,8 +918,23 @@ entry:
   %trace14 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %trace, align 8
   %trace15 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 3
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %trace14, ptr %trace15, align 8
+  %agg_claim_ld = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
+  %agg_str_field = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 0
+  %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  %agg_str_field16 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 1
+  %agg_str_data17 = extractvalue { ptr, i64 } %agg_str_field16, 0
+  %agg_str_field18 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
+  %agg_str_data19 = extractvalue { ptr, i64 } %agg_str_field18, 0
   %ret_load = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
-  ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
+  %ret_rec_f = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
+  %ret_rec_nf = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { ptr, i64 } %ret_rec_f, 0
+  %ret_rec_f20 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
+  %ret_rec_nf21 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { ptr, i64 } %ret_rec_f20, 1
+  %ret_rec_f22 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf21, 2
+  %ret_rec_nf23 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf21, { ptr, i64 } %ret_rec_f22, 2
+  %ret_rec_f24 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf23, 3
+  %ret_rec_nf25 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf23, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f24, 3
+  ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf25
 }
 
 attributes #0 = { noreturn }

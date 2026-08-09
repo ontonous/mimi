@@ -1320,7 +1320,12 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
                 if !seen_names.insert(name.clone()) {
                     let dup_modules: Vec<String> = modules
                         .values()
-                        .filter(|m| m.file.items.iter().any(|i| item_name(i).as_deref() == Some(&name[..])))
+                        .filter(|m| {
+                            m.file
+                                .items
+                                .iter()
+                                .any(|i| item_name(i).as_deref() == Some(&name[..]))
+                        })
                         .map(|m| m.path.display().to_string())
                         .collect();
                     return Err(format!(

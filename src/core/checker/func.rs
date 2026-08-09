@@ -177,13 +177,20 @@ impl<'a> Checker<'a> {
             };
             let coerced = is_numeric_coercion(&ret, &last_ty_clean);
             let type_ok = coerced || self.unification.unify(&ret, &last_ty_clean).is_ok();
-            if !type_ok && !matches!(ret.unlocated(), Type::Name(n, _) if n == "unit") {
+            if !type_ok {
+                // 0.35.23 deep-eval: the old `!unit` exemption silently
+                // discarded a non-unit tail expression in a unit function
+                // (e.g. `func send_help() { send(...) }` — send returns i64).
+                // The resolved layer then hard-rejected the body as
+                // TOOL-RESOLUTION-001 ("i64 and () have no admitted implicit
+                // conversion"), leaking an internal error to the user. Report
+                // E0207 up front so the mismatch is a clear diagnostic.
                 self.errors.push(
                     Diagnostic::error_code(
                         crate::diagnostic::codes::E0207,
                         format!("implicit return: expected {}, found {}", fmt_type(&ret), fmt_type(&last_ty)),
                         self.diagnostic_span(),
-                    ).with_help("the last expression in a function body is implicitly returned; make sure its type matches the declared return type")
+                    ).with_help("the last expression in a function body is implicitly returned; make sure its type matches the declared return type — or discard it with `let _ = ...`")
                 );
             }
         }

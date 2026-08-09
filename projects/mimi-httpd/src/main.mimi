@@ -110,7 +110,7 @@ func handle_client(client_fd: i64) {
     let resp = route_request(req)
     let response_str = build_response(resp)
     send(client_fd, response_str)
-    close_fd(client_fd)
+    let _ = close_fd(client_fd)
 }
 
 func main() -> i32 {

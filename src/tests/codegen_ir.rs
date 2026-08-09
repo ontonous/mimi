@@ -35,8 +35,8 @@ fn ir_module_has_filename() {
 fn ir_i32_returns_i32() {
     let ir = compile_to_ir("func main() -> i32 { 42 }");
     assert!(
-        ir.contains("define i32 @main()"),
-        "i32 should map to i32 in IR (A1 restoration)"
+        ir.contains("define i32 @main(i32"),
+        "i32 should map to i32 in IR (A1 restoration); main carries the C (argc, argv) pair since 0.35.23"
     );
 }
 
@@ -157,13 +157,13 @@ fn ir_icmp_ne() {
 #[test]
 fn ir_i64_return_type() {
     let ir = compile_to_ir("func main() -> i64 { 42 }");
-    assert!(ir.contains("define i64 @main()"), "i64 return type");
+    assert!(ir.contains("define i64 @main(i32"), "i64 return type");
 }
 
 #[test]
 fn ir_f64_return_type() {
     let ir = compile_to_ir("func main() -> f64 { 3.14 }");
-    assert!(ir.contains("define double @main()"), "f64 maps to double");
+    assert!(ir.contains("define double @main(i32"), "f64 maps to double");
 }
 
 // ===================== Logical Operator IR =====================

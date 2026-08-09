@@ -640,10 +640,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 let obj_type = self.infer_object_type(&args[0], vars);
-                if let Some(inner) = obj_type
-                    .strip_prefix("List<")
-                    .and_then(|s| s.strip_suffix('>'))
-                {
+                if obj_type == "List" || obj_type.starts_with("List<") {
+                    let inner_opt = obj_type
+                        .strip_prefix("List<")
+                        .and_then(|s| s.strip_suffix('>'));
+                    let inner = inner_opt.unwrap_or("i64");
                     let list_struct_ty = self.list_struct_type();
                     let alloca = self.build_alloca(list_struct_ty, "to_json_list_alloca")?;
                     match &metadata_args[0] {

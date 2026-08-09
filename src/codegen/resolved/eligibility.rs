@@ -489,7 +489,15 @@ fn require_scalar_type(
             item, arguments, ..
         }) => {
             match item.as_str() {
-                "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set" => {
+                // 0.35.23 deep-eval: `builtin:type:Record` is the type-erased
+                // map handle (map_new/map_set/from_json results) — same
+                // opaque-i64 lowering as Map/Set. Without it, mimi-log's main
+                // (count_by_* → Record) fell back to legacy and hit the legacy
+                // List<record> for-loop gap.
+                "builtin:type:List"
+                | "builtin:type:Map"
+                | "builtin:type:Set"
+                | "builtin:type:Record" => {
                     for arg in arguments {
                         require_scalar_type(program, owner, arg)?;
                     }

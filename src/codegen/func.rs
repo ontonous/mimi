@@ -41,7 +41,6 @@ fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
 }
 
 use super::CodeGenerator;
-use super::HeapEntry;
 use super::VarEntry;
 
 /// CG-H10 (audit): collect all identifier names referenced via `old(name)`
@@ -904,6 +903,76 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // Closures are not strings; claim env ownership first when applicable.
         let val = self.claim_returned_closure_env(val, ret_type)?;
+        // 0.35.23 deep-eval (mimi-make native UAF): aggregate returns that
+        // CARRY string fields — `(string, string)` tuples and records —
+        // leave the element heap buffers registered in this function's heap
+        // scope; the scope-exit flush freed them while the returned
+        // aggregate still referenced them (parse_variable's pair was later
+        // fed to mimi_str_clone: src == freed-and-reused dst →
+        // copy_nonoverlapping overlap abort). Claim each string-shaped
+        // field's data pointer so the guarded flush skips it — ownership
+        // transfers to the caller (same contract as closure envs, B9).
+        // Record/tuple values may arrive as an alloca POINTER (the implicit
+        // return path loads them only after this claim runs). Pre-check the
+        // field shapes FIRST so no IR is emitted unless a string field can
+        // actually be claimed (golden-IR stability for every other shape).
+        fn agg_claim_shape(st: inkwell::types::StructType) -> bool {
+            let fields = st.get_field_types();
+            let is_plain_string = fields.len() == 2
+                && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                && matches!(fields[1], BasicTypeEnum::IntType(_));
+            fields.len() >= 2
+                && !is_plain_string
+                && fields.iter().any(|f| match f {
+                    BasicTypeEnum::StructType(inner) => {
+                        let fs = inner.get_field_types();
+                        fs.len() == 2
+                            && matches!(fs[0], BasicTypeEnum::PointerType(_))
+                            && matches!(fs[1], BasicTypeEnum::IntType(_))
+                    }
+                    _ => false,
+                })
+        }
+        let agg_claim_val: Option<(
+            inkwell::types::StructType<'ctx>,
+            inkwell::values::StructValue<'ctx>,
+        )> = match (ret_type, val) {
+            (BasicTypeEnum::StructType(st), BasicValueEnum::StructValue(sv))
+                if agg_claim_shape(st) =>
+            {
+                Some((st, sv))
+            }
+            (BasicTypeEnum::StructType(st), BasicValueEnum::PointerValue(pv))
+                if agg_claim_shape(st) =>
+            {
+                match self.build_load(BasicTypeEnum::StructType(st), pv, "agg_claim_ld") {
+                    Ok(BasicValueEnum::StructValue(sv)) => Some((st, sv)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((st, sv)) = agg_claim_val {
+            let fields = st.get_field_types();
+            let is_plain_string = fields.len() == 2
+                && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                && matches!(fields[1], BasicTypeEnum::IntType(_));
+            if fields.len() >= 2 && !is_plain_string {
+                for (idx, fty) in fields.iter().enumerate() {
+                    if Self::is_string_llvm_type(*fty) {
+                        if let Ok(BasicValueEnum::StructValue(fsv)) =
+                            self.build_extract_value(sv.into(), idx as u32, "agg_str_field")
+                        {
+                            if let Ok(BasicValueEnum::PointerValue(data)) =
+                                self.build_extract_value(fsv.into(), 0, "agg_str_data")
+                            {
+                                self.claim_closure_env(data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let is_string_struct = match ret_type {
             BasicTypeEnum::StructType(st) => {
                 let fields = st.get_field_types();
@@ -1123,30 +1192,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(phi.as_basic_value())
     }
 
-    /// True when `ty` is the canonical Mimi list struct `{i64 len, ptr data}`.
-    fn is_list_llvm_type(ty: BasicTypeEnum<'ctx>) -> bool {
-        matches!(ty, BasicTypeEnum::StructType(st)
-            if st.get_field_types().len() == 2
-                && matches!(st.get_field_types()[0], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64)
-                && matches!(st.get_field_types()[1], BasicTypeEnum::PointerType(_)))
-    }
-
-    /// Drop every `HeapEntry::Slot(base, _, field)` registration matching
-    /// `(alloca, field)` from all live heap scopes, so the scope-exit free
-    /// skips the escaped buffer (ownership transfers to the caller).
-    fn remove_heap_slot(
-        &self,
-        alloca: inkwell::values::PointerValue<'ctx>,
-        field: u32,
-    ) {
-        let mut scopes = self.heap_allocs.borrow_mut();
-        for scope in scopes.iter_mut() {
-            scope.retain(|e| {
-                !matches!(e, HeapEntry::Slot(base, _, f) if *base == alloca && *f == field)
-            });
-        }
-    }
-
     /// L6: when a function returns a custom-enum-shaped value `{i32 tag, i64
     /// payload}`, claim the payload box pointer (field 1) so the callee's
     /// scope-exit free skips it — ownership transfers to the caller, which
@@ -1178,6 +1223,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) {
         match expr.map(|e| e.unlocated()) {
             Some(Expr::Ident(name)) => {
+                // 0.35.23 deep-eval (mutate_list_push_allowed SIGSEGV): a
+                // view/mutate borrow param's list storage IS the caller's
+                // struct (pointer ABI). Nulling its data field here (the
+                // implicit-return claim after `push(data, n)` recursed into
+                // the call args) destroyed the CALLER's list — main's
+                // `xs[2]` then loaded through a null data pointer.
+                if self.borrow_param_names.contains(name.as_str()) {
+                    return;
+                }
                 // List variables are stored as pointers to the {i64, ptr}
                 // list struct (the struct itself is an unnamed local). Null
                 // out the struct's data field: the scope-exit free loads the
@@ -1188,27 +1242,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let is_list_var = self
                     .var_type_names
                     .get(name)
-                    .map(|t| t.starts_with("List<"))
+                    .map(|t| t == "List" || t.starts_with("List<"))
                     .unwrap_or(false);
                 if is_list_var {
-                    if let Some(&(alloca, _ty)) = vars.get(name) {
+                    if let Some(&(alloca, ty)) = vars.get(name) {
                         let list_ty = self.list_struct_type();
-                        let list_ptr = match self.build_load(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                            alloca,
-                            &format!("{}_ret_list", name),
-                        ) {
-                            Ok(BasicValueEnum::PointerValue(p)) => p,
-                            _ => return,
+                        let struct_ptr = match ty {
+                            BasicTypeEnum::StructType(_) => alloca,
+                            BasicTypeEnum::PointerType(_) => {
+                                match self.build_load(
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    alloca,
+                                    &format!("{}_ret_list", name),
+                                ) {
+                                    Ok(BasicValueEnum::PointerValue(p)) => p,
+                                    _ => alloca,
+                                }
+                            }
+                            _ => alloca,
                         };
                         if let Ok(data_gep) = self.gep().build_struct_gep(
                             list_ty,
-                            list_ptr,
+                            struct_ptr,
                             1,
                             &format!("{}_ret_list_data", name),
                         ) {
-                            let null_ptr =
-                                self.context.ptr_type(inkwell::AddressSpace::default()).const_null();
+                            let null_ptr = self
+                                .context
+                                .ptr_type(inkwell::AddressSpace::default())
+                                .const_null();
                             let _ = self.build_store(data_gep, null_ptr);
                         }
                     }
@@ -1217,6 +1279,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(Expr::Tuple(elems)) => {
                 for e in elems {
                     self.claim_returned_lists(Some(e), vars);
+                }
+            }
+            Some(Expr::Record { fields, .. }) => {
+                for f in fields {
+                    self.claim_returned_lists(Some(&f.value), vars);
+                }
+            }
+            Some(Expr::Call(_, args)) => {
+                for a in args {
+                    self.claim_returned_lists(Some(a), vars);
+                }
+            }
+            Some(Expr::Block(stmts)) => {
+                if let Some(last) = stmts.last() {
+                    if let Stmt::Expr(e) = last.unlocated() {
+                        self.claim_returned_lists(Some(e), vars);
+                    }
                 }
             }
             _ => {}
@@ -1232,7 +1311,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// here so the caller owns a fresh one while the literal's original is
     /// freed harmlessly. Recurses into tuple fields. llvm.memcpy with size 0
     /// permits null pointers (LangRef), so empty lists need no special case.
-    fn claim_returned_list_literals(
+    pub(in crate::codegen) fn claim_returned_list_literals(
         &mut self,
         val: BasicValueEnum<'ctx>,
         expr: Option<&Expr>,
@@ -1243,15 +1322,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::StructValue(sv) => {
                     let mut new_sv = sv;
                     for (i, item) in items.iter().enumerate() {
-                        let fv =
-                            self.build_extract_value(new_sv.into(), i as u32, "ret_tup_f")?;
+                        let fv = self.build_extract_value(new_sv.into(), i as u32, "ret_tup_f")?;
                         let nf = self.claim_returned_list_literals(fv, Some(item))?;
                         new_sv = self
                             .builder
                             .build_insert_value(new_sv, nf, i as u32, "ret_tup_nf")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("tuple insert: {}", e))
-                            })?
+                            .map_err(|e| CompileError::LlvmError(format!("tuple insert: {}", e)))?
+                            .into_struct_value();
+                    }
+                    Ok(BasicValueEnum::StructValue(new_sv))
+                }
+                _ => Ok(val),
+            },
+            Some(Expr::Record { fields, .. }) => match val {
+                BasicValueEnum::StructValue(sv) => {
+                    let mut new_sv = sv;
+                    for (i, f) in fields.iter().enumerate() {
+                        let fv = self.build_extract_value(new_sv.into(), i as u32, "ret_rec_f")?;
+                        let nf = self.claim_returned_list_literals(fv, Some(&f.value))?;
+                        new_sv = self
+                            .builder
+                            .build_insert_value(new_sv, nf, i as u32, "ret_rec_nf")
+                            .map_err(|e| CompileError::LlvmError(format!("record insert: {}", e)))?
                             .into_struct_value();
                     }
                     Ok(BasicValueEnum::StructValue(new_sv))
@@ -1536,8 +1628,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_return(Some(&adjusted))?;
             }
             None => {
+                // 0.35.23 (deep-eval): a bare `return` in a unit function
+                // must `ret i64 0` — the unit signature is i64 (compile_func),
+                // so the old `ret void` was invalid IR (mismatched terminator)
+                // that O1's CalledValuePropagationPass SIGSEGV'd on
+                // ("func f() { if true { return } }" crash).
+                let zero = self.zero_value_for(ret_type);
                 self.flush_heap_scopes_to_boundary()?;
-                self.build_return(None)?;
+                self.build_return(Some(&zero))?;
             }
         }
         Ok(())
@@ -1556,7 +1654,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// If a block's last expression yields a raw C-string pointer (string
     /// literal), wrap it into the canonical {ptr, i64} struct so if-expressions
     /// and merge phis see a uniform string layout.
-    fn normalize_block_last_string(
+    pub(in crate::codegen) fn normalize_block_last_string(
         &self,
         val: BasicValueEnum<'ctx>,
         block: &Block,
@@ -1875,6 +1973,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<ControlFlow<(), BasicValueEnum<'ctx>>> {
         let ret_ty_ast = func.ret.as_ref();
         self.current_fn_ret_ty_ast = func.ret.clone();
+        // 0.35.23 deep-eval: refresh the borrow-param guard set for this
+        // body — claim_returned_lists must skip view/mutate params whose
+        // list storage is the caller's struct (pointer ABI).
+        self.borrow_param_names = func
+            .params
+            .iter()
+            .filter(|p| p.borrow.is_some())
+            .map(|p| p.name.clone())
+            .collect();
         // audit (MEDIUM): empty function bodies must not silently return a
         // default value of the wrong type (e.g. i64(0) for a struct-returning
         // function). For empty bodies with struct return, use `undef` —
@@ -1920,9 +2027,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             match stmt.unlocated() {
                 Stmt::Expr(expr) => {
-                    last_val = self.compile_expr(expr, vars)?;
-                    last_val = self.adjust_int_val(last_val, ret_type)?;
-                    last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                    // 0.35.23 deep-eval: a NON-tail statement-position match
+                    // discards its value (mimi-log main `match content {..}`
+                    // with heterogeneous assignment tails previously errored
+                    // E0200 "match arm values have incompatible types"). Tail
+                    // matches keep expression semantics (implicit return).
+                    if matches!(expr.unlocated(), Expr::Match(..)) && !is_tail {
+                        if let Expr::Match(scrutinee, arms) = expr.unlocated() {
+                            self.compile_match_expr(scrutinee, arms, vars, true)?;
+                        }
+                    } else {
+                        last_val = self.compile_expr(expr, vars)?;
+                        last_val = self.adjust_int_val(last_val, ret_type)?;
+                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+                    }
                 }
                 Stmt::Return(Some(expr)) => {
                     let mut val = self.compile_expr(expr, vars)?;
@@ -2240,6 +2358,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                     val = self.normalize_string_value(val, init)?;
                     // Track type info for simple Variable patterns
                     if let PatternKind::Variable(name) = &pat.kind {
+                        // 0.35.23 deep-eval: `let y = x` inherits the source
+                        // variable's tracked type (top-level body counterpart
+                        // of the block.rs fixes). mimi-log main's
+                        // `let mut filtered = entries` above `for e in
+                        // display` lost the List<LogEntry> element type, so
+                        // the element bound as bare i64 and field access
+                        // failed E0700 in the legacy emitter.
+                        if let Expr::Ident(src_name) = init.unlocated() {
+                            if std::env::var("MIMI_VERBOSE").is_ok() {
+                                eprintln!(
+                                    "DBG let-ident inherit: name={} src={} src_ty_names={:?} src_ty={:?}",
+                                    name,
+                                    src_name,
+                                    self.var_type_names.get(src_name),
+                                    self.var_types.get(src_name)
+                                );
+                            }
+                            if !self.var_type_names.contains_key(name.as_str()) {
+                                if let Some(src_ty) = self.var_type_names.get(src_name).cloned() {
+                                    self.var_type_names.insert(name.clone(), src_ty);
+                                }
+                            }
+                            if !self.var_types.contains_key(name.as_str()) {
+                                if let Some(src_ty) = self.var_types.get(src_name).cloned() {
+                                    self.var_types.insert(name.clone(), src_ty);
+                                }
+                            }
+                        }
+                        // 0.35.23 deep-eval: `let buf = store.buffer` — a
+                        // field-access init must register the field's type
+                        // (infer_object_type resolves it via the record
+                        // catalog). Without this, `buf[i]` on a List<string>
+                        // returned the raw i64 slot and json_is_valid(msg)
+                        // failed "expected a string argument" (mimichat
+                        // MessageStore::store_get_by_room).
+                        if let Expr::Field(_, _) = init.unlocated() {
+                            let field_ty = self.infer_object_type(init, vars);
+                            if !field_ty.is_empty() {
+                                self.var_type_names.insert(name.clone(), field_ty);
+                            }
+                        }
                         if let Some(ty_ref) = &ty {
                             if let Type::Name(tn, args) = ty_ref.unlocated() {
                                 if !args.is_empty() {
@@ -2750,6 +2909,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
+                        // 0.35.23 deep-eval (mimi-make E0707): the
+                        // top-level-body counterpart of the block.rs If/Block
+                        // backfill — `let r0 = if n > 0 { parse_one(..) }
+                        // else { Rule {..} }` in main's top level flows
+                        // through THIS path (compile_func_body); without it
+                        // `r0.target` fails E0707 because var_type_names
+                        // never learns "Rule".
+                        if !self.var_type_names.contains_key(name.as_str())
+                            && matches!(init.unlocated(), Expr::If { .. } | Expr::Block(_))
+                        {
+                            let inferred = self.infer_object_type(init, vars);
+                            if !inferred.is_empty() {
+                                self.var_type_names.insert(name.clone(), inferred);
+                            }
+                        }
                         // Track list element type for nested List<List<T>> indexing
                         if let Some(decl_ty) = &ty {
                             self.register_list_elem_type(name, decl_ty);
@@ -2796,6 +2970,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let PatternKind::Tuple(sub_pats) = &pat.kind {
                         if !sub_pats.is_empty() {
                             self.tuple_type_stack.pop();
+                        }
+                        if let Expr::Call(callee, _) = init.unlocated() {
+                            if let Expr::Ident(func_name) = callee.unlocated() {
+                                if func_name == "map_get" && sub_pats.len() == 2 {
+                                    if let PatternKind::Variable(name) = &sub_pats[1].kind {
+                                        self.var_type_names.insert(name.clone(), "any".to_string());
+                                    }
+                                }
+                            }
                         }
                     }
                     if let PatternKind::Variable(name) = &pat.kind {
@@ -3465,13 +3648,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|t| types::basic_to_metadata(self.context, *t))
             .collect();
 
-        let fn_type = match ret_type {
-            BasicTypeEnum::IntType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::FloatType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::PointerType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::StructType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::ArrayType(t) => t.fn_type(&metadata_params, false),
-            _ => self.context.i64_type().fn_type(&metadata_params, false),
+        // 0.35.23 deep-eval: the native entry `main` receives the C
+        // (argc, argv) pair so the generated executable can seed the runtime
+        // CLI args (mimi_args_init) — args()/cli_args() were EMPTY in every
+        // `mimi build` binary before this (mimi-log, mimi-lint, mimi-kv,
+        // mimichat all read CLI args; the VM got them via with_cli_args).
+        // argc is declared i32 to match the C main ABI (SysV passes argc in
+        // edi — reading a declared i64 would eat garbage high bits).
+        let fn_type = if func.name == "main" {
+            let main_params = [
+                BasicMetadataTypeEnum::IntType(self.context.i32_type()),
+                BasicMetadataTypeEnum::PointerType(self.context.ptr_type(AddressSpace::default())),
+            ];
+            match ret_type {
+                BasicTypeEnum::IntType(t) => t.fn_type(&main_params, false),
+                BasicTypeEnum::FloatType(t) => t.fn_type(&main_params, false),
+                BasicTypeEnum::PointerType(t) => t.fn_type(&main_params, false),
+                BasicTypeEnum::StructType(t) => t.fn_type(&main_params, false),
+                BasicTypeEnum::ArrayType(t) => t.fn_type(&main_params, false),
+                _ => self.context.i64_type().fn_type(&main_params, false),
+            }
+        } else {
+            match ret_type {
+                BasicTypeEnum::IntType(t) => t.fn_type(&metadata_params, false),
+                BasicTypeEnum::FloatType(t) => t.fn_type(&metadata_params, false),
+                BasicTypeEnum::PointerType(t) => t.fn_type(&metadata_params, false),
+                BasicTypeEnum::StructType(t) => t.fn_type(&metadata_params, false),
+                BasicTypeEnum::ArrayType(t) => t.fn_type(&metadata_params, false),
+                _ => self.context.i64_type().fn_type(&metadata_params, false),
+            }
         };
 
         // Reuse an existing declaration if it already exists. `Module::add_function`
@@ -3616,6 +3821,32 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
+
+        // 0.35.23 deep-eval: native entry — seed the runtime CLI args so
+        // args()/cli_args() work in the generated executable. The declare_func
+        // main signature carries (argc: i32, argv: ptr); zext argc to i64 for
+        // the runtime's mimi_args_init(i64, ptr).
+        if func.name == "main" {
+            if let Some(args_init_fn) = self.module.get_function("mimi_args_init") {
+                if let (Some(argc), Some(argv)) =
+                    (function.get_nth_param(0), function.get_nth_param(1))
+                {
+                    let argc_64 = self
+                        .builder
+                        .build_int_z_extend(
+                            argc.into_int_value(),
+                            self.context.i64_type(),
+                            "main_argc_64",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("argc zext: {e}")))?;
+                    self.build_call(
+                        args_init_fn,
+                        &[argc_64.into(), argv.into()],
+                        "mimi_args_init",
+                    )?;
+                }
+            }
+        }
 
         // v0.29.24: apply @max_children(N) process quota when compiling main.
         if func.name == "main" {

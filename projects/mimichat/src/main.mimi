@@ -78,13 +78,18 @@ func PROTO_VER() -> i32 { 1 }
 
 func format_timestamp(ts: i64) -> string {
     let secs = ts / 1000
+    let days = secs / 86400
     let hours = secs / 3600 % 24
     let mins = secs / 60 % 60
     let sec = secs % 60
     let h_str = if hours < 10 { "0" + to_string(hours) } else { to_string(hours) }
     let m_str = if mins < 10 { "0" + to_string(mins) } else { to_string(mins) }
     let s_str = if sec < 10 { "0" + to_string(sec) } else { to_string(sec) }
-    h_str + ":" + m_str + ":" + s_str
+    if days > 0 {
+        to_string(days) + "d " + h_str + ":" + m_str + ":" + s_str
+    } else {
+        h_str + ":" + m_str + ":" + s_str
+    }
 }
 
 func safe_substring(s: string, start: i32, end: i32) -> string {
@@ -145,7 +150,7 @@ func list_contains_string(items: List<string>, item: string) -> bool {
 
 func safe_parse_int(s: string, default_val: i32) -> i32 {
     let (ok, val) = str_parse_int(s)
-    if ok { val } else { default_val }
+    if ok { val as i32 } else { default_val }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -772,7 +777,7 @@ func store_get_by_room(store: MessageStore, room: string, max_count: i32) -> Lis
 func send_help(fd: i64) {
     let ts = now_ms()
     let help_text = "=== MimiChat Commands ===\n/msg <text>          Send message to current room\n/join <room>         Join a room\n/leave <room>        Leave a room\n/create <room>       Create a new room\n/private <user> <t>  Send private message\n/nick <name>         Change nickname\n/rooms               List available rooms\n/users               List users in current room\n/history             Show recent messages\n/ping                Ping server\n/quit                Disconnect\n/help                Show this help\nOr just type to send a message to the current room."
-    send(fd, encode_system_msg(help_text, ts))
+    let _ = send(fd, encode_system_msg(help_text, ts))
 }
 
 func handle_msg_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, room_mgr: RoomManager) {
@@ -797,8 +802,8 @@ func handle_private_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManage
     let ts = now_ms()
     let target_fd = user_mgr.get_fd(target)
     if target_fd < 0 { send(fd, encode_error_msg("User \"" + target + "\" not found.", ts)); return }
-    send(target_fd, encode_private_msg(nick, target, text, ts))
-    send(fd, encode_private_msg(nick, target, "(sent to " + target + ") " + text, ts))
+    let _ = send(target_fd, encode_private_msg(nick, target, text, ts))
+    let _ = send(fd, encode_private_msg(nick, target, "(sent to " + target + ") " + text, ts))
 }
 
 func handle_join_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, room_mgr: RoomManager) {
@@ -825,7 +830,7 @@ func handle_join_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, 
         }
     } else {
         let ts = now_ms()
-        send(fd, encode_error_msg(result, ts))
+        let _ = send(fd, encode_error_msg(result, ts))
     }
 }
 
@@ -846,12 +851,12 @@ func handle_leave_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager,
             let def_join = room_mgr.join(DEFAULT_ROOM(), nick)
             if def_join == "ok" {
                 user_mgr.set_room(nick, DEFAULT_ROOM())
-                send(fd, encode_system_msg("Switched to \"" + DEFAULT_ROOM() + "\"", ts))
+                let _ = send(fd, encode_system_msg("Switched to \"" + DEFAULT_ROOM() + "\"", ts))
             }
         }
     } else {
         let ts = now_ms()
-        send(fd, encode_error_msg(result, ts))
+        let _ = send(fd, encode_error_msg(result, ts))
     }
 }
 
@@ -860,8 +865,8 @@ func handle_create_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager
     if is_blank(room_name) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /create <room>", ts)); return }
     let result = room_mgr.create(room_name)
     let ts = now_ms()
-    if result == "ok" { send(fd, encode_system_msg("Room \"" + room_name + "\" created.", ts)) }
-    else { send(fd, encode_error_msg(result, ts)) }
+    if result == "ok" { let _ = send(fd, encode_system_msg("Room \"" + room_name + "\" created.", ts)) }
+    else { let _ = send(fd, encode_error_msg(result, ts)) }
 }
 
 func handle_nick_cmd(fd: i64, old_nick: string, cmd: Record, user_mgr: UserManager) -> string {
@@ -878,7 +883,7 @@ func handle_nick_cmd(fd: i64, old_nick: string, cmd: Record, user_mgr: UserManag
 func handle_rooms_cmd(fd: i64, room_mgr: RoomManager) {
     let ts = now_ms()
     let room_list = room_mgr.list_rooms()
-    send(fd, encode_rooms_msg(room_list, ts))
+    let _ = send(fd, encode_rooms_msg(room_list, ts))
 }
 
 func handle_users_cmd(fd: i64, room_mgr: RoomManager, user_mgr: UserManager, nick: string) {
@@ -886,10 +891,10 @@ func handle_users_cmd(fd: i64, room_mgr: RoomManager, user_mgr: UserManager, nic
     let ts = now_ms()
     if room == "" {
         let all_nicks = user_mgr.list_nicks()
-        send(fd, encode_users_msg(all_nicks, ts))
+        let _ = send(fd, encode_users_msg(all_nicks, ts))
     } else {
         let members = room_mgr.get_members(room)
-        send(fd, encode_users_msg(members, ts))
+        let _ = send(fd, encode_users_msg(members, ts))
     }
 }
 
@@ -899,10 +904,10 @@ func handle_kick_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, 
     let target_fd = user_mgr.get_fd(target)
     if target_fd < 0 { let ts = now_ms(); send(fd, encode_error_msg("User \"" + target + "\" not found.", ts)); return }
     let ts = now_ms()
-    send(target_fd, encode_system_msg("You have been kicked from the server.", ts))
-    send(fd, encode_system_msg("Kicked \"" + target + "\" from the server.", ts))
+    let _ = send(target_fd, encode_system_msg("You have been kicked from the server.", ts))
+    let _ = send(fd, encode_system_msg("Kicked \"" + target + "\" from the server.", ts))
     room_mgr.remove_from_all(target)
-    user_mgr.unregister(target_fd)
+    let _ = user_mgr.unregister(target_fd)
 }
 
 func handle_topic_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager, user_mgr: UserManager) {
@@ -911,17 +916,17 @@ func handle_topic_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager,
     let ts = now_ms()
     if is_blank(topic_text) {
         let current = room_mgr.get_topic(room)
-        if is_blank(current) { send(fd, encode_system_msg("Room \"" + room + "\" has no topic set.", ts)) }
-        else { send(fd, encode_topic_msg(room, current, ts)) }
+        if is_blank(current) { let _ = send(fd, encode_system_msg("Room \"" + room + "\" has no topic set.", ts)) }
+        else { let _ = send(fd, encode_topic_msg(room, current, ts)) }
     } else {
         let result = room_mgr.set_topic(room, topic_text)
         if result == "ok" {
             let members = room_mgr.get_members(room)
             for m in members {
                 let mfd = user_mgr.get_fd(m)
-                if mfd >= 0 { send(mfd, encode_topic_msg(room, topic_text, ts)) }
+                if mfd >= 0 { let _ = send(mfd, encode_topic_msg(room, topic_text, ts)) }
             }
-        } else { send(fd, encode_error_msg(result, ts)) }
+        } else { let _ = send(fd, encode_error_msg(result, ts)) }
     }
 }
 
@@ -994,7 +999,7 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
             let cmd_type = cmd_get_string(cmd, "cmd", "")
             if cmd_type == CMD_QUIT() || cmd_type == "exit" || cmd_type == "quit" { keep_running = false }
             else if cmd_type == CMD_HELP() { send_help(client_fd) }
-            else if cmd_type == CMD_PING() { let pong_ts = now_ms(); send(client_fd, encode_pong_msg(pong_ts)) }
+            else if cmd_type == CMD_PING() { let pong_ts = now_ms(); let _ = send(client_fd, encode_pong_msg(pong_ts)) }
             else if cmd_type == CMD_MSG() { handle_msg_cmd(client_fd, current_nick, cmd, user_mgr, room_mgr) }
             else if cmd_type == CMD_PRIVATE() || cmd_type == "priv" || cmd_type == "whisper" || cmd_type == "tell" { handle_private_cmd(client_fd, current_nick, cmd, user_mgr) }
             else if cmd_type == CMD_JOIN() { handle_join_cmd(client_fd, current_nick, cmd, user_mgr, room_mgr) }
@@ -1016,17 +1021,17 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
                 let motd_text = cmd_get_string(cmd, "text", "")
                 let motd_ts = now_ms()
                 broadcast_system_msg("MOTD: " + motd_text, room_mgr, user_mgr)
-                send(client_fd, encode_ok_msg("MOTD broadcast", motd_ts))
+                let _ = send(client_fd, encode_ok_msg("MOTD broadcast", motd_ts))
             }
             else if cmd_type == CMD_HISTORY() {
                 let hist_ts = now_ms()
                 let entries = user_mgr.get_history(50)
-                send(client_fd, encode_history_msg(entries, hist_ts))
+                let _ = send(client_fd, encode_history_msg(entries, hist_ts))
             }
             else if cmd_type == "" { }
             else {
                 let err_ts = now_ms()
-                send(client_fd, encode_error_msg("Unknown command: " + cmd_type + ". Type /help for commands.", err_ts))
+                let _ = send(client_fd, encode_error_msg("Unknown command: " + cmd_type + ". Type /help for commands.", err_ts))
             }
         }
     }
@@ -1069,7 +1074,7 @@ func run_server_loop(srv_fd: i64, user_mgr: UserManager, room_mgr: RoomManager, 
         else {
             client_count = client_count + 1
             println("New connection (#" + to_string(client_count) + "), fd=" + to_string(cfd))
-            spawn handle_connection(cfd, user_mgr, room_mgr, config.history_file)
+            let _ = spawn handle_connection(cfd, user_mgr, room_mgr, config.history_file)
         }
     }
     0

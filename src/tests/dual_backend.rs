@@ -15880,3 +15880,92 @@ fn dual_inferred_i64_literal_no_trap() {
         "i64 literal / float mix stay un-trapped",
     );
 }
+
+// ─── 0.35.23 deep-eval (examples/ corpus) regressions ─────────
+// Round-2 depth evaluation (2026-08-09): examples/ differential (VM vs
+// native) surfaced ① native `to_string(bool)` rendered "1"/"0" while the
+// VM rendered "true"/"false"; ② `?` on a custom enum `Err(string)` printed
+// the raw heap handle natively ("Error: Result::Err(200835760)");
+// ③ the VM hard-errored E0800 on `main() -> f64` (examples/records,
+// shapes) while native compiled; ④ checker dropped the reference wrapper
+// for annotated `let ref x: T = ...` arena bindings (E0204 cannot
+// dereference).
+
+#[test]
+fn dual_to_string_bool_parity() {
+    // compile_to_string must render bool as "true"/"false" on both
+    // backends (pre-fix: native sprintf "%ld" → "1"/"0").
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            println(to_string(true));
+            println(to_string(false));
+            println(\"flag=\" + to_string(3 > 2));
+            0
+        }",
+        "true\nfalse\nflag=true",
+        "to_string(bool) parity",
+    );
+}
+
+#[test]
+fn dual_custom_enum_try_err_string_display() {
+    // `?` on a custom enum `Err(string)` must exit with the decoded string
+    // message (pre-fix: the raw heap handle was printed).
+    if !can_link() {
+        return;
+    }
+    let src = "type Res {
+        Ok(i32)
+        Err(string)
+    }
+    func fail() -> Res { Err(\"boom\") }
+    func main() -> i32 {
+        let x = fail()?;
+        println(x);
+        0
+    }";
+    let cg = compile_and_run(src).expect_err("codegen `?` on Err must exit");
+    assert!(
+        cg.contains("Error: Result::Err(\"boom\")"),
+        "codegen must decode the string payload in the exit message, got: {cg}"
+    );
+}
+
+#[test]
+fn vm_accepts_f64_and_bool_main() {
+    // Native compiles `main() -> f64` (examples/records, shapes) and
+    // `main() -> bool`; the VM previously hard-errored E0800 "main
+    // returned non-integer". Both must now run to completion.
+    let res = run_source_bytecode_result("func main() -> f64 { 3.14 }");
+    assert!(res.is_ok(), "VM must accept main() -> f64, got {:?}", res);
+    let res = run_source_bytecode_result("func main() -> bool { true }");
+    assert!(res.is_ok(), "VM must accept main() -> bool, got {:?}", res);
+}
+
+#[test]
+fn ref_annotated_binding_check_and_parity() {
+    // Checker: annotated `let ref x: i32 = 42` must wrap the reference
+    // (pre-fix: x was typed bare i32 → E0204 cannot dereference).
+    check_source("func main() -> i32 { arena { let ref x: i32 = 42; *x } }").unwrap_or_else(
+        |diags| {
+            panic!(
+                "annotated ref binding must check:\n{}",
+                diags
+                    .iter()
+                    .map(|d| format!("{}", d))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        },
+    );
+    // Both backends must agree on the annotated ref value (value form).
+    assert_both_backends_stdout(
+        "func main() -> i32 {
+            let val = arena { let ref x: i32 = 99; x };
+            println(val);
+            0
+        }",
+        "99",
+        "annotated arena ref binding parity",
+    );
+}

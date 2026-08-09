@@ -239,8 +239,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Determine if the error type is string (Result<T, string>) to display
         // the actual error message instead of a numeric pointer value.
-        let is_string_err = is_result
-            && inner_type_name
+        let is_string_err = if is_result {
+            inner_type_name
                 .as_ref()
                 .map(|tn| {
                     tn.rsplit(',')
@@ -248,7 +248,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map(|last| last.trim_end_matches('>').trim() == "string")
                         .unwrap_or(false)
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+        } else if is_user_enum {
+            // 0.35.23 deep-eval: a custom enum's `Err(string)` payload is a
+            // heap string handle ({ptr,len} struct) — render it via
+            // `mimi_try_exit_str` instead of printing the numeric handle
+            // (`?` on `Res { Ok(i32) Err(string) }` printed a raw heap
+            // address, e.g. "Error: Result::Err(200835760)").
+            inner_type_name
+                .as_ref()
+                .and_then(|tn| self.type_defs.get(tn))
+                .and_then(|td| match &td.kind {
+                    TypeDefKind::Enum(variants) => variants
+                        .iter()
+                        .find(|v| v.name == "Err")
+                        .and_then(|v| v.payload.as_ref())
+                        .and_then(|p| match p {
+                            VariantPayload::Tuple(tys) => tys.first().cloned(),
+                            _ => None,
+                        })
+                        .map(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "string")),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
         if is_string_err {
             // String error: the i64 slot contains a ptrtoint-encoded pointer

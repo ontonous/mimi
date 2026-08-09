@@ -407,7 +407,13 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
 /// Genuinely unsupported: Channel/Future/Atomic (no codegen path).
 pub(crate) fn is_json_serializable(t: &Type) -> bool {
     match t.unlocated() {
-        Type::Infer => true,                                    // _ placeholder — defer
+        Type::Infer => true, // _ placeholder — defer
+        // 0.35.23 deep-eval: an unresolved element type (e.g. the empty
+        // list literal in `to_json([])`, typed `List<?T0>`) is serializable
+        // — an empty collection has no elements to serialize and renders
+        // as `[]`/`{}` at runtime. Previously this fell through to false
+        // and rejected `map_set(rooms, name, to_json([]))` (mimichat).
+        Type::TypeVar(_) => true,
         Type::Newtype(_, inner) => is_json_serializable(inner), // transparent
         // Product tuples: JSON arrays when every element is serializable.
         Type::Tuple(elems) => elems.iter().all(is_json_serializable),
