@@ -103,6 +103,9 @@ pub(crate) mod fuzz;
 // === Dual-backend equivalence tests ===
 pub(crate) mod dual_backend;
 
+// === Deep-eval 2026-08-09 regression locks (demos differential findings) ===
+pub(crate) mod deep_eval_20260809;
+
 // === Dual-interpreter equivalence tests (0.31.45) ===
 pub(crate) mod dual_interp;
 

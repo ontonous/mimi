@@ -600,6 +600,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // 0.34.41 第二档: ensures guards before any return cleanup (legacy
         // emit_return checks ensures before heap teardown).
         self.emit_ensures_checks(callable, Some(value), &mut frame)?;
+        // Deep-eval 2026-08-09: enforce the string-return ownership contract.
+        // The caller-side track_string_return_lifetime frees the returned
+        // data pointer; resolved returns may hand back `.rodata` literals, so
+        // probe live heap registrations and heap-copy anything not owned.
+        let value = self.generator.claim_resolved_string_return(value)?;
+        // Deep-eval 2026-08-09 (demos/07 custom Res segv): same claim for
+        // custom-enum-shaped returns ({i32 tag, i64 payload}): the payload
+        // box of boxed variants must survive the callee's scope-exit free —
+        // ownership transfers to the caller (mirrors the legacy
+        // claim_returned_enum_box in Stmt::Return / emit_return).
+        self.generator.claim_returned_enum_box(value, result_type)?;
         // Determine whether the return type transitively owns heap data.
         // If so, drain the heap scope (caller takes ownership) instead of
         // freeing — otherwise the returned pointer(s) dangle.
@@ -1221,6 +1232,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 })?;
                 let value = value
                     .map(|value| self.coerce_to(value, result_type))
+                    .transpose()?;
+                // Deep-eval 2026-08-09: same string-return ownership probe on
+                // early-return paths (see the implicit-return funnel).
+                let value = value
+                    .map(|value| self.generator.claim_resolved_string_return(value))
                     .transpose()?;
                 // 0.34.41 第二档: ensures guards on early return paths too
                 // (legacy emit_return is the single funnel there; here every
@@ -3796,44 +3812,46 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         ))
                                     })?;
                                 // For built-in Err, the payload at index 2 is an i64
-                                // ptrtoint to a heap-allocated {i64, i64} tuple (source
-                                // and error, both ptrtoint-encoded). Decode the tuple
-                                // struct before recursing so that Tuple patterns see a
-                                // StructValue instead of a raw i64.
+                                // ptrtoint handle. Deep-eval 2026-08-09: decode per
+                                // the binding's DECLARED type — Flow Err tuples are
+                                // {i64,i64} (source + error, both ptrtoint-encoded),
+                                // but plain Result<string,string> (and Result<T,
+                                // custom-enum>) store a heap {ptr,i64} string struct
+                                // / {i32,i64} enum. The old hard-coded {i64,i64}
+                                // misdecoded string Err handles (string bytes read as
+                                // two i64s) and concat then failed with
+                                // "resolved numeric conversion {i64,i64} → {ptr,i64}".
                                 let decoded_val = if variant_name.as_str() == "Err"
                                     && matches!(payload_val, BasicValueEnum::IntValue(_))
                                 {
-                                    let i64_ty = self.generator.context.i64_type();
-                                    let tuple_llvm_ty = self.generator.context.struct_type(
-                                        &[
-                                            BasicTypeEnum::IntType(i64_ty),
-                                            BasicTypeEnum::IntType(i64_ty),
-                                        ],
-                                        false,
-                                    );
-                                    let ptr = self
-                                        .generator
-                                        .builder
-                                        .build_int_to_ptr(
-                                            payload_val.into_int_value(),
-                                            self.generator
-                                                .context
-                                                .ptr_type(inkwell::AddressSpace::default()),
-                                            "err_tuple_ptr",
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("inttoptr err: {e}"))
-                                        })?;
-                                    self.generator
-                                        .builder
-                                        .build_load(
-                                            BasicTypeEnum::StructType(tuple_llvm_ty),
-                                            ptr,
-                                            "err_tuple_val",
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("load err tuple: {e}"))
-                                        })?
+                                    let target_llvm = self.lower_type(&sub_pattern.ty)?;
+                                    if matches!(target_llvm, BasicTypeEnum::StructType(_)) {
+                                        let ptr = self
+                                            .generator
+                                            .builder
+                                            .build_int_to_ptr(
+                                                payload_val.into_int_value(),
+                                                self.generator
+                                                    .context
+                                                    .ptr_type(inkwell::AddressSpace::default()),
+                                                "err_payload_ptr",
+                                            )
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "inttoptr err: {e}"
+                                                ))
+                                            })?;
+                                        self.generator
+                                            .builder
+                                            .build_load(target_llvm, ptr, "err_payload_val")
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "load err payload: {e}"
+                                                ))
+                                            })?
+                                    } else {
+                                        payload_val
+                                    }
                                 } else {
                                     payload_val
                                 };
@@ -4124,6 +4142,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .map(BasicValueEnum::from)
                         .map_err(|e| CompileError::LlvmError(format!("fpext: {e}")))
                 }
+            }
+            // Deep-eval 2026-08-09 (resolved Ok(list) E0722): a type-erased
+            // container handle (ptr to the {i64,ptr} list struct) packed into
+            // a by-value Ok slot — load the struct. Mirrors the legacy
+            // compile_ok_constructor's natural-shape payload slot. Guarded to
+            // the List layout only: a bare function pointer (e.g. `add_impl`
+            // inside a tuple) also arrives as a ptr but must NOT be loaded
+            // from the code section — that SIGSEGVs (real_world_tuple_fn_element_call).
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(sty))
+                if sty.get_field_types().len() == 2
+                    && matches!(
+                        sty.get_field_types()[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
+                    && matches!(sty.get_field_types()[1], BasicTypeEnum::PointerType(_)) =>
+            {
+                self.generator
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(sty),
+                        pv,
+                        "resolved_ptr_struct_load",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|e| CompileError::LlvmError(format!("ptr struct load: {e}")))
             }
             _ => Err(CompileError::Unsupported(format!(
                 "resolved numeric conversion {:?} → {target:?} is not supported",
@@ -6666,13 +6709,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator.push_heap_scope();
         let body_val = self.emit_block(&callable_body, &lambda.body, &mut lambda_frame)?;
         if !self.current_block_terminated() {
-            // Free heap allocations before returning (lambda return types
-            // are scalar — they don't own heap data).
-            let _ = self.generator.free_heap_allocs();
             if let Some(val) = body_val {
                 let val = self.coerce_to(val, ret_ty)?;
+                // Deep-eval 2026-08-09 (demos/test_closure_call garbage):
+                // string-returning closures must hand the caller a buffer
+                // that OUTLIVES this scope's heap cleanup. The concat buffer
+                // is registered in this scope, so returning it and then
+                // freeing dangles the {ptr,len} value. Ownership probing
+                // cannot help here (free_heap_allocs has no claim guard), so
+                // heap-copy unconditionally BEFORE the cleanup — the copy
+                // reads the source data first, then the cleanup releases the
+                // original. Caller-side track_closure_return_lifetime
+                // re-registers the copy for release.
+                let val = self.generator.heap_copy_string_value(val)?;
+                // Free heap allocations before returning (non-string returns
+                // are scalar — they don't own heap data).
+                let _ = self.generator.free_heap_allocs();
                 self.generator.build_return(Some(&val))?;
             } else {
+                let _ = self.generator.free_heap_allocs();
                 self.generator.build_return(None)?;
             }
         }
@@ -6811,6 +6866,58 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // Single-payload variant: emit the argument and coerce to i64.
             let arg_val = self.emit_expr(&call.arguments[0].value, frame)?;
             let arg_val = self.apply_conversion(arg_val, &call.arguments[0].conversion)?;
+            // Deep-eval 2026-08-09 (demos/07 custom Res segv): a string
+            // payload must follow the Packed convention shared with the
+            // legacy variant ctors and the built-in Result<T,string> error
+            // slot (Q1): heap-box the {ptr,len} struct and store
+            // ptrtoint(box) in the payload slot. Encoding the raw data
+            // pointer inline makes the match-side decode_payload_struct load
+            // the string BYTES as a {ptr,len} struct (garbage display →
+            // segv), and the caller-side tag-conditional box free would then
+            // free the data pointer itself (free(.rodata literal) abort).
+            if let BasicValueEnum::StructValue(sv) = arg_val {
+                let fields = sv.get_type().get_field_types();
+                let is_string_shape = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::IntType(_));
+                if is_string_shape {
+                    let box_ptr = self
+                        .generator
+                        .malloc_or_abort(i64_ty.const_int(16, false), "enum_str_box")?;
+                    self.generator.build_store(box_ptr, sv)?;
+                    // Callee scope-exit frees the box unless the enum escapes
+                    // via return: register it, then claim the pointer so the
+                    // return path's free guard skips it (ownership transfers
+                    // to the caller, whose EnumBox registration re-adopts the
+                    // box with a tag-conditional free).
+                    self.generator.register_heap_box(box_ptr);
+                    self.generator.claim_closure_env(box_ptr);
+                    let payload =
+                        self.generator
+                            .build_ptr_to_int(box_ptr, i64_ty, "enum_str_box_i")?;
+                    let struct_ty = self.generator.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(i32_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    );
+                    let mut result = struct_ty.get_undef();
+                    result = self
+                        .generator
+                        .builder
+                        .build_insert_value(result, i32_ty.const_int(ordinal, false), 0, "enum_tag")
+                        .map_err(|e| CompileError::LlvmError(format!("enum tag insert: {e}")))?
+                        .into_struct_value();
+                    result = self
+                        .generator
+                        .builder
+                        .build_insert_value(result, payload, 1, "enum_payload")
+                        .map_err(|e| CompileError::LlvmError(format!("enum payload insert: {e}")))?
+                        .into_struct_value();
+                    return Ok(BasicValueEnum::StructValue(result));
+                }
+            }
             self.coerce_to_i64(arg_val)?
         };
 

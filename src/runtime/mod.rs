@@ -2332,6 +2332,17 @@ pub extern "C" fn mimi_str_concat(
     alloc_c_string(&result)
 }
 
+/// Deep-eval 2026-08-09 (test_result_match parity): the current OS error as
+/// a heap C string, formatted like Rust's `io::Error` Display
+/// ("No such file or directory (os error 2)"). Used by the native
+/// read_file/write_file Err paths so their messages match the interpreter's
+/// `e.to_string()` instead of a hard-coded string.
+#[no_mangle]
+pub extern "C" fn mimi_os_error_message() -> *mut std::ffi::c_char {
+    let msg = std::io::Error::last_os_error().to_string();
+    alloc_c_string(&msg)
+}
+
 /// Character-index (Unicode scalar) `char_at`.
 /// Returns a new heap-allocated 1-char string; aborts on OOB / invalid UTF-8.
 #[no_mangle]

@@ -4178,6 +4178,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     return Ok(());
                 }
+                // Deep-eval 2026-08-09 (09_io_files parity): `Ok(())` — the
+                // unit payload lowers to i64464 zero; display it as `()` to
+                // match the interpreter instead of `0`.
+                if matches!(val, BasicValueEnum::IntValue(_)) {
+                    let ok_root =
+                        Self::strip_first_type_arg(arg_type, "Result").unwrap_or_default();
+                    if ok_root == "()" || ok_root == "unit" {
+                        let unit_str = self
+                            .builder
+                            .build_global_string_ptr("()", "res_ok_unit")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let wrap = self.emit_display_wrap(
+                            "Ok(",
+                            unit_str.as_pointer_value(),
+                            "res_ok_unit_wrap",
+                        )?;
+                        self.build_store(out_slot, wrap)?;
+                        self.flush_display_since(arm_marker)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        return Ok(());
+                    }
+                }
             }
             match field_ty {
                 BasicTypeEnum::PointerType(_) if label == "ok" => {
@@ -9471,14 +9495,67 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // ── Err branch: fopen returned NULL ──
         self.builder.position_at_end(fopen_null_bb);
+        // Deep-eval 2026-08-09 (test_result_match parity): format the OS error
+        // like the interpreter's `e.to_string()` ("No such file or directory
+        // (os error 2)") instead of a hard-coded message.
+        let os_err_fn = self
+            .module
+            .get_function("mimi_os_error_message")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_os_error_message",
+                    i8_ptr_ty.fn_type(&[], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         let err_msg = self
             .builder
-            .build_global_string_ptr("read_file: fopen failed", "read_file_err_msg")
-            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+            .build_call(os_err_fn, &[], "read_err_msg")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_os_error_message void")?
+            .into_pointer_value();
+        // The message buffer is consumed by concat / display before the
+        // function-boundary free; register it so it is released exactly once.
+        self.register_heap_alloc(err_msg);
         self.build_store(disc_gep, bool_ty.const_int(0, false))?;
         self.build_store(ok_gep, string_ty.const_zero())?;
-        let err_ptr_int =
-            self.build_ptr_to_int(err_msg.as_pointer_value(), i64_ty, "err_ptr_int")?;
+        // Err(string) must store a heap {ptr,len} handle — the contract that
+        // match decode (inttoptr+GEP+load), `?` and display's struct probe
+        // expect. A bare data pointer makes match decode load string bytes as
+        // a {ptr,len} struct (garbage field0) and concat strlen-segfaults.
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let heap = self.malloc_or_abort(i64_ty.const_int(16, false), "read_err_heap")?;
+        let heap_ptr = self
+            .build_bit_cast(
+                heap.into(),
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                "read_err_heap_ptr",
+            )?
+            .into_pointer_value();
+        let err_gep0 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 0, "read_err_heap_ptr_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(err_gep0, err_msg)?;
+        let err_len = self
+            .builder
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(err_msg)],
+                "read_err_len",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or("read_file strlen void")?
+            .into_int_value();
+        let err_gep1 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 1, "read_err_heap_len_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(err_gep1, err_len)?;
+        self.register_heap_box(heap_ptr);
+        let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "err_ptr_int")?;
         self.build_store(err_gep, err_ptr_int)?;
         self.build_br(merge_bb)?;
 
@@ -9578,14 +9655,71 @@ impl<'ctx> CodeGenerator<'ctx> {
         // ── Err branch: fopen returned NULL ──
         // Result Err: {i1 false, i64 0, i64 err_msg_handle}
         self.builder.position_at_end(null_check_bb);
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        // Deep-eval 2026-08-09 (test_result_match parity): OS error message
+        // matching the interpreter (see compile_read_file).
+        let os_err_fn = self
+            .module
+            .get_function("mimi_os_error_message")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_os_error_message",
+                    i8_ptr_ty.fn_type(&[], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         let err_msg = self
             .builder
-            .build_global_string_ptr("write_file: fopen failed", "write_file_err_msg")
-            .map_err(|e| CompileError::LlvmError(format!("gstr error: {}", e)))?;
+            .build_call(os_err_fn, &[], "write_err_msg")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_os_error_message void")?
+            .into_pointer_value();
+        self.register_heap_alloc(err_msg);
         self.build_store(disc_gep, bool_ty.const_int(0, false))?;
         self.build_store(ok_gep, i64_ty.const_int(0, false))?;
-        let err_ptr_int =
-            self.build_ptr_to_int(err_msg.as_pointer_value(), i64_ty, "err_ptr_int")?;
+        // Err(string) must use a heap {ptr,len} handle (see compile_read_file)
+        // — a bare data pointer segfaults match decode / `?` (inttoptr+load
+        // of bytes).
+        let string_struct_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let heap = self.malloc_or_abort(i64_ty.const_int(16, false), "write_err_heap")?;
+        let heap_ptr = self
+            .build_bit_cast(
+                heap.into(),
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                "write_err_heap_ptr",
+            )?
+            .into_pointer_value();
+        let werr_gep0 = self
+            .gep()
+            .build_struct_gep(string_struct_ty, heap_ptr, 0, "write_err_heap_ptr_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(werr_gep0, err_msg)?;
+        let werr_len = self
+            .builder
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(err_msg)],
+                "write_err_len",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or("write_file strlen void")?
+            .into_int_value();
+        let werr_gep1 = self
+            .gep()
+            .build_struct_gep(string_struct_ty, heap_ptr, 1, "write_err_heap_len_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(werr_gep1, werr_len)?;
+        self.register_heap_box(heap_ptr);
+        let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "err_ptr_int")?;
         self.build_store(err_gep, err_ptr_int)?;
         self.build_br(merge_bb)?;
         // ── Ok branch: fopen succeeded ──

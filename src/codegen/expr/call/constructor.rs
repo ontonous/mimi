@@ -486,14 +486,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => return Err("Err: unsupported error value type".into()),
         };
-        let struct_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(bool_ty),
-                BasicTypeEnum::IntType(i64_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
+        let struct_ty = match &self.pending_result_ok_ty {
+            // Deep-eval 2026-08-09 (std/fs read_lines E0200): pad the Ok slot
+            // with the Ok value-shape zero so both arms of a match producing
+            // the same Result type build identical layouts. Ok(List) stores a
+            // ptr (type-erased container handle), Ok(string) stores the
+            // {ptr,i64} struct by value, scalars store i64 — the pad must
+            // mirror that or the phi unification sees `{i1,ptr,i64}` vs
+            // `{i1,i64,i64}` and rejects the match.
+            Some(ok_ty) => {
+                let pad = self.result_ok_pad_value(ok_ty);
+                let pad_ty = match pad {
+                    BasicValueEnum::IntValue(iv) => BasicTypeEnum::IntType(iv.get_type()),
+                    BasicValueEnum::PointerValue(pv) => BasicTypeEnum::PointerType(pv.get_type()),
+                    BasicValueEnum::StructValue(sv) => BasicTypeEnum::StructType(sv.get_type()),
+                    _ => BasicTypeEnum::IntType(i64_ty),
+                };
+                let sty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(bool_ty),
+                        pad_ty,
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let alloca = self.build_alloca(sty, "err_val")?;
+                let disc_gep = self
+                    .gep()
+                    .build_struct_gep(sty, alloca, 0, "disc")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.build_store(disc_gep, disc)?;
+                let ok_gep = self
+                    .gep()
+                    .build_struct_gep(sty, alloca, 1, "ok_pad")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.build_store(ok_gep, pad)?;
+                let err_gep = self
+                    .gep()
+                    .build_struct_gep(sty, alloca, 2, "err_payload")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.build_store(err_gep, err_val)?;
+                return self.build_load(sty, alloca, "loaded");
+            }
+            None => self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(bool_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            ),
+        };
         let alloca = self.build_alloca(struct_ty, "err_val")?;
         let disc_gep = self
             .gep()
@@ -542,6 +585,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.build_store(val_gep, i64_ty.const_int(0, false))?;
         self.build_load(struct_ty, alloca, "loaded")
+    }
+
+    /// Deep-eval 2026-08-09 (std/fs read_lines E0200): the Ok-slot zero pad
+    /// of the legacy Err constructor, shaped after the Ok payload's RUNTIME
+    /// value representation. Container names (List/Map/Set) are type-erased
+    /// heap pointers, `string` is a by-value {ptr,i64} struct, everything
+    /// else falls back to i64 zero.
+    fn result_ok_pad_value(&self, ok_ty: &Type) -> BasicValueEnum<'ctx> {
+        let i64_ty = self.context.i64_type();
+        match ok_ty.unlocated() {
+            Type::Name(n, _) if n == "string" => {
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let sty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                BasicValueEnum::StructValue(sty.const_zero())
+            }
+            Type::Name(n, _)
+                if matches!(n.as_str(), "List" | "Map" | "Set" | "Channel" | "Array") =>
+            {
+                BasicValueEnum::PointerValue(
+                    self.context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .const_null(),
+                )
+            }
+            _ => BasicValueEnum::IntValue(i64_ty.const_zero()),
+        }
     }
 
     /// Given a type string like `"Result<string, i64>"` or `"Option<string>"`,

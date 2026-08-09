@@ -369,6 +369,49 @@
   内引入 segfault 风险不对称；当前状态无 crash、输出语义正确（zip legacy
   显示空行、map 函数体 fallback legacy），不阻断 RC。
 
+### 0.35.17 — 深度可用性评估 + 全面查缺补漏（Phase F：demos 双后端差分）
+
+> 三段式战役：复盘 0.35.1–16 与 backlog 对账 → 深度可用性评估（demos 双后端
+> 差分，发现 10+ 存量 bug 家族）→ 逐个修复 + 回归锁固化。修复报告
+> `devdocs/v0.35/deep-eval-0.35.17.md`。
+
+- **B1 CFG worklist Continue 死锁**：`while { if c { continue } }` 触发
+  "resource analysis did not reach return block" 假阳性（demos/02 整个 0.1.4
+  窗口都是坏的）——`predecessors_ready` 豁免 Backedge/Continue loop-carried
+  边 + 2 回归锁（borrow_boundary.rs）；
+- **B2 字符串所有权家族**：B2a resolved string 返回所有权探针（match 尾 arm
+  的 string 返回被 free 后返回悬垂指针，demos/04 abort）；B2b
+  register_heap_alloc entry-block null-init（if 分支内 concat 未开分支 free
+  垃圾，demos/04 describe_point segv）；B2c 自定义 Res 四层全链（var 绑定
+  → match 解码 → `?` 早退传播 → 隐式返回 claim，demos/07 完整 MATCH）；
+- **B3 closure string 返回垃圾**（test_closure_call 双后端 MATCH）；
+- **B5 嵌套 else-if string 零填充丢值**（静默错误输出，demos/06 修复）；
+- **B6 泛型 string 参数单态化**（legacy_param_llvm_type type_map 查询——
+  参数 i64 alloca 存 16 字节 string struct 的栈破坏，demos/03
+  SelectionDAG 崩）；
+- **B7 builtin Result/Option scrutinee 旁路解码**（`match read_file(…)`——builtin
+  不在 func_defs，Err(e) 绑定保持 raw i64 句柄 → concat 报 E0700；scrutinee
+  helper + pending_scrutinee_result_ty 旁路）；
+- **E0200 Result 布局分裂**（std/fs read_lines `use std::fs` 编译失败）：legacy
+  Ok(List) 造 {i1,ptr,i64} 而 Err(string) 造 {i1,i64,i64}——Err 构造器改按
+  Ok 值表示 pad（pending_result_ok_ty），双 arm 布局统一；
+- **resolved Err 解码按绑定类型**（Flow 硬编码 {i64,i64} tuple 误读普通
+  Result<string,string> 的 {ptr,i64} string 句柄 → E0722）；numeric_convert
+  ptr→List struct 支持（仅限 {i64,ptr} 容器布局，函数指针不 load）；
+- **09 Result 显示全链**：let 绑定 builtin Result 注册类型（compile_func_body
+  缺失，compile_block 有——两路径对齐）、write_file 类型名 Result<(),string>
+  修正、`Ok(())` unit 载荷显示 "()" 而非 0；
+- **read_file/write_file Err 契约统一**：裸数据指针 → heap {ptr,len} 句柄
+  （match decode/`?`/display probe 契约），错误消息对齐 VM 的
+  `e.to_string()`（runtime 新增 mimi_os_error_message）；
+- **B4 newtype → Nominal 转换**（demos/11 TOOL-RESOLUTION-001）：lower.rs
+  implicit_conversion 同 item 的 NewtypeWrap 放行，demos/11 完整 MATCH；
+- **门禁**：demos 双后端差分 03/04/06/07/08/09/10/11/12/13/15 +
+  test_result_match 全 MATCH（仅剩 05 zip / 14 ffi 环境 / test_time 时间差
+  三项已知非 bug）；全量 5305 lib + 15 main + 31 real_world + cli 绿；
+  clippy --all-targets 零警告；fmt 干净；新增 7 回归锁
+  （src/tests/deep_eval_20260809.rs，check+VM+codegen 三方断言）。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

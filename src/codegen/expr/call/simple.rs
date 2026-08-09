@@ -7734,6 +7734,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, arg) in args.iter_mut().enumerate() {
             if let Some(pt) = function.get_nth_param(i as u32) {
                 let target = pt.get_type();
+                // Deep-eval 2026-08-09 (demos/03 swap_pair compiler crash):
+                // a string literal reaching a monomorphized generic string
+                // parameter is still a raw C-string pointer; the callee
+                // expects the Mimi string struct {ptr,i64}. Passing the bare
+                // pointer is an ABI violation that LLVM SelectionDAG crashes
+                // on. Wrap it before the call.
+                if let BasicTypeEnum::StructType(st) = target {
+                    let fields = st.get_field_types();
+                    let is_string_struct = fields.len() == 2
+                        && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(fields[1], BasicTypeEnum::IntType(_));
+                    if is_string_struct
+                        && matches!(arg, BasicValueEnum::PointerValue(_))
+                        && arg.get_type() != target
+                    {
+                        let pv = match *arg {
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            _ => unreachable!(),
+                        };
+                        *arg = self.wrap_c_string(pv)?;
+                        continue;
+                    }
+                }
                 *arg = self.adjust_int_val(*arg, target)?;
             }
         }

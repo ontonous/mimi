@@ -1030,6 +1030,98 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Resolved-emitter string-return ownership contract (deep-eval
+    /// 2026-08-09; demos/04_adt_match native abort): legacy return funnels
+    /// claim string ownership via expression-shape heuristics
+    /// (`claim_string_return_value`), but resolved-emitter returns lack that
+    /// path — a match/if merge can hand back a `.rodata` literal while the
+    /// caller-side `track_string_return_lifetime` unconditionally frees the
+    /// returned data pointer (free(global) → munmap_chunk abort).
+    ///
+    /// Runtime ownership probe: compare the data pointer against null and
+    /// every live heap registration of the current function scope
+    /// (`heap_probe_candidates`); when nothing matches, heap-copy so the
+    /// returned pointer is always malloc-owned. Heap-matching values
+    /// transfer ownership WITHOUT a copy (`drain_heap_scope` drops the
+    /// registration on the return path), so concat-heavy returns neither
+    /// crash nor leak. Null counts as owned: free(null) is a no-op.
+    pub(in crate::codegen) fn claim_resolved_string_return(
+        &self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let BasicValueEnum::StructValue(sv) = val else {
+            return Ok(val);
+        };
+        let sty = sv.get_type();
+        let fields = sty.get_field_types();
+        let is_string_struct = fields.len() == 2
+            && matches!(fields[0], BasicTypeEnum::PointerType(_))
+            && matches!(fields[1], BasicTypeEnum::IntType(_));
+        if !is_string_struct {
+            return Ok(val);
+        }
+        let data_pv = match self.build_extract_value(sv.into(), 0, "res_ret_data")? {
+            BasicValueEnum::PointerValue(pv) => pv,
+            _ => return Ok(val),
+        };
+        let i64_ty = self.context.i64_type();
+        let data_i = self.build_ptr_to_int(data_pv, i64_ty, "res_ret_data_i")?;
+        let candidates = self.heap_probe_candidates();
+        let mut owned = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                data_i,
+                i64_ty.const_int(0, false),
+                "res_ret_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("res ret null cmp: {}", e)))?;
+        for cand in candidates {
+            let eq = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::EQ, data_i, cand, "res_ret_cand_eq")
+                .map_err(|e| CompileError::LlvmError(format!("res ret cmp: {}", e)))?;
+            owned = self
+                .builder
+                .build_or(owned, eq, "res_ret_owned")
+                .map_err(|e| CompileError::LlvmError(format!("res ret or: {}", e)))?;
+        }
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("res ret claim outside function".into()))?;
+        let heap_bb = self.context.append_basic_block(parent, "res_ret_heap");
+        let copy_bb = self.context.append_basic_block(parent, "res_ret_copy");
+        let cont_bb = self.context.append_basic_block(parent, "res_ret_cont");
+        self.build_cond_br(owned, heap_bb, copy_bb)?;
+        self.builder.position_at_end(heap_bb);
+        self.build_br(cont_bb)?;
+        self.builder.position_at_end(copy_bb);
+        let copied = self.heap_copy_string_value(sv.into())?;
+        // heap_copy_string_value branches internally (malloc OOM abort), so
+        // the builder may now sit in a successor of copy_bb — the phi
+        // predecessor must be that ACTUAL block.
+        let copy_end_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::LlvmError("res ret copy lost block".into()))?;
+        self.build_br(cont_bb)?;
+        self.builder.position_at_end(cont_bb);
+        let BasicValueEnum::StructValue(copied_sv) = copied else {
+            return Ok(copied);
+        };
+        let phi = self
+            .builder
+            .build_phi(sty, "res_ret_val")
+            .map_err(|e| CompileError::LlvmError(format!("res ret phi: {}", e)))?;
+        phi.add_incoming(&[
+            (&sv as &dyn inkwell::values::BasicValue, heap_bb),
+            (&copied_sv as &dyn inkwell::values::BasicValue, copy_end_bb),
+        ]);
+        Ok(phi.as_basic_value())
+    }
+
     /// L6: when a function returns a custom-enum-shaped value `{i32 tag, i64
     /// payload}`, claim the payload box pointer (field 1) so the callee's
     /// scope-exit free skips it — ownership transfers to the caller, which
@@ -1088,7 +1180,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// to release the buffer before the return instruction completes. The
     /// caller is expected to register the resulting struct's data pointer
     /// (see `emit_function_call::track_string_return_lifetime`).
-    fn heap_copy_string_value(
+    pub(in crate::codegen) fn heap_copy_string_value(
         &self,
         val: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
@@ -1445,6 +1537,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             param.ty.unlocated(),
             crate::ast::Type::Name(n, a) if a.is_empty() && generic_param_names.contains(n.as_str())
         ) {
+            // Deep-eval 2026-08-09 (demos/03 swap_pair): during
+            // monomorphization (type_map active) the generic name has a
+            // concrete substitute — use it, otherwise a string-typed U
+            // parameter gets an i64 alloca and the body stores the 16-byte
+            // {ptr,i64} struct into it (stack corruption + SelectionDAG
+            // crash). The i64 placeholder stays for the skeleton pass
+            // (empty type_map), where it only has to satisfy declare_func.
+            if let crate::ast::Type::Name(n, _) = param.ty.unlocated() {
+                if let Some(concrete) = self.type_map.get(n) {
+                    if let Some(ty) = self.llvm_type_for(concrete) {
+                        return Some(ty);
+                    }
+                }
+            }
             return Some(BasicTypeEnum::IntType(self.context.i64_type()));
         }
         let resolved = self.resolve_type(&param.ty);
@@ -2401,7 +2507,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 self.var_type_names
                                                     .insert(name.clone(), "Set".to_string());
                                             }
-                                            _ => {}
+                                            _ => {
+                                                // Deep-eval 2026-08-09 (09_io_files
+                                                // Result display): builtin
+                                                // Result-returning calls
+                                                // (read_file/input/write_file/…)
+                                                // left the binding untyped —
+                                                // infer_object_type fell back to
+                                                // the variable name ("r1") and
+                                                // println displayed the Result
+                                                // struct as a bare tuple
+                                                // `(true, "…", 0)`. Mirror the
+                                                // compile_block builtin fallback.
+                                                if crate::codegen::builtins::is_builtin(func_name) {
+                                                    let obj_type =
+                                                        self.infer_object_type(init, vars);
+                                                    if !obj_type.is_empty()
+                                                        && obj_type.as_str() != func_name.as_str()
+                                                    {
+                                                        self.var_type_names
+                                                            .insert(name.clone(), obj_type);
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3004,6 +3132,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // frees local temporaries.
         let last_val = self.claim_string_return_value(last_val, ret_type, expr, vars)?;
 
+        // Deep-eval 2026-08-09 (demos/07 custom Res segv): mirror emit_return's
+        // L6 claim — a custom-enum-shaped return ({i32, i64}) may carry a
+        // boxed payload that the heap cleanup below would otherwise free
+        // before the ret, leaving the caller reading freed memory.
+        self.claim_returned_enum_box(last_val, ret_type)?;
+
         // Convert pointer-to-struct to struct value when return type expects a struct.
         // Must happen BEFORE free_heap_allocs to null out heap data pointers in the original struct,
         // preventing use-after-free on the returned value's heap-allocated data.
@@ -3319,6 +3453,22 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let ret_ty_ast = func.ret.as_ref();
         self.current_fn_ret_ty_ast = func.ret.clone();
+        // Deep-eval 2026-08-09 (std/fs read_lines E0200): legacy Err
+        // constructors inside a Result-returning function pad the Ok slot
+        // with the Ok value-shape zero (consume in compile_err_constructor).
+        // Without this, `match` arms constructing the same Result type split
+        // layouts (`Ok(list)` → {i1,ptr,i64} vs `Err(str)` → {i1,i64,i64})
+        // and the phi unification rejects the match.
+        let saved_pending_result_ok_ty = self.pending_result_ok_ty.take();
+        if let Some(ok_ty) = func.ret.as_ref().and_then(|r| match r.unlocated() {
+            crate::ast::Type::Result(ok, _) => Some((**ok).clone()),
+            crate::ast::Type::Name(n, args) if n == "Result" && args.len() == 2 => {
+                Some(args[0].clone())
+            }
+            _ => None,
+        }) {
+            self.pending_result_ok_ty = Some(ok_ty);
+        }
         let last_expr = func.body.last().and_then(|s| match s.unlocated() {
             Stmt::Expr(e) => Some(e),
             _ => None,
@@ -3329,6 +3479,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // all heap scopes down to this function's boundary. Only the
                 // boundary marker remains to be popped.
                 self.end_function_heap_scope();
+                self.pending_result_ok_ty = saved_pending_result_ok_ty;
                 return Ok(());
             }
             ControlFlow::Continue(last_val) => {
@@ -3339,6 +3490,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
             }
         }
+        self.pending_result_ok_ty = saved_pending_result_ok_ty;
 
         self.end_function_heap_scope();
 

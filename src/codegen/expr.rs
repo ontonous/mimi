@@ -1364,9 +1364,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             | "chr" | "type_name" | "c_str_to_string" | "from_json" => {
                 return Some("string".to_string())
             }
-            "input" | "read_file" | "write_file" | "write_file_bytes" => {
+            "input" | "read_file" | "read_file_partial" | "read_file_bytes" => {
                 return Some("Result<string,string>".to_string())
             }
+            "write_file" | "write_file_bytes" => return Some("Result<(), string>".to_string()),
             "listdir" | "walk_dir" | "str_split" | "keys" | "values" | "sort_str" => {
                 return Some("List<string>".to_string())
             }

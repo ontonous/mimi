@@ -5653,6 +5653,27 @@ impl BodyLowerer<'_> {
                 to: to.clone(),
             });
         }
+        // Deep-eval 2026-08-09 (demos/11_advanced TOOL-RESOLUTION-001): a
+        // newtype construction `UserId(id)` lowers to Newtype{UserId} while
+        // the record field annotation is Nominal{UserId} — same item, so the
+        // wrap is structural. `instantiated_type_target` misses this because
+        // it peels the Newtype to its inner, and the inner (i32) is not the
+        // nominal target. Admit the wrap directly when the items agree.
+        if let (
+            Some(ResolvedType::Newtype {
+                item: from_item, ..
+            }),
+            Some(ResolvedType::Nominal { item: to_item, .. }),
+        ) = (self.types.get(from), self.types.get(to))
+        {
+            if from_item == to_item {
+                return Ok(CheckedConversion {
+                    kind: CheckedConversionKind::NewtypeWrap,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
         if let Some((kind, target)) = self.instantiated_type_target(node_id, to)? {
             if &target == from {
                 let kind = match kind {

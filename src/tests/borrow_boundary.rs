@@ -508,3 +508,53 @@ func main() -> i32 {
         "double &mut xs[i] should be rejected"
     );
 }
+
+// ── Worklist convergence regression (deep-eval 2026-08-09) ────────
+//
+// `while { … if c { continue } … }` used to deadlock the resource
+// dataflow worklist: the loop header carries a Continue-edge predecessor
+// from inside the body, `predecessors_ready` demanded its out-state before
+// processing the header, dropped the header when the state was absent, and
+// the queued-gate never re-pushed it. The loop-exit block then never got
+// an out-state and every such function failed with a spurious "resource
+// analysis did not reach return block" (demos/02_control_flow shipped
+// broken through the whole 0.1.4 window).
+
+#[test]
+fn resource_analysis_converges_with_continue_in_while() {
+    let src = r#"
+func f() {
+    let mut val = 0
+    while val < 10 {
+        val += 1
+        if val == 3 { continue }
+        println("x")
+    }
+}
+func main() -> i32 { f(); 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "if-continue inside while must not stall resource analysis"
+    );
+}
+
+#[test]
+fn resource_analysis_converges_with_continue_and_break() {
+    let src = r#"
+func count_with_break() {
+    let mut val = 0
+    while val < 10 {
+        val += 1
+        if val == 3 { continue }
+        if val == 8 { break }
+        println("  val =", val)
+    }
+}
+func main() -> i32 { count_with_break(); 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "continue + break combo inside while must type-check"
+    );
+}
