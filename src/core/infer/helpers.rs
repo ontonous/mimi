@@ -3,7 +3,81 @@ use crate::core::checker::Checker;
 use crate::core::helpers::{fmt_type, is_int};
 use std::collections::HashMap;
 
+/// True when a block definitely cannot fall through: its last statement is a
+/// terminator (`return`/`break`/`continue`). Diverging branches produce no
+/// value in if/else position, so their type must not participate in branch
+/// type unification (CO-H2, dx-backlog #7 — e.g. an `if` whose branches both
+/// `return` different Flow states must not report E0214).
+pub(crate) fn block_is_diverging(block: &Block) -> bool {
+    matches!(
+        block.last().map(|stmt| stmt.unlocated()),
+        Some(Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue)
+    )
+}
+
 impl<'a> Checker<'a> {
+    /// Bidirectionally check an `if/else` against `expected` and unify the
+    /// two branch types. Shared by the statement-position tail-if check
+    /// (`check_block_with_implicit_return`), block-tail ifs
+    /// (`check_block_expr`) and the expression-position `Expr::If` arm — so
+    /// all three paths agree on branch-unification semantics.
+    ///
+    /// Diverging branches (terminator tail) are exempt from unification: they
+    /// never produce a value, so `if { return A } else { return B }` is fine
+    /// even when `A` and `B` differ. The if-expression's value type is the
+    /// non-diverging branch's type (or the then-branch's type when both
+    /// diverge — the caller treats that as "no value").
+    pub(in crate::core) fn check_if_branch_types(
+        &mut self,
+        cond: &Expr,
+        then_: &Block,
+        else_: Option<&Block>,
+        expected: &Type,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        let cond_ty = self.infer_expr(cond, scopes);
+        if !crate::core::helpers::is_bool(&cond_ty) {
+            self.emit_code(
+                crate::diagnostic::codes::E0205,
+                format!(
+                    "if condition must be bool, found {}",
+                    crate::core::helpers::fmt_type(&cond_ty)
+                ),
+            );
+        }
+        let then_ty = self.check_block_expr(then_, expected, scopes);
+        let Some(else_block) = else_ else {
+            return then_ty;
+        };
+        let else_ty = self.check_block_expr(else_block, expected, scopes);
+        let then_diverges = block_is_diverging(then_);
+        let else_diverges = block_is_diverging(else_block);
+        // Numeric widening ({i32→i64, i32→f64, i64→f64}) is an admitted
+        // implicit conversion between branches — unify alone would reject
+        // `if c { 1 } else { 2_i64 }` (i32 vs i64).
+        let coercible = crate::core::helpers::is_numeric_coercion(&else_ty, &then_ty)
+            || crate::core::helpers::is_numeric_coercion(&then_ty, &else_ty);
+        if !then_diverges
+            && !else_diverges
+            && !coercible
+            && self.unification.unify(&then_ty, &else_ty).is_err()
+        {
+            self.emit_code(
+                crate::diagnostic::codes::E0214,
+                format!(
+                    "if/else branches have different types: {} vs {}",
+                    fmt_type(&then_ty),
+                    fmt_type(&else_ty)
+                ),
+            );
+        }
+        if then_diverges && !else_diverges {
+            else_ty
+        } else {
+            then_ty
+        }
+    }
+
     /// Common scaffolding for block expressions: push/pop all needed scope
     /// stacks and type-check every statement. The caller decides how to obtain
     /// the result type from the last statement.
@@ -96,12 +170,13 @@ impl<'a> Checker<'a> {
                     Type::Name("unit".into(), vec![])
                 }
                 Stmt::If { cond, then_, else_ } => {
-                    let if_expr = Expr::If {
-                        cond: Box::new(cond.clone()),
-                        then_: then_.clone(),
-                        else_: else_.clone(),
-                    };
-                    this.check_expr(expected, &if_expr, scopes)
+                    // CO-H2 (dx-backlog #7): do NOT synthesize an `Expr::If`
+                    // here. `check_expr` records an expression-type entry for
+                    // the passed node; a synthesized node has no AST metadata
+                    // and therefore no stable NodeId, which aborts the
+                    // resolved layer (`stabilize_expression_types`). Delegate
+                    // to the shared branch-type check instead.
+                    this.check_if_branch_types(cond, then_, else_.as_ref(), expected, scopes)
                 }
                 Stmt::Block(inner) => this.check_block_expr(inner, expected, scopes),
                 _ => {

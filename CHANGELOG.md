@@ -412,6 +412,50 @@
   clippy --all-targets 零警告；fmt 干净；新增 7 回归锁
   （src/tests/deep_eval_20260809.rs，check+VM+codegen 三方断言）。
 
+### 0.35.18 — fmt 评估收尾（dx-backlog #4，Phase G）
+
+> 全语料 round-trip 幂等 + 语义保持双维度评估，确认 `mimi fmt` 语义安全；
+> 语料级回归锁入仓。报告 `devdocs/v0.35/fmt-eval-0.35.18.md`。
+
+- **幂等性**：153 文件（demos/examples/std/libraries/projects 全量）
+  `fmt(fmt(x)) == fmt(x)` **100% 通过**；
+- **语义保持**：50 个有格式变化文件——token 流等价（lexer 序列对比，忽略
+  Newline/Indent/Dedent）+ 同目录 `mimi check` **0 破坏**；
+- **方法论教训**：stdlib 上下文文件必须同目录验证——`std/maps.mimi` 拷到
+  /tmp 的 `unknown type 'Any'` 是路径假阳性（`Any` 仅 std/ 目录内可见），
+  格式化输出放回 std/ 目录即通过；
+- **语料级回归锁**：`src/tests/fmt_corpus_eval.rs`（幂等 + token 流保持，
+  demos/examples 全量 + std/maps.mimi round-trip 锁）；
+- **登记 0.2**：类型位置泛型尖括号插空格（`List<string>` → `List < string >`，
+  风格非 bug——token 流不变、parser 正常接受）；golden 快照可选。
+
+### 0.35.19 — 错误消息 CO-H2 精确 span（dx-backlog #7，Phase G）
+
+> 消灭一条内部 `TOOL-RESOLUTION-001` 泄漏路径：tail if/else 分支类型不匹配
+> 从“无 E 码 + 无 span + 泄漏 rt:<hash> 类型 ID”变为 E0214 + 精确 if 语句
+> 定位 + 语言类型名。报告 `devdocs/v0.35/error-coh2-0.35.19.md`。
+
+- **checker/lowering 对齐**：`check_block_with_implicit_return` 尾部
+  `Stmt::If`（带 else）改双向检查（锚定 if 语句 span；双分支 diverging 时
+  不触发隐式返回检查）——此前 checker 放行、resolved lowering 用内部码拦截；
+- **类型名渲染**：`PrimitiveType::language_name()` + `BodyLowerer::type_display`
+  （Primitive/Nominal/Tuple/Result/Option/Reference/Newtype 递归渲染，深度上限
+  4；`builtin:type:` 前缀剥离）——`implicit_conversion` 错误消息不再泄漏
+  `rt:<hash>` 内部 ID；
+- **span 回退链**（resolved/mod.rs）：generated NodeId 查 node_meta 失败时提取
+  `function:<owner>` 锚点，不再静默 `Span::UNKNOWN`；
+- **统一 if 分支检查**：`Checker::check_if_branch_types` 共享方法（cond bool
+  E0205 + 双向分支检查 + unify E0214），接线 `check_expr_inner` 的 `Expr::If`
+  / `check_block_expr` 尾部 If / tail-if 三处——**diverging 分支豁免**（尾部
+  return/break/continue 不参与 unify，flow `-> A|B` 双状态 return 合法）+
+  **数值强制豁免**（i32/i64、int/float 混合分支合法）；
+- **消灭合成临时 Expr 隐患**：`check_block_expr` 尾部 If 分支不再合成
+  `Expr::If` 调 check_expr（合成节点无 AST meta → 无 stable NodeId →
+  `stabilize_expression_types` abort；该路径首次被真实触发后暴露）；
+- **回归锁**：`src/tests/error_co_h2.rs` ×4（E0214 精确 span / diverging
+  豁免 / 数值强制 / 无内部 ID 泄漏）；全量 **5311 lib** + 15 main + 31
+  real_world + cli 绿；clippy 零警告；fmt 干净；dispatch 无静默回退。
+
 ## [0.1.4] — 2026-08-08
 
 > **语法冻结 + 语义裁决落地 + 架构冻结（Phase G）**。

@@ -830,6 +830,28 @@ impl CheckedProgram {
                                 .node_meta
                                 .get(&error.node_id)
                                 .map(|meta| meta.origin.user_span())
+                                .or_else(|| {
+                                    // CO-H2 (dx-backlog #7): generated
+                                    // lowering nodes (e.g.
+                                    // `function:f/generated:body.block:...`)
+                                    // are not registered in the metadata
+                                    // catalog. Fall back to the owning
+                                    // callable's anchor (`function:f`) so
+                                    // the diagnostic still names a source
+                                    // location instead of Span::UNKNOWN.
+                                    error
+                                        .node_id
+                                        .0
+                                        .split('/')
+                                        .next()
+                                        .filter(|part| part.starts_with("function:"))
+                                        .and_then(|owner| {
+                                            program
+                                                .node_meta
+                                                .get(&NodeId(owner.to_string()))
+                                                .map(|meta| meta.origin.user_span())
+                                        })
+                                })
                                 .unwrap_or(Span::UNKNOWN);
                             // wave1-review §5.16 (closed 2026-08-07): E0830
                             // used to live only inside the message text with

@@ -31,6 +31,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const BLOCK_NORMALIZATION_RULE: &str = "resolved_body.structured_block";
 
+/// CO-H2 (dx-backlog #7): user-facing nominal name. Strips interning prefixes
+/// (`builtin:type:List` → `List`); Flow state identities keep their
+/// `state:Flow::State` form (readable and stable).
+fn nominal_display(item: &str) -> String {
+    item.strip_prefix("builtin:type:")
+        .unwrap_or(item)
+        .to_string()
+}
+
 fn is_local_place(expression: &Expr) -> bool {
     match expression.unlocated() {
         Expr::Ident(_) => true,
@@ -5476,6 +5485,69 @@ impl BodyLowerer<'_> {
         }
     }
 
+    /// CO-H2 (dx-backlog #7): render a canonical type the way the language
+    /// spells it, for user-facing diagnostics. Internal identities
+    /// (`rt:<hash>`, `builtin:type:` prefixes, interning artifacts) must
+    /// never leak into error messages. Recursion is depth-capped so a
+    /// pathological (e.g. self-referential) type cannot balloon the message.
+    fn type_display(&self, id: &ResolvedTypeId) -> String {
+        self.render_type(id, 0)
+    }
+
+    fn render_type(&self, id: &ResolvedTypeId, depth: usize) -> String {
+        if depth > 4 {
+            return id.as_str().to_string();
+        }
+        match self.types.get(id) {
+            Some(ResolvedType::Primitive(p)) => p.language_name().to_string(),
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) => {
+                let base = nominal_display(item.as_str());
+                if arguments.is_empty() {
+                    base
+                } else {
+                    let args = arguments
+                        .iter()
+                        .map(|a| self.render_type(a, depth + 1))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{base}<{args}>")
+                }
+            }
+            Some(ResolvedType::Tuple(elems)) => {
+                let inner = elems
+                    .iter()
+                    .map(|e| self.render_type(e, depth + 1))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({inner})")
+            }
+            Some(ResolvedType::Result { ok, error }) => format!(
+                "Result<{}, {}>",
+                self.render_type(ok, depth + 1),
+                self.render_type(error, depth + 1)
+            ),
+            Some(ResolvedType::Option(t)) => {
+                format!("Option<{}>", self.render_type(t, depth + 1))
+            }
+            Some(ResolvedType::Reference {
+                mutable, target, ..
+            }) => {
+                let m = if *mutable { "mut " } else { "" };
+                let t = self.render_type(target, depth + 1);
+                if t == "()" {
+                    format!("&{m}()")
+                } else {
+                    format!("&{m}{t}")
+                }
+            }
+            Some(ResolvedType::Newtype { item, .. }) => nominal_display(item.as_str()),
+            Some(ResolvedType::Nothing) => "Nothing".to_string(),
+            _ => id.as_str().to_string(),
+        }
+    }
+
     fn implicit_conversion(
         &self,
         node_id: &NodeId,
@@ -5762,11 +5834,9 @@ impl BodyLowerer<'_> {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!(
-                        "checked implicit conversion is required from '{}' ({:?}) to '{}' ({:?})",
-                        from.as_str(),
-                        self.types.get(from),
-                        to.as_str(),
-                        self.types.get(to)
+                        "checked implicit conversion is required from '{}' to '{}'",
+                        self.type_display(from),
+                        self.type_display(to)
                     ),
                 )])
             }
@@ -5782,8 +5852,8 @@ impl BodyLowerer<'_> {
                 node_id.clone(),
                 format!(
                     "types '{}' and '{}' have no admitted implicit conversion",
-                    from.as_str(),
-                    to.as_str()
+                    self.type_display(from),
+                    self.type_display(to)
                 ),
             )]);
         }
