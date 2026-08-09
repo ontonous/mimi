@@ -1080,12 +1080,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                 src.starts_with("List").then_some(src)
             }
             "range" => Some("List<i64>".to_string()),
-            // NOTE: `zip` deliberately NOT covered here. compile_zip packs
-            // each pair as two raw i64 slots (string elems are pointer
-            // bit patterns), which does not match the heap-packed layout
-            // `emit_list_product_tuple_to_string` expects — typing it as
-            // `List<(A, B)>` segfaults the formatter. zip display stays a
-            // known limitation until the formatter grows a raw-pair mode.
+            // zip: List<(A, B)> — pair of the two source lists' element types.
+            // compile_zip now heap-packs each pair (16-byte {a,b} allocation
+            // referenced by an 8-byte slot), matching the product-tuple
+            // formatter's heap-pack assumption, so typing it as List<(A, B)>
+            // is safe (raw inline pairs used to segfault the formatter).
+            "zip" => {
+                let a = args.first().map(|a| self.infer_object_type(a, vars));
+                let b = args.get(1).map(|b| self.infer_object_type(b, vars));
+                let ea = a.as_deref().and_then(Self::strip_list_element_type);
+                let eb = b.as_deref().and_then(Self::strip_list_element_type);
+                match (ea, eb) {
+                    (Some(ea), Some(eb)) => Some(format!("List<({}, {})>", ea, eb)),
+                    _ => None,
+                }
+            }
+            // enumerate: List<(i32, T)> — index pair with the source element.
+            "enumerate" => {
+                let src = args.first().map(|a| self.infer_object_type(a, vars));
+                let elem = src.as_deref().and_then(Self::strip_list_element_type);
+                elem.map(|e| format!("List<(i32, {})>", e))
+            }
             _ => None,
         }
     }

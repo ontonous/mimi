@@ -140,20 +140,108 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .and_then(|et| crate::codegen::expr::call::helpers::parse_type_str(et))
                         .and_then(|ty| self.llvm_type_for(&ty))
                     {
-                        if let BasicTypeEnum::StructType(_sty) = elem_ty {
-                            let size = self.llvm_type_size_bytes(elem_ty);
-                            let size_val = i64_ty.const_int(size, false);
-                            // B4: abort on OOM instead of null-deref.
-                            let heap_ptr = self.malloc_or_abort(size_val, "push_struct")?;
-                            let loaded = self
-                                .builder
-                                .build_load(elem_ty, pv, "push_struct_load")
-                                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-                                .into_struct_value();
-                            self.builder.build_store(heap_ptr, loaded).map_err(|e| {
-                                CompileError::LlvmError(format!("store error: {}", e))
-                            })?;
-                            BasicValueEnum::PointerValue(heap_ptr)
+                        if let BasicTypeEnum::StructType(sty) = elem_ty {
+                            let ffields = sty.get_field_types();
+                            let is_list_struct = ffields.len() == 2
+                                && matches!(
+                                    ffields[0],
+                                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                                )
+                                && matches!(ffields[1], BasicTypeEnum::PointerType(_));
+                            if is_list_struct {
+                                // 0.35.20 (#6): List<T> element — deep-copy the
+                                // data array so the pushed element owns its
+                                // buffer. The shallow {len, data} struct copy
+                                // aliased the source (e.g. a slice of the
+                                // iterated list inside std chunks), and the
+                                // source's scope-exit free left the pushed
+                                // element dangling (garbage / SIGSEGV).
+                                let loaded = self
+                                    .builder
+                                    .build_load(elem_ty, pv, "push_list_load")
+                                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                                    .into_struct_value();
+                                let len = self
+                                    .builder
+                                    .build_extract_value(loaded, 0, "push_list_len")
+                                    .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?
+                                    .into_int_value();
+                                let data = self
+                                    .builder
+                                    .build_extract_value(loaded, 1, "push_list_data")
+                                    .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?
+                                    .into_pointer_value();
+                                let bytes = self
+                                    .builder
+                                    .build_int_mul(len, i64_ty.const_int(8, false), "push_list_bytes")
+                                    .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+                                let new_data = self.malloc_or_abort(bytes, "push_list_data")?;
+                                let memcpy_fn = self.get_runtime_fn("memcpy")?;
+                                self.builder
+                                    .build_call(
+                                        memcpy_fn,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(new_data),
+                                            BasicMetadataValueEnum::PointerValue(data),
+                                            BasicMetadataValueEnum::IntValue(bytes),
+                                        ],
+                                        "push_list_memcpy",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("memcpy: {}", e))
+                                    })?;
+                                // Build the {i64 len, ptr data} struct BY VALUE
+                                // (insert_value) — build_list_struct would return
+                                // an alloca pointer (dangling after this frame)
+                                // and register its data slot for scope-exit free
+                                // (double ownership).
+                                let list_ty = self.list_struct_type();
+                                let new_list = self
+                                    .builder
+                                    .build_insert_value(
+                                        list_ty.get_undef(),
+                                        len,
+                                        0,
+                                        "push_list_val_len",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("insert: {}", e))
+                                    })?
+                                    .into_struct_value();
+                                let new_list = self
+                                    .builder
+                                    .build_insert_value(
+                                        new_list,
+                                        new_data,
+                                        1,
+                                        "push_list_val_data",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("insert: {}", e))
+                                    })?
+                                    .into_struct_value();
+                                let size = self.llvm_type_size_bytes(elem_ty);
+                                let size_val = i64_ty.const_int(size, false);
+                                let heap_ptr = self.malloc_or_abort(size_val, "push_list_box")?;
+                                self.builder
+                                    .build_store(heap_ptr, new_list)
+                                    .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                                BasicValueEnum::PointerValue(heap_ptr)
+                            } else {
+                                let size = self.llvm_type_size_bytes(elem_ty);
+                                let size_val = i64_ty.const_int(size, false);
+                                // B4: abort on OOM instead of null-deref.
+                                let heap_ptr = self.malloc_or_abort(size_val, "push_struct")?;
+                                let loaded = self
+                                    .builder
+                                    .build_load(elem_ty, pv, "push_struct_load")
+                                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                                    .into_struct_value();
+                                self.builder.build_store(heap_ptr, loaded).map_err(|e| {
+                                    CompileError::LlvmError(format!("store error: {}", e))
+                                })?;
+                                BasicValueEnum::PointerValue(heap_ptr)
+                            }
                         } else {
                             BasicValueEnum::PointerValue(pv)
                         }

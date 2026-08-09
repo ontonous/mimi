@@ -305,6 +305,13 @@ pub struct CodeGenerator<'ctx> {
     /// reinterpret slots as f64 bit patterns instead of summing them as i64.
     /// Set at the call site (push-flag pattern), consumed by compile_sum.
     pending_sum_elem_type: Option<String>,
+    /// 0.35.20 (#6): inferred product-tuple element type of the current
+    /// `zip(a, b)` / `enumerate(xs)` call — e.g. `(string, i32)` / `(i32, i32)`.
+    /// compile_zip/compile_enumerate use it to heap-pack each pair with the
+    /// SAME LLVM layout the product-tuple formatter expects (string fields
+    /// inline {ptr,len}), so zip/enumerate display matches bytecode. Without
+    /// it pairs fall back to two raw i64 slots, which the formatter misreads.
+    pending_zip_pair_type: Option<String>,
     /// When compiling a typed list literal (`let xs: List<T> = [...]`), the
     /// element type `T` so Result/Option constructors can be inflated to a
     /// uniform layout before heap packing.
@@ -637,6 +644,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             display_frees: std::cell::RefCell::new(Vec::new()),
             pending_push_elem_type: None,
             pending_sum_elem_type: None,
+            pending_zip_pair_type: None,
             pending_list_elem_type: None,
             pending_result_ok_ty: None,
             pending_to_string_is_any: false,

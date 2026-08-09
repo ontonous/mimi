@@ -41,6 +41,7 @@ fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
 }
 
 use super::CodeGenerator;
+use super::HeapEntry;
 use super::VarEntry;
 
 /// CG-H10 (audit): collect all identifier names referenced via `old(name)`
@@ -1122,6 +1123,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(phi.as_basic_value())
     }
 
+    /// True when `ty` is the canonical Mimi list struct `{i64 len, ptr data}`.
+    fn is_list_llvm_type(ty: BasicTypeEnum<'ctx>) -> bool {
+        matches!(ty, BasicTypeEnum::StructType(st)
+            if st.get_field_types().len() == 2
+                && matches!(st.get_field_types()[0], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64)
+                && matches!(st.get_field_types()[1], BasicTypeEnum::PointerType(_)))
+    }
+
+    /// Drop every `HeapEntry::Slot(base, _, field)` registration matching
+    /// `(alloca, field)` from all live heap scopes, so the scope-exit free
+    /// skips the escaped buffer (ownership transfers to the caller).
+    fn remove_heap_slot(
+        &self,
+        alloca: inkwell::values::PointerValue<'ctx>,
+        field: u32,
+    ) {
+        let mut scopes = self.heap_allocs.borrow_mut();
+        for scope in scopes.iter_mut() {
+            scope.retain(|e| {
+                !matches!(e, HeapEntry::Slot(base, _, f) if *base == alloca && *f == field)
+            });
+        }
+    }
+
     /// L6: when a function returns a custom-enum-shaped value `{i32 tag, i64
     /// payload}`, claim the payload box pointer (field 1) so the callee's
     /// scope-exit free skips it — ownership transfers to the caller, which
@@ -1136,6 +1161,160 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// callee's return-type AST), so records are never *freed* as enum boxes.
     /// Multi-target results share the shape but cannot be returned (flow-state
     /// linearity, E0421), so they never reach here.
+    /// 0.35.20 (#6): transfer ownership of List data buffers that escape this
+    /// function through the return value (returned directly as a List variable,
+    /// or packed inside a returned tuple). Their `HeapEntry::Slot(data)`
+    /// registrations are dropped so `flush_heap_scopes_to_boundary` skips them
+    /// — the caller owns the buffers now. Without this, returning a List
+    /// variable freed its data array before the caller could read it
+    /// (use-after-free → garbage display / SIGSEGV). Detection is by AST shape
+    /// (Ident of a List-typed var, or a tuple of such), covering the common
+    /// `return xs` / `(yes, no)` patterns; unrecognized shapes keep the old
+    /// scope-exit free.
+    pub(in crate::codegen) fn claim_returned_lists(
+        &self,
+        expr: Option<&Expr>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) {
+        match expr.map(|e| e.unlocated()) {
+            Some(Expr::Ident(name)) => {
+                // List variables are stored as pointers to the {i64, ptr}
+                // list struct (the struct itself is an unnamed local). Null
+                // out the struct's data field: the scope-exit free loads the
+                // slot and turns into free(null) — a no-op — while the
+                // returned struct value (already loaded by the caller path)
+                // keeps the live data pointer. Mirrors claim_string_return_value
+                // (which nulls the string slot before heap cleanup).
+                let is_list_var = self
+                    .var_type_names
+                    .get(name)
+                    .map(|t| t.starts_with("List<"))
+                    .unwrap_or(false);
+                if is_list_var {
+                    if let Some(&(alloca, _ty)) = vars.get(name) {
+                        let list_ty = self.list_struct_type();
+                        let list_ptr = match self.build_load(
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            alloca,
+                            &format!("{}_ret_list", name),
+                        ) {
+                            Ok(BasicValueEnum::PointerValue(p)) => p,
+                            _ => return,
+                        };
+                        if let Ok(data_gep) = self.gep().build_struct_gep(
+                            list_ty,
+                            list_ptr,
+                            1,
+                            &format!("{}_ret_list_data", name),
+                        ) {
+                            let null_ptr =
+                                self.context.ptr_type(inkwell::AddressSpace::default()).const_null();
+                            let _ = self.build_store(data_gep, null_ptr);
+                        }
+                    }
+                }
+            }
+            Some(Expr::Tuple(elems)) => {
+                for e in elems {
+                    self.claim_returned_lists(Some(e), vars);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 0.35.20 (#6): deep-copy List *literals* that escape through a return.
+    /// claim_returned_lists nulls the data slot of List *variables*, but a
+    /// literal (`return [1, 2]` or a tuple like `([1, 2], [3, 4])`) has no
+    /// named slot to null — its buffer is registered by build_list_struct and
+    /// freed by the scope-exit flush, leaving the returned struct value
+    /// dangling (garbage under O0; O1 happened to mask it). Copy the buffer
+    /// here so the caller owns a fresh one while the literal's original is
+    /// freed harmlessly. Recurses into tuple fields. llvm.memcpy with size 0
+    /// permits null pointers (LangRef), so empty lists need no special case.
+    fn claim_returned_list_literals(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        expr: Option<&Expr>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match expr.map(|e| e.unlocated()) {
+            Some(Expr::List(_)) => self.deep_copy_list_value(val),
+            Some(Expr::Tuple(items)) => match val {
+                BasicValueEnum::StructValue(sv) => {
+                    let mut new_sv = sv;
+                    for (i, item) in items.iter().enumerate() {
+                        let fv =
+                            self.build_extract_value(new_sv.into(), i as u32, "ret_tup_f")?;
+                        let nf = self.claim_returned_list_literals(fv, Some(item))?;
+                        new_sv = self
+                            .builder
+                            .build_insert_value(new_sv, nf, i as u32, "ret_tup_nf")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("tuple insert: {}", e))
+                            })?
+                            .into_struct_value();
+                    }
+                    Ok(BasicValueEnum::StructValue(new_sv))
+                }
+                _ => Ok(val),
+            },
+            _ => Ok(val),
+        }
+    }
+
+    /// Deep-copy a List struct value's data buffer ({i64 len, ptr data}).
+    fn deep_copy_list_value(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let sv = match val {
+            BasicValueEnum::StructValue(sv) => sv,
+            BasicValueEnum::PointerValue(pv) => {
+                // build_list_struct returns an alloca pointer; load it.
+                let list_ty = self.list_struct_type();
+                self.build_load(BasicTypeEnum::StructType(list_ty), pv, "ret_list_ld")?
+                    .into_struct_value()
+            }
+            _ => return Ok(val),
+        };
+        let len = self
+            .build_extract_value(sv.into(), 0, "ret_list_len")?
+            .into_int_value();
+        let data = self
+            .build_extract_value(sv.into(), 1, "ret_list_data")?
+            .into_pointer_value();
+        let i64_ty = self.context.i64_type();
+        let bytes = self
+            .builder
+            .build_int_mul(len, i64_ty.const_int(8, false), "ret_list_bytes")
+            .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+        let new_data = self.malloc_or_abort(bytes, "ret_list_copy")?;
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(new_data),
+                    BasicMetadataValueEnum::PointerValue(data),
+                    BasicMetadataValueEnum::IntValue(bytes),
+                ],
+                "ret_list_memcpy",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("memcpy: {}", e)))?;
+        let list_ty = self.list_struct_type();
+        let new_sv = self
+            .builder
+            .build_insert_value(list_ty.get_undef(), len, 0, "ret_list_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert len: {}", e)))?
+            .into_struct_value();
+        let new_sv = self
+            .builder
+            .build_insert_value(new_sv, new_data, 1, "ret_list_data")
+            .map_err(|e| CompileError::LlvmError(format!("insert data: {}", e)))?
+            .into_struct_value();
+        Ok(BasicValueEnum::StructValue(new_sv))
+    }
+
     pub(in crate::codegen) fn claim_returned_enum_box(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -1335,19 +1514,31 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.claim_returned_enum_box(v, ret_type)?;
         }
         self.pop_shared_scope()?;
-        // B9: flush to the function boundary so function-level heap
-        // registrations (closure env slots from call sites, string slots)
-        // are released on every return path, not just the fallthrough.
-        self.flush_heap_scopes_to_boundary()?;
         self.pop_comp_scope();
         self.pop_cap_scope();
         match val {
             Some(v) => {
                 let adjusted = self.coerce_variant_value(v, ret_type, ret_ty_ast)?;
                 let adjusted = self.load_return_value_if_needed(adjusted)?;
+                // 0.35.20 (#6): claim returned List variables' data buffers —
+                // null out the variable slot's data field AFTER the return
+                // value has been loaded, so the returned struct keeps the
+                // live pointer while the scope-exit free turns into free(null)
+                // (ownership transfers to the caller).
+                self.claim_returned_lists(expr, vars);
+                // 0.35.20 (#6): deep-copy List literals escaping the return
+                // (no named slot to null). Both claims must run BEFORE the
+                // flush below — the previous order flushed first, freeing the
+                // buffers the claims were supposed to protect (visible under
+                // O0, masked by O1).
+                let adjusted = self.claim_returned_list_literals(adjusted, expr)?;
+                self.flush_heap_scopes_to_boundary()?;
                 self.build_return(Some(&adjusted))?;
             }
-            None => self.build_return(None)?,
+            None => {
+                self.flush_heap_scopes_to_boundary()?;
+                self.build_return(None)?;
+            }
         }
         Ok(())
     }
@@ -3178,6 +3369,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => last_val,
         };
         let last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
+
+        // 0.35.20 (#6): claim returned List variables' data buffers — null out
+        // the variable slot's data field AFTER the return value has been loaded
+        // above, so the returned struct keeps the live pointer while the
+        // scope-exit free below turns into free(null) (ownership transfers to
+        // the caller). Placing this before the load returned a null data
+        // pointer (empty-list display for chunks).
+        self.claim_returned_lists(expr, vars);
+        // 0.35.20 (#6): List *literals* escaping the return get a deep-copied
+        // buffer (no named slot to null) — must run before the flush below.
+        let last_val = self.claim_returned_list_literals(last_val, expr)?;
 
         // Pop scopes (discard compensations on normal exit)
         // A function owns exactly one shared-release frame. Popping only that

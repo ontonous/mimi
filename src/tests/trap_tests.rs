@@ -277,7 +277,7 @@ func main() -> i32 {
 
 #[test]
 fn trap_i32_max_plus_one() {
-    // i32::MAX + 1 should wrap or error, not silently produce wrong result.
+    // i32::MAX + 1 must trap (E0802), not silently wrap.
     let src = r#"
 func main() -> i32 {
     let max = 2147483647
@@ -285,19 +285,15 @@ func main() -> i32 {
     return result
 }
 "#;
-    let result = run_source(src);
-    // Wrapping: -2147483648. Error: runtime panic.
-    // Either is acceptable; silent wrong answer is NOT.
-    match result {
-        interp::Value::Int(v) => {
-            assert!(
-                v == i32::MIN as i64 || v == i32::MAX as i64 + 1,
-                "i32::MAX + 1 should wrap to MIN or overflow, got {}",
-                v
-            );
-        }
-        other => panic!("unexpected result: {:?}", other),
-    }
+    // 0.35.21 (#8): inferred i32 semantics — in-range literals infer i32,
+    // so `max + 1` traps like codegen's checked i32 addition. The pre-fix
+    // test accepted wrap-to-MIN or the i64 value (silent-wrap era).
+    let result = run_source_bytecode_result(src);
+    assert!(result.is_err(), "i32::MAX + 1 must trap");
+    assert!(
+        result.unwrap_err().contains("overflow"),
+        "trap must report integer overflow"
+    );
 }
 
 #[test]
@@ -334,20 +330,16 @@ func main() -> i32 {
     return result
 }
 "#;
-    let result = run_source(src);
-    // 100000 * 100000 = 10^10, overflows i32.
-    // Wrapping: 1410065408. Error: runtime panic.
-    match result {
-        interp::Value::Int(v) => {
-            // Accept wrapping or large value (i64 internal representation).
-            assert!(
-                v == 1410065408 || v == 10000000000,
-                "100000 * 100000 overflow: got {}",
-                v
-            );
-        }
-        other => panic!("unexpected result: {:?}", other),
-    }
+    // 0.35.21 (#8): 100000 * 100000 = 10^10 overflows i32 — in-range
+    // literals now infer i32 (checker default), so the VM traps E0802 like
+    // codegen's checked i32 multiplication. The pre-fix test tolerated
+    // wrapping (1410065408) / i64 (10000000000) — the silent-wrap era.
+    let result = run_source_bytecode_result(src);
+    assert!(result.is_err(), "100000 * 100000 must trap on i32 overflow");
+    assert!(
+        result.unwrap_err().contains("overflow"),
+        "trap must report integer overflow"
+    );
 }
 
 #[test]
@@ -584,6 +576,10 @@ fn trap_dual_i32_overflow() {
     if !can_link() {
         return;
     }
+    // 0.35.21 (#8): the VM now traps inferred-width i32 overflow (in-range
+    // literals infer i32, let-level CheckI32 catches folded arithmetic) —
+    // the old loose assertion (compare outputs when codegen happened to
+    // diverge) is replaced by a strict trap-parity check on both backends.
     let src = r#"
 func main() -> i32 {
     let max = 2147483647
@@ -592,13 +588,16 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_with_stdout(src);
-    let codegen_result = compile_and_run(src);
-    if let Ok(codegen_stdout) = codegen_result {
-        assert_eq!(
-            interp_result.1.trim(),
-            codegen_stdout.trim(),
-            "i32 overflow dual-backend mismatch"
-        );
-    }
+    let vm = run_source_bytecode_result(src);
+    assert!(vm.is_err(), "VM must trap on inferred i32 overflow");
+    assert!(
+        vm.unwrap_err().contains("overflow"),
+        "VM trap must report overflow"
+    );
+    let cg = checked_codegen_compile_and_run(src);
+    assert!(cg.is_err(), "codegen must trap on inferred i32 overflow");
+    assert!(
+        cg.unwrap_err().contains("overflow"),
+        "codegen trap must report overflow"
+    );
 }

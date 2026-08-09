@@ -378,7 +378,7 @@ pub fn describe(code: &str) -> &'static str {
         E0436 => "generic parameter name shadows a builtin type name",
         E0437 => "trait method call on a bounded generic parameter is not supported (monomorphization deferred to 1.x)",
         E0438 => "generic type argument count mismatch",
-        E0439 => "verification engine divergence: resolved and flow_ast disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3)",
+        E0439 => "verification engine divergence: resolved and flow_ast disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3). Arithmetic properties (e.g. `ensures: result == x * x`) commonly trigger this: the flow engine models integers as unbounded while the resolved engine applies i32/i64 checked semantics, so overflow-prone contracts may verify one engine and disprove the other. Add explicit bounds (e.g. `requires: x <= 46340`) to remove the divergence, or compare with bounded arithmetic (`requires: -2**31 <= x && x <= 2**31 - 1`)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

@@ -539,3 +539,54 @@ func main() -> i32 {
 
     cleanup(&root);
 }
+
+#[test]
+fn loader_std_strings_plus_fs_merge_no_dup_impl_key() {
+    // 0.35.21 (#3): `use std::strings` + `use std::fs` used to fail with
+    // "duplicate item 'string'" because item_name keyed Item::Impl on
+    // type_name alone — both modules impl traits on `string` (Str, FsOps).
+    // The dedup key is now (trait, type), so coexisting impls merge cleanly.
+    let dir = temp_dir("std_strings_fs");
+    let main_path = dir.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use std::strings
+use std::fs
+
+func main() -> i32 {
+    let s = "hello"
+    let up = s.to_upper()
+    if up == "HELLO" { 1 } else { 0 }
+}
+"#,
+    )
+    .expect("write main with std::strings + std::fs");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("loading main with std::strings + std::fs should succeed");
+    let merged = loader.merge_all().expect("merge should not report duplicate item");
+    // Both impls must be present (Str on string AND FsOps on string).
+    let impl_types: Vec<String> = merged
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            crate::ast::Item::Impl(i) => Some(format!("{}:{}", i.trait_name, i.type_name)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        impl_types.iter().any(|k| k == "Str:string"),
+        "Str impl on string missing: {:?}",
+        impl_types
+    );
+    assert!(
+        impl_types.iter().any(|k| k == "FsOps:string"),
+        "FsOps impl on string missing: {:?}",
+        impl_types
+    );
+
+    cleanup(&dir);
+}

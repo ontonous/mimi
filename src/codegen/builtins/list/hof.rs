@@ -523,7 +523,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(in crate::codegen) fn compile_enumerate(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
@@ -535,10 +535,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
-        let sizeof_pair = i64_ty.const_int(16, false);
+        // Heap-pack layout: each result element is an 8-byte pointer to a
+        // 16-byte pair {i64 i, i64 v} on the heap. This matches the product-
+        // tuple formatter's heap-pack assumption (List<(i32, T)> elements are
+        // pointers, see emit_list_product_tuple_to_string) and the push builtin's
+        // struct-copy path — raw 16-byte inline pairs made enumerate display
+        // segfault (formatter dereferenced the first slot as a pointer).
         let alloc_size = self
             .builder
-            .build_int_mul(list_len, sizeof_pair, "enum_alloc_size")
+            .build_int_mul(list_len, i64_ty.const_int(8, false), "enum_alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
         let result_data = self.malloc_or_abort(alloc_size, "enum_malloc")?;
         let result_data_i64 = self
@@ -590,32 +595,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, elem_ptr, "enum_elem_val")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let idx_2 = self
+        // 0.35.20 (#6): heap-pack the pair with the formatter's tuple layout
+        // (string fields inline {ptr,len}) so enumerate display matches
+        // bytecode. Falls back to two raw i64 slots when the type is unknown.
+        let pair_ty = self.pending_zip_pair_type.take();
+        let pair_heap = self.build_zip_pair(idx, elem, pair_ty.as_deref())?;
+        let pair_i64 = self
             .builder
-            .build_int_add(idx, idx, "enum_idx_2")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let pair_index_ptr = {
-            self.gep()
-                .build_in_bounds_gep(i64_ty, result_data_i64, &[idx_2], "enum_pair_index")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(pair_index_ptr, idx)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let pair_value_ptr = {
-            self.gep().build_in_bounds_gep(
-                i64_ty,
-                result_data_i64,
-                &[self
-                    .builder
-                    .build_int_add(idx_2, i64_ty.const_int(1, false), "enum_idx_2_plus_1")
-                    .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?],
-                "enum_pair_value",
+            .build_bit_cast(
+                pair_heap,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "enum_pair_i64",
             )
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+        let pair_slot = {
+            self.gep()
+                .build_in_bounds_gep(i64_ty, result_data_i64, &[idx], "enum_pair_slot")
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder
-            .build_store(pair_value_ptr, elem)
+            .build_store(pair_slot, pair_i64)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         let next = self
             .builder
@@ -633,7 +633,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(in crate::codegen) fn compile_zip(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
@@ -666,10 +666,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
         let data_ptr_a = self.load_list_data_i64(*list_ptr_a)?;
         let data_ptr_b = self.load_list_data_i64(*list_ptr_b)?;
-        let sizeof_pair = i64_ty.const_int(16, false);
+        // Heap-pack layout: each result element is an 8-byte pointer to a
+        // 16-byte pair {i64 a, i64 b} on the heap — matching the product-tuple
+        // formatter's heap-pack assumption and the push builtin's struct-copy
+        // path. The previous raw 16-byte inline pairs made zip display print
+        // empty (formatter read the pair's first slot as a pointer into the
+        // second slot's integer bits).
         let alloc_size = self
             .builder
-            .build_int_mul(min_len, sizeof_pair, "zip_alloc_size")
+            .build_int_mul(min_len, i64_ty.const_int(8, false), "zip_alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
         let result_data = self.malloc_or_abort(alloc_size, "zip_malloc")?;
         let result_data_i64 = self
@@ -731,32 +736,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, elem_b_ptr, "zip_elem_b_val")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let idx_2 = self
+        // 0.35.20 (#6): heap-pack the pair with the formatter's tuple layout
+        // (string fields inline {ptr,len}) so zip display matches bytecode.
+        // Falls back to two raw i64 slots when the type is unknown.
+        let pair_ty = self.pending_zip_pair_type.take();
+        let pair_heap = self.build_zip_pair(elem_a, elem_b, pair_ty.as_deref())?;
+        let pair_i64 = self
             .builder
-            .build_int_add(idx, idx, "zip_idx_2")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let pair_a_ptr = {
-            self.gep()
-                .build_in_bounds_gep(i64_ty, result_data_i64, &[idx_2], "zip_pair_a")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(pair_a_ptr, elem_a)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let pair_b_ptr = {
-            self.gep().build_in_bounds_gep(
-                i64_ty,
-                result_data_i64,
-                &[self
-                    .builder
-                    .build_int_add(idx_2, i64_ty.const_int(1, false), "zip_idx_2_plus_1")
-                    .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?],
-                "zip_pair_b",
+            .build_bit_cast(
+                pair_heap,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "zip_pair_i64",
             )
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+        let pair_slot = {
+            self.gep()
+                .build_in_bounds_gep(i64_ty, result_data_i64, &[idx], "zip_pair_slot")
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder
-            .build_store(pair_b_ptr, elem_b)
+            .build_store(pair_slot, pair_i64)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         let next = self
             .builder
@@ -771,5 +771,225 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(done_bb);
         let result_alloca = self.alloc_list_result(min_len, result_data)?;
         Ok(result_alloca.into())
+    }
+
+    /// 0.35.20 (#6): heap-pack a {a, b} pair with the LLVM layout of
+    /// `pair_ty_str` (e.g. "(string, i32)") so the product-tuple formatter
+    /// reads it correctly. String fields are inlined as {ptr, len} (strlen),
+    /// matching the tuple-literal layout; nested Lists are loaded by value;
+    /// floats are bitcast; narrow ints truncated. Falls back to two raw i64
+    /// slots when the type is unknown (callers that did not thread the type
+    /// through the pending_zip_pair_type channel).
+    fn build_zip_pair(
+        &self,
+        elem_a: inkwell::values::IntValue<'ctx>,
+        elem_b: inkwell::values::IntValue<'ctx>,
+        pair_ty_str: Option<&str>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let pair_ty = pair_ty_str
+            .and_then(|ts| crate::codegen::expr::call::helpers::parse_type_str(ts))
+            .and_then(|ty| self.llvm_type_for(&ty));
+        if let Some(BasicTypeEnum::StructType(sty)) = pair_ty {
+            let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+            let pair_heap = self.malloc_or_abort(
+                i64_ty.const_int(size, false),
+                "zip_pair_heap",
+            )?;
+            let fields = sty.get_field_types();
+            let srcs = [elem_a, elem_b];
+            for (i, ft) in fields.iter().enumerate() {
+                let src = srcs[i];
+                let field_gep = self
+                    .gep()
+                    .build_struct_gep(sty, pair_heap, i as u32, &format!("zip_pair_f{}", i))
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                match ft {
+                    BasicTypeEnum::IntType(it) => {
+                        let bw = it.get_bit_width();
+                        let v: BasicValueEnum<'ctx> = if bw == 64 {
+                            BasicValueEnum::IntValue(src)
+                        } else if bw == 1 {
+                            BasicValueEnum::IntValue(
+                                self.builder
+                                    .build_int_truncate(src, *it, "zip_pair_bool")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("trunc: {}", e))
+                                    })?,
+                            )
+                        } else {
+                            BasicValueEnum::IntValue(
+                                self.builder
+                                    .build_int_truncate(src, *it, "zip_pair_int")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("trunc: {}", e))
+                                    })?,
+                            )
+                        };
+                        self.builder
+                            .build_store(field_gep, v)
+                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    }
+                    BasicTypeEnum::FloatType(ftt) => {
+                        let f = self
+                            .builder
+                            .build_bit_cast(src, *ftt, "zip_pair_float")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?;
+                        self.builder
+                            .build_store(field_gep, f)
+                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    }
+                    BasicTypeEnum::PointerType(pt) => {
+                        let p = self
+                            .builder
+                            .build_int_to_ptr(src, *pt, "zip_pair_ptr")
+                            .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+                        self.builder
+                            .build_store(field_gep, p)
+                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    }
+                    BasicTypeEnum::StructType(fsty) => {
+                        let ffs = fsty.get_field_types();
+                        if ffs.len() == 2
+                            && matches!(ffs[0], BasicTypeEnum::PointerType(_))
+                            && matches!(
+                                ffs[1],
+                                BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                            )
+                        {
+                            // string {ptr, len}: ptr + strlen.
+                            // 0.35.20 FIX: the inner {ptr,i64} GEPs must be
+                            // based on field_gep (this field's address inside
+                            // the pair), NOT pair_heap. Using pair_heap with a
+                            // {ptr,i64} type made field-0 GEPs land at offset 0
+                            // regardless of the field index — for zip(string,i32)
+                            // the string is field 0 so the write happened to
+                            // land on its own slot (accidentally correct), but
+                            // enumerate(i32,string) wrote ptr+len over the idx
+                            // and ptr slots, so the formatter read ptr=1 and
+                            // strlen(0x1) SIGSEGV'd. zip+enumerate in one
+                            // function exposed it (type-aware 24B path only
+                            // engaged when a prior zip call primed the pair
+                            // type channel).
+                            let p = self
+                                .builder
+                                .build_int_to_ptr(src, i8_ptr, "zip_pair_str_ptr")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("inttoptr: {}", e))
+                                })?;
+                            let ptr_gep = self
+                                .gep()
+                                .build_struct_gep(*fsty, field_gep, 0, "zip_pair_str_p")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("gep error: {}", e))
+                                })?;
+                            self.builder
+                                .build_store(ptr_gep, p)
+                                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                            let strlen_fn = self.get_runtime_fn("strlen")?;
+                            let len = self
+                                .builder
+                                .build_call(
+                                    strlen_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(p)],
+                                    "zip_pair_strlen",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("strlen: {}", e))
+                                })?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            let len_gep = self
+                                .gep()
+                                .build_struct_gep(*fsty, field_gep, 1, "zip_pair_str_l")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("gep error: {}", e))
+                                })?;
+                            self.builder
+                                .build_store(len_gep, len)
+                                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                        } else if ffs.len() == 2
+                            && matches!(
+                                ffs[0],
+                                BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                            )
+                            && matches!(ffs[1], BasicTypeEnum::PointerType(_))
+                        {
+                            // Nested List {i64 len, ptr data}: the slot holds a
+                            // pointer to the list struct — load by value into
+                            // the tuple field (matches tuple-literal layout).
+                            let p = self
+                                .builder
+                                .build_int_to_ptr(src, i8_ptr, "zip_pair_list_ptr")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("inttoptr: {}", e))
+                                })?;
+                            let loaded = self
+                                .build_load(
+                                    BasicTypeEnum::StructType(*fsty),
+                                    p,
+                                    "zip_pair_list_ld",
+                                )?
+                                .into_struct_value();
+                            self.builder
+                                .build_store(field_gep, loaded)
+                                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                        } else {
+                            // Other struct (Option/Record element): store the
+                            // slot bits as a pointer to the struct (best effort;
+                            // these element kinds are rare in zip/enumerate).
+                            let p = self
+                                .builder
+                                .build_int_to_ptr(src, i8_ptr, "zip_pair_rec_ptr")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("inttoptr: {}", e))
+                                })?;
+                            self.builder
+                                .build_store(field_gep, p)
+                                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                        }
+                    }
+                    _ => {
+                        self.builder
+                            .build_store(field_gep, src)
+                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    }
+                }
+            }
+            return Ok(pair_heap);
+        }
+        // Fallback: two raw i64 slots (16 bytes).
+        let pair_heap = self.malloc_or_abort(i64_ty.const_int(16, false), "zip_pair_heap")?;
+        let pair_i64 = self
+            .builder
+            .build_bit_cast(
+                pair_heap,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "zip_pair_i64",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+        let pair_a_ptr = self
+            .gep()
+            .build_in_bounds_gep(i64_ty, pair_i64, &[i64_ty.const_int(0, false)], "zip_pair_a")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder
+            .build_store(pair_a_ptr, elem_a)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let pair_b_ptr = self
+            .gep()
+            .build_in_bounds_gep(
+                i64_ty,
+                pair_i64,
+                &[i64_ty.const_int(1, false)],
+                "zip_pair_b",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder
+            .build_store(pair_b_ptr, elem_b)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        Ok(pair_heap)
     }
 }

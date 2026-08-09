@@ -5,6 +5,62 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.22 — 可用性修复收官：E0439 提示 + 文档语法 + 错误消息 + test 参数（Phase H）
+
+- **#5 E0439 帮助文本**：`codes.rs` 与 `docs/error-codes.md` 同步——算术属性
+  （`ensures: result == x * x`）触发 resolved/flow 引擎分歧的成因说明与消除
+  办法（显式边界 `requires: x <= 46340`）；
+- **#4 language-spec.md §6.8 合约语法修正**：函数头行尾 `requires x >= 0`
+  （无冒号，parser 拒绝）→ 函数体内 `requires: x >= 0`（带冒号，golden
+  语法）；全文档无残留错误示例；
+- **#2 lower.rs ref 绑定错误消息**：V-1 内部工作项编号（V-1, Wave-3）→
+  用户可读语义（`let ref` 需 enclosing arena block）；
+- **#1 mimi test 零参过滤**：只收集零参 `test_` 函数并运行；带参辅助函数
+  （如 `test_color(c: Color)`）跳过并提示（原无条件零参调用 → E0800 误报）；
+- **验证**：5321 lib + 15 real_world + 31 real_world_cli 全绿；demos 差分
+  14/15 MATCH 保持。
+
+### 0.35.21 — 推断路径 i32 溢出守卫 + loader impl 去重键（Phase H）
+
+- **#8 推断路径 i32 溢出三路径统一**（interp 静默回绕 / codegen E0802 trap）：
+  `infer_expr_type` 字面量按 i32 范围定宽（in-range → Int32）；新增
+  `binop_is_i32_width` 统一宽度判定（字面量弹性适配非字面量侧，负字面量
+  `Unary(Neg)` 识别）；推断路径 let 级 `CheckI32`（限定 Binary/Unary 标量
+  算术，防误伤 Call/closure）；Range/Lambda infer 返回 Unknown；
+- **#8 测试**：codegen trap 断言改用 checked（resolved）路径
+  （`assert_both_backends_trap_e0802`）；trap_tests 3 处旧宽松断言（静默
+  回绕时代）更新为 trap 语义；新增 3 回归锁（fold 溢出 / 变量乘法 /
+  i64 字面量不误伤）；
+- **#3 loader item_name 去重键**：`Item::Impl` 由 `type_name` 改为
+  `(trait, type)` 组合键——`use std::strings` + `use std::fs`（同对
+  `string` 实现 Str/FsOps）不再报 duplicate item；`mod.rs` + `flow.rs`
+  两处合并路径同步；回归锁
+  `loader_std_strings_plus_fs_merge_no_dup_impl_key`；
+- **验证**：5320 lib 全绿；45 loader 测试全过。相邻发现：std/json + std/maps
+  的 pub `has_key` 同名不同签名（std 库命名问题）登记 0.2。
+
+### 0.35.20 — #6 codegen 嵌套容器全修复：zip/enumerate/partition/chunks（Phase H）
+
+- **zip/enumerate heap-pack pair 布局**：`infer_list_builtin_return_type`
+  白名单扩 zip/enumerate + `pending_zip_pair_type` 类型通道 +
+  `build_zip_pair` 类型感知构造（string 内联 {ptr,len}、嵌套 List 按值
+  load、float bitcast、窄 int truncate）；`05_lists.mimi` 首次完全 MATCH；
+- **深挖三处隐藏 bug**：① `build_zip_pair` string 字段 GEP 基址错用
+  `pair_heap`（偏移 0）→ 应 `field_gep`——zip(string,i32) 碰巧正确，
+  enumerate(i32,string) 覆盖 idx/ptr 槽 → `strlen(0x1)` SIGSEGV；
+  ② `emit_return` 的 flush 在 claim 之前（O0 暴露 use-after-free，O1
+  掩盖）→ claim/flush 顺序重构；③ List 字面量返回无 claim 路径
+  （`([1,2],[3,4])` 无命名槽可 null）→ `claim_returned_list_literals`
+  深拷贝 data 缓冲（llvm.memcpy size=0 允许 null 指针，空 List 免分支）；
+- **push 对 List<T> 元素深拷贝 data**（chunks 内层悬空根因）；
+  `claim_returned_lists` 顺序修正（返回值 load 后、free 前）；
+- **附带修复 fmt_type pre-existing bug**：`same_type` Newtype-Name 交叉分支
+  剥参数导致 `Newtype("a", Option)` ≡ `Option<i32>`（proptest seed
+  0b73fde9 触发）→ else 分支保留 args；
+- **回归锁 ×6**（zip strings/ints、enumerate strings、zip+enumerate 同函数、
+  partition、chunks、用户函数返回 List tuple）；5317 lib 全绿；demos 差分
+  14/15 MATCH（除 14_ffi 环境差）。
+
 ### 0.35.1 — 性能基线套件 + 四象限矩阵（0.1.5 首 sprint，Phase A）
 
 > 0.1.5 性能主线的第一步：建立可复现基线，锁定 trap 成本分解的第一个靶子。

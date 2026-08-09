@@ -1170,14 +1170,19 @@ If body uses `?`, signature must declare rollback failure error type; failure re
 Contracts are exclusive fields of function/transition definitions:
 
 ```mimi
-func withdraw(balance: i64, amount: i64) -> i64
-    requires amount >= 0
-    requires amount <= balance
-    ensures result == balance - amount
-{
+func withdraw(balance: i64, amount: i64) -> i64 {
+    requires: amount >= 0
+    requires: amount <= balance
+    ensures: result == balance - amount
     balance - amount
 }
 ```
+
+> **语法注意（0.35.22 修正）**：合约语句写在**函数体内**，关键字后带冒号
+> （`requires: ...` / `ensures: ...`）。函数头行尾 `requires amount >= 0`
+> （既无体内位置也无冒号）的旧写法会被 parser 拒绝（E0500 系列）。
+> 校验：`docs/syntax-reference.md` golden 语法与 `devdocs/v0.31/04-type-system.md`
+> 裁决文档一致。
 
 #### `invariant`
 
