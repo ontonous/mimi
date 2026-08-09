@@ -140,35 +140,10 @@ impl<'a> Checker<'a> {
             Expr::Block(block) => self.check_block_expr(block, expected, scopes),
             // C3: if — check both branches against expected type
             Expr::If { cond, then_, else_ } => {
-                let condition_ty = self.infer_expr(cond, scopes);
-                if !crate::core::helpers::is_bool(&condition_ty) {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0202,
-                        format!(
-                            "if condition must be bool, found {}",
-                            crate::core::helpers::fmt_type(&condition_ty)
-                        ),
-                    );
-                }
-                // Use check_block_expr to propagate expected type to branches
-                let then_ty = self.check_block_expr(then_, expected, scopes);
-                if let Some(else_block) = else_ {
-                    let else_ty = self.check_block_expr(else_block, expected, scopes);
-                    // Unify both branches
-                    if self.unification.unify(&then_ty, &else_ty).is_err() {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0214,
-                            format!(
-                                "if/else branches have different types: {} vs {}",
-                                crate::core::helpers::fmt_type(&then_ty),
-                                crate::core::helpers::fmt_type(&else_ty)
-                            ),
-                        );
-                    }
-                    self.unification.zonk_or_unknown(&then_ty)
-                } else {
-                    then_ty
-                }
+                // CO-H2 (dx-backlog #7): delegate to the shared branch-type
+                // check so expression-position ifs agree with block-tail ifs
+                // on diverging-branch semantics and E codes.
+                self.check_if_branch_types(cond, then_, else_.as_ref(), expected, scopes)
             }
             // For all other expressions, fall back to inference
             _ => self.infer_expr(expr, scopes),

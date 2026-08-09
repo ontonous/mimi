@@ -46,12 +46,41 @@ impl<'a> Checker<'a> {
                 }
             }
             if i + 1 == block.len() {
-                if let Stmt::Expr(expr) = stmt.unlocated() {
-                    // The final expression is checked bidirectionally against
-                    // the callable result so None/Some/Ok/Err residuals are
-                    // fully constrained before typed artifacts are captured.
-                    last_expr_type = Some(self.check_expr(ret, expr, scopes));
-                    continue;
+                match stmt.unlocated() {
+                    Stmt::Expr(expr) => {
+                        // The final expression is checked bidirectionally against
+                        // the callable result so None/Some/Ok/Err residuals are
+                        // fully constrained before typed artifacts are captured.
+                        last_expr_type = Some(self.check_expr(ret, expr, scopes));
+                        continue;
+                    }
+                    Stmt::If { cond, then_, else_ } if else_.is_some() => {
+                        // CO-H2 (dx-backlog #7): a tail `if/else` is a value
+                        // position in the resolved lowering (`has_tail_result`,
+                        // lower.rs — both branches must match the callable's
+                        // return type). Check it bidirectionally via the shared
+                        // branch-type check (no synthesized Expr: `check_expr`
+                        // would record a checker expression type on a node
+                        // with no stable NodeId, aborting lowering later). A
+                        // branch/return mismatch surfaces as E0214 with a
+                        // precise span instead of leaking an internal
+                        // TOOL-RESOLUTION-001 from the resolved layer.
+                        if let Some(meta) = stmt.meta() {
+                            self.set_pos(meta.span.start_line, meta.span.start_col);
+                        }
+                        let if_ty =
+                            self.check_if_branch_types(cond, then_, else_.as_ref(), ret, scopes);
+                        // Both branches diverging (e.g. every branch `return`s)
+                        // means the if produces no value and there is nothing
+                        // to implicitly return.
+                        let both_diverging = crate::core::infer::helpers::block_is_diverging(then_)
+                            && crate::core::infer::helpers::block_is_diverging(
+                                else_.as_ref().expect("guarded is_some"),
+                            );
+                        last_expr_type = if both_diverging { None } else { Some(if_ty) };
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             self.check_stmt(stmt, ret, scopes);

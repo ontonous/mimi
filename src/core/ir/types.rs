@@ -114,6 +114,32 @@ impl PrimitiveType {
         })
     }
 
+    /// Reverse of [`Self::from_language_name`]: the user-facing language name.
+    /// CO-H2 (dx-backlog #7): resolved lowering diagnostics must render
+    /// canonical types as the language spells them, not as internal IDs.
+    pub fn language_name(self) -> &'static str {
+        match self {
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::I128 => "i128",
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::U128 => "u128",
+            Self::Isize => "isize",
+            Self::Usize => "usize",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Bool => "bool",
+            Self::Char => "char",
+            Self::String => "string",
+            Self::Unit => "()",
+        }
+    }
+
     fn tag(self) -> &'static str {
         match self {
             Self::I8 => "i8",

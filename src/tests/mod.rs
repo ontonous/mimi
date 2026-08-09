@@ -151,6 +151,8 @@ pub(crate) mod audit_fix_verifier;
 pub(crate) mod audit_fix_verifier_resolved;
 pub(crate) mod audit_fix_vm;
 pub(crate) mod audit_fix_vm_exec;
+pub(crate) mod error_co_h2;
+pub(crate) mod fmt_corpus_eval;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
