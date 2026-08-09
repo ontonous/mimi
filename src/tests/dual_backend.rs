@@ -15824,6 +15824,63 @@ fn dual_user_func_returns_list_tuple() {
     );
 }
 
+#[test]
+fn dual_claim_stops_at_call_args_in_legacy_body() {
+    // Regression (0.35.24): claim_returned_lists recursed into Call args
+    // (0.35.23) and nulled local List variables that are mere INPUTS of the
+    // call — the field-assign `rec.field = g(local)` (legacy body via mutate
+    // param) nulled `local`'s data slot, so the later `local[0]` read through
+    // a null pointer (native printed 0; VM unaffected → dual mismatch). The
+    // walk now stops at Call: args are inputs, not part of the returned
+    // value's ownership shape.
+    assert_both_backends_stdout(
+        "type MyRec { field: List<i32>, }\n\n        func g(x: List<i32>) -> List<i32> { x }\n\n        func f(data: mutate List<i32>) -> i32 {\n            let local = [1, 2, 3]\n            let rec = MyRec { field: [1] }\n            rec.field = g(local)\n            local[0]\n        }\n\n        func main() -> i64 {\n            let xs = [1]\n            println(f(xs))\n            0\n        }",
+        "1",
+        "field-assign call RHS must not null a local list arg (legacy body)",
+    );
+}
+
+#[test]
+fn dual_legacy_generic_push_tail_call_keeps_local_list() {
+    // Regression (0.35.24): a generic (legacy-emitted) function whose tail
+    // expression is a mutate-builtin call (`push(data, n)`) used to hit the
+    // Call-args recursion: `data` was claimed (nulled) although it never
+    // escapes — the scope-exit free turned into free(null), leaking the
+    // buffer. The walk now stops at Call, so the local list keeps normal
+    // ownership and the following reads stay valid.
+    assert_both_backends_stdout(
+        "func f<T>(x: T) -> i32 {\n            let data = [1, 2, 3]\n            push(data, 4)\n            let n = len(data)\n            println(n)\n            0\n        }\n\n        func main() -> i64 {\n            f(0)\n            0\n        }",
+        "4",
+        "generic legacy push tail call keeps local list intact",
+    );
+}
+
+#[test]
+fn dual_var_assign_keeps_rhs_list_alive() {
+    // Regression (0.35.24): the 0.35.23 assignment-time "claim" nulled the
+    // RHS List variable on `dst = xs` (legacy body) — a later `xs[0]` read
+    // through a null data pointer (native printed 0; VM printed 1). List
+    // assignment is a COW shallow copy (push on either side reallocs its own
+    // slot), NOT an ownership transfer, so the RHS must stay live.
+    assert_both_backends_stdout(
+        "func f<T>(x: T) -> i32 {\n            let xs = [1, 2, 3]\n            let mut dst = [0]\n            dst = xs\n            xs[0]\n        }\n\n        func main() -> i64 {\n            println(f(0))\n            0\n        }",
+        "1",
+        "variable assignment must keep the RHS list alive (legacy body)",
+    );
+}
+
+#[test]
+fn dual_field_assign_keeps_rhs_list_alive() {
+    // Regression (0.35.24): the 0.35.23 assignment-time "claim" nulled the
+    // RHS List variable on `rec.field = xs` (legacy body) — a later `xs[0]`
+    // read through a null data pointer (native printed 0; VM printed 1).
+    assert_both_backends_stdout(
+        "type MyRec { field: List<i32>, }\n\n        func f(data: mutate List<i32>) -> i32 {\n            let xs = [1, 2, 3]\n            let mut rec = MyRec { field: [0] }\n            rec.field = xs\n            xs[0]\n        }\n\n        func main() -> i64 {\n            let xs = [1]\n            println(f(xs))\n            0\n        }",
+        "1",
+        "field assignment must keep the RHS list alive (legacy body)",
+    );
+}
+
 // ─── 0.35.21 (#8) inferred-width i32 overflow guards ──────────
 // CheckI32 (0.34.34) only covered explicitly annotated `let x: i32`;
 // un-annotated bindings silently wrapped in the i64 register domain while
