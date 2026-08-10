@@ -1856,19 +1856,30 @@ impl FfiRuntime {
                     _userdata: unsafe { Box::from_raw(userdata_ptr) }, // SAFETY: 上方 Box::into_raw 转移所有权至裸指针，此处 from_raw 收回，配对无双重释放。
                 };
 
-                if let Ok(mut store) = super::ffi::callback::global_callback_store().lock() {
-                    store.insert(
-                        cb_id,
-                        super::ffi::callback::GlobalCallbackEntry {
-                            closure,
-                            ret_is_float,
-                            arg_free_mask,
-                            arg_kinds,
-                            active_count: Arc::clone(&active_count),
-                            keepalive: Some(keepalive),
-                        },
-                    );
-                }
+                // 0.35.37 (H8): `if let Ok` silently skipped the store insert
+                // when the mutex was poisoned (a prior panic in a closure
+                // holding the guard). A registered callback then vanished
+                // from global_callback_store while the caller believed the
+                // FFI function pointer was live — the trampoline was
+                // keepalive-registered but unreachable, and the next extern
+                // call hit a dangling callback (C3 amplification). A
+                // poisoned mutex is recoverable: `into_inner` resurfaces the
+                // data; poisoning records a panic, it does not destroy the
+                // registration contract.
+                let mut store = super::ffi::callback::global_callback_store()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                store.insert(
+                    cb_id,
+                    super::ffi::callback::GlobalCallbackEntry {
+                        closure,
+                        ret_is_float,
+                        arg_free_mask,
+                        arg_kinds,
+                        active_count: Arc::clone(&active_count),
+                        keepalive: Some(keepalive),
+                    },
+                );
 
                 // FfiGuard no longer owns the trampoline (global store does).
                 // Keep a no-op guard slot unused — callers still pass ffi_guards.
