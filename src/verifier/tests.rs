@@ -1203,6 +1203,87 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn verify_callee_unencodable_precondition_is_fail_closed() {
+    // H1 (audit-triage-0.35.25): the callee-requires walker was fail-OPEN —
+    // a precondition `expr_to_z3_bool` could not encode (calls, strings,
+    // ...) was silently skipped, so the caller verified Proven while the
+    // runtime traps E0801 at the call site. The string comparison in the
+    // requires is unencodable (strings are not modeled on the AST path);
+    // the call must now come back "not verified", never Proven.
+    require_z3!();
+    let src = r#"
+func guarded(tag: string) -> i64 {
+    requires: tag == "admin"
+    tag.len()
+}
+
+func caller(tag: string) -> i64 {
+    guarded(tag)
+}
+func main() -> i64 { 0 }
+"#;
+    let results = verify_source(src).expect("verify unencodable callee requires");
+    let caller = results
+        .iter()
+        .find(|r| r.func_name == "caller")
+        .expect("caller result");
+    assert_ne!(
+        caller.status,
+        VerifStatus::Proven,
+        "unencodable callee requires must not verify the caller: {}",
+        caller.message
+    );
+    assert!(
+        caller.message.contains("cannot be encoded"),
+        "failure must name the unencodable precondition: {}",
+        caller.message
+    );
+}
+
+#[test]
+fn verify_callee_requires_unknown_is_fail_closed() {
+    // H1: a solver timeout (Unknown) on the callee-requires check used to be
+    // treated as satisfied. The disjunction `x < 0 || x * x < 0` is
+    // nonlinear and hard for Z3 to decide — if it returns Unknown the call
+    // must not verify. The important lock is the fail-closed branch: should
+    // the solver ever answer Unknown, the caller gets an explicit "could not
+    // be decided" failure instead of Proven.
+    require_z3!();
+    let src = r#"
+func tricky(x: i64) -> i64 {
+    requires: x < 0 || x * x < 0
+    x * x
+}
+func caller(x: i64) -> i64 {
+    tricky(x)
+}
+func main() -> i64 { 0 }
+"#;
+    let results = verify_source(src).expect("verify callee requires Unknown path");
+    let caller = results
+        .iter()
+        .find(|r| r.func_name == "caller")
+        .expect("caller result");
+    match caller.status {
+        VerifStatus::Proven => panic!(
+            "solver timeout on callee requires must not verify the caller: {}",
+            caller.message
+        ),
+        VerifStatus::Failed => {
+            assert!(
+                caller.message.contains("could not be decided")
+                    || caller.message.contains("may violate precondition"),
+                "Unknown path must fail closed: {}",
+                caller.message
+            );
+        }
+        _ => {
+            // SolverUnknown keeps the no-proof contract (never Proven).
+        }
+    }
+}
+
+#[test]
 fn verify_branch_callee_ensures_not_unconditional() {
     require_z3!();
     // V-C5: callee ensures inside a never-taken branch must not prove caller.

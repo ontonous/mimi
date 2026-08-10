@@ -3217,9 +3217,38 @@ impl VerifierCtx {
                                 call_args,
                                 &format!("call_{}", name),
                             );
-                            if let Some(z3_req) = expr::expr_to_z3_bool(&substituted, vars) {
-                                let (result, _) = session.check_scope(z3_req.not());
-                                if result == z3::SatResult::Sat {
+                            // 0.35.34 (H1): the walker was fail-OPEN — a
+                            // precondition that could not be encoded
+                            // (expr_to_z3_bool None: calls, strings, ...) was
+                            // silently skipped, and a solver timeout (Unknown)
+                            // was treated as satisfied. The caller then
+                            // verified Proven while the runtime traps E0801
+                            // at the call site. fail-closed: both become
+                            // explicit "not verified" errors.
+                            let z3_req = match expr::expr_to_z3_bool(&substituted, vars) {
+                                Some(z) => z,
+                                None => {
+                                    errors.push((
+                                        caller_name.to_string(),
+                                        format!(
+                                            "call to '{}' has a precondition that cannot be encoded for verification — not verified",
+                                            name
+                                        ),
+                                        expr.meta()
+                                            .map(|meta| meta.span)
+                                            .or_else(|| {
+                                                self.func_defs
+                                                    .get(caller_name)
+                                                    .map(|caller| caller.meta.span)
+                                            })
+                                            .unwrap_or(Span::UNKNOWN),
+                                    ));
+                                    return;
+                                }
+                            };
+                            let (result, _) = session.check_scope(z3_req.not());
+                            match result {
+                                z3::SatResult::Sat => {
                                     errors.push((
                                         caller_name.to_string(),
                                         format!("call to '{}' may violate precondition", name),
@@ -3234,6 +3263,28 @@ impl VerifierCtx {
                                     ));
                                     return;
                                 }
+                                // Unknown = solver timeout/incomplete: the
+                                // precondition could NOT be discharged, so
+                                // the call must not verify (fail-closed).
+                                z3::SatResult::Unknown => {
+                                    errors.push((
+                                        caller_name.to_string(),
+                                        format!(
+                                            "call to '{}': precondition satisfaction could not be decided (solver timeout) — not verified",
+                                            name
+                                        ),
+                                        expr.meta()
+                                            .map(|meta| meta.span)
+                                            .or_else(|| {
+                                                self.func_defs
+                                                    .get(caller_name)
+                                                    .map(|caller| caller.meta.span)
+                                            })
+                                            .unwrap_or(Span::UNKNOWN),
+                                    ));
+                                    return;
+                                }
+                                z3::SatResult::Unsat => {}
                             }
                         }
                     }
