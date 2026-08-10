@@ -2,6 +2,7 @@
 //! Findings: devdocs/full-audit-2026-08-05.md (2026-08-05 full audit).
 //! Discipline: each fix must carry a regression test here; L1 divergences
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
+use super::*;
 
 // ---------------------------------------------------------------------------
 // quote.rs fixes (2026-08-05 audit, MEDIUM): unbounded drop recursion +
@@ -102,4 +103,97 @@ fn audit_mutex_guard_same_thread_roundtrip() {
     assert_eq!(mimi_mutex_get(g2), 42);
     mimi_mutex_unlock(g2);
     mimi_mutex_drop(m);
+}
+
+// ── 0.35.29 H13: close_fd must not close standard streams ──
+// The VM and codegen backends disagreed with the connect policy
+// (net.rs builtin_connect rejects fd <= 2): close_fd(0/1/2) silently
+// closed the interpreter's own stdio. Both sides now reject the
+// standard-stream range.
+
+#[test]
+fn audit_h13_close_fd_rejects_standard_streams_vm() {
+    // VM side: close_fd(0) must trap with a clean InterpError, not close stdin.
+    let src = r#"
+func main() -> i32 {
+    close_fd(0)
+    0
+}
+"#;
+    let r = run_source_result(src);
+    assert!(
+        r.is_err(),
+        "close_fd(0) must be rejected on the VM — got {:?}",
+        r
+    );
+    let msg = r.unwrap_err();
+    assert!(
+        msg.contains("standard stream"),
+        "error must name the stdio guard, got: {msg}"
+    );
+}
+
+#[test]
+fn audit_h13_close_fd_rejects_standard_streams_codegen() {
+    if !can_link() {
+        return;
+    }
+    // Codegen side: mimi_close returns -1 for fd <= 2 (like connect's guard),
+    // so the compiled program observes the rejection instead of closing stdio.
+    let src = r#"
+func main() -> i32 {
+    let r = close_fd(1)
+    println(r)
+    0
+}
+"#;
+    let out = compile_and_run(src).expect("program must run");
+    assert_eq!(out.trim(), "-1");
+}
+
+#[test]
+fn audit_h13_close_fd_still_closes_real_fds() {
+    // A real fd > 2 must still close cleanly on the VM. The test process and
+    // the VM share the same process (run_source runs in-process), so a fd
+    // opened here is visible to the Mimi program. After close_fd the fd must
+    // be gone (EBADF on a second close via fcntl).
+    use std::os::unix::io::AsRawFd;
+    let path = std::env::temp_dir().join(format!("mimi_h13_{}.txt", std::process::id()));
+    std::fs::write(&path, b"x").unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let fd = file.as_raw_fd();
+    assert!(
+        fd > 2,
+        "test fd must be > 2 for the guard to pass, got {fd}"
+    );
+    drop(file);
+
+    let src = format!(
+        r#"
+func main() -> i32 {{
+    close_fd({fd})
+    0
+}}
+"#
+    );
+    let r = run_source_result(&src);
+    assert!(
+        r.is_ok(),
+        "close_fd of a real fd > 2 must succeed, got {r:?}"
+    );
+
+    // The fd must now be closed: fcntl(F_GETFD) itself would return a valid
+    // descriptor otherwise. Verify via libc that it is EBADF.
+    // SAFETY: fcntl with a raw fd; the fd is not in use by this process
+    // anymore (the File was dropped).
+    let rc = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_eq!(rc, -1, "fd {fd} must be closed after close_fd");
+    // SAFETY: errno access after a libc failure.
+    let err = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(
+        err,
+        Some(libc::EBADF),
+        "closed fd must report EBADF, got {err:?}"
+    );
+    let _ = std::fs::remove_file(&path);
 }

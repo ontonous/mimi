@@ -1285,6 +1285,16 @@ fn builtin_close_fd(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("close_fd: fd must be i32"))? as i32;
+    // 0.35.29 (H13): guard standard streams the same way connect does at
+    // net.rs — closing 0/1/2 hijacks the interpreter's own stdio. The
+    // codegen backend rejects the same range in runtime mimi_close, so
+    // both backends agree (previously: strategy mismatch with connect).
+    if fd <= 2 {
+        return Err(InterpError::new(format!(
+            "close_fd: fd={} is a standard stream (0/1/2); refusing to close interpreter stdio",
+            fd
+        )));
+    }
     if fd >= 0 {
         unsafe { libc::close(fd) }; // SAFETY: fd>=0 已检查；close_fd builtin 契约要求 fd 为有效描述符。
     }
