@@ -3971,7 +3971,23 @@ impl<'a> JsonParser<'a> {
     /// current position parses as a strict JSON value (RFC 8259: object keys
     /// must be strings, colons/commas in the right places, numbers with the
     /// RFC grammar, no trailing garbage).
+    ///
+    /// 0.35.27 (C4): depth-guarded — shares `self.depth` with the permissive
+    /// parser so deeply nested `{{{{...}}}}` returns `false` instead of
+    /// overflowing the stack (permissive path already had JSON_MAX_DEPTH=64;
+    /// the strict path previously recursed unchecked).
     fn strict_value(&mut self) -> bool {
+        self.depth += 1;
+        if self.depth > JSON_MAX_DEPTH {
+            self.depth -= 1;
+            return false;
+        }
+        let result = self.strict_value_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn strict_value_inner(&mut self) -> bool {
         self.skip_ws();
         match self.peek() {
             b'{' => self.strict_object(),

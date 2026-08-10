@@ -753,6 +753,60 @@ fn audit_from_json_null_guard_and_valid_dual() {
     assert_codegen_traps(malformed, "from_json parse error");
 }
 
+/// C4 regression lock: deeply nested JSON must be rejected, not crash.
+///
+/// Pre-fix (0.35.27): the strict RFC 8259 validator (strict_value/
+/// strict_object/strict_array) recursed WITHOUT any depth limit — `[[[[...]]]]`
+/// far beyond the permissive parser's JSON_MAX_DEPTH=64 overflowed the stack
+/// (SIGSEGV). The permissive path already had a depth guard; the strict path
+/// was the asymmetric hole. Now strict_value shares self.depth with the
+/// permissive parser: nesting deeper than 64 → false → Err, never a crash.
+#[test]
+fn audit_deep_nested_json_rejected_not_stack_overflow() {
+    // 500 nested arrays — far past the 64-depth guard, ~50× the old
+    // permissive limit. Pre-fix this SIGSEGVs in strict_value recursion
+    // (libtest 2MB stack: 64 * two frames per level ≈ overflow quickly).
+    let deep = format!("{}0{}", "[".repeat(500), "]".repeat(500));
+    // VM reference: is_valid_json must return false (valid: true), not crash.
+    let vm_src = format!(
+        r#"
+        func main() -> i32 {{
+            let s = "{}"
+            if json_is_valid(s) {{ 1 }} else {{ 0 }}
+        }}
+    "#,
+        deep
+    );
+    // assert_vm_output is not directly available; use run_source_bytecode_result
+    let file = parse(&vm_src);
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("C4: compile deep json check");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
+    match vm.run_value() {
+        Ok(crate::interp::Value::Int(0)) => {} // valid rejected → good
+        Ok(v) => panic!("C4: deep json accepted (returned {:?})", v),
+        Err(e) => panic!("C4: deep json crashed VM: {}", e.message()),
+    }
+
+    if !can_link() {
+        return;
+    }
+    // Codegen: from_json on the deep document must trap ("parse error"), not
+    // crash or pass garbage.
+    let codegen_src = format!(
+        r#"
+        func main() -> i32 {{
+            println(from_json("{}"))
+            0
+        }}
+    "#,
+        deep
+    );
+    assert_codegen_traps(&codegen_src, "from_json parse error");
+}
+
 // ============================================================
 // stdlib JSON parser 与 serde 语义统一（audit 2026-08-07）
 // ============================================================
