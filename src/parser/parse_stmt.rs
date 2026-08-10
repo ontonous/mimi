@@ -825,6 +825,17 @@ impl Parser {
                 }
                 // F-H2: interpolation sub-parser must consume the entire fragment.
                 let mut sub = Parser::new_with_source(tokens, self.source_id);
+                // 0.35.25 (C2, audit-triage-0.35.25.md): 子解析器继承外层
+                // recursion_depth——修复前嵌套 f-string 每层新建实例时从 0
+                // 重数，深度守卫对跨实例链完全失察（6000 层嵌套 ~30KB 源码
+                // SIGSEGV，默认 8MB 栈打穿；libtest 2MB 栈 40 层即炸）。
+                // 继承后守卫跨实例持续计数，达到预算返回 ParseError。
+                sub.recursion_depth.set(self.recursion_depth.get());
+                // 通用预算（DEPTH_MAX_DEFAULT=128）对本路径太宽：嵌套每层
+                // 栈成本 ~53KB，128 预算允许 64 层嵌套 ~3.4MB 仍会爆 2MB
+                // libtest 栈。f-string 专用预算 DEPTH_MAX_FSTRING=64
+                // （≈32 层嵌套，~1.7MB，带余量）。
+                self.check_depth_with(super::helpers::DEPTH_MAX_FSTRING)?;
                 let expr = sub.parse_expr(0)?;
                 if !sub.at(&TokenKind::Eof) {
                     return Err(ParseError::new(
