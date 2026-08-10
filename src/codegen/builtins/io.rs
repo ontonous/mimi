@@ -124,10 +124,93 @@ impl<'ctx> CodeGenerator<'ctx> {
             let cur = self
                 .build_load(i64_ty, total_alloca, &format!("{}_asz_t{}", name, pi))?
                 .into_int_value();
+            // M8 (0.35.37): checked add — a wrapped `total` (negative or tiny)
+            // would make malloc allocate a small buffer and the trailing
+            // NUL write (buf[offset], offset = total-1) go out of bounds.
+            // Same SD-7 sadd.with.overflow pattern as list/hof.rs.
+            let saddle_ty = self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::IntType(self.context.bool_type()),
+                ],
+                false,
+            );
+            let saddle_fn = self
+                .module
+                .get_function("llvm.sadd.with.overflow.i64")
+                .unwrap_or_else(|| {
+                    self.module.add_function(
+                        "llvm.sadd.with.overflow.i64",
+                        saddle_ty.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::IntType(i64_ty),
+                                BasicMetadataTypeEnum::IntType(i64_ty),
+                            ],
+                            false,
+                        ),
+                        Some(inkwell::module::Linkage::External),
+                    )
+                });
+            let saddle_call = self
+                .builder
+                .build_call(
+                    saddle_fn,
+                    &[
+                        BasicMetadataValueEnum::IntValue(cur),
+                        BasicMetadataValueEnum::IntValue(add_len),
+                    ],
+                    &format!("{}_asz_sadd{}", name, pi),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("sadd.with.overflow: {}", e)))?;
+            let saddle_val = saddle_call
+                .try_as_basic_value_opt()
+                .ok_or_else(|| CompileError::LlvmError("sadd.with.overflow returned void".into()))?
+                .into_struct_value();
             let next = self
                 .builder
-                .build_int_add(cur, add_len, &format!("{}_asz_tadd{}", name, pi))
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                .build_extract_value(saddle_val, 0, &format!("{}_asz_sum{}", name, pi))
+                .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?
+                .into_int_value();
+            let overflow = self
+                .builder
+                .build_extract_value(saddle_val, 1, &format!("{}_asz_ovf{}", name, pi))
+                .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?
+                .into_int_value();
+            let current_fn = self.current_function().ok_or_else(|| {
+                CompileError::LlvmError("no current function for sized_cat_parts overflow".into())
+            })?;
+            let sum_ok_bb = self
+                .context
+                .append_basic_block(current_fn, &format!("{}_asz_ok{}", name, pi));
+            let sum_ovf_bb = self
+                .context
+                .append_basic_block(current_fn, &format!("{}_asz_ovf_trap{}", name, pi));
+            self.builder
+                .build_conditional_branch(overflow, sum_ovf_bb, sum_ok_bb)
+                .map_err(|e| CompileError::LlvmError(format!("cond_br: {}", e)))?;
+            self.builder.position_at_end(sum_ovf_bb);
+            let ovf_msg = self
+                .builder
+                .build_global_string_ptr(
+                    "display buffer size overflow",
+                    &format!("{}_asz_ovf_msg{}", name, pi),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("global string: {}", e)))?;
+            let abort_fn = self.get_or_declare_abort_fn();
+            self.builder
+                .build_call(
+                    abort_fn,
+                    &[BasicMetadataValueEnum::PointerValue(
+                        ovf_msg.as_pointer_value(),
+                    )],
+                    &format!("{}_asz_ovf_abort{}", name, pi),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("call: {}", e)))?;
+            // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable: {}", e)))?;
+            self.builder.position_at_end(sum_ok_bb);
             self.build_store(total_alloca, next)?;
         }
         let total = self
@@ -217,9 +300,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // offset picked up a stale runtime length and truncated the result
         // to its first byte. A call the optimizer cannot see through breaks
         // the folding.
+        // M8 (0.35.37): pass `total` as alloc_size so the runtime aborts
+        // (instead of writing out of bounds) if off_end ever exceeds the
+        // allocation.
         let nul_fn_ty = self.context.void_type().fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64_ty),
                 BasicMetadataTypeEnum::IntType(i64_ty),
             ],
             false,
@@ -239,6 +326,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             &[
                 BasicMetadataValueEnum::PointerValue(buf),
                 BasicMetadataValueEnum::IntValue(off_end),
+                BasicMetadataValueEnum::IntValue(total),
             ],
             &format!("{}_asz_term", name),
         )?;

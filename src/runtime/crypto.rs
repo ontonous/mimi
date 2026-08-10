@@ -258,13 +258,31 @@ pub extern "C" fn mimi_to_string_f64(val: f64) -> *mut std::ffi::c_char {
 /// # Safety contract
 /// `buf` must point to an allocation of at least `offset + 1` bytes
 /// (sized_cat_parts allocates exactly total = content + 1 and passes
-/// offset = total - 1).
+/// offset = total - 1). `alloc_size` is that total — M8 (0.35.37) adds it
+/// so the runtime can abort instead of writing out of bounds when a caller
+/// (internal bug or external FFI misuse) passes an offset beyond the
+/// allocation. The runtime has no allocation-size registry for raw
+/// `malloc`'d buffers, so `alloc_size` is the last line of defense against
+/// heap corruption; the primary defense is the checked add in the codegen
+/// emitter that computes `total`.
 #[no_mangle]
-pub extern "C" fn mimi_runtime_buf_nul_terminate(buf: *mut u8, offset: i64) {
+pub extern "C" fn mimi_runtime_buf_nul_terminate(buf: *mut u8, offset: i64, alloc_size: i64) {
     if buf.is_null() || offset < 0 {
         return;
     }
-    // SAFETY: caller contract above (allocation covers offset + 1).
+    // M8: abort on any out-of-bounds NUL write instead of corrupting the
+    // heap. `offset + 1` must fit within alloc_size (i.e. offset <=
+    // alloc_size - 1). alloc_size <= 0 is equally invalid for a live buf.
+    if alloc_size <= 0 || offset >= alloc_size {
+        // mimi_runtime_abort does not return (-> !).
+        crate::runtime::mimi_runtime_abort(
+            b"[mimi runtime] mimi_runtime_buf_nul_terminate: offset (with NUL) exceeds \
+              allocation size - heap-corrupting write prevented\0"
+                .as_ptr() as *const std::ffi::c_char,
+        );
+    }
+    // SAFETY: caller contract above (allocation covers offset + 1) and the
+    // bounds check just performed.
     unsafe {
         *buf.offset(offset as isize) = 0;
     }

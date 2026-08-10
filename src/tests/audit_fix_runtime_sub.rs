@@ -197,3 +197,77 @@ func main() -> i32 {{
     );
     let _ = std::fs::remove_file(&path);
 }
+
+// ── 0.35.37 M8: buf_nul_terminate bounds defense ──
+// The runtime helper now carries alloc_size and aborts (not heap-corrupts)
+// when offset >= alloc_size. Process abort is not testable in-process, so:
+//  1. positive path: a legal offset writes the NUL exactly (asserted via the
+//     buffer contents), and
+//  2. the out-of-bounds case is verified in a child process that must abort
+//     with the exact diagnostic (fail-loud, not silent corruption).
+
+#[test]
+fn audit_m8_buf_nul_terminate_positive_writes_exact_nul() {
+    use crate::runtime::mimi_runtime_buf_nul_terminate;
+    // SAFETY: 8-byte heap buffer; offset 7 (with NUL) is the last byte.
+    let buf = unsafe { libc::malloc(8) } as *mut u8;
+    assert!(!buf.is_null());
+    // SAFETY: freshly allocated buffer, write within bounds.
+    unsafe { std::ptr::write_bytes(buf, b'x', 8) };
+    mimi_runtime_buf_nul_terminate(buf, 7, 8);
+    // SAFETY: buffer was allocated above; reads are within bounds.
+    unsafe {
+        assert_eq!(*buf.offset(7), 0, "NUL must be written at offset 7");
+        assert_eq!(
+            *buf.offset(6),
+            b'x',
+            "bytes before offset must be untouched"
+        );
+    }
+    // SAFETY: buffer from libc::malloc is freed by libc::free.
+    unsafe { libc::free(buf as *mut libc::c_void) };
+}
+
+#[test]
+fn audit_m8_buf_nul_terminate_oob_aborts_in_child() {
+    use std::process::{Command, Stdio};
+    // Re-run this same test binary with a filter that forces the abort path.
+    let exe = std::env::current_exe().expect("current exe");
+    let child = Command::new(exe)
+        .args([
+            "--exact",
+            "tests::audit_fix_runtime_sub::audit_m8_oob_abort_helper",
+            "--nocapture",
+        ])
+        .env("MIMI_M8_OOB_HELPER", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let out = child.wait_with_output().expect("wait child");
+    assert!(
+        !out.status.success(),
+        "out-of-bounds NUL terminate must abort (got success)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("heap-corrupting write prevented"),
+        "abort message must name the hazard, got: {stderr}"
+    );
+}
+
+/// Helper executed in a child process: an offset past the allocation must
+/// abort (never silently write out of bounds).
+#[test]
+fn audit_m8_oob_abort_helper() {
+    if std::env::var("MIMI_M8_OOB_HELPER").is_err() {
+        return; // not the child invocation — no-op so the test binary stays green
+    }
+    use crate::runtime::mimi_runtime_buf_nul_terminate;
+    // SAFETY: 4-byte buffer; offset 7 (with NUL) exceeds alloc_size 4.
+    let buf = unsafe { libc::malloc(4) } as *mut u8;
+    assert!(!buf.is_null());
+    mimi_runtime_buf_nul_terminate(buf, 7, 4);
+    // SAFETY: unreachable when the guard works; frees in case it doesn't.
+    unsafe { libc::free(buf as *mut libc::c_void) };
+}

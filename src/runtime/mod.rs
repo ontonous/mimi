@@ -20209,6 +20209,8 @@ mod env;
 
 mod crypto;
 #[cfg(not(standalone))]
+pub use crypto::mimi_runtime_buf_nul_terminate;
+#[cfg(not(standalone))]
 pub use crypto::{base64_decode_str, base64_encode_bytes, sha256_bytes};
 
 mod binary_io;
