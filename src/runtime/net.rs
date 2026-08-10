@@ -276,6 +276,13 @@ pub extern "C" fn mimi_close(fd: i64) -> i64 {
     if fd < 0 {
         return -1;
     }
+    // 0.35.29 (H13): fd <= 2 (standard streams) must not be closable from
+    // user code — closing 0/1/2 hijacks the interpreter/compiled-process
+    // stdio. Mirrors the connect guard at mimi_connect (fd <= 2 rejected);
+    // arbitrary files/sockets (>2) remain closable.
+    if fd <= 2 {
+        return -1;
+    }
     // SAFETY: direct POSIX close with a validated file descriptor.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
