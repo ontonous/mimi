@@ -334,6 +334,13 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
 /// codegen-built program can reach 127.0.0.1/169.254.169.254 while the VM
 /// cannot (L1 divergence + a genuine SSRF hole in the native backend).
 /// Returns None when the host is blocked.
+///
+/// 0.35.29 H4: `parse_http_url` hands us the host WITH its IPv6 brackets
+/// (`[::1]`), so the guard must strip them before matching — the old check
+/// matched the raw string and every `[v6]` literal sailed through. Also
+/// decodes inet_aton-style numeric IPv4 literals (2130706433 / 0x7f000001 /
+/// 017700000001 / 127.1) which getaddrinfo resolves but a string-prefix
+/// check cannot see.
 fn ssrf_validate_host(host: &str) -> Option<()> {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     let blocked_hosts = [
@@ -349,41 +356,143 @@ fn ssrf_validate_host(host: &str) -> Option<()> {
     let private_prefixes = [
         "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
         "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
-        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
+        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd", "fe8", "fe9", "fea", "feb",
     ];
     if private_prefixes.iter().any(|p| h.starts_with(p)) {
         return None;
     }
+    // Numeric IPv4 literals that getaddrinfo resolves but a prefix match
+    // cannot see (inet_aton compatibility: decimal/hex/octal integers and
+    // 1-4 dotted parts). 127.0.0.1 == 2130706433 == 0x7f000001 ==
+    // 017700000001 == 127.1.
+    if let Some(v4) = decode_ipv4_literal(h) {
+        if is_private_ipv4(v4) {
+            return None;
+        }
+    }
+    // IPv4-mapped IPv6 (::ffff:127.0.0.1) routes straight to the v4 address
+    // — must not fall through the prefix check on the v6 side.
+    if let Some(suffix) = h.strip_prefix("::ffff:") {
+        if let Some(v4) = decode_ipv4_literal(suffix) {
+            if is_private_ipv4(v4) {
+                return None;
+            }
+        }
+    }
     Some(())
 }
 
-/// SSRF protection for the native HTTP client. Mirrors the bytecode VM's
-/// validate_host_ssrf (interp/bytecode/builtins/net.rs): loopback, link-local,
-/// private, and cloud-metadata addresses are blocked with a loud abort. The
-/// VM blocks them; the native runtime must too, otherwise a codegen-built
-/// program can reach 127.0.0.1 / 169.254.169.254 while the VM cannot (L1
-/// divergence + a real SSRF hole in the native backend).
-/// Returns true when the host passes (is allowed).
-fn validate_ssrf(host: &str) -> bool {
-    let blocked_hosts = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "::1",
-        "metadata.google.internal",
-    ];
-    if blocked_hosts.contains(&host) {
-        return false;
+/// Decode an inet_aton-compatible IPv4 literal to its 32-bit value, or None
+/// if `s` is not a numeric literal (hostname, IPv6, etc.). Supported forms:
+/// single decimal/hex/octal integer (a 32-bit value), and 1-4 dotted parts
+/// where each part is decimal or octal (0-prefixed); 3-part forms treat the
+/// last part as 16-bit, 2-part forms as 24-bit — exactly what glibc's
+/// getaddrinfo/inet_aton accept.
+fn decode_ipv4_literal(s: &str) -> Option<u32> {
+    if s.is_empty() || s.len() > 45 {
+        return None;
     }
-    let private_prefixes = [
-        "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
-        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
-        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
-    ];
-    if private_prefixes.iter().any(|p| host.starts_with(p)) {
-        return false;
+    // Single integer (whole 32-bit value).
+    if !s.contains('.') {
+        if s.len() > 1 && s.starts_with('0') {
+            // Octal (leading 0, digits 0-7); malformed → not a literal.
+            if !s.starts_with("0x") && !s.starts_with("0X") {
+                if !s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+                    return None;
+                }
+                return u32::from_str_radix(s, 8).ok();
+            }
+        }
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        if s.bytes().all(|b| b.is_ascii_digit()) {
+            return s.parse::<u32>().ok();
+        }
+        return None;
     }
-    true
+    // Dotted parts. Each part is decimal, or octal when 0-prefixed
+    // (inet_aton: 0177.0.0.1 == 127.0.0.1).
+    fn part(p: &str) -> Option<u32> {
+        if p.is_empty() || p.len() > 4 {
+            return None;
+        }
+        if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        if p.len() > 1 && p.starts_with('0') {
+            if !p.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+                return None;
+            }
+            return u32::from_str_radix(p, 8).ok();
+        }
+        if !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        p.parse::<u32>().ok()
+    }
+    let parts: Vec<&str> = s.split('.').collect();
+    match parts.len() {
+        4 => {
+            let mut v: u32 = 0;
+            for p in &parts {
+                let n = part(p)?;
+                if n > 255 {
+                    return None;
+                }
+                v = (v << 8) | n;
+            }
+            Some(v)
+        }
+        // inet_aton short forms.
+        3 => {
+            let a = part(parts[0])?;
+            let b = part(parts[1])?;
+            let c = part(parts[2])?;
+            if a > 255 || b > 255 || c > 65535 {
+                return None;
+            }
+            Some((a << 24) | (b << 16) | c)
+        }
+        2 => {
+            let a = part(parts[0])?;
+            let b = part(parts[1])?;
+            if a > 255 || b > 0x00ff_ffff {
+                return None;
+            }
+            Some((a << 24) | b)
+        }
+        1 => part(parts[0]),
+        _ => None,
+    }
+}
+
+/// True when `v4` is loopback (127/8), private (10/8, 172.16/12, 192.168/16),
+/// link-local (169.254/16), or the unspecified address (0.0.0.0) — the same
+/// address families the string-prefix check blocks.
+fn is_private_ipv4(v4: u32) -> bool {
+    let first = v4 >> 24;
+    if first == 127 || first == 10 || first == 0 {
+        return true;
+    }
+    if (v4 >> 16) == 0xc0a8 {
+        // 192.168.0.0/16
+        return true;
+    }
+    if (v4 >> 16) == 0xa9fe {
+        // 169.254.0.0/16
+        return true;
+    }
+    // 172.16.0.0/12 — every address in 172.16.0.0-172.31.255.255 shifts to
+    // exactly 0xac1 when >> 20 (the range is 16 contiguous /16 blocks, so a
+    // <= upper bound would wrongly admit 172.32+).
+    (v4 >> 20) == 0xac1
 }
 
 fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
@@ -396,27 +505,13 @@ fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
     // / mimi_http_post) had NO equivalent guard — codegen-compiled programs could
     // fetch loopback/cloud-metadata/private hosts while VM programs could not:
     // a security-relevant dual-backend divergence (P-0: VM is reference).
-    // Centralize here so every HTTP request is guarded once.
-    let blocked_hosts = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "::1",
-        "metadata.google.internal",
-    ];
-    if blocked_hosts.contains(&host) {
+    // Centralize here so every HTTP request is guarded once (0.35.29 H4:
+    // single source of truth — the old duplicate inline check disagreed with
+    // validate_ssrf and neither stripped IPv6 brackets).
+    if ssrf_validate_host(host).is_none() {
         eprintln!(
-            "[mimi runtime] http_get/http_post: SSRF protection — loopback addresses are blocked"
+            "[mimi runtime] http_get/http_post: SSRF protection — loopback/private addresses are blocked"
         );
-        return None;
-    }
-    let private_prefixes = [
-        "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
-        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
-        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
-    ];
-    if private_prefixes.iter().any(|p| host.starts_with(p)) {
-        eprintln!("[mimi runtime] http_get/http_post: SSRF protection — private/internal addresses are blocked");
         return None;
     }
 
@@ -571,8 +666,10 @@ pub extern "C" fn mimi_http_post(
         }
     };
 
-    // SSRF: block loopback/private/internal hosts (VM parity).
-    if !validate_ssrf(&host) {
+    // SSRF: block loopback/private/internal hosts (VM parity; single guard
+    // centralized in http_request — this pre-check gives http_post the same
+    // loud-early failure http_get already has).
+    if ssrf_validate_host(&host).is_none() {
         eprintln!(
             "[mimi runtime] http_post: SSRF protection — address blocked: {}",
             host
@@ -623,5 +720,102 @@ mod tests {
         assert!(mimi_recv(999_999, 0, std::ptr::null_mut()).is_null());
         assert!(mimi_recv(999_999, -1, std::ptr::null_mut()).is_null());
         assert!(mimi_recv(-1, 64, std::ptr::null_mut()).is_null());
+    }
+
+    // ── 0.35.29 H4: SSRF guard must strip IPv6 brackets and decode numeric
+    // ── IPv4 literals (inet_aton family) — parse_http_url hands the guard
+    // ── `[::1]`-style hosts, and getaddrinfo resolves 2130706433 to
+    // ── 127.0.0.1, both invisible to the old raw string-prefix match.
+
+    #[test]
+    fn ssrf_blocks_bracketed_ipv6_loopback_and_ula() {
+        // The H4 core: parse_http_url returns the host WITH its brackets.
+        assert!(
+            ssrf_validate_host("[::1]").is_none(),
+            "[::1] must be blocked"
+        );
+        assert!(ssrf_validate_host("[::1]:80").is_none());
+        assert!(
+            ssrf_validate_host("[fc00::1]").is_none(),
+            "ULA must be blocked"
+        );
+        assert!(
+            ssrf_validate_host("[fd00::1]").is_none(),
+            "ULA must be blocked"
+        );
+        assert!(ssrf_validate_host("[fe80::1]").is_none()); // link-local prefix
+        assert!(ssrf_validate_host("::1").is_none());
+        // A public IPv6 literal stays allowed.
+        assert!(ssrf_validate_host("[2001:db8::1]").is_some());
+    }
+
+    #[test]
+    fn ssrf_blocks_numeric_ipv4_literals() {
+        // inet_aton family: all of these resolve to 127.0.0.1.
+        assert!(
+            ssrf_validate_host("2130706433").is_none(),
+            "decimal int must be blocked"
+        );
+        assert!(
+            ssrf_validate_host("0x7f000001").is_none(),
+            "hex int must be blocked"
+        );
+        assert!(
+            ssrf_validate_host("017700000001").is_none(),
+            "octal int must be blocked"
+        );
+        assert!(
+            ssrf_validate_host("127.1").is_none(),
+            "2-part short form must be blocked"
+        );
+        assert!(
+            ssrf_validate_host("0177.0.0.1").is_none(),
+            "octal dotted quad must be blocked"
+        );
+        assert!(
+            ssrf_validate_host("0x7f.0.0.1").is_none(),
+            "hex dotted part must be blocked"
+        );
+        // Private/link-local families.
+        assert!(ssrf_validate_host("10.0.0.5").is_none());
+        assert!(ssrf_validate_host("172.16.0.1").is_none());
+        assert!(ssrf_validate_host("192.168.1.1").is_none());
+        assert!(ssrf_validate_host("169.254.169.254").is_none());
+        assert!(ssrf_validate_host("0.0.0.0").is_none());
+        // IPv4-mapped IPv6.
+        assert!(
+            ssrf_validate_host("[::ffff:127.0.0.1]").is_none(),
+            "v4-mapped loopback must be blocked"
+        );
+        assert!(ssrf_validate_host("::ffff:10.0.0.5").is_none());
+        // Public addresses still pass.
+        assert!(ssrf_validate_host("8.8.8.8").is_some());
+        assert!(
+            ssrf_validate_host("172.32.0.1").is_some(),
+            "outside 172.16/12 is public"
+        );
+        assert!(ssrf_validate_host("example.com").is_some());
+        assert!(
+            ssrf_validate_host("134744072").is_some(),
+            "134744072 = 8.8.8.8 (public int form)"
+        );
+        assert!(
+            ssrf_validate_host("2130706434").is_none(),
+            "2130706434 = 0x7f000002, still loopback"
+        );
+    }
+
+    #[test]
+    fn http_url_ssrf_guard_blocks_loopback_variants() {
+        // End-to-end through the URL parse path: http://[::1]/ must not reach
+        // http_request with a bracketed host that slips the guard.
+        let u = "http://[::1]/";
+        let (host, _, _) = parse_http_url(u).unwrap();
+        assert_eq!(host, "[::1]");
+        assert!(ssrf_validate_host(&host).is_none());
+        let u = "http://2130706433/x";
+        let (host, _, _) = parse_http_url(u).unwrap();
+        assert_eq!(host, "2130706433");
+        assert!(ssrf_validate_host(&host).is_none());
     }
 }
