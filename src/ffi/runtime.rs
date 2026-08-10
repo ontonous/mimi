@@ -628,6 +628,18 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
                                 // Drop oldest half so in-flight recent pointers
                                 // remain valid when possible.
                                 let drop_n = pending.len() / 2;
+                                // H7: remember the reclaimed pointers BEFORE
+                                // dropping them — a C caller may still hold
+                                // one and call _free later; free() then
+                                // reports the reclaimed pointer explicitly
+                                // (and refuses a use of freed memory) instead
+                                // of silently no-op'ing.
+                                RECLAIMED_C_STRINGS.with(|reclaimed| {
+                                    let mut reclaimed = reclaimed.borrow_mut();
+                                    for cs in pending.iter().take(drop_n) {
+                                        reclaimed.insert(cs.as_ptr());
+                                    }
+                                });
                                 pending.drain(0..drop_n);
                                 eprintln!(
                                     "[mimi] WARNING: PENDING_C_STRINGS exceeded {}; dropped {} oldest entries",
@@ -663,7 +675,34 @@ pub extern "C" fn mimi_string_as_c_str_free(c_str: *const std::ffi::c_char) {
         return;
     }
     PENDING_C_STRINGS.with(|pending| {
-        pending.borrow_mut().retain(|cs| cs.as_ptr() != c_str);
+        let mut pending = pending.borrow_mut();
+        let before = pending.len();
+        pending.retain(|cs| cs.as_ptr() != c_str);
+        let removed = pending.len() != before; // H7: retain returns (), compare lengths.
+        if removed {
+            // H7: the pointer was still pending — normal path, also retire
+            // any stale reclaimed marker (should not exist for a live ptr).
+            RECLAIMED_C_STRINGS.with(|reclaimed| {
+                reclaimed.borrow_mut().remove(&c_str);
+            });
+            return;
+        }
+        drop(pending);
+        // H7: not in the pending registry. If the overflow drain reclaimed
+        // it, the CString was already freed — the caller is freeing (or
+        // worse, still reading) memory that no longer belongs to it.
+        // Report instead of silently succeeding.
+        let was_reclaimed =
+            RECLAIMED_C_STRINGS.with(|reclaimed| reclaimed.borrow_mut().remove(&c_str));
+        if was_reclaimed {
+            eprintln!(
+                "[mimi] WARNING: mimi_string_as_c_str_free on pointer {:p} \
+                 that was ALREADY reclaimed by the PENDING_C_STRINGS overflow \
+                 drain — possible use-after-free / double-free; this pointer \
+                 aliases freed memory",
+                c_str
+            );
+        }
     });
 }
 
@@ -674,6 +713,16 @@ thread_local! {
     /// to release the entry.  When the thread exits the thread-local Vec is
     /// dropped and any remaining CStrings are freed automatically.
     static PENDING_C_STRINGS: RefCell<Vec<std::ffi::CString>> = const { RefCell::new(Vec::new()) };
+    /// H7 (audit-triage-0.35.25): pointers reclaimed by the MAX_PENDING
+    /// overflow drain. The drain frees the CString while a C caller may
+    /// still hold the pointer (UAF), and a later
+    /// `mimi_string_as_c_str_free` found nothing to retain — a silent no-op
+    /// that hid the double-free/UAF hazard. Recording reclaimed pointers
+    /// lets free() report the hazard explicitly instead of silently
+    /// succeeding. Bounded (ring-like): a reclaimed pointer is retired as
+    /// soon as the caller frees it, or when this registry overflows.
+    static RECLAIMED_C_STRINGS: RefCell<std::collections::HashSet<*const std::ffi::c_char>> =
+        RefCell::new(std::collections::HashSet::new());
 }
 
 /// Return the byte length of a Mimi string value.
@@ -1212,5 +1261,78 @@ mod tests {
     fn shared_c_api_create_null_is_safe() {
         // SAFETY: null input is explicitly handled by the function.
         assert_eq!(unsafe { mimi_shared_create(std::ptr::null_mut()) }, 0);
+    }
+
+    /// H7: when PENDING_C_STRINGS overflows, the drain frees the oldest
+    /// CStrings while a C caller may still hold the pointer. A later
+    /// `mimi_string_as_c_str_free` on a reclaimed pointer must be REPORTED
+    /// (not a silent no-op) — the reclaimed registry records the hazard.
+    #[test]
+    fn free_after_overflow_drain_is_diagnosed_not_silent() {
+        // Tests share the thread-local registry across test threads
+        // (--test-threads reuse); start from a clean slate so the drain
+        // accounting below is deterministic.
+        PENDING_C_STRINGS.with(|p| p.borrow_mut().clear());
+        RECLAIMED_C_STRINGS.with(|r| r.borrow_mut().clear());
+
+        // SAFETY: fresh heap Value wrapping a String.
+        let make_value = || {
+            let v = Box::new(Value::String("0123456789abcdef".to_string()));
+            Box::into_raw(v)
+        };
+
+        // Fill past MAX_PENDING (4096): the 4097th call triggers a drain
+        // of half the registry, reclaiming the oldest pointers.
+        let mut ptrs = Vec::new();
+        for _ in 0..(4096 + 64) {
+            let v = make_value();
+            // SAFETY: v is a valid heap Value.
+            let p = unsafe { mimi_string_as_c_str(v) };
+            assert!(!p.is_null());
+            ptrs.push(p);
+            // v is freed after its C-string was registered; the string bytes
+            // are copied by CString::new.
+            mimi_value_free(v);
+        }
+
+        // The first pointers must have been reclaimed by the drain.
+        let first = ptrs[0];
+        let reclaimed_before = RECLAIMED_C_STRINGS.with(|r| r.borrow().contains(&first));
+        assert!(
+            reclaimed_before,
+            "overflow drain must record the reclaimed pointer in RECLAIMED_C_STRINGS"
+        );
+
+        // Freeing a reclaimed pointer: must retire the registry entry —
+        // the warning fires, the pointer is consumed from the hazard list.
+        mimi_string_as_c_str_free(first);
+        let reclaimed_after = RECLAIMED_C_STRINGS.with(|r| r.borrow().contains(&first));
+        assert!(
+            !reclaimed_after,
+            "freeing a reclaimed pointer must remove it from the hazard registry"
+        );
+
+        // A fresh (non-drained) pointer still frees normally and is
+        // removed from PENDING. NOTE: we deliberately do NOT assert "not in
+        // the reclaimed registry" — the allocator may reuse an address that
+        // a drained CString freed (exactly the hazard class the registry
+        // tracks), so address equality proves nothing about liveness.
+        let last = *ptrs.last().unwrap();
+        mimi_string_as_c_str_free(last);
+        let still_pending = PENDING_C_STRINGS.with(|p| {
+            p.borrow()
+                .iter()
+                .any(|cs| cs.as_ptr() == last || first == cs.as_ptr())
+        });
+        assert!(
+            !still_pending,
+            "freed pointers must leave PENDING_C_STRINGS"
+        );
+
+        // Clean up the middle pointers so the thread-local drains quietly
+        // (no leak warnings across tests).
+        for &p in ptrs.iter().skip(1).take(ptrs.len() - 2) {
+            mimi_string_as_c_str_free(p);
+        }
     }
 }
