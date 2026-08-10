@@ -454,7 +454,22 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
             if *n < 0 {
                 return Err(InterpError::new("repeat count must be non-negative"));
             }
-            Ok(Value::String(s.repeat(*n as usize)))
+            // 0.35.29 H10: mirror the codegen CG-H2 guard (transform.rs) —
+            // the raw `s.repeat(n)` panics inside std on a capacity overflow
+            // ("a".repeat(i64::MAX)) and OOMs the process for large counts.
+            // Clamp to the same 8 GiB cap so both backends agree.
+            let count = *n as usize;
+            const MAX_TOTAL: usize = 1usize << 33; // 8 GiB, mirrors codegen
+            let total = s
+                .len()
+                .checked_mul(count)
+                .ok_or_else(|| InterpError::new("str_repeat: total size overflow"))?;
+            if total > MAX_TOTAL {
+                return Err(InterpError::new(
+                    "str_repeat: result exceeds 8 GiB cap (refusing unbounded allocation)",
+                ));
+            }
+            Ok(Value::String(s.repeat(count)))
         }
         _ => Err(InterpError::new("repeat expects (string, int)")),
     }
@@ -573,5 +588,66 @@ fn builtin_regex_replace(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
         _ => Err(InterpError::new(
             "regex_replace expects (string, string, string)",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── 0.35.29 H10: str_repeat must clamp to the codegen CG-H2 8 GiB cap ──
+    // The old `s.repeat(n)` panicked inside std on capacity overflow
+    // ("a".repeat(i64::MAX)) and OOM'd for large counts — one-line repro
+    // of a VM crash the codegen backend already guarded against.
+
+    fn repeat(s: &str, n: i64) -> Result<Value, InterpError> {
+        // builtin_str_repeat ignores its `_vm` param; a minimal VM suffices.
+        let prog = crate::interp::bytecode::instr::BytecodeProgram {
+            extern_names: Vec::new(),
+            functions: Vec::new(),
+            entry: 0,
+            builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(std::sync::Arc::new(prog));
+        builtin_str_repeat(&mut vm, &[Value::String(s.to_string()), Value::Int(n)])
+    }
+
+    #[test]
+    fn str_repeat_caps_huge_counts_without_panicking() {
+        // i64::MAX: the pre-fix code panicked in std's capacity check
+        // (capacity overflow). Now must be a clean Err — not a crash.
+        assert!(repeat("a", i64::MAX).is_err());
+        assert!(repeat("a", i64::MAX - 1).is_err());
+        assert!(repeat("a", 1_000_000_000_000).is_err());
+    }
+
+    #[test]
+    fn str_repeat_rejects_overflow_and_negative() {
+        // "xx" * (1<<40) overflows the 8 GiB cap even though the count
+        // itself fits i64.
+        assert!(repeat("xx", 1i64 << 40).is_err());
+        assert!(repeat("x", -1).is_err());
+        assert!(repeat("x", -100).is_err());
+    }
+
+    #[test]
+    fn str_repeat_small_counts_still_work() {
+        assert_eq!(
+            repeat("ab", 3).unwrap(),
+            Value::String("ababab".to_string())
+        );
+        assert_eq!(repeat("", 1_000_000).unwrap(), Value::String(String::new()));
+        assert_eq!(repeat("x", 0).unwrap(), Value::String(String::new()));
     }
 }
