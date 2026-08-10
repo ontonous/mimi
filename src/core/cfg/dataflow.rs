@@ -259,7 +259,17 @@ pub(super) fn analyze_canonical(
             transfer(action, &mut outgoing, &loan_catalog, &mut errors);
         }
         for edge in cfg.successors(&block) {
-            if edge.kind == EdgeKind::Backedge && !outgoing.active_loans.is_empty() {
+            // 0.35.28 (H3): `continue` edges are loop-carried just like
+            // back-edges — a loan whose last use sits past the `continue`
+            // (the reference is live when the loop jumps back) skips its
+            // BorrowEnd and stays live into the next iteration. Pre-fix only
+            // `Backedge` was inspected, so `while c { println(*r); continue }`
+            // — where `continue` REPLACES the back-edge, so no Backedge edge
+            // ever exists — leaked the borrow across the continue edge
+            // silently.
+            if matches!(edge.kind, EdgeKind::Backedge | EdgeKind::Continue)
+                && !outgoing.active_loans.is_empty()
+            {
                 errors.push(
                     Diagnostic::error_code(
                         crate::diagnostic::codes::E0415,
@@ -319,12 +329,18 @@ fn validate_return_resources(
         // consumption points too (fail-closed — holding a capability inside
         // an infinite loop is not consumption): explicit Diverge terminators
         // and blocks whose only exits are back-edges (infinite loop bodies).
+        // 0.35.28 (H3): an infinite `loop { continue }` body exits only via
+        // continue edges (never a back-edge — the body's terminator is the
+        // continue itself, so no Backedge exists). Treat Continue as a
+        // loop-carried diverging exit just like Backedge, else a capability
+        // held in such a loop leaks without a single diagnostic (G-5
+        // fail-closed promise).
         let is_diverging_sink = matches!(block.terminator, Terminator::Diverge) || {
             let successors = cfg.successors(block_id);
             !successors.is_empty()
                 && successors
                     .iter()
-                    .all(|edge| edge.kind == EdgeKind::Backedge)
+                    .all(|edge| matches!(edge.kind, EdgeKind::Backedge | EdgeKind::Continue))
         };
         if !is_return && !is_diverging_sink {
             continue;
@@ -1427,5 +1443,64 @@ func main() -> i32 { 0 }
             error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
                 && error.message == "borrow remains live across a loop back-edge"
         }));
+    }
+
+    /// H3 regression lock (0.35.28): a loan whose LAST USE sits past a
+    /// `continue` edge (the reference is still live when the loop jumps back)
+    /// must be rejected with E0415. Pre-fix the E0415 check only inspected
+    /// `EdgeKind::Backedge`, so a borrow that stayed live across a continue
+    /// edge leaked without a diagnostic — NLL placed no BorrowEnd on the
+    /// continue path (the reference is live across the edge, so
+    /// liveness_end_locations finds no kill point), and the loop-carried
+    /// check never looked there.
+    #[test]
+    fn loan_live_across_continue_edge_is_rejected() {
+        let file = parse(
+            r#"
+func loop_read_continue(flag: bool) -> i32 {
+    let value = 1
+    let loan = &value
+    while flag {
+        println(*loan)
+        continue
+    }
+    value
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let errors = crate::core::check_program(&file)
+            .expect_err("loop-carried loan via continue must fail");
+        assert!(errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
+                && error.message == "borrow remains live across a loop back-edge"
+        }));
+    }
+
+    /// H3 regression lock (0.35.28): a capability held inside an infinite
+    /// `loop { continue }` must be reported as unconsumed (E0256). Pre-fix
+    /// `is_diverging_sink` only recognized blocks whose successors were ALL
+    /// `Backedge` — a body whose only exits are `continue` edges was not a
+    /// diverging sink, so the capability leaked silently (fail-closed promise
+    /// of G-5 violated).
+    #[test]
+    fn capability_leaked_in_loop_continue_is_rejected() {
+        let file = parse(
+            r#"
+cap Token
+func leak_cap(t: cap Token) -> i32 {
+    loop {
+        continue
+    }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let errors = crate::core::check_program(&file)
+            .expect_err("capability held in infinite continue-loop must be flagged unconsumed");
+        assert!(errors
+            .iter()
+            .any(|error| { error.code.as_deref() == Some(crate::diagnostic::codes::E0256) }));
     }
 }
