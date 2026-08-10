@@ -2183,8 +2183,23 @@ pub extern "C" fn mimi_map_from_list(
     }
     // C6/C7 fix: validate n bounds and ensure pointers look like valid
     // C string pointers before dereferencing.
+    // M7 (0.35.37): the 1M cap silently DROPPED entries beyond the limit
+    // (red line #2: no silent error swallowing). Cap loudly: warn once so a
+    // caller that hands a huge n (e.g. from a corrupted length) is told the
+    // tail was discarded instead of wondering where its keys went.
+    let raw_n = n;
     let n = n.min(1_000_000);
+    if n < raw_n {
+        eprintln!(
+            "[mimi runtime] mimi_map_from_list: n = {} exceeds the 1M safety cap; \
+             only the first 1M entries are inserted, {} were dropped (FFI caller contract: \
+             arrays must have >= n elements)",
+            raw_n,
+            raw_n - n
+        );
+    }
     let map_ptr = handle as *mut MimiMap;
+    let mut warned_bad_key = false;
     for i in 0..n {
         // C6: We only have the caller's word that arrays have >= n elements.
         // We mitigate by capping n at 1M, but the real fix requires a
@@ -2197,11 +2212,22 @@ pub extern "C" fn mimi_map_from_list(
         let key_handle = unsafe { *keys.add(i as usize) };
         let val_handle = unsafe { *values.add(i as usize) };
         // RT-H1/H4: only decode keys via safe_c_string_from_handle (mincore+NUL).
+        // M7: a failed key check is diagnosed once (not silent) — it means
+        // the caller's array contains a wild/foreign handle, and the pair is
+        // skipped rather than inserted under a garbage key.
         if let Some(s) = safe_c_string_from_handle(key_handle) {
             // SAFETY: map_ptr is the just-allocated map (handle != 0).
             unsafe {
                 (*map_ptr).inner.insert(s, val_handle);
             }
+        } else if !warned_bad_key {
+            warned_bad_key = true;
+            eprintln!(
+                "[mimi runtime] mimi_map_from_list: key handle {:#x} at index {} is not a \
+                 plausible mapped C string — entry skipped (and any further bad keys are \
+                 silently skipped)",
+                key_handle, i
+            );
         }
     }
     handle
@@ -20888,5 +20914,76 @@ mod audit_pkgd_tests {
             "{\"a\":{\"Ok\":[\"None\"]},\"b\":{\"Err\":[\"nope\"]}}"
         );
         mimi_map_destroy(h);
+    }
+
+    // ── M7 (0.35.37): mimi_map_from_list silent truncation / bad-key skip ──
+
+    /// The 1M cap must truncate loudly (warn to stderr) and the returned map
+    /// must contain exactly the capped count — not silently lose entries.
+    #[test]
+    fn map_from_list_cap_truncates_loudly() {
+        // Allocate 1M+64 key/value handles. Keys must be *valid mapped C
+        // strings* or safe_c_string_from_handle rejects them; use
+        // alloc_c_string for real heap strings.
+        let n = 1_000_000 + 64i64;
+        let mut keys: Vec<ValueHandle> = Vec::with_capacity(n as usize);
+        let mut values: Vec<ValueHandle> = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let k = format!("k{}", i);
+            let c = alloc_c_string(&k);
+            keys.push(c as ValueHandle);
+            values.push(i as ValueHandle);
+        }
+        let h = mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), n);
+        // Loud truncation: only the first 1M entries survive.
+        assert_eq!(mimi_map_size(h), 1_000_000);
+        mimi_map_destroy(h);
+        // Free the key strings (map copies them; we own the originals).
+        for &k in &keys {
+            mimi_string_free(k as *mut std::ffi::c_char);
+        }
+    }
+
+    /// A wild/foreign key handle must be skipped (with a warning), never
+    /// inserted under a garbage key; the remaining valid pairs still land.
+    #[test]
+    fn map_from_list_bad_key_skipped_others_inserted() {
+        let k1 = alloc_c_string("alpha");
+        let k2 = alloc_c_string("beta");
+        let mut keys = vec![k1 as ValueHandle, 0x0000_7000_0000_0000, k2 as ValueHandle];
+        let mut values = vec![1usize as ValueHandle, 2, 3];
+        let h = mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 3);
+        assert_eq!(
+            mimi_map_size(h),
+            2,
+            "garbage key must be skipped, valid keys kept"
+        );
+        // "beta" -> 3 survived (third pair). "alpha" -> 1 survived (first).
+        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        assert!(out.contains("\"alpha\""));
+        assert!(out.contains("\"beta\""));
+        assert!(!out.contains("garbage"));
+        mimi_map_destroy(h);
+        mimi_string_free(k1 as *mut std::ffi::c_char);
+        mimi_string_free(k2 as *mut std::ffi::c_char);
+    }
+
+    /// Sanity: normal path with mixed integer/pointer values is unaffected —
+    /// values must never be validated as heap pointers (integers are legal).
+    #[test]
+    fn map_from_list_mixed_values_unaffected() {
+        let k1 = alloc_c_string("int");
+        let k2 = alloc_c_string("zero");
+        // Integer values 7 and 0 (0 is below MIN_HEAP — must still insert).
+        let mut keys = vec![k1 as ValueHandle, k2 as ValueHandle];
+        let mut values = vec![7usize as ValueHandle, 0usize as ValueHandle];
+        let h = mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 2);
+        assert_eq!(mimi_map_size(h), 2);
+        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        assert!(out.contains("\"int\":"));
+        assert!(out.contains("\"zero\":"));
+        mimi_map_destroy(h);
+        mimi_string_free(k1 as *mut std::ffi::c_char);
+        mimi_string_free(k2 as *mut std::ffi::c_char);
     }
 }
