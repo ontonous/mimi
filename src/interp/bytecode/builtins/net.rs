@@ -524,6 +524,12 @@ fn http_split_host_port(host: &str) -> Result<(&str, i64), InterpError> {
 }
 
 fn validate_host_ssrf(host: &str) -> Result<(), InterpError> {
+    // 0.35.29 H4 mirror of runtime ssrf_validate_host: guard strips IPv6
+    // brackets before matching (defensive — http_split_host_port already
+    // returns the bare addr) and decodes inet_aton-style numeric IPv4
+    // literals (2130706433 / 0x7f000001 / 017700000001 / 127.1) that
+    // getaddrinfo resolves but a string-prefix check cannot see.
+    let h = host.trim_start_matches('[').trim_end_matches(']');
     let blocked_hosts = [
         "localhost",
         "127.0.0.1",
@@ -531,7 +537,7 @@ fn validate_host_ssrf(host: &str) -> Result<(), InterpError> {
         "::1",
         "metadata.google.internal",
     ];
-    if blocked_hosts.contains(&host) {
+    if blocked_hosts.contains(&h) {
         return Err(InterpError::new(
             "http_get/http_post: SSRF protection — loopback addresses are blocked",
         ));
@@ -539,14 +545,130 @@ fn validate_host_ssrf(host: &str) -> Result<(), InterpError> {
     let private_prefixes = [
         "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
         "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
-        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd",
+        "172.31.", "192.168.", "169.254.", "::1", "fc", "fd", "fe8", "fe9", "fea", "feb",
     ];
-    if private_prefixes.iter().any(|p| host.starts_with(p)) {
+    if private_prefixes.iter().any(|p| h.starts_with(p)) {
         return Err(InterpError::new(
             "http_get/http_post: SSRF protection — private/internal addresses are blocked",
         ));
     }
+    if let Some(v4) = decode_ipv4_literal(h) {
+        if is_private_ipv4(v4) {
+            return Err(InterpError::new(
+                "http_get/http_post: SSRF protection — numeric private IPv4 literals are blocked",
+            ));
+        }
+    }
+    // IPv4-mapped IPv6 (::ffff:127.0.0.1) routes straight to the v4 address.
+    if let Some(suffix) = h.strip_prefix("::ffff:") {
+        if let Some(v4) = decode_ipv4_literal(suffix) {
+            if is_private_ipv4(v4) {
+                return Err(InterpError::new(
+                    "http_get/http_post: SSRF protection — IPv4-mapped loopback is blocked",
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Decode an inet_aton-compatible IPv4 literal to its 32-bit value, or None
+/// if `s` is not a numeric literal (hostname, IPv6, etc.). Mirrors
+/// runtime/net.rs decode_ipv4_literal — keep the two in sync (H4 family).
+fn decode_ipv4_literal(s: &str) -> Option<u32> {
+    if s.is_empty() || s.len() > 45 {
+        return None;
+    }
+    if !s.contains('.') {
+        if s.len() > 1 && s.starts_with('0') {
+            if !s.starts_with("0x") && !s.starts_with("0X") {
+                if !s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+                    return None;
+                }
+                return u32::from_str_radix(s, 8).ok();
+            }
+        }
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        if s.bytes().all(|b| b.is_ascii_digit()) {
+            return s.parse::<u32>().ok();
+        }
+        return None;
+    }
+    fn part(p: &str) -> Option<u32> {
+        if p.is_empty() || p.len() > 4 {
+            return None;
+        }
+        if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        if p.len() > 1 && p.starts_with('0') {
+            if !p.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+                return None;
+            }
+            return u32::from_str_radix(p, 8).ok();
+        }
+        if !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        p.parse::<u32>().ok()
+    }
+    let parts: Vec<&str> = s.split('.').collect();
+    match parts.len() {
+        4 => {
+            let mut v: u32 = 0;
+            for p in &parts {
+                let n = part(p)?;
+                if n > 255 {
+                    return None;
+                }
+                v = (v << 8) | n;
+            }
+            Some(v)
+        }
+        3 => {
+            let a = part(parts[0])?;
+            let b = part(parts[1])?;
+            let c = part(parts[2])?;
+            if a > 255 || b > 255 || c > 65535 {
+                return None;
+            }
+            Some((a << 24) | (b << 16) | c)
+        }
+        2 => {
+            let a = part(parts[0])?;
+            let b = part(parts[1])?;
+            if a > 255 || b > 0x00ff_ffff {
+                return None;
+            }
+            Some((a << 24) | b)
+        }
+        1 => part(parts[0]),
+        _ => None,
+    }
+}
+
+/// True when `v4` is loopback (127/8), private (10/8, 172.16/12, 192.168/16),
+/// link-local (169.254/16), or the unspecified address (0.0.0.0).
+fn is_private_ipv4(v4: u32) -> bool {
+    let first = v4 >> 24;
+    if first == 127 || first == 10 || first == 0 {
+        return true;
+    }
+    if (v4 >> 16) == 0xc0a8 || (v4 >> 16) == 0xa9fe {
+        return true;
+    }
+    // 172.16.0.0/12: every address in 172.16.0.0-172.31.255.255 shifts to
+    // exactly 0xac1 when >> 20 (16 contiguous /16 blocks; a <= upper bound
+    // would wrongly admit 172.32+).
+    (v4 >> 20) == 0xac1
 }
 
 fn builtin_http_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -604,4 +726,64 @@ fn builtin_http_post(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         .map(|(_, b)| b)
         .unwrap_or(&response);
     Ok(Value::String(res_body.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 0.35.29 H4: VM-side SSRF guard must mirror the runtime — bracket
+    //! stripping, inet_aton numeric IPv4 decoding, and link-local IPv6.
+
+    use super::*;
+
+    fn blocked(host: &str) -> bool {
+        validate_host_ssrf(host).is_err()
+    }
+
+    #[test]
+    fn vm_ssrf_blocks_bracketed_ipv6_and_numeric_ipv4() {
+        // Bracket forms (defensive: http_split_host_port already strips).
+        assert!(blocked("[::1]"));
+        assert!(blocked("[fc00::1]"));
+        assert!(blocked("[fd00::1]"));
+        assert!(blocked("[fe80::1]"), "link-local IPv6 must be blocked");
+        // inet_aton family → 127.0.0.1.
+        assert!(blocked("2130706433"));
+        assert!(blocked("0x7f000001"));
+        assert!(blocked("017700000001"));
+        assert!(blocked("127.1"));
+        assert!(blocked("0177.0.0.1"));
+        assert!(blocked("0x7f.0.0.1"));
+        // IPv4-mapped IPv6.
+        assert!(blocked("::ffff:127.0.0.1"));
+        assert!(blocked("[::ffff:10.0.0.5]"));
+        // Private/link-local families.
+        assert!(blocked("10.0.0.5"));
+        assert!(blocked("172.16.0.1"));
+        assert!(blocked("172.31.255.255"));
+        assert!(blocked("192.168.1.1"));
+        assert!(blocked("169.254.169.254"));
+        assert!(blocked("0.0.0.0"));
+        // Public stays allowed.
+        assert!(!blocked("8.8.8.8"));
+        assert!(!blocked("172.32.0.1"), "outside 172.16/12 is public");
+        assert!(
+            !blocked("134744072"),
+            "134744072 = 8.8.8.8 (public int form)"
+        );
+        assert!(!blocked("example.com"));
+        assert!(!blocked("[2001:db8::1]"));
+    }
+
+    #[test]
+    fn vm_decode_ipv4_literal_forms() {
+        assert_eq!(decode_ipv4_literal("2130706433"), Some(0x7f00_0001));
+        assert_eq!(decode_ipv4_literal("0x7f000001"), Some(0x7f00_0001));
+        assert_eq!(decode_ipv4_literal("017700000001"), Some(0x7f00_0001));
+        assert_eq!(decode_ipv4_literal("127.1"), Some(0x7f00_0001));
+        assert_eq!(decode_ipv4_literal("127.0.0.1"), Some(0x7f00_0001));
+        assert_eq!(decode_ipv4_literal("8.8.8.8"), Some(0x0808_0808));
+        assert_eq!(decode_ipv4_literal("example.com"), None);
+        assert_eq!(decode_ipv4_literal("::1"), None);
+        assert_eq!(decode_ipv4_literal(""), None);
+    }
 }
