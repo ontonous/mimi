@@ -303,6 +303,15 @@ fn builtin_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
     if buf_size <= 0 {
         return Err(InterpError::new("recv: buf_size must be positive"));
     }
+    // 0.35.29 (H12): mirror runtime MAX_RECV_SIZE — an absurd buf_size
+    // (e.g. i64::MAX) made vec![0u8; size] abort the VM with an allocation
+    // failure (or OOM). The codegen backend already rejects > 100 MB.
+    const MAX_RECV_SIZE: i64 = 100 * 1024 * 1024; // 100MB
+    if buf_size > MAX_RECV_SIZE {
+        return Err(InterpError::new(
+            "recv: buf_size exceeds 100 MB cap (refusing unbounded allocation)",
+        ));
+    }
     let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
     // SAFETY: buf 为 vec![0; buf_size]，as_mut_ptr 指向其堆缓冲，长度与容量匹配。
     let n = unsafe {
@@ -332,44 +341,38 @@ fn builtin_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
 // === HTTP builtins ===
 
 fn http_connect(host: &str, port: i64) -> Result<i64, InterpError> {
-    // SAFETY: libc::socket 标准调用；常量参数均为合法 i32。
-    let domain = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    if domain < 0 {
-        return Err(InterpError::new("http: failed to create socket"));
+    // 0.35.29 (H12): the old libc socket + blocking connect had NO timeout —
+    // a packet-dropping firewall blocked ~2 min on OS SYN retries. Mirror
+    // the runtime client (runtime/net.rs http_request): std's connect_timeout
+    // with a 5s cap, trying each resolved address (v4/v6, multi-homed).
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::os::unix::io::IntoRawFd;
+    const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let addr = format!("{}:{}", host, port);
+    let addrs = addr
+        .to_socket_addrs()
+        .map_err(|e| InterpError::new(format!("http: could not resolve '{}': {}", host, e)))?;
+    let mut stream: Option<TcpStream> = None;
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, HTTP_CONNECT_TIMEOUT) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => continue,
+        }
     }
-    let c_host = std::ffi::CString::new(host)
-        .map_err(|e| InterpError::new(format!("http: invalid host: {}", e)))?;
-    // SAFETY: zeroed 初始化 POD addrinfo，字段随后显式赋值。
-    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
-    hints.ai_family = libc::AF_UNSPEC;
-    hints.ai_socktype = libc::SOCK_STREAM;
-    let port_str = format!("{}", port);
-    let c_port =
-        std::ffi::CString::new(port_str).map_err(|_| InterpError::new("http: invalid port"))?;
-    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
-    // SAFETY: CString::new 保证 NUL 结尾；res 由 getaddrinfo 分配，随后 freeaddrinfo 释放。
-    let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
-    if err != 0 || res.is_null() {
-        // SAFETY: domain 为 socket() 返回的有效描述符，close 释放一次。
-        unsafe { libc::close(domain) };
-        return Err(InterpError::new(format!(
-            "http: could not resolve host '{}'",
-            host
-        )));
-    }
-    // SAFETY: (*res) 指向 getaddrinfo 返回链表的有效节点。
-    let ret = unsafe { libc::connect(domain, (*res).ai_addr, (*res).ai_addrlen) };
-    // SAFETY: res 为 getaddrinfo 分配的有效指针，仅释放一次。
-    unsafe { libc::freeaddrinfo(res) };
-    if ret < 0 {
-        // SAFETY: 同上——domain 有效，close 释放一次。
-        unsafe { libc::close(domain) };
-        return Err(InterpError::new(format!(
-            "http: connection refused to '{}:{}'",
+    let stream = stream.ok_or_else(|| {
+        InterpError::new(format!(
+            "http: connection to '{}:{}' failed or timed out after 5s",
             host, port
-        )));
-    }
-    Ok(domain as i64)
+        ))
+    })?;
+    // SAFETY: into_raw_fd transfers ownership of the socket to the caller,
+    // which passes it back to http_send_recv (and closes it there). The fd
+    // is unique — nobody else holds it.
+    Ok(stream.into_raw_fd() as i64)
 }
 
 fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpError> {
@@ -395,12 +398,18 @@ fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpE
             if err == libc::EINTR {
                 continue;
             }
+            if err == libc::EWOULDBLOCK || err == libc::EAGAIN {
+                return Err(InterpError::new("send: timed out after 5s (stalled peer)"));
+            }
             return Err(InterpError::new(format!("send error: {}", err)));
         }
         sent += n;
     }
     Ok(())
 }
+
+/// Max HTTP response bytes (mirrors runtime/net.rs MAX_HTTP_RESPONSE).
+const MAX_HTTP_RESPONSE: usize = 100 * 1024 * 1024; // 100MB
 
 fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
     let mut chunk = vec![0u8; 32768];
@@ -413,10 +422,24 @@ fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
             if err == libc::EINTR {
                 continue;
             }
+            if err == libc::EWOULDBLOCK || err == libc::EAGAIN {
+                return Err(InterpError::new(
+                    "recv: timed out after 5s (stalled peer, no data received)",
+                ));
+            }
             return Err(InterpError::new(format!("recv error: {}", err)));
         }
         if n == 0 {
             break;
+        }
+        // Check-then-extend (mirrors runtime MAX_HTTP_RESPONSE): never let
+        // result exceed the cap even on the final chunk. The old check at
+        // the loop top could overshoot by one recv (a chunk pushed the total
+        // past the cap while the top-of-loop check raced ahead).
+        if result.len() + n as usize > MAX_HTTP_RESPONSE {
+            return Err(InterpError::new(
+                "recv: response exceeds 100 MB cap (refusing unbounded allocation)",
+            ));
         }
         result.extend_from_slice(&chunk[..n as usize]);
     }
@@ -424,6 +447,47 @@ fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
 }
 
 fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
+    // H12: set send+recv timeouts on the socket (mirrors the runtime's
+    // set_read_timeout/set_write_timeout) so a stalled peer errors out
+    // instead of blocking the VM forever.
+    // SAFETY: fd comes from http_connect and is unique; setting socket
+    // options on it is valid while it is open.
+    let tmo = libc::timeval {
+        tv_sec: 5,
+        tv_usec: 0,
+    };
+    let rc = unsafe {
+        libc::setsockopt(
+            fd as i32,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tmo as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        unsafe { libc::close(fd as i32) };
+        return Err(InterpError::new(format!(
+            "http: setsockopt(SO_RCVTIMEO) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let rc = unsafe {
+        libc::setsockopt(
+            fd as i32,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &tmo as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        unsafe { libc::close(fd as i32) };
+        return Err(InterpError::new(format!(
+            "http: setsockopt(SO_SNDTIMEO) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
     let c_req = std::ffi::CString::new(request)
         .map_err(|e| InterpError::new(format!("http: invalid request: {}", e)))?;
     send_all(
@@ -785,5 +849,149 @@ mod tests {
         assert_eq!(decode_ipv4_literal("example.com"), None);
         assert_eq!(decode_ipv4_literal("::1"), None);
         assert_eq!(decode_ipv4_literal(""), None);
+    }
+
+    // ── 0.35.29 H12: HTTP/socket must cap size and time out ───
+    // The old VM client had neither: recv_all_into grew the buffer without
+    // bound (a chatty/malicious peer → OOM) and a stalled peer blocked the
+    // VM forever. Mirrors runtime/net.rs (MAX_HTTP_RESPONSE + 5s timeouts).
+
+    #[test]
+    fn h12_recv_all_errors_on_cap_without_oom() {
+        // SAFETY: socketpair creates two connected fd pairs valid for the
+        // process; both ends are closed on all paths below.
+        let mut fds = [0i32; 2];
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+            0
+        );
+        let writer = fds[0];
+        let reader = fds[1];
+
+        // Writer thread: pump > MAX_HTTP_RESPONSE bytes until the reader
+        // gives up (EPIPE once the reader closes). The reader must stop at
+        // the cap — with the old code this loop OOM'd instead.
+        let writer_thread = std::thread::spawn(move || {
+            let chunk = vec![b'x'; 65536];
+            let total: usize = MAX_HTTP_RESPONSE + 10 * 1024 * 1024; // 110 MB
+            let mut sent = 0usize;
+            while sent < total {
+                // SAFETY: chunk is a valid buffer; fd is open.
+                let n = unsafe {
+                    libc::send(
+                        writer,
+                        chunk.as_ptr() as *const libc::c_void,
+                        chunk.len(),
+                        0,
+                    )
+                };
+                if n <= 0 {
+                    break; // writer closed by reader (cap reached) or error
+                }
+                sent += n as usize;
+            }
+            // SAFETY: fd owned by this thread (created via socketpair).
+            unsafe { libc::close(writer) };
+        });
+
+        let mut buf = Vec::new();
+        let r = recv_all_into(reader, &mut buf);
+        assert!(
+            r.is_err(),
+            "recv_all_into must Err at the cap instead of OOM'ing"
+        );
+        let msg = r.unwrap_err().message().to_string();
+        assert!(
+            msg.contains("100 MB cap"),
+            "cap error must name the limit, got: {msg}"
+        );
+        assert!(
+            buf.len() <= MAX_HTTP_RESPONSE,
+            "captured {} bytes, must stop at cap",
+            buf.len()
+        );
+        // SAFETY: reader fd owned by this test.
+        unsafe { libc::close(reader) };
+        let _ = writer_thread.join();
+    }
+
+    #[test]
+    fn h12_recv_times_out_after_timeo() {
+        // A peer that never sends: recv_all_into must fail with a timeout
+        // error (SO_RCVTIMEO → EAGAIN), not block forever.
+        // SAFETY: socketpair as above; both ends closed on all paths.
+        let mut fds = [0i32; 2];
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+            0
+        );
+        let reader = fds[1];
+        let tmo = libc::timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+        // SAFETY: reader is a valid socket fd owned by this test.
+        let rc = unsafe {
+            libc::setsockopt(
+                reader,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tmo as *const libc::timeval as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(rc, 0);
+        let mut buf = Vec::new();
+        let start = std::time::Instant::now();
+        let r = recv_all_into(reader, &mut buf);
+        assert!(r.is_err(), "stalled peer must time out, got {r:?}");
+        let msg = r.unwrap_err().message().to_string();
+        assert!(
+            msg.contains("timed out after"),
+            "timeout error must be explicit, got: {msg}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "must fail within the timeout, took {:?}",
+            start.elapsed()
+        );
+        // SAFETY: reader fd owned by this test; writer fds[0] is still open
+        // in this process (leaked intentionally — dropping it would make the
+        // reader see EOF instead of timeout; 4-byte leak is negligible).
+        unsafe { libc::close(reader) };
+    }
+
+    #[test]
+    fn h12_recv_builtin_rejects_absurd_buf_size() {
+        // Old code: vec![0u8; buf_size] with buf_size = i64::MAX → abort on
+        // allocation failure. Now mirrors runtime MAX_RECV_SIZE.
+        let r = builtin_recv(
+            &mut crate::interp::bytecode::vm::BytecodeVM::new(std::sync::Arc::new(
+                crate::interp::bytecode::instr::BytecodeProgram {
+                    extern_names: Vec::new(),
+                    functions: Vec::new(),
+                    entry: 0,
+                    builtin_names: vec![],
+                    actor_defs: std::collections::HashMap::new(),
+                    flow_defs: std::collections::HashMap::new(),
+                    flow_transition_funcs: std::collections::HashMap::new(),
+                    flow_fails_transitions: std::collections::HashSet::new(),
+                    actor_method_funcs: std::collections::HashMap::new(),
+                    max_children: None,
+                    flow_persistent: std::collections::HashMap::new(),
+                    flow_fault_type: std::collections::HashMap::new(),
+                    type_defs: std::collections::HashMap::new(),
+                    ast: None,
+                    record_fields: std::collections::HashMap::new(),
+                },
+            )),
+            &[Value::Int(999_999), Value::Int(i64::MAX)],
+        );
+        assert!(r.is_err(), "i64::MAX buf_size must be rejected, got {r:?}");
+        let msg = r.unwrap_err().message().to_string();
+        assert!(
+            msg.contains("100 MB cap"),
+            "cap error must name the limit, got: {msg}"
+        );
     }
 }

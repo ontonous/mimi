@@ -20175,7 +20175,9 @@ pub use capability::*;
 
 mod future;
 
-mod fs;
+// pub(crate): the bytecode VM's exec builtins call `run_exec_capped` through
+// this module so both backends cap subprocess output identically (H12).
+pub(crate) mod fs;
 
 mod env;
 

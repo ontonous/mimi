@@ -330,6 +330,66 @@ pub struct MimiExecResult {
     pub stderr: *mut std::ffi::c_char,
 }
 
+/// Max bytes captured per output stream by the exec family (10 MB, both
+/// backends — VM builtins reuse this same helper, so the cap is shared).
+pub(crate) const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024;
+
+/// Spawn `cmd`, capture stdout/stderr capped at `MAX_EXEC_OUTPUT` per stream,
+/// and **keep draining** the pipes past the cap so the child never blocks on
+/// a full pipe buffer (0.35.29 H12). The old `Command::output()` collected
+/// the full output and only truncated afterwards — a child writing >16 MB
+/// OOM'd the interpreter/compiled process. Return (stdout, stderr, code).
+///
+/// This is shared with the bytecode VM builtins (`builtin_exec*` in
+/// misc.rs) so both backends cap identically — L1 by construction.
+pub(crate) fn run_exec_capped(cmd: &mut std::process::Command) -> (Vec<u8>, Vec<u8>, Option<i32>) {
+    use std::io::Read;
+    use std::process::{ChildStdout, Stdio};
+
+    fn drain_capped(mut r: impl Read) -> Vec<u8> {
+        let mut kept = Vec::with_capacity(MAX_EXEC_OUTPUT.min(65536));
+        let mut buf = [0u8; 16384];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let room = MAX_EXEC_OUTPUT - kept.len();
+                    if room > 0 {
+                        let take = room.min(n);
+                        kept.extend_from_slice(&buf[..take]);
+                    }
+                    // Bytes past the cap are read and discarded — the child
+                    // must never block on a full pipe buffer.
+                }
+                Err(_) => break,
+            }
+        }
+        kept
+    }
+
+    // SAFETY: stdout/stderr are captured into pipes owned by us; the child
+    // is waited on below. Both streams are read concurrently so a child
+    // writing a lot to one stream cannot block because the other is full.
+    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(c) => c,
+        Err(_) => return (Vec::new(), Vec::new(), None),
+    };
+    let out_pipe: Option<ChildStdout> = child.stdout.take();
+    let err_pipe = child.stderr.take();
+    let (out_pipe, err_pipe) = match (out_pipe, err_pipe) {
+        (Some(o), Some(e)) => (o, e),
+        _ => {
+            let _ = child.wait();
+            return (Vec::new(), Vec::new(), None);
+        }
+    };
+    let stderr_t = std::thread::spawn(move || drain_capped(err_pipe));
+    let stdout = drain_capped(out_pipe);
+    let stderr = stderr_t.join().unwrap_or_default();
+    let code = child.wait().ok().and_then(|s| s.code());
+    (stdout, stderr, code)
+}
+
 /// Executes a shell command via `sh -c`. Returns a heap-allocated MimiExecResult.
 /// Uses shell interpretation (pipelines, variables, redirections).
 ///
@@ -390,42 +450,17 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
         });
         return Box::into_raw(res);
     }
-    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB per stream
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd_str)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
-                &out.stdout[..MAX_EXEC_OUTPUT]
-            } else {
-                &out.stdout
-            };
-            let stderr_bytes = if out.stderr.len() > MAX_EXEC_OUTPUT {
-                &out.stderr[..MAX_EXEC_OUTPUT]
-            } else {
-                &out.stderr
-            };
-            let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
-            let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
-            let exit_code = out.status.code().unwrap_or(-1);
-            let res = Box::new(MimiExecResult {
-                exit_code: exit_code as i64,
-                stdout: alloc_c_string(&stdout),
-                stderr: alloc_c_string(&stderr),
-            });
-            Box::into_raw(res)
-        }
-        Err(e) => {
-            let res = Box::new(MimiExecResult {
-                exit_code: -1,
-                stdout: alloc_c_string(""),
-                stderr: alloc_c_string(&format!("exec error: {}", e)),
-            });
-            Box::into_raw(res)
-        }
-    }
+    let (stdout_bytes, stderr_bytes, code) =
+        run_exec_capped(std::process::Command::new("sh").arg("-c").arg(cmd_str));
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+    let exit_code = code.unwrap_or(-1);
+    let res = Box::new(MimiExecResult {
+        exit_code: exit_code as i64,
+        stdout: alloc_c_string(&stdout),
+        stderr: alloc_c_string(&stderr),
+    });
+    Box::into_raw(res)
 }
 
 /// Frees a MimiExecResult allocated by mimi_exec.
@@ -482,23 +517,10 @@ pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi:
     if cmd_str.contains('\0') {
         return alloc_c_string("");
     }
-    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd_str)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
-                &out.stdout[..MAX_EXEC_OUTPUT]
-            } else {
-                &out.stdout
-            };
-            let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
-            alloc_c_string(&stdout)
-        }
-        Err(_) => alloc_c_string(""),
-    }
+    let (stdout_bytes, _stderr, _code) =
+        run_exec_capped(std::process::Command::new("sh").arg("-c").arg(cmd_str));
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    alloc_c_string(&stdout)
 }
 
 /// Execute a single program without shell interpretation.
@@ -533,24 +555,16 @@ pub extern "C" fn mimi_exec_safe(
     };
     if args.is_null() {
         // No args — just run the program with no arguments.
-        let output = std::process::Command::new(&prog_str).output();
-        return match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let exit_code = out.status.code().unwrap_or(-1);
-                Box::into_raw(Box::new(MimiExecResult {
-                    exit_code: exit_code as i64,
-                    stdout: alloc_c_string(&stdout),
-                    stderr: alloc_c_string(&stderr),
-                }))
-            }
-            Err(e) => Box::into_raw(Box::new(MimiExecResult {
-                exit_code: -1,
-                stdout: alloc_c_string(""),
-                stderr: alloc_c_string(&format!("exec_safe error: {}", e)),
-            })),
-        };
+        let mut cmd = std::process::Command::new(&prog_str);
+        let (stdout, stderr, code) = run_exec_capped(&mut cmd);
+        let exit_code = code.unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr).into_owned();
+        return Box::into_raw(Box::new(MimiExecResult {
+            exit_code: exit_code as i64,
+            stdout: alloc_c_string(&stdout),
+            stderr: alloc_c_string(&stderr),
+        }));
     }
     // SAFETY: args was checked non-null above.
     let lst = unsafe { &*args };
@@ -565,39 +579,16 @@ pub extern "C" fn mimi_exec_safe(
         let s = unsafe { cstr_to_string(item_ptr) };
         cmd.arg(s);
     }
-    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB per stream
-    let output = cmd.output();
-    match output {
-        Ok(out) => {
-            let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
-                &out.stdout[..MAX_EXEC_OUTPUT]
-            } else {
-                &out.stdout
-            };
-            let stderr_bytes = if out.stderr.len() > MAX_EXEC_OUTPUT {
-                &out.stderr[..MAX_EXEC_OUTPUT]
-            } else {
-                &out.stderr
-            };
-            let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
-            let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
-            let exit_code = out.status.code().unwrap_or(-1);
-            let res = Box::new(MimiExecResult {
-                exit_code: exit_code as i64,
-                stdout: alloc_c_string(&stdout),
-                stderr: alloc_c_string(&stderr),
-            });
-            Box::into_raw(res)
-        }
-        Err(e) => {
-            let res = Box::new(MimiExecResult {
-                exit_code: -1,
-                stdout: alloc_c_string(""),
-                stderr: alloc_c_string(&format!("exec_safe error: {}", e)),
-            });
-            Box::into_raw(res)
-        }
-    }
+    let (stdout_bytes, stderr_bytes, code) = run_exec_capped(&mut cmd);
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+    let exit_code = code.unwrap_or(-1);
+    let res = Box::new(MimiExecResult {
+        exit_code: exit_code as i64,
+        stdout: alloc_c_string(&stdout),
+        stderr: alloc_c_string(&stderr),
+    });
+    Box::into_raw(res)
 }
 
 /// Result of stat-ing a file.
