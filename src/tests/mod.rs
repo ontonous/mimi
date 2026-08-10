@@ -408,7 +408,7 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed in run_source");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value()
         .expect("bytecode run_value failed in run_source")
 }
@@ -421,7 +421,7 @@ pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed in run_source_with_stdout");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.enable_stdout_capture();
     let val = vm
         .run_value()
@@ -452,7 +452,7 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
         .map_err(|e| e.message)?;
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
@@ -487,7 +487,7 @@ pub(crate) fn checked_run_source_result(src: &str) -> Result<interp::Value, Stri
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     compiler.install_checked_program(&program);
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
@@ -515,7 +515,7 @@ pub(crate) fn run_source_bytecode(src: &str) -> interp::Value {
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().expect("bytecode run_value failed")
 }
 
@@ -528,7 +528,7 @@ pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, Str
         .map_err(|e| e.message)?;
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
@@ -540,7 +540,7 @@ pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, Stri
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.enable_stdout_capture();
     let val = vm.run_value().expect("bytecode run_value failed");
     let stdout = vm.take_stdout();
@@ -562,7 +562,7 @@ pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Va
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     compiler.install_checked_program(&program);
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
@@ -584,7 +584,7 @@ pub(crate) fn bytecode_call_named(
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.call_named(func_name, args)
         .map_err(|e| e.message().to_string())
 }
@@ -602,7 +602,7 @@ pub(crate) fn bytecode_run_with_contracts(
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.verify_contracts = verify;
     vm.run_value().map_err(|e| e.message().to_string())
 }
@@ -899,7 +899,7 @@ pub(crate) fn dual_assert_contract_ok(src: &str) {
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed in dual_assert_contract_ok");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.verify_contracts = true;
     vm.run_value()
         .expect("bytecode contract run failed in dual_assert_contract_ok");
@@ -916,7 +916,7 @@ pub(crate) fn dual_assert_contract_violation(src: &str) {
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed in dual_assert_contract_violation");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.verify_contracts = true;
     let vm_err = vm
         .run_value()

@@ -95,9 +95,15 @@ struct FlowTxCtx {
 }
 
 /// The bytecode VM.
-pub struct BytecodeVM<'a> {
-    /// The compiled program.
-    program: &'a BytecodeProgram,
+///
+/// 0.35.27 (C3): owns an `Arc<BytecodeProgram>` instead of borrowing
+/// `&'a BytecodeProgram` — the VM is self-contained (no lifetime parameter)
+/// and can be sent to/spawned on other threads (actor workers, cross-thread
+/// FFI callbacks) without the program's creator staying alive. This is the
+/// ownership model that makes the FFI callback path UAF-free.
+pub struct BytecodeVM {
+    /// The compiled program (Arc-shared: creator, VMs, callbacks coexist).
+    program: std::sync::Arc<BytecodeProgram>,
     /// Call stack of frames.
     stack: Vec<Frame>,
     /// Captured stdout output (for testing).
@@ -149,8 +155,23 @@ fn reg_as_f64(v: &Value) -> Result<f64, InterpError> {
     }
 }
 
-impl<'a> BytecodeVM<'a> {
-    pub fn new(program: &'a BytecodeProgram) -> Self {
+impl BytecodeVM {
+    pub fn new(program: std::sync::Arc<BytecodeProgram>) -> Self {
+        let max_children = program.max_children;
+        // 0.35.27 (C3): read program metadata BEFORE moving the Arc into the
+        // struct field (program.ast is needed for the FFI runtime below).
+        let ffi_runtime = match program.ast.as_ref() {
+            Some(file) => {
+                let mut rt = FfiRuntime::from_file(file);
+                rt.verify_ffi = false;
+                rt
+            }
+            None => FfiRuntime::from_parts(
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            ),
+        };
         BytecodeVM {
             program,
             stack: Vec::with_capacity(64),
@@ -159,7 +180,7 @@ impl<'a> BytecodeVM<'a> {
             depth: 0,
             stop_depth: 0,
             registry: registry::create_registry(),
-            max_children: program.max_children,
+            max_children,
             spawn_count: 0,
             cli_args: Vec::new(),
             exit_requested: None,
@@ -170,18 +191,7 @@ impl<'a> BytecodeVM<'a> {
             // tables. Contract verification is disabled until the bytecode
             // engine implements contract-expression eval (see
             // FfiClosureRunner::eval_contract_expr).
-            ffi_runtime: match program.ast.as_ref() {
-                Some(file) => {
-                    let mut rt = FfiRuntime::from_file(file);
-                    rt.verify_ffi = false;
-                    rt
-                }
-                None => FfiRuntime::from_parts(
-                    std::collections::HashMap::new(),
-                    std::collections::HashMap::new(),
-                    std::collections::HashMap::new(),
-                ),
-            },
+            ffi_runtime,
             quote_stack: Vec::new(),
             quote_captures: std::collections::HashMap::new(),
             verify_contracts: true,
@@ -189,8 +199,8 @@ impl<'a> BytecodeVM<'a> {
     }
 
     /// Access the compiled program (for builtins that need type info).
-    pub fn program(&self) -> &'a BytecodeProgram {
-        self.program
+    pub fn program(&self) -> &BytecodeProgram {
+        &self.program
     }
 
     /// Request the VM to terminate with the given exit code.
@@ -422,15 +432,18 @@ impl<'a> BytecodeVM<'a> {
         args: Vec<Value>,
         return_reg: Option<Reg>,
     ) -> Result<(), InterpError> {
+        // 0.35.27 (C3): local Arc clone — `proto` borrows the local `program`,
+        // not `self`, so the `self.check_requires`/`self.stack.push` calls
+        // below are borrow-conflict-free.
+        let program = std::sync::Arc::clone(&self.program);
         if self.depth >= MAX_DEPTH {
             return Err(InterpError::new(
                 "recursion limit exceeded (possible infinite recursion)",
             ));
         }
 
-        let proto = &self.program.functions[func_idx as usize];
+        let proto = &program.functions[func_idx as usize];
         let reg_count = proto.register_count as usize;
-
         if args.len() != proto.param_count as usize {
             return Err(InterpError::new(format!(
                 "function '{}' expects {} argument(s), got {}",
@@ -515,6 +528,12 @@ impl<'a> BytecodeVM<'a> {
     /// Call/Ret are handled by pushing/popping frames — no Rust recursion.
     fn exec_loop(&mut self) -> Result<Value, InterpError> {
         let stop = self.stop_depth;
+        // 0.35.27 (C3): borrow through a local Arc clone so `proto` does
+        // not hold a borrow of `self` (self.program is now an Arc field,
+        // not a raw reference) — the per-instruction `cur_frame_mut()` /
+        // `set_reg()` calls below stay borrow-conflict-free. One clone per
+        // exec_loop invocation, not per instruction (program never changes).
+        let program = std::sync::Arc::clone(&self.program);
         loop {
             // Check for exit() builtin request.
             if let Some(code) = self.exit_requested.take() {
@@ -522,7 +541,7 @@ impl<'a> BytecodeVM<'a> {
             }
 
             let frame = self.cur_frame();
-            let proto = &self.program.functions[frame.proto_idx as usize];
+            let proto = &program.functions[frame.proto_idx as usize];
 
             if frame.pc >= proto.code.len() {
                 // Fell off the end — implicit return Unit.
@@ -2323,6 +2342,7 @@ impl<'a> BytecodeVM<'a> {
                         Value::BytecodeClosure {
                             proto: proto_idx,
                             captured,
+                            program: std::sync::Arc::clone(&self.program),
                         },
                     );
                 }
@@ -2337,6 +2357,7 @@ impl<'a> BytecodeVM<'a> {
                         Value::BytecodeClosure {
                             proto: proto_idx,
                             captured,
+                            program: _,
                         } => {
                             // Collect arguments.
                             let args: Vec<Value> = (0..argc)
@@ -3229,6 +3250,7 @@ impl<'a> BytecodeVM<'a> {
             Value::BytecodeClosure {
                 proto: proto_idx,
                 captured,
+                program: _,
             } => {
                 // H-14: snapshot the stack so a failed closure run can be cleaned.
                 let stack_len_before = self.stack.len();
@@ -3993,7 +4015,7 @@ impl<'a> BytecodeVM<'a> {
                 implicit_single: false,
             })
         });
-        let bc_prog = std::sync::Arc::new(self.program.clone());
+        let bc_prog = self.program.clone();
         let handle = ActorHandle::new_bytecode(instance, program, bc_prog, self.stdout_buf());
         self.spawn_count += 1;
         Ok(Value::Actor(handle))
@@ -4111,7 +4133,7 @@ fn default_value_for_type_str(
 /// FfiClosureRunner implementation: the bytecode VM can execute Mimi
 /// closures (BytecodeClosure) from C callback trampolines, and provides the
 /// program File for cross-thread callback evaluation.
-impl<'a> FfiClosureRunner for BytecodeVM<'a> {
+impl FfiClosureRunner for BytecodeVM {
     fn ffi_file(&self) -> &crate::ast::File {
         self.program
             .ast
@@ -4122,12 +4144,6 @@ impl<'a> FfiClosureRunner for BytecodeVM<'a> {
 
     fn apply_closure_ffi(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
         self.call_closure(closure, &args).map_err(|e| e.to_string())
-    }
-
-    fn ffi_bytecode_program(
-        &self,
-    ) -> Option<*const crate::interp::bytecode::instr::BytecodeProgram> {
-        Some(self.program as *const crate::interp::bytecode::instr::BytecodeProgram)
     }
 
     fn eval_contract_expr(

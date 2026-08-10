@@ -148,32 +148,18 @@ pub(in crate::interp) fn ensure_callback_file(file: &File) {
 /// Evaluate a Mimi closure from a cross-thread callback context.
 /// Creates a temporary Interpreter from the globally stored program file,
 /// evaluates the closure, and returns the result as an i64.
-/// BytecodeProgram pointer for cross-thread BytecodeClosure evaluation
+/// BytecodeProgram for cross-thread BytecodeClosure evaluation
 /// (0.33 Phase D FFI forwarding).
 ///
-/// SAFETY: registered by FfiRuntime while a synchronous extern call with
-/// callback parameters is on the stack; the owning BytecodeVM stays alive
-/// for the duration of that call (C libraries that invoke callbacks from
-/// worker threads join them before returning). The pointer is only read
-/// while that call is in progress.
-#[derive(Copy, Clone)]
-struct SendProgramPtr(*const crate::interp::bytecode::instr::BytecodeProgram);
-// SAFETY: same ownership contract as SendFilePtr — read-only access while
-// the owning VM's extern call is on the stack.
-unsafe impl Send for SendProgramPtr {}
-// SAFETY: read-only access; no mutation through this pointer.
-unsafe impl Sync for SendProgramPtr {}
-
-static CALLBACK_PROGRAM: std::sync::Mutex<Option<SendProgramPtr>> = std::sync::Mutex::new(None);
-
-/// Register the BytecodeProgram of the VM driving the current extern call.
-pub(in crate::interp) fn set_callback_program(
-    program: *const crate::interp::bytecode::instr::BytecodeProgram,
-) {
-    if let Ok(mut store) = CALLBACK_PROGRAM.lock() {
-        *store = Some(SendProgramPtr(program));
-    }
-}
+/// 0.35.27 (C3) ownership model: `BytecodeClosure` carries its own program
+/// `Arc` (see `Value::BytecodeClosure::program`), so a C library that stores
+/// the callback function pointer and invokes it after the synchronous extern
+/// call returned — even from another thread — evaluates against the closure's
+/// own program, which stays alive as long as the closure does. There is no
+/// global "latest program" pointer, hence no dangling pointer and no
+/// VM-lifetime coupling. (The pre-C3 design stored a raw `*const
+/// BytecodeProgram` globally — UAF when the owning VM dropped before a
+/// delayed callback fired.)
 
 fn encode_callback_result(result: Value, ret_is_float: bool) -> Result<i64, String> {
     if ret_is_float {
@@ -204,17 +190,12 @@ fn evaluate_cross_thread_callback(
     args: Vec<Value>,
     ret_is_float: bool,
 ) -> Result<i64, String> {
-    if matches!(closure, Value::BytecodeClosure { .. }) {
-        let prog_ptr = {
-            let store = CALLBACK_PROGRAM.lock().unwrap_or_else(|e| e.into_inner());
-            store.map(|s| s.0).ok_or_else(|| {
-                "no bytecode program registered for cross-thread callback evaluation".to_string()
-            })?
-        };
-        // SAFETY: the pointer is valid while the owning VM's extern call is
-        // on the stack; the C library joins worker threads before returning.
-        let program = unsafe { &*prog_ptr };
-        let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(program);
+    if let Value::BytecodeClosure { program, .. } = closure {
+        // 0.35.27 (C3): the closure is self-contained — it carries its own
+        // program Arc (proto indices are guaranteed to match this closure),
+        // so the program outlives the VM that created it and can be evaluated
+        // on any thread without a dangling pointer or a mismatched program.
+        let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(std::sync::Arc::clone(program));
         let result = vm
             .apply_closure_ffi(closure, args)
             .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;

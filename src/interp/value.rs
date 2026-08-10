@@ -268,9 +268,15 @@ pub enum Value {
         captured: HashMap<String, Value>,
     },
     /// Bytecode closure: stores function proto index + captured environment.
+    /// 0.35.27 (C3): carries the owning program's Arc — the closure is
+    /// self-contained. Cross-thread evaluation (FFI callbacks, actor workers)
+    /// always uses THIS program, so the proto index can never be resolved
+    /// against a freed or mismatched program, and the program outlives the
+    /// VM that created the closure (no UAF).
     BytecodeClosure {
         proto: u32,
         captured: HashMap<String, Value>,
+        program: std::sync::Arc<crate::interp::bytecode::instr::BytecodeProgram>,
     },
     Shared(Arc<RwLock<Value>>),
     LocalShared(LocalSharedInner),
@@ -371,9 +377,14 @@ impl Clone for Value {
                 body: body.clone(),
                 captured: captured.clone(),
             },
-            Value::BytecodeClosure { proto, captured } => Value::BytecodeClosure {
+            Value::BytecodeClosure {
+                proto,
+                captured,
+                program,
+            } => Value::BytecodeClosure {
                 proto: *proto,
                 captured: captured.clone(),
+                program: std::sync::Arc::clone(program),
             },
             Value::Shared(v) => Value::Shared(Arc::clone(v)),
             Value::LocalShared(v) => Value::LocalShared(v.clone()),
@@ -1082,7 +1093,7 @@ impl ActorHandle {
                                 }
                                 let mut args = vec![current_state.clone()];
                                 args.extend(msg.args);
-                                let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
+                                let mut vm = crate::interp::bytecode::BytecodeVM::new(worker_bc.clone());
                                 if let Some(ref buf) = worker_stdout {
                                     vm.set_stdout_buf(buf.clone());
                                 }
@@ -1159,7 +1170,7 @@ impl ActorHandle {
                                 });
                                 let mut args = vec![self_val];
                                 args.extend(msg.args);
-                                let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
+                                let mut vm = crate::interp::bytecode::BytecodeVM::new(worker_bc.clone());
                                 if let Some(ref buf) = worker_stdout {
                                     vm.set_stdout_buf(buf.clone());
                                 }

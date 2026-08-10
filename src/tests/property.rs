@@ -255,7 +255,7 @@ proptest! {
                 if core::check(&file).is_ok() {
                     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
                     if let Ok(prog) = compiler.compile_file(&file) {
-                        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
                         let _ = vm.run_value();
                     }
                 }
@@ -273,7 +273,7 @@ proptest! {
                 if core::check(&file).is_ok() {
                     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
                     if let Ok(prog) = compiler.compile_file(&file) {
-                        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
                         let _ = vm.run_value();
                     }
                 }
@@ -742,7 +742,7 @@ proptest! {
                 if core::check(&file).is_ok() {
                     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
                     if let Ok(prog) = compiler.compile_file(&file) {
-                        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
                         let _ = vm.run_value();
                     }
                 }

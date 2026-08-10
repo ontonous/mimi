@@ -228,7 +228,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
 }
 
-fn builtin_abs(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_abs(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(v) => {
             let abs = v.checked_abs().ok_or_else(|| {
@@ -261,7 +261,7 @@ fn to_i64(v: &Value) -> Result<i64, InterpError> {
 // Macro for unary float builtins with finiteness check (SD-9).
 macro_rules! unary_float {
     ($name:ident, $method:ident) => {
-        fn $name(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+        fn $name(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
             let x = to_f64(&args[0])?;
             let r = x.$method();
             vm.check_float(r, stringify!($method))?;
@@ -285,7 +285,7 @@ unary_float!(builtin_ln, ln);
 unary_float!(builtin_log2, log2);
 unary_float!(builtin_log10, log10);
 
-fn builtin_log(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_log(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // log(x) or log(x, base)
     if args.len() < 1 || args.len() > 2 {
         return Err(InterpError::new(
@@ -307,7 +307,7 @@ fn builtin_log(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpE
 }
 unary_float!(builtin_sqrt, sqrt);
 unary_float!(builtin_cbrt, cbrt);
-fn builtin_floor(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_floor(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(v) => Ok(Value::Int(*v)),
         other => {
@@ -317,7 +317,7 @@ fn builtin_floor(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     }
 }
 
-fn builtin_ceil(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_ceil(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(v) => Ok(Value::Int(*v)),
         other => {
@@ -327,7 +327,7 @@ fn builtin_ceil(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     }
 }
 
-fn builtin_round(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_round(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(v) => Ok(Value::Int(*v)),
         other => {
@@ -337,7 +337,7 @@ fn builtin_round(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     }
 }
 
-fn builtin_atan2(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atan2(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let y = to_f64(&args[0])?;
     let x = to_f64(&args[1])?;
     let r = y.atan2(x);
@@ -345,7 +345,7 @@ fn builtin_atan2(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     Ok(Value::Float(r))
 }
 
-fn builtin_pow(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_pow(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Int(base), Value::Int(exp)) => {
             if *exp < 0 {
@@ -377,7 +377,7 @@ fn builtin_pow(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpE
     }
 }
 
-fn builtin_min(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_min(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int((*a).min(*b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
@@ -387,7 +387,7 @@ fn builtin_min(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     }
 }
 
-fn builtin_max(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_max(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int((*a).max(*b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
@@ -397,11 +397,11 @@ fn builtin_max(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     }
 }
 
-fn builtin_pi(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_pi(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Float(std::f64::consts::PI))
 }
 
-fn builtin_random(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_random(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     // Simple LCG-based pseudo-random (no external crate).
     // Uses 53-bit mantissa / 2^53 → [0, 1) (tree-walker parity).
     use std::time::SystemTime;
@@ -416,22 +416,22 @@ fn builtin_random(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, In
     Ok(Value::Float((val as f64) / ((1u64 << 53) as f64)))
 }
 
-fn builtin_is_nan(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_nan(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let x = to_f64(&args[0])?;
     Ok(Value::Bool(x.is_nan()))
 }
 
-fn builtin_is_finite(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_finite(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let x = to_f64(&args[0])?;
     Ok(Value::Bool(x.is_finite()))
 }
 
-fn builtin_is_infinite(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_infinite(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let x = to_f64(&args[0])?;
     Ok(Value::Bool(x.is_infinite()))
 }
 
-fn builtin_is_close(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_close(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let a = to_f64(&args[0])?;
     let b = to_f64(&args[1])?;
     let epsilon = to_f64(&args[2])?;
@@ -441,13 +441,13 @@ fn builtin_is_close(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     Ok(Value::Bool((a - b).abs() <= epsilon))
 }
 
-fn builtin_f64_eq_exact(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_f64_eq_exact(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let a = to_f64(&args[0])?;
     let b = to_f64(&args[1])?;
     Ok(Value::Bool(a == b))
 }
 
-fn builtin_wrapping_add(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_wrapping_add(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let (a, b) = match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => (a, b),
         _ => return Err(InterpError::new("wrapping_add expects two integers")),
@@ -455,7 +455,7 @@ fn builtin_wrapping_add(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     Ok(Value::Int(a.wrapping_add(*b)))
 }
 
-fn builtin_wrapping_sub(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_wrapping_sub(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let (a, b) = match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => (a, b),
         _ => return Err(InterpError::new("wrapping_sub expects two integers")),
@@ -463,7 +463,7 @@ fn builtin_wrapping_sub(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     Ok(Value::Int(a.wrapping_sub(*b)))
 }
 
-fn builtin_wrapping_mul(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_wrapping_mul(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let (a, b) = match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => (a, b),
         _ => return Err(InterpError::new("wrapping_mul expects two integers")),

@@ -202,6 +202,74 @@ fn interp_ffi_threaded_callback() {
     );
 }
 
+/// Delayed-callback regression lock (0.35.27 C3: FFI callback UAF).
+///
+/// A C library stores the callback pointer during a synchronous extern call
+/// and invokes it AFTER the call returns — after the BytecodeVM that
+/// registered the closure has been dropped. The pre-C3 design held a global
+/// raw `*const BytecodeProgram` that dangled once the owning VM dropped:
+/// invoking the stored callback then was use-after-free.
+///
+/// Since 0.35.27, `BytecodeClosure` carries its own program `Arc`, so the
+/// delayed invocation (which takes the cross-thread evaluation path — no TLS
+/// runner on the firing thread) evaluates against the closure's own program,
+/// which stays alive as long as the closure does.
+#[test]
+fn interp_ffi_delayed_callback_after_vm_drop() {
+    if !can_cc() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:delayed unwrap failed");
+
+    // The real-world shape of this bug: a C library stays loaded in the
+    // process while the Mimi VM that registered the callback comes and goes.
+    // Hold the library open for the whole test — otherwise the VM's own
+    // dlopen/dlclose cycle unloads the .so and the C-side slot re-initializes
+    // (that would be a different, unrelated lifecycle issue).
+    // SAFETY: so_path exists; the handle stays alive until end of test.
+    let lib = unsafe { libloading::Library::new(&so_path) }
+        .expect("src/tests/ffi_interp_e2e.rs:delayed dlopen failed");
+
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+
+    // Store the callback in the C-side slot and return. The BytecodeVM that
+    // registers the closure is dropped as soon as run_source_bytecode_result
+    // returns — the UAF trigger point for the old raw-pointer design.
+    let result = run_source_bytecode_result(
+        r#"
+        extern "C" {
+            func test_delayed_callback_store(cb: func(i32) -> i32) -> i32
+        }
+        func main() -> i32 {
+            let factor = 4
+            let cb = fn(n: i32) -> i32 { n * factor + 11 }
+            test_delayed_callback_store(cb)
+        }
+    "#,
+    );
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(
+        result.expect("src/tests/ffi_interp_e2e.rs:delayed store unwrap failed"),
+        interp::Value::Int(1)
+    );
+
+    // NOW the registering VM is gone. Fire the stored callback from the test
+    // process (TLS has no runner → cross-thread path). The closure's own
+    // program Arc keeps the program alive: cb(3) = 3*4 + 11 = 23.
+    // SAFETY: the callback pointer was stored by test_delayed_callback_store
+    // while the extern call was on the stack; the 0.35.27 Arc ownership makes
+    // it safe to invoke after the VM dropped (pre-C3: raw program pointer
+    // dangled → UAF/undefined result).
+    unsafe {
+        let fire: libloading::Symbol<unsafe extern "C" fn(i32) -> i32> = lib
+            .get(b"test_delayed_callback_fire")
+            .expect("src/tests/ffi_interp_e2e.rs:delayed dlsym failed");
+        assert_eq!(fire(3), 23);
+    }
+}
+
 #[test]
 fn interp_ffi_parse_int_raw_string() {
     if !can_cc() {

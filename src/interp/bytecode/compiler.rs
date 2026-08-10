@@ -9,6 +9,7 @@ use super::registry;
 use crate::ast::*;
 use crate::interp::error::InterpError;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Bytecode compiler: transforms AST functions into FunctionProto.
 pub struct BytecodeCompiler {
@@ -491,8 +492,10 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Compile a full AST file into a BytecodeProgram.
-    pub fn compile_file(&mut self, file: &File) -> Result<BytecodeProgram, InterpError> {
+    /// Compile a full AST file into a BytecodeProgram (Arc-shared so VMs,
+    /// cross-thread FFI callbacks, and actor workers can hold it independently
+    /// of the compiler/creator lifetime — 0.35.27 C3 ownership model).
+    pub fn compile_file(&mut self, file: &File) -> Result<Arc<BytecodeProgram>, InterpError> {
         // Store AST for actor worker threads.
         self.ast_file = Some(std::sync::Arc::new(file.clone()));
 
@@ -818,7 +821,7 @@ impl BytecodeCompiler {
             })
         });
 
-        Ok(BytecodeProgram {
+        Ok(Arc::new(BytecodeProgram {
             functions: std::mem::take(&mut self.functions),
             entry,
             builtin_names: std::mem::take(&mut self.builtin_names),
@@ -834,7 +837,7 @@ impl BytecodeCompiler {
             type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
-        })
+        }))
     }
 
     /// Resolve type aliases recursively: if `ty` is a Name that matches a
@@ -884,7 +887,10 @@ impl BytecodeCompiler {
     /// Compile a file for comptime evaluation only.
     /// Unlike `compile_file`, this does not require a `main` function.
     /// Used by codegen to evaluate `comptime func` declarations.
-    pub fn compile_for_comptime(&mut self, file: &File) -> Result<BytecodeProgram, InterpError> {
+    pub fn compile_for_comptime(
+        &mut self,
+        file: &File,
+    ) -> Result<Arc<BytecodeProgram>, InterpError> {
         // Store AST for actor worker threads.
         self.ast_file = Some(std::sync::Arc::new(file.clone()));
 
@@ -966,7 +972,7 @@ impl BytecodeCompiler {
         // No main requirement for comptime compilation.
         let entry = self.func_table.get("main").copied().unwrap_or(0);
 
-        Ok(BytecodeProgram {
+        Ok(Arc::new(BytecodeProgram {
             functions: std::mem::take(&mut self.functions),
             entry,
             builtin_names: std::mem::take(&mut self.builtin_names),
@@ -982,7 +988,7 @@ impl BytecodeCompiler {
             type_defs: std::mem::take(&mut self.type_defs),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
-        })
+        }))
     }
 
     fn register_builtin(&mut self, name: &str) {
@@ -6315,7 +6321,7 @@ pub fn eval_comptime_block_bytecode(
     let fidx = prog
         .function_index(&wrapper_name)
         .ok_or_else(|| format!("comptime wrapper function '{wrapper_name}' not found"))?;
-    let mut vm = super::vm::BytecodeVM::new(&prog);
+    let mut vm = super::vm::BytecodeVM::new(prog.clone());
     vm.verify_contracts = false;
     // Use Display (not `.message()`) so the diagnostic code ([E0801]/
     // [E0802]/[E0813] ...) survives into compile-time reports — callers

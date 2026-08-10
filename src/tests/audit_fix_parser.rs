@@ -344,7 +344,9 @@ fn nested_fstring_hits_recursion_limit_not_stack_overflow() {
         s
     };
     let src = format!("func main() -> i32 {{\n let x = {}\n 0\n}}", inner);
-    let tokens = crate::lexer::Lexer::new(&src).tokenize().expect("lex nested fstring");
+    let tokens = crate::lexer::Lexer::new(&src)
+        .tokenize()
+        .expect("lex nested fstring");
     let res = crate::parser::Parser::new(tokens).parse_file();
     let err = res.expect_err("6000-level fstring must be rejected, not crash");
     assert!(
@@ -367,7 +369,9 @@ fn nested_fstring_within_budget_parses_on_test_stack() {
         s
     };
     let src = format!("func main() -> i32 {{\n let x = {}\n 0\n}}", inner);
-    let tokens = crate::lexer::Lexer::new(&src).tokenize().expect("lex nested fstring");
+    let tokens = crate::lexer::Lexer::new(&src)
+        .tokenize()
+        .expect("lex nested fstring");
     let res = crate::parser::Parser::new(tokens).parse_file();
     assert!(
         res.is_ok(),

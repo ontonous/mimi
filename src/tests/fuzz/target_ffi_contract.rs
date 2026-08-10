@@ -55,7 +55,7 @@ fn interp_ffi_verify(src: &str) -> Result<String, String> {
         .map_err(|e| e.message.clone())?;
     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
-    let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
     vm.set_verify_ffi(true);
     vm.verify_contracts = true;
     vm.run_value()

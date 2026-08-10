@@ -1471,7 +1471,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let prog = compiler
                 .compile_for_comptime(&synth)
                 .map_err(|e| e.to_string())?;
-            let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
             let mut results = std::collections::HashMap::new();
             for item in &synth.items {
                 if let crate::ast::Item::Func(f) = item {

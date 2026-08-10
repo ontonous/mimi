@@ -28,7 +28,7 @@ pub enum BuiltinCategory {
 
 /// A builtin function implementation.
 /// Takes the VM (for stdout, closure calls, etc.) and the argument slice.
-pub type BuiltinFn = fn(&mut BytecodeVM<'_>, &[Value]) -> Result<Value, InterpError>;
+pub type BuiltinFn = fn(&mut BytecodeVM, &[Value]) -> Result<Value, InterpError>;
 
 /// Descriptor for a builtin function.
 pub struct BuiltinDesc {

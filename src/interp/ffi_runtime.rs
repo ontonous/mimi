@@ -44,14 +44,6 @@ pub(in crate::interp) trait FfiClosureRunner {
         expr: &crate::ast::Expr,
         result_binding: Option<&Value>,
     ) -> Result<Value, String>;
-    /// Optional BytecodeProgram pointer, used for cross-thread BytecodeClosure
-    /// evaluation (0.33 Phase D FFI forwarding). Interpreter returns None and
-    /// uses the tree-walker cross-thread path instead.
-    fn ffi_bytecode_program(
-        &self,
-    ) -> Option<*const crate::interp::bytecode::instr::BytecodeProgram> {
-        None
-    }
 }
 
 /// FFI execution context shared by both interpreter backends.
@@ -1783,12 +1775,10 @@ impl FfiRuntime {
         // SAFETY: self.runner 裸指针由 set_runner 写入，调用方保证同步调用期间有效。
         let runner = unsafe { &mut *runner };
         super::ffi::callback::ensure_callback_file(runner.ffi_file());
-        // 0.33 Phase D: register the VM's BytecodeProgram for cross-thread
-        // BytecodeClosure evaluation. Valid while this extern call is on the
-        // stack (C libraries join worker threads before returning).
-        if let Some(program) = runner.ffi_bytecode_program() {
-            super::ffi::callback::set_callback_program(program);
-        }
+        // 0.35.27 (C3): cross-thread BytecodeClosure evaluation no longer
+        // needs a program registered here — the closure carries its own
+        // program Arc (see Value::BytecodeClosure::program). The old
+        // raw-pointer global (set_callback_program) is deleted.
         match arg {
             Value::Closure { .. } | Value::BytecodeClosure { .. } => {
                 let closure = arg.clone();
