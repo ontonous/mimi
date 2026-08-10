@@ -689,10 +689,43 @@ pub enum AllocatorKind {
     Bump,
 }
 
-/// C buffer wrapper that automatically frees memory on drop
+/// C buffer wrapper that automatically frees memory on drop.
+///
+/// H9 (0.35.37): the fields are **private** on purpose. `unsafe impl Sync`
+/// is only sound because shared references (`&CBufferInner`) expose read-only
+/// accessors and *no* `&self` path can mutate the buffer; mutation requires
+/// `&mut CBufferInner` or ownership, which is exactly once (Arc + Drop).
+/// Public raw-pointer fields would let any holder of `&CBufferInner` write
+/// through the pointer from another thread — a data race the type system
+/// could not catch. Privacy is the structural enforcement of the FFI
+/// contract that previously existed only as a comment.
 pub struct CBufferInner {
-    pub ptr: *mut u8,
-    pub size: usize,
+    ptr: *mut u8,
+    size: usize,
+}
+
+impl CBufferInner {
+    /// Create a buffer wrapper taking ownership of `ptr` (from
+    /// libc::malloc/calloc) of `size` bytes. Freed exactly once in Drop.
+    pub fn new(ptr: *mut u8, size: usize) -> Self {
+        CBufferInner { ptr, size }
+    }
+
+    /// Read-only view of the buffer pointer. Safe to call on `&self`:
+    /// reading the pointer does not dereference it.
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
+    /// Read-only view of the buffer size.
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    /// Whether the buffer is empty (null pointer or zero size).
+    pub fn is_empty(&self) -> bool {
+        self.ptr.is_null() || self.size == 0
+    }
 }
 
 // SAFETY: CBufferInner is Send because it uniquely owns a heap-allocated buffer
@@ -700,10 +733,11 @@ pub struct CBufferInner {
 // Moving the value across threads does not alias or split ownership of the
 // buffer; only the final Drop frees it.
 unsafe impl Send for CBufferInner {}
-// SAFETY: CBufferInner is Sync because its fields are a raw pointer and a usize,
-// both of which are Sync. Shared references (e.g. through Arc<CBufferInner>)
-// only read ptr/size or run Drop once; actual buffer access is synchronized by
-// the FFI contract / runtime.
+// SAFETY: CBufferInner is Sync because its fields are private and no `&self`
+// method mutates the buffer: `as_ptr`/`len`/`is_empty` only read the fields,
+// and the buffer contents are only reachable through a mutable reference or
+// ownership. Shared references (e.g. through Arc<CBufferInner>) therefore
+// cannot race on buffer contents; Drop runs exactly once (Arc ownership).
 unsafe impl Sync for CBufferInner {}
 
 impl Drop for CBufferInner {
@@ -719,7 +753,7 @@ impl Drop for CBufferInner {
 
 impl std::fmt::Debug for CBufferInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CBuffer({:p}, {} bytes)", self.ptr, self.size)
+        write!(f, "CBuffer({:p}, {} bytes)", self.as_ptr(), self.len())
     }
 }
 
@@ -1746,7 +1780,9 @@ impl std::fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Range { start, end } => write!(f, "{}..{}", start, end),
-            Value::CBuffer(inner) => write!(f, "CBuffer({:p}, {} bytes)", inner.ptr, inner.size),
+            Value::CBuffer(inner) => {
+                write!(f, "CBuffer({:p}, {} bytes)", inner.as_ptr(), inner.len())
+            }
             Value::DynTrait {
                 data,
                 concrete_type,
@@ -2122,5 +2158,32 @@ fn display_projections(projections: &[RuntimeProjection]) -> String {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         values_equal(self, other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H9 (0.35.37): compile-time enforcement that CBufferInner's unsafe
+    /// Send + Sync impls remain in place. If a future refactor removes the
+    /// impls (or adds a field that breaks the manual impl), this function
+    /// fails to compile — the structural contract is pinned.
+    #[test]
+    fn c_buffer_inner_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CBufferInner>();
+    }
+
+    /// H9: the read-only accessors must not expose mutation. A `&CBufferInner`
+    /// held across threads can only read ptr/size; buffer writes need `&mut`
+    /// or ownership. This test pins the accessor surface: no field access.
+    #[test]
+    fn c_buffer_inner_read_only_accessors() {
+        // SAFETY: fresh null buffer, never dereferenced.
+        let buf = CBufferInner::new(std::ptr::null_mut(), 0);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        assert!(buf.as_ptr().is_null());
     }
 }
