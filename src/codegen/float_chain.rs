@@ -19,11 +19,20 @@
 //!   - 中继点检查删除后，非有限传播到末端检查捕获——两次 trap 之间只有纯
 //!     算术指令（无副作用），可观测行为等价（E0813 abort）。
 //!
+//! 链中继判定的传播性边界（0.35.25 审查修复，audit-triage-0.35.25.md C1）：
+//!   "非有限输入 ⇒ 非有限输出"只在**输入位置**成立。FDiv/FRem 的**除数**位置
+//!   打破不变量：c/Inf = +0.0、c%Inf = c（有限）——被除数位置才传播
+//!   （Inf/c = ±Inf、Inf%c = NaN）。libm 调用同样有例外：pow(Inf,0)=1、
+//!   pow(NaN,0)=1、pow(c,Inf)=0（c∈(0,1)）、atan2(c,Inf)=0、atan2(Inf,c)=π/2、
+//!   exp(-Inf)=+0.0、tanh(±Inf)=±1。任意用户函数 call 更是黑盒（可能忽略
+//!   输入返回有限值）。因此仅收敛纯代数链（FAdd/FSub/FMul 与 FDiv/FRem 的
+//!   被除数位置）和传播性无例外的 libm 单参函数白名单（is_propagating_libm_call）。
+//!
 //! 仅 O1 路径调用（O0 保持逐点检查，行为完全不变）。
 
 use inkwell::llvm_sys::core::*;
 use inkwell::llvm_sys::prelude::*;
-use inkwell::llvm_sys::{LLVMOpcode, LLVMRealPredicate, LLVMTypeKind};
+use inkwell::llvm_sys::{LLVMOpcode, LLVMRealPredicate};
 use std::collections::HashSet;
 
 /// 检查点：`x` 被 `check_float_finite`/`enforce_float_finite` 检查。
@@ -247,12 +256,6 @@ unsafe fn block_calls_trap(bb: LLVMBasicBlockRef) -> bool {
     false
 }
 
-unsafe fn is_float_type(v: LLVMValueRef) -> bool {
-    let ty = LLVMTypeOf(v);
-    let kind = LLVMGetTypeKind(ty);
-    kind == LLVMTypeKind::LLVMDoubleTypeKind || kind == LLVMTypeKind::LLVMFloatTypeKind
-}
-
 /// 判断检查点 `cp.x` 是否为链中继点：
 /// 所有用户（排除检查部件 is_nan / fabs(x)）都是"受检 f64/f32 代数 op"，
 /// 或经无逃逸 alloca 转发后汇入链（store→load 对，load 消费皆是链成员）。
@@ -268,7 +271,9 @@ unsafe fn is_relay(cp: &CheckPoint, checked: &HashSet<LLVMValueRef>) -> bool {
         }
         had_real_use = true;
         // 链成员：浮点算术指令且其自身结果也在检查点集合
-        if is_chain_op(user, checked) {
+        // （0.35.25：`x` 必须位于传播位置——FDiv/FRem 除数位置与
+        // 非白名单 call 在此断裂，保留检查）
+        if is_chain_op(cp.x, user, checked) {
             use_ref = LLVMGetNextUse(use_ref);
             continue;
         }
@@ -285,18 +290,60 @@ unsafe fn is_relay(cp: &CheckPoint, checked: &HashSet<LLVMValueRef>) -> bool {
     had_real_use
 }
 
-unsafe fn is_chain_op(user: LLVMValueRef, checked: &HashSet<LLVMValueRef>) -> bool {
-    let opcode = LLVMGetInstructionOpcode(user);
-    let is_arith = matches!(
-        opcode,
-        LLVMOpcode::LLVMFAdd
-            | LLVMOpcode::LLVMFSub
-            | LLVMOpcode::LLVMFMul
-            | LLVMOpcode::LLVMFDiv
-            | LLVMOpcode::LLVMFRem
-    );
-    let is_math_call = opcode == LLVMOpcode::LLVMCall && is_float_type(user);
-    (is_arith || is_math_call) && checked.contains(&user)
+/// 链中继 op 判定：`user` 消费被检查值 `x`，且"x 非有限 ⇒ user 结果非有限"
+/// 可证明成立，user 自身也是检查点（`checked` 集合成员）。
+///
+/// IEEE 754 传播性（NaN ⊛ x = NaN；Inf 参与的代数结果 ∈ {NaN, ±Inf}）只在
+/// **输入/被除数位置**成立。反例（输入非有限但输出有限，链在此断裂，必须
+/// 保留检查）：
+///   - FDiv/FRem 除数位置：c/Inf = +0.0、c%Inf = c（c 有限非零）
+///   - pow：pow(Inf,0)=1、pow(NaN,0)=1、pow(c,Inf)=0（c∈(0,1)）
+///   - atan2：atan2(c,Inf)=0、atan2(Inf,c)=π/2
+///   - exp/exp2：exp(-Inf)=+0.0；tanh：tanh(±Inf)=±1
+///   - 任意用户函数 call：黑盒，完全可能忽略输入返回有限值
+///
+/// 因此仅收敛：FAdd/FSub/FMul（纯代数链）、FDiv/FRem 的**被除数**位置，
+/// 以及传播性无例外的 libm 单参函数白名单（`is_propagating_libm_call`）。
+unsafe fn is_chain_op(x: LLVMValueRef, user: LLVMValueRef, checked: &HashSet<LLVMValueRef>) -> bool {
+    if !checked.contains(&user) {
+        return false;
+    }
+    match LLVMGetInstructionOpcode(user) {
+        LLVMOpcode::LLVMFAdd | LLVMOpcode::LLVMFSub | LLVMOpcode::LLVMFMul => true,
+        // FDiv/FRem：仅被除数位置传播（x/op）；除数位置 c/x 可"治愈"
+        // Inf 为有限（+0.0/c）→ 链在此断裂，保留检查。
+        LLVMOpcode::LLVMFDiv | LLVMOpcode::LLVMFRem => {
+            LLVMGetNumOperands(user) >= 2 && LLVMGetOperand(user, 0) == x
+        }
+        LLVMOpcode::LLVMCall => is_propagating_libm_call(user),
+        _ => false,
+    }
+}
+
+/// libm 单参函数传播性白名单：对**任意**非有限输入返回 NaN/±Inf 的
+/// 单调/发散函数（IEEE 754 对 ±Inf 的无效运算返回 NaN）。
+///
+/// 不在白名单（传播性有例外，链在此断裂）：exp/exp2（exp(-Inf)=+0.0）、
+/// tanh（tanh(±Inf)=±1）、pow/atan2（特殊值组合回归有限）、random
+/// （恒有限）、用户函数 call（黑盒）。
+unsafe fn is_propagating_libm_call(user: LLVMValueRef) -> bool {
+    const SAFE_LIBM: &[&str] = &[
+        // 0.35.3 基准与 stdlib 实际生成的 libm 调用名（math.rs 注册表）。
+        // 单参单调/发散：非有限输入 ⇒ NaN/±Inf，无例外。
+        "sqrt", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh",
+        "cosh", "cbrt", "fabs", "floor", "ceil", "round",
+    ];
+    let callee = LLVMGetCalledValue(user);
+    if callee.is_null() {
+        return false;
+    }
+    let mut len = 0usize;
+    let name = LLVMGetValueName2(callee, &mut len);
+    if name.is_null() {
+        return false;
+    }
+    let s = std::ffi::CStr::from_ptr(name).to_string_lossy();
+    SAFE_LIBM.contains(&s.as_ref())
 }
 
 /// store 转发判定：`user` 是 store 指令，所存值 == `cp.x`，目标为无逃逸
@@ -355,7 +402,8 @@ unsafe fn stores_into_forwardable_alloca(
                 use3 = LLVMGetNextUse(use3);
                 continue;
             }
-            if !is_chain_op(u3, checked) {
+            // 0.35.25：`l`（x 的转发副本）必须位于传播位置
+            if !is_chain_op(l, u3, checked) {
                 return false;
             }
             use3 = LLVMGetNextUse(use3);

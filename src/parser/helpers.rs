@@ -21,6 +21,20 @@ pub(crate) const DEPTH_MAX_DEFAULT: usize = 128;
 /// margin; legitimate code rarely nests modules beyond 3–4 levels.
 pub(crate) const DEPTH_MAX_MODULE: usize = 32;
 
+/// Depth budget for f-string interpolation nesting
+/// (parse_stmt.rs `parse_fstring_parts` sub-parser).
+/// Measured 2026-08-10 (0.35.25, audit-triage C2) on a 2 MB libtest thread
+/// stack: nested f-string interpolation overflows at depth 40 (~38 safe),
+/// i.e. ~53 KB of stack per nesting level — the sub-parser path stacks a
+/// fresh `Parser` (with source registry) plus lexer/expression frames per
+/// level, several times heavier than a plain expression level (≤9 KB).
+/// Each nesting level counts 2 against `recursion_depth` (parse_expr of the
+/// enclosing level + sub-parser parse_expr), so the 128 default budget
+/// admits 64 levels ≈ 3.4 MB — past the 2 MB test stack. The budget below
+/// (≈32 levels, ~1.7 MB) keeps the deepest f-string nesting inside the
+/// 2 MB budget with margin; legitimate code nests f-strings ≤ 5 levels.
+pub(crate) const DEPTH_MAX_FSTRING: usize = 64;
+
 impl Parser {
     /// Guard against deep recursion on the cheap paths (expressions,
     /// statements, types, patterns, session-type chains). Returns Err if
@@ -45,12 +59,9 @@ impl Parser {
     /// stacks libtest uses for test threads (the CLI main thread has 8 MB,
     /// but the guard must hold on the smallest supported stack).
     pub(crate) fn check_depth_with(&self, max: usize) -> Result<(), ParseError> {
-        // TEMP WAVE-2 PROBE (agent PM): env override to measure real overflow
-        // budgets per recursion path. Remove with the probe test.
-        let max = std::env::var("MIMI_PROBE_CAP")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(max);
+        // 0.35.25 (M1, audit-triage-0.35.25.md): 移除 TEMP WAVE-2 遗留的
+        // MIMI_PROBE_CAP 环境变量后门（深度上限可被覆盖到任意值，与 C2
+        // 子解析器深度逃逸叠加放大；违反红线 #3 无 TODO issue 编号）。
         if self.recursion_depth.get() >= max {
             let tok = self.peek();
             return Err(ParseError::new(

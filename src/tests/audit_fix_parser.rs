@@ -321,6 +321,61 @@ fn deeply_chained_session_type_hits_recursion_limit_not_stack_overflow() {
     );
 }
 
+// ── 0.35.25 C2 回归锁（audit-triage-0.35.25.md）──────────────
+// 修复前：嵌套 f-string 插值每层新建 Parser 实例、recursion_depth 从 0
+// 重数，深度守卫对跨实例链完全失察——6000 层嵌套（~30KB）SIGSEGV
+// （CLI 8MB 栈）；libtest 2MB 栈上仅 40 层即溢出。
+// 修复后：子解析器继承外层深度 + f-string 专用预算 DEPTH_MAX_FSTRING=64
+// （≈32 层嵌套，~1.7MB，实测 31 层在 2MB libtest 栈安全）。
+// 两个探针：深层必须返回 ParseError 而非崩溃；预算内的合法嵌套必须
+// 在 2MB libtest 线程栈上解析成功。
+
+/// Deeply nested f-string interpolation must hit the recursion limit
+/// (ParseError), not SIGSEGV. Runs on a 2 MB libtest thread stack like the
+/// other depth probes — the pre-fix failure mode was stack overflow abort.
+#[test]
+fn nested_fstring_hits_recursion_limit_not_stack_overflow() {
+    let depth: usize = 6000;
+    let inner = {
+        let mut s = String::from("a");
+        for _ in 0..depth {
+            s = format!("f\"{{{}}}\"", s);
+        }
+        s
+    };
+    let src = format!("func main() -> i32 {{\n let x = {}\n 0\n}}", inner);
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().expect("lex nested fstring");
+    let res = crate::parser::Parser::new(tokens).parse_file();
+    let err = res.expect_err("6000-level fstring must be rejected, not crash");
+    assert!(
+        err.message.contains("recursion limit"),
+        "expected recursion-limit error, got: {}",
+        err.message
+    );
+}
+
+/// f-string nesting within the budget must parse successfully on a 2 MB
+/// libtest thread stack (31 levels ≈ 1.6 MB measured).
+#[test]
+fn nested_fstring_within_budget_parses_on_test_stack() {
+    let depth: usize = 24;
+    let inner = {
+        let mut s = String::from("a");
+        for _ in 0..depth {
+            s = format!("f\"{{{}}}\"", s);
+        }
+        s
+    };
+    let src = format!("func main() -> i32 {{\n let x = {}\n 0\n}}", inner);
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().expect("lex nested fstring");
+    let res = crate::parser::Parser::new(tokens).parse_file();
+    assert!(
+        res.is_ok(),
+        "24-level fstring must parse on 2 MB test stack, got: {:?}",
+        res.err().map(|e| e.message.clone())
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Fix 6 — digit separator violations are lex errors (lexer/flow.rs)
 // ═══════════════════════════════════════════════════════════════
@@ -517,10 +572,12 @@ func main() -> i32 { 0 }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// TEMP WAVE-2 PROBE (agent PM) — stack-budget measurement harness.
-// Driven by MIMI_PROBE_DEPTH / MIMI_PROBE_SHAPE / MIMI_PROBE_CAP.
-// Runs on a libtest thread (2 MB stack) exactly like the red-line test.
-// REMOVED once the module-path cap is fixed and documented.
+// WAVE-2 stack-budget measurement harness (inert by default).
+// Driven by MIMI_PROBE_DEPTH / MIMI_PROBE_SHAPE. Runs on a libtest
+// thread (2 MB stack) exactly like the red-line test.
+// NOTE (0.35.25, M1): the MIMI_PROBE_CAP depth override was removed
+// from check_depth_with (helpers.rs) — budgets are now fixed per
+// recursion path; this harness exercises the fixed caps only.
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
