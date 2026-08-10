@@ -54,7 +54,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
 }
 
-fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_println(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
     vm.append_stdout(&s);
     vm.append_stdout("\n");
@@ -63,7 +63,7 @@ fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     Ok(Value::Unit)
 }
 
-fn builtin_print(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_print(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
     vm.append_stdout(&s);
     flush_c_stdio();
@@ -71,7 +71,7 @@ fn builtin_print(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     Ok(Value::Unit)
 }
 
-fn builtin_print_err(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_print_err(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // B-7 (audit 2026-08-05): auto-deref Shared/LocalShared for dual-backend
     // parity with print/println (codegen loads the payload, not the wrapper).
     let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
@@ -97,7 +97,7 @@ fn flush_c_stdio() {
     }
 }
 
-fn builtin_input_line(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_input_line(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
@@ -105,7 +105,7 @@ fn builtin_input_line(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value
     Ok(Value::String(input.trim_end().to_string()))
 }
 
-fn builtin_input_int(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_input_int(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)

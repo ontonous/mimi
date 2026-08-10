@@ -130,7 +130,7 @@ pub(crate) fn test(
         .map_err(|e| format!("bytecode compile error: {}", e))?;
 
     for func_name in &test_funcs {
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         match vm.call_named(func_name, vec![]) {
             // TC-H1: bool-returning tests fail when the value is false;
             // non-bool Ok is still a pass (side-effect / unit tests).

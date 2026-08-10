@@ -38,10 +38,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
 }
 
-pub(crate) fn builtin_map_list(
-    vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+pub(crate) fn builtin_map_list(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // Option/Result .map() method dispatch.
     if let Value::Variant(tag, payload) = &args[0] {
         let closure = &args[1];
@@ -72,7 +69,7 @@ pub(crate) fn builtin_map_list(
 }
 
 pub(crate) fn builtin_filter_list(
-    vm: &mut BytecodeVM<'_>,
+    vm: &mut BytecodeVM,
     args: &[Value],
 ) -> Result<Value, InterpError> {
     let list = match &args[0] {
@@ -95,7 +92,7 @@ pub(crate) fn builtin_filter_list(
 }
 
 pub(crate) fn builtin_reduce_list(
-    vm: &mut BytecodeVM<'_>,
+    vm: &mut BytecodeVM,
     args: &[Value],
 ) -> Result<Value, InterpError> {
     let list = match &args[0] {
@@ -114,7 +111,7 @@ pub(crate) fn builtin_reduce_list(
     Ok(acc)
 }
 
-fn builtin_any(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_any(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("any: first argument must be a list")),
@@ -129,7 +126,7 @@ fn builtin_any(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpE
     Ok(Value::Bool(false))
 }
 
-fn builtin_all(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_all(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("all: first argument must be a list")),

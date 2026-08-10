@@ -98,7 +98,7 @@ fn checked_program_owns_its_migration_body_input() {
     let prog = compiler
         .compile_file(program.raw_ast())
         .expect("bytecode compile owned checked program");
-    let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
     let result = vm
         .call_named("main", vec![])
         .expect("run owned checked program");

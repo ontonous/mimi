@@ -187,7 +187,7 @@ fn bench_interp_simple() {
     let mut compiler = BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).expect("compile");
     let _ = bench("bytecode_simple", 500, || {
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         vm.run_value()
     });
 }
@@ -210,7 +210,7 @@ func fib(n: i32) -> i32 {
     let mut compiler = BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).expect("compile");
     let _ = bench("bytecode_fib_5", 50, || {
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         vm.run_value()
     });
 }

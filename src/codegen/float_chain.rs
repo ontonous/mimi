@@ -304,7 +304,11 @@ unsafe fn is_relay(cp: &CheckPoint, checked: &HashSet<LLVMValueRef>) -> bool {
 ///
 /// 因此仅收敛：FAdd/FSub/FMul（纯代数链）、FDiv/FRem 的**被除数**位置，
 /// 以及传播性无例外的 libm 单参函数白名单（`is_propagating_libm_call`）。
-unsafe fn is_chain_op(x: LLVMValueRef, user: LLVMValueRef, checked: &HashSet<LLVMValueRef>) -> bool {
+unsafe fn is_chain_op(
+    x: LLVMValueRef,
+    user: LLVMValueRef,
+    checked: &HashSet<LLVMValueRef>,
+) -> bool {
     if !checked.contains(&user) {
         return false;
     }
@@ -330,8 +334,8 @@ unsafe fn is_propagating_libm_call(user: LLVMValueRef) -> bool {
     const SAFE_LIBM: &[&str] = &[
         // 0.35.3 基准与 stdlib 实际生成的 libm 调用名（math.rs 注册表）。
         // 单参单调/发散：非有限输入 ⇒ NaN/±Inf，无例外。
-        "sqrt", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh",
-        "cosh", "cbrt", "fabs", "floor", "ceil", "round",
+        "sqrt", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh",
+        "cbrt", "fabs", "floor", "ceil", "round",
     ];
     let callee = LLVMGetCalledValue(user);
     if callee.is_null() {

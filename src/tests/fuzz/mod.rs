@@ -250,7 +250,7 @@ func main() -> i32 { process(5) }
         .expect("src/tests/fuzz/mod.rs:222 unwrap failed");
     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
     if let Ok(prog) = compiler.compile_file(&file) {
-        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
         vm.set_verify_ffi(true);
         let _ = vm.run_value();
     }

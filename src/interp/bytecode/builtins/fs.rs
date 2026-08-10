@@ -155,7 +155,7 @@ fn expect_str(args: &[Value], idx: usize) -> Result<String, InterpError> {
 
 // ── File I/O ────────────────────────────────────────────
 
-fn builtin_read_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     // Guard against oversized files (matches tree-walker CL-H1).
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -175,7 +175,7 @@ fn builtin_read_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn builtin_write_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_write_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     let content = expect_str(args, 1)?;
     match std::fs::write(&path, &content) {
@@ -187,7 +187,7 @@ fn builtin_write_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
     }
 }
 
-fn builtin_append_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_append_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     let content = expect_str(args, 1)?;
     use std::io::Write;
@@ -200,32 +200,32 @@ fn builtin_append_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     Ok(Value::Bool(ok))
 }
 
-fn builtin_file_exists(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_file_exists(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     Ok(Value::Bool(std::path::Path::new(&path).exists()))
 }
 
-fn builtin_remove_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_remove_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     Ok(Value::Bool(std::fs::remove_file(&path).is_ok()))
 }
 
-fn builtin_is_dir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_dir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
 }
 
-fn builtin_is_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     Ok(Value::Bool(std::path::Path::new(&path).is_file()))
 }
 
-fn builtin_mkdir_p(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_mkdir_p(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     Ok(Value::Bool(std::fs::create_dir_all(&path).is_ok()))
 }
 
-fn builtin_listdir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_listdir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     match std::fs::read_dir(&path) {
         Ok(entries) => {
@@ -245,7 +245,7 @@ fn builtin_listdir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
 /// Depth-first, collects files only (directories are descended into, not
 /// listed) — matches the runtime `mimi_walk_dir` semantics so the dual
 /// backends agree.
-fn builtin_walk_dir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_walk_dir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     fn walk_recursive(dir: &std::path::Path, out: &mut Vec<String>) {
         let rd = match std::fs::read_dir(dir) {
@@ -269,7 +269,7 @@ fn builtin_walk_dir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 
 // ── Path operations ─────────────────────────────────────
 
-fn builtin_path_basename(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_path_basename(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     let basename = std::path::Path::new(&path)
         .file_name()
@@ -278,7 +278,7 @@ fn builtin_path_basename(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     Ok(Value::String(basename))
 }
 
-fn builtin_path_dirname(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     let dirname = std::path::Path::new(&path)
         .parent()
@@ -288,7 +288,7 @@ fn builtin_path_dirname(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     Ok(Value::String(dirname))
 }
 
-fn builtin_path_ext(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
     let ext = std::path::Path::new(&path)
         .extension()
@@ -297,7 +297,7 @@ fn builtin_path_ext(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     Ok(Value::String(ext))
 }
 
-fn builtin_path_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_path_join(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let base = expect_str(args, 0)?;
     let other = expect_str(args, 1)?;
     let joined = std::path::Path::new(&base).join(&other);
@@ -306,7 +306,7 @@ fn builtin_path_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 
 // ── Env ─────────────────────────────────────────────────
 
-fn builtin_args(vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_args(vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let args: Vec<Value> = vm
         .cli_args
         .iter()
@@ -315,7 +315,7 @@ fn builtin_args(vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, Inter
     Ok(Value::List(args))
 }
 
-fn builtin_getenv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_getenv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let key = expect_str(args, 0)?;
     match std::env::var(&key) {
         Ok(val) => Ok(Value::Variant("Ok".into(), vec![Value::String(val)])),
@@ -326,7 +326,7 @@ fn builtin_getenv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     }
 }
 
-fn builtin_set_env(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_set_env(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let key = expect_str(args, 0)?;
     let val = expect_str(args, 1)?;
     std::env::set_var(&key, &val);
@@ -335,7 +335,7 @@ fn builtin_set_env(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
 
 // ── Time ────────────────────────────────────────────────
 
-fn builtin_timestamp(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_timestamp(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -343,7 +343,7 @@ fn builtin_timestamp(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value,
     Ok(Value::Int(secs as i64))
 }
 
-fn builtin_timestamp_ms(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_timestamp_ms(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -351,7 +351,7 @@ fn builtin_timestamp_ms(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Val
     Ok(Value::Int(ms as i64))
 }
 
-fn builtin_sleep(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_sleep(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let ms = match &args[0] {
         Value::Int(v) => {
             if *v < 0 {

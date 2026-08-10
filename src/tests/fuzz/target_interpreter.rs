@@ -15,7 +15,7 @@ proptest::proptest! {
                 if core::check(&file).is_ok() {
                     let mut compiler = BytecodeCompiler::new();
                     if let Ok(prog) = compiler.compile_file(&file) {
-                        let mut vm = BytecodeVM::new(&prog);
+                        let mut vm = BytecodeVM::new(prog.clone());
                         vm.verify_contracts = false;
                         let _ = vm.run_value();
                     }
@@ -40,7 +40,7 @@ fn test_interp_simple_loop() {
             if core::check(&file).is_ok() {
                 let mut compiler = BytecodeCompiler::new();
                 let prog = compiler.compile_file(&file).expect("compile");
-                let mut vm = BytecodeVM::new(&prog);
+                let mut vm = BytecodeVM::new(prog.clone());
                 let result = vm.run_value().expect("run");
                 assert_eq!(result, interp::Value::Int(5));
             }
@@ -59,7 +59,7 @@ fn test_interp_zero_division() {
     let file = parse_src(src);
     let mut compiler = BytecodeCompiler::new();
     if let Ok(prog) = compiler.compile_file(&file) {
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         let _ = vm.run_value();
     }
 }
@@ -75,7 +75,7 @@ fn test_interp_out_of_bounds() {
     let file = parse_src(src);
     let mut compiler = BytecodeCompiler::new();
     if let Ok(prog) = compiler.compile_file(&file) {
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         let _ = vm.run_value();
     }
 }
@@ -95,7 +95,7 @@ fn test_interp_while_loop() {
     }
     let mut compiler = BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).expect("compile");
-    let mut vm = BytecodeVM::new(&prog);
+    let mut vm = BytecodeVM::new(prog.clone());
     let result = vm.run_value().expect("run");
     assert_eq!(result, interp::Value::Int(100));
 }
@@ -115,7 +115,7 @@ fn test_interp_complex_match_edge_cases() {
     }
     let mut compiler = BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).expect("compile");
-    let mut vm = BytecodeVM::new(&prog);
+    let mut vm = BytecodeVM::new(prog.clone());
     let result = vm.run_value().expect("run");
     assert_eq!(result, interp::Value::Int(42));
 }

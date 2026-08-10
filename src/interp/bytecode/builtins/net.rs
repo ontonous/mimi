@@ -64,7 +64,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
 }
 
-fn builtin_socket(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_socket(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let domain = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("socket: domain must be i32"))? as i32;
@@ -99,7 +99,7 @@ fn builtin_socket(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     Ok(Value::Int(fd as i64))
 }
 
-fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_connect(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("connect: fd must be i32"))? as i32;
@@ -197,7 +197,7 @@ fn builtin_connect(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     Ok(Value::Int(0))
 }
 
-fn builtin_bind(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_bind(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("bind: fd must be i32"))? as i32;
@@ -228,7 +228,7 @@ fn builtin_bind(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     Ok(Value::Int(0))
 }
 
-fn builtin_listen(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_listen(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("listen: fd must be i32"))? as i32;
@@ -248,7 +248,7 @@ fn builtin_listen(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     Ok(Value::Int(0))
 }
 
-fn builtin_accept(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_accept(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("accept: fd must be i32"))? as i32;
@@ -273,7 +273,7 @@ fn builtin_accept(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     Ok(Value::Int(client_fd as i64))
 }
 
-fn builtin_send(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_send(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("send: fd must be i32"))? as i32;
@@ -293,7 +293,7 @@ fn builtin_send(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     Ok(Value::Int(sent as i64))
 }
 
-fn builtin_recv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("recv: fd must be i32"))? as i32;
@@ -549,7 +549,7 @@ fn validate_host_ssrf(host: &str) -> Result<(), InterpError> {
     Ok(())
 }
 
-fn builtin_http_get(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_http_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let url = args[0]
         .as_string()
         .ok_or_else(|| InterpError::new("http_get: url must be string"))?;
@@ -576,7 +576,7 @@ fn builtin_http_get(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     Ok(Value::String(body.to_string()))
 }
 
-fn builtin_http_post(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_http_post(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let url = args[0]
         .as_string()
         .ok_or_else(|| InterpError::new("http_post: url must be string"))?;

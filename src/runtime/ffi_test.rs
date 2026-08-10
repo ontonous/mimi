@@ -303,3 +303,42 @@ pub extern "C" fn test_threaded_callback(
     });
     handle.join().unwrap_or(0)
 }
+
+// Delayed-callback helpers (0.35.27 C3 UAF regression lock).
+//
+// A C library may STORE the callback function pointer and invoke it AFTER the
+// synchronous extern call has returned (event handlers, deferred dispatch).
+// The pre-C3 design kept a global raw `*const BytecodeProgram` that dangled
+// once the owning VM dropped — invoking the stored pointer after the extern
+// call returned was use-after-free. Since 0.35.27, `BytecodeClosure` carries
+// its own program Arc, so delayed invocation evaluates against a program that
+// stays alive as long as the closure does.
+//
+// `test_delayed_callback_store` keeps the callback pointer in a process-global
+// slot and returns immediately (the caller's VM may drop right after).
+// `test_delayed_callback_fire` invokes the stored pointer later, from any
+// thread (test harness calls it after the Mimi VM that registered the closure
+// has been dropped — the UAF trigger point for the old design).
+
+static DELAYED_CB: std::sync::Mutex<Option<unsafe extern "C" fn(i32) -> i32>> =
+    std::sync::Mutex::new(None);
+
+#[no_mangle]
+pub extern "C" fn test_delayed_callback_store(cb: Option<unsafe extern "C" fn(i32) -> i32>) -> i32 {
+    let mut slot = DELAYED_CB.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = cb;
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn test_delayed_callback_fire(x: i32) -> i32 {
+    let slot = DELAYED_CB.lock().unwrap_or_else(|e| e.into_inner());
+    match *slot {
+        // SAFETY: `f` is a callback pointer registered by a prior
+        // test_delayed_callback_store call; the Mimi closure + its program
+        // Arc keep everything it needs alive (0.35.27 C3).
+        Some(f) => unsafe { f(x) },
+        // IP-C4: 0 error sentinel.
+        None => -1,
+    }
+}

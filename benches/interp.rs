@@ -12,7 +12,7 @@ fn interp_simple(c: &mut Criterion) {
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -34,7 +34,7 @@ func main() -> i32 { fib(30) }
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -62,7 +62,7 @@ func main() -> bool { is_prime(9973) }
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -86,7 +86,7 @@ func main() -> i32 { sum([1,2,3,4,5,6,7,8,9,10]) }
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -117,7 +117,7 @@ func main() -> i32 { sum(make_list(1000)) }
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -146,7 +146,7 @@ func main() -> i32 {
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -174,7 +174,7 @@ func main() -> f64 {
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.run_value().unwrap();
         })
     });
@@ -198,7 +198,7 @@ func main() -> i32 { factorial(10) }
             let mut compiler = interp::bytecode::BytecodeCompiler::new();
             compiler.install_checked_program(&program);
             let prog = compiler.compile_file(&file).unwrap();
-            let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+            let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
             vm.verify_contracts = true;
             vm.run_value().unwrap();
         })

@@ -44,7 +44,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
 }
 
-fn builtin_to_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_to_int(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(v) => Ok(Value::Int(*v)),
         Value::Float(v) => Ok(Value::Int(*v as i64)),
@@ -57,7 +57,7 @@ fn builtin_to_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     }
 }
 
-fn builtin_to_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_to_float(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Float(v) => Ok(Value::Float(*v)),
         Value::Int(v) => Ok(Value::Float(*v as f64)),
@@ -81,6 +81,6 @@ fn builtin_to_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     }
 }
 
-fn builtin_to_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_to_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::String(args[0].to_string()))
 }

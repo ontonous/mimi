@@ -14,7 +14,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
 }
 
-fn builtin_exit(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_exit(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let code = if args.is_empty() {
         0i64
     } else {

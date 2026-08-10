@@ -146,7 +146,7 @@ fn run_once(
         let prog = compiler
             .compile_file(&merged_file)
             .map_err(|e| format!("bytecode compile error: {}", e))?;
-        let mut vm = BytecodeVM::new(&prog).with_cli_args(extra_args.to_vec());
+        let mut vm = BytecodeVM::new(prog.clone()).with_cli_args(extra_args.to_vec());
         // §13-#67: --verify-contracts was silently ignored. Wire it: the CLI
         // flag is opt-in (default false), matching the documented semantics
         // ("Enable runtime contract verification"). The VM's internal default

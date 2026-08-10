@@ -435,12 +435,12 @@ fn json_to_value(j: &serde_json::Value) -> Value {
     }
 }
 
-fn builtin_to_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_to_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let json = value_to_json(&args[0]);
     Ok(Value::String(json.to_string()))
 }
 
-fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_from_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => {
             // Without type parameter: validate and return string as-is.
@@ -457,7 +457,7 @@ fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 /// from_json_typed: parse JSON string into a Mimi Value, coerced to target type.
 /// Called by the compiler when `from_json::<T>(s)` is used with a type parameter.
 /// args[0] = JSON string, args[1] = type string (e.g. "List<(i32, i32)>").
-fn builtin_from_json_typed(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_from_json_typed(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let json_str = match &args[0] {
         Value::String(s) => s.clone(),
         _ => return Err(InterpError::new("from_json::<T> expects a string")),
@@ -702,7 +702,7 @@ fn split_type_args(s: &str) -> Vec<String> {
     parts
 }
 
-fn builtin_json_get_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_json_get_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
             let jv: serde_json::Value = serde_json::from_str(json_str)
@@ -724,7 +724,7 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     }
 }
 
-fn builtin_json_get_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_json_get_int(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
             let jv: serde_json::Value = serde_json::from_str(json_str)
@@ -750,7 +750,7 @@ fn builtin_json_get_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     }
 }
 
-fn builtin_json_is_valid(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_json_is_valid(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => Ok(Value::Bool(
             serde_json::from_str::<serde_json::Value>(s).is_ok(),
@@ -761,7 +761,7 @@ fn builtin_json_is_valid(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 
 // ── Crypto ──────────────────────────────────────────────
 
-fn builtin_sha256(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_sha256(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(data) => {
             let hash = crate::runtime::sha256_bytes(data.as_bytes());
@@ -772,7 +772,7 @@ fn builtin_sha256(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     }
 }
 
-fn builtin_base64_encode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_base64_encode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(data) => {
             let encoded = crate::runtime::base64_encode_bytes(data.as_bytes());
@@ -782,7 +782,7 @@ fn builtin_base64_encode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     }
 }
 
-fn builtin_base64_decode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_base64_decode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(data) => match crate::runtime::base64_decode_str(data) {
             Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
@@ -797,7 +797,7 @@ fn builtin_base64_decode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 
 // ── Testing / assertions ────────────────────────────────
 
-fn builtin_assert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_assert(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.is_empty() {
         return Err(InterpError::new("assert expects at least 1 argument"));
     }
@@ -812,7 +812,7 @@ fn builtin_assert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     Ok(Value::Unit)
 }
 
-fn builtin_assert_eq(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_assert_eq(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if !crate::interp::values_equal(&args[0], &args[1]) {
         return Err(InterpError::new(format!(
             "assertion failed: {} != {}",
@@ -822,7 +822,7 @@ fn builtin_assert_eq(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     Ok(Value::Unit)
 }
 
-fn builtin_assert_ne(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_assert_ne(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if crate::interp::values_equal(&args[0], &args[1]) {
         return Err(InterpError::new(format!(
             "assertion failed: {} == {}",
@@ -832,10 +832,7 @@ fn builtin_assert_ne(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     Ok(Value::Unit)
 }
 
-fn builtin_assert_approx_eq(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_assert_approx_eq(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let a = match &args[0] {
         Value::Float(f) => *f,
         Value::Int(i) => *i as f64,
@@ -857,7 +854,7 @@ fn builtin_assert_approx_eq(
 
 // ── IO misc ─────────────────────────────────────────────
 
-fn builtin_eprintln(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_eprintln(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // B-7 (audit 2026-08-05): auto-deref Shared/LocalShared exactly like
     // print/println — codegen's eprintln loads the shared payload, so the
     // VM must not print the wrapper (`shared(42)` vs `42` divergence).
@@ -866,7 +863,7 @@ fn builtin_eprintln(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     Ok(Value::Unit)
 }
 
-fn builtin_input(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_input(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     // §8-#86 (audit-2026-08-05): align with the checker type and the codegen
     // backend — `input()` is typed `string`, and std/io.mimi's `input_line`
     // consumes it as a plain string with "" as the EOF sentinel. The VM used
@@ -879,7 +876,7 @@ fn builtin_input(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, Int
     }
 }
 
-fn builtin_input_float(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_input_float(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
@@ -890,7 +887,7 @@ fn builtin_input_float(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Valu
     }
 }
 
-fn builtin_input_bool(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_input_bool(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
@@ -903,7 +900,7 @@ fn builtin_input_bool(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value
 
 // ── Convert misc ────────────────────────────────────────
 
-fn builtin_from_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_from_int(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // Tree-walker parity: from_int is identity on Int, errors on non-int.
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(*i)),
@@ -916,10 +913,7 @@ fn builtin_from_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 
 // ── JSON extended ───────────────────────────────────────
 
-fn builtin_json_get_element(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_json_get_element(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::Int(idx)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
@@ -940,7 +934,7 @@ fn builtin_json_get_element(
     }
 }
 
-fn builtin_json_has_key(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_json_has_key(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
@@ -952,10 +946,7 @@ fn builtin_json_has_key(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     }
 }
 
-fn builtin_json_array_length(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_json_array_length(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(json_str) => match serde_json::from_str::<serde_json::Value>(json_str) {
             Ok(json) => match json.as_array() {
@@ -992,7 +983,7 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
-fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_regex_find_all(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(text), Value::String(pattern)) => {
             let re = regex::Regex::new(pattern)
@@ -1014,11 +1005,11 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
 
 // ── Misc value ops ──────────────────────────────────────
 
-fn builtin_eq(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_eq(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Bool(crate::interp::values_equal(&args[0], &args[1])))
 }
 
-fn builtin_inner(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_inner(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // inner/deref — unwrap a wrapper type.
     match &args[0] {
         Value::Variant(_, payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
@@ -1037,7 +1028,7 @@ fn builtin_inner(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     }
 }
 
-fn builtin_fields(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_fields(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
             let keys: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
@@ -1057,7 +1048,7 @@ fn resolve_type_name_arg(v: &Value) -> Result<&str, InterpError> {
     }
 }
 
-fn builtin_type_fields(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_type_fields(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.len() != 1 {
         return Err(InterpError::new(
             "type_fields expects 1 argument (a type name string)",
@@ -1083,7 +1074,7 @@ fn builtin_type_fields(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
     Ok(Value::List(names))
 }
 
-fn builtin_type_variants(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_type_variants(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.len() != 1 {
         return Err(InterpError::new(
             "type_variants expects 1 argument (a type name string)",
@@ -1107,18 +1098,18 @@ fn builtin_type_variants(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
 
 // ── C string ────────────────────────────────────────────
 
-fn builtin_str_to_c_str(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_to_c_str(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // In the interpreter, C strings are just regular strings.
     Ok(args[0].clone())
 }
 
-fn builtin_c_str_to_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_c_str_to_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     Ok(args[0].clone())
 }
 
 // ── Process ─────────────────────────────────────────────
 
-fn builtin_exec(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_exec(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.len() != 1 {
         return Err(InterpError::new("exec expects 1 argument (command)"));
     }
@@ -1165,7 +1156,7 @@ fn builtin_exec(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     }
 }
 
-fn builtin_exec_pipe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_exec_pipe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.len() != 1 {
         return Err(InterpError::new("exec_pipe expects 1 argument (command)"));
     }
@@ -1186,7 +1177,7 @@ fn builtin_exec_pipe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn builtin_exec_safe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_exec_safe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.is_empty() {
         return Err(InterpError::new(
             "exec_safe expects at least 1 argument (program)",
@@ -1235,7 +1226,7 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 
 // ── FS extended ─────────────────────────────────────────
 
-fn builtin_file_stat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_file_stat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(path) => {
             let mut fields = std::collections::HashMap::new();
@@ -1265,7 +1256,7 @@ fn builtin_file_stat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_read_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(path) => match std::fs::read(path) {
             Ok(bytes) => {
@@ -1278,10 +1269,7 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     }
 }
 
-fn builtin_write_file_bytes(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_write_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(data)) => match std::fs::write(path, data.as_bytes()) {
             Ok(()) => Ok(Value::Bool(true)),
@@ -1293,7 +1281,7 @@ fn builtin_write_file_bytes(
     }
 }
 
-fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_close_fd(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let fd = args[0]
         .as_int()
         .ok_or_else(|| InterpError::new("close_fd: fd must be i32"))? as i32;
@@ -1303,10 +1291,7 @@ fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     Ok(Value::Unit)
 }
 
-fn builtin_read_file_partial(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_read_file_partial(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // Match tree-walker: read_file_partial(path, max_bytes) → String
     match (&args[0], &args[1]) {
         (Value::String(path), Value::Int(max)) => match std::fs::read(path) {
@@ -1326,7 +1311,7 @@ fn builtin_read_file_partial(
     }
 }
 
-fn builtin_read_lines_each(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_read_lines_each(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // read_lines_each(path, callback) — iterate lines calling closure, return count.
     let path = match &args[0] {
         Value::String(s) => s.clone(),
@@ -1352,7 +1337,7 @@ fn builtin_read_lines_each(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
     Ok(Value::Int(count))
 }
 
-fn builtin_read_lines_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_read_lines_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = match &args[0] {
         Value::String(s) => s.clone(),
         _ => return Err(InterpError::new("read_lines_json expects a string path")),
@@ -1377,7 +1362,7 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 }
 
 fn builtin_regex_capture_groups(
-    _vm: &mut BytecodeVM<'_>,
+    _vm: &mut BytecodeVM,
     args: &[Value],
 ) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
@@ -1413,7 +1398,7 @@ fn builtin_regex_capture_groups(
 
 // ── Shadow memory ───────────────────────────────────────
 
-fn builtin_shadow_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_shadow_alloc(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let size = match &args[0] {
         Value::Int(n) => *n as usize,
         _ => return Err(InterpError::new("shadow_alloc: size must be int")),
@@ -1431,7 +1416,7 @@ fn builtin_shadow_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     Ok(Value::Int(ptr as i64))
 }
 
-fn builtin_shadow_tag(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_shadow_tag(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let ptr = match &args[0] {
         Value::Int(n) => *n as *const u8,
         _ => return Err(InterpError::new("shadow_tag: ptr must be int")),
@@ -1443,7 +1428,7 @@ fn builtin_shadow_tag(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
     Ok(Value::Int(crate::runtime::mimi_shadow_tag(ptr, tag) as i64))
 }
 
-fn builtin_shadow_check(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_shadow_check(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let ptr = match &args[0] {
         Value::Int(n) => *n as *const u8,
         _ => return Err(InterpError::new("shadow_check: ptr must be int")),
@@ -1457,7 +1442,7 @@ fn builtin_shadow_check(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     ))
 }
 
-fn builtin_shadow_free(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_shadow_free(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let ptr = match &args[0] {
         Value::Int(n) => *n as *mut u8,
         _ => return Err(InterpError::new("shadow_free: ptr must be int")),
@@ -1466,30 +1451,24 @@ fn builtin_shadow_free(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     Ok(Value::Unit)
 }
 
-fn builtin_alloc_noop(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_alloc_noop(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     // Allocator builtins are no-ops in the interpreter (memory is GC'd).
     Ok(Value::Unit)
 }
 
-fn builtin_allocator_system(
-    _vm: &mut BytecodeVM<'_>,
-    _args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_allocator_system(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Allocator(crate::interp::AllocatorKind::System))
 }
 
-fn builtin_allocator_arena(
-    _vm: &mut BytecodeVM<'_>,
-    _args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_allocator_arena(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Allocator(crate::interp::AllocatorKind::Arena))
 }
 
-fn builtin_allocator_bump(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_allocator_bump(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Allocator(crate::interp::AllocatorKind::Bump))
 }
 
-fn builtin_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_alloc(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // alloc(allocator, value) — the bytecode VM has no region memory, so any
     // allocator simply returns the value as-is (System semantics).
     match (args.first(), args.get(1)) {
@@ -1500,14 +1479,14 @@ fn builtin_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     }
 }
 
-fn builtin_bump_used(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_bump_used(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     // No arena state in the bytecode VM: always 0.
     Ok(Value::Int(0))
 }
 
 // === Tooling / meta builtins ===
 
-fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_lexer(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let source = args[0]
         .as_string()
         .ok_or_else(|| InterpError::new("lexer expects a string source"))?;
@@ -1524,7 +1503,7 @@ fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     Ok(Value::String(result))
 }
 
-fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let source = args[0]
         .as_string()
         .ok_or_else(|| InterpError::new("parse expects a string source"))?;
@@ -1543,7 +1522,7 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     Ok(Value::String(result))
 }
 
-fn builtin_ast_dump(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_ast_dump(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.len() != 1 {
         return Err(InterpError::new(
             "ast_dump expects 1 argument (a quoted AST)",
@@ -1555,7 +1534,7 @@ fn builtin_ast_dump(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     }
 }
 
-fn builtin_ast_eval(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_ast_eval(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.len() != 1 {
         return Err(InterpError::new(
             "ast_eval expects 1 argument (a quoted AST)",

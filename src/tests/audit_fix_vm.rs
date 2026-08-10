@@ -13,7 +13,7 @@ fn vm_result_with_stdout(src: &str) -> (Result<interp::Value, String>, String) {
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed");
-    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.enable_stdout_capture();
     let res = vm.run_value().map_err(|e| e.message().to_string());
     let stdout = vm.take_stdout();

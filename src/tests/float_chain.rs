@@ -201,8 +201,8 @@ func main() -> i32 {
 }
 "#;
     // VM：逐点检查，乘法点 trap
-    let vm_err = run_source_bytecode_result(src)
-        .expect_err("bytecode: Inf in FDiv divisor must trap");
+    let vm_err =
+        run_source_bytecode_result(src).expect_err("bytecode: Inf in FDiv divisor must trap");
     assert!(
         vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
         "bytecode FDiv divisor trap missing E0813: {}",
@@ -241,8 +241,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let vm_err = run_source_bytecode_result(src)
-        .expect_err("bytecode: Inf before pow must trap");
+    let vm_err = run_source_bytecode_result(src).expect_err("bytecode: Inf before pow must trap");
     assert!(
         vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
         "bytecode pow-chain trap missing E0813: {}",
@@ -279,8 +278,8 @@ func main() -> i32 {
     0
 }
 "#;
-    let vm_err = run_source_bytecode_result(src)
-        .expect_err("bytecode: Inf in FDiv numerator must trap");
+    let vm_err =
+        run_source_bytecode_result(src).expect_err("bytecode: Inf in FDiv numerator must trap");
     assert!(
         vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
         "bytecode FDiv numerator trap missing E0813: {}",
@@ -318,8 +317,8 @@ func main() -> i32 {
     0
 }
 "#;
-    let vm_err = run_source_bytecode_result(src)
-        .expect_err("bytecode: Inf passed to user func must trap");
+    let vm_err =
+        run_source_bytecode_result(src).expect_err("bytecode: Inf passed to user func must trap");
     assert!(
         vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
         "bytecode user-func trap missing E0813: {}",

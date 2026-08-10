@@ -251,7 +251,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
 
 // ── Formatting ──────────────────────────────────────────
 
-fn builtin_format(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_format(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     if args.is_empty() {
         return Err(InterpError::new("format expects at least 1 argument"));
     }
@@ -278,7 +278,7 @@ fn builtin_format(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
 
 // ── Substring / search ──────────────────────────────────
 
-fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_substring(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1], &args[2]) {
         (Value::String(s), Value::Int(start), Value::Int(end)) => {
             let chars: Vec<char> = s.chars().collect();
@@ -294,10 +294,7 @@ fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 }
 
 /// Method version: .substring() errors on out-of-bounds (tree-walker parity).
-fn builtin_substring_method(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_substring_method(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1], &args[2]) {
         (Value::String(s), Value::Int(start), Value::Int(end)) => {
             let chars: Vec<char> = s.chars().collect();
@@ -319,7 +316,7 @@ fn builtin_substring_method(
     }
 }
 
-fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_split(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // Cap.split() — split combined capability into tuple of parts.
     if args.len() == 1 {
         if let Value::Cap(components) = &args[0] {
@@ -351,7 +348,7 @@ fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn builtin_str_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_join(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::List(parts), Value::String(sep)) => {
             let mut strings = Vec::with_capacity(parts.len());
@@ -367,7 +364,7 @@ fn builtin_str_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     }
 }
 
-fn builtin_str_contains(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_contains(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_str()))),
         (Value::List(l), target) => Ok(Value::Bool(l.contains(target))),
@@ -378,7 +375,7 @@ fn builtin_str_contains(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     }
 }
 
-fn builtin_str_starts_with(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_starts_with(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(prefix)) => {
             Ok(Value::Bool(s.starts_with(prefix.as_str())))
@@ -387,14 +384,14 @@ fn builtin_str_starts_with(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     }
 }
 
-fn builtin_str_ends_with(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_ends_with(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(suffix)) => Ok(Value::Bool(s.ends_with(suffix.as_str()))),
         _ => Err(InterpError::new("ends_with expects (string, string)")),
     }
 }
 
-fn builtin_str_index_of(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_index_of(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => match s.find(sub.as_str()) {
             Some(byte_idx) => {
@@ -407,10 +404,7 @@ fn builtin_str_index_of(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     }
 }
 
-fn builtin_str_count_substring(
-    _vm: &mut BytecodeVM<'_>,
-    args: &[Value],
-) -> Result<Value, InterpError> {
+fn builtin_str_count_substring(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => {
             if sub.is_empty() {
@@ -424,7 +418,7 @@ fn builtin_str_count_substring(
 
 // ── Transform ───────────────────────────────────────────
 
-fn builtin_str_replace(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_replace(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1], &args[2]) {
         (Value::String(s), Value::String(from), Value::String(to)) => {
             Ok(Value::String(s.replace(from.as_str(), to.as_str())))
@@ -433,28 +427,28 @@ fn builtin_str_replace(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     }
 }
 
-fn builtin_str_trim(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_trim(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => Ok(Value::String(s.trim().to_string())),
         _ => Err(InterpError::new("trim expects a string")),
     }
 }
 
-fn builtin_str_to_upper(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_to_upper(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => Ok(Value::String(s.to_uppercase())),
         _ => Err(InterpError::new("to_upper expects a string")),
     }
 }
 
-fn builtin_str_to_lower(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_to_lower(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => Ok(Value::String(s.to_lowercase())),
         _ => Err(InterpError::new("to_lower expects a string")),
     }
 }
 
-fn builtin_str_repeat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_repeat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::Int(n)) => {
             if *n < 0 {
@@ -468,7 +462,7 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
 
 // ── Char operations ─────────────────────────────────────
 
-fn builtin_str_char_at(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_char_at(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let idx = match &args[1] {
         Value::Int(i) => *i as usize,
         _ => return Err(InterpError::new("char_at expects (string, int)")),
@@ -483,7 +477,7 @@ fn builtin_str_char_at(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     }
 }
 
-fn builtin_char_code(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_char_code(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::Int(idx)) => {
             let i = *idx as usize;
@@ -496,7 +490,7 @@ fn builtin_char_code(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn builtin_chr(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_chr(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(code) => {
             if *code < 0 || *code > 0x10FFFF {
@@ -515,7 +509,7 @@ fn builtin_chr(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
 
 // ── Parse ───────────────────────────────────────────────
 
-fn builtin_str_parse_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_parse_int(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => match s.trim().parse::<i64>() {
             Ok(n) => Ok(Value::Tuple(vec![Value::Bool(true), Value::Int(n)])),
@@ -525,7 +519,7 @@ fn builtin_str_parse_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     }
 }
 
-fn builtin_str_parse_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_parse_float(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => match s.trim().parse::<f64>() {
             Ok(n) if n.is_finite() => Ok(Value::Tuple(vec![Value::Bool(true), Value::Float(n)])),
@@ -536,13 +530,13 @@ fn builtin_str_parse_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     }
 }
 
-fn builtin_to_string_val(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_to_string_val(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::String(args[0].to_string()))
 }
 
 // ── Regex ───────────────────────────────────────────────
 
-fn builtin_regex_match(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_regex_match(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(text), Value::String(pattern)) => {
             let re = regex::Regex::new(pattern)
@@ -553,7 +547,7 @@ fn builtin_regex_match(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     }
 }
 
-fn builtin_regex_find(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_regex_find(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(text), Value::String(pattern)) => {
             let re = regex::Regex::new(pattern)
@@ -567,7 +561,7 @@ fn builtin_regex_find(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
     }
 }
 
-fn builtin_regex_replace(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_regex_replace(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1], &args[2]) {
         (Value::String(text), Value::String(pattern), Value::String(replacement)) => {
             let re = regex::Regex::new(pattern)

@@ -227,7 +227,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
 
 // ── Core list ───────────────────────────────────────────
 
-fn builtin_len(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_len(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let len = match &args[0] {
         Value::List(l) => l.len(),
         Value::String(s) => s.chars().count(),
@@ -239,7 +239,7 @@ fn builtin_len(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     Ok(Value::Int(len as i64))
 }
 
-fn builtin_push(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_push(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
             let mut new_list = l.clone();
@@ -253,7 +253,7 @@ fn builtin_push(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     }
 }
 
-fn builtin_pop(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_pop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
             let mut new_list = l.clone();
@@ -268,7 +268,7 @@ fn builtin_pop(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     }
 }
 
-fn builtin_range(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_range(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let start = match &args[0] {
         Value::Int(v) => *v,
         _ => return Err(InterpError::new("range start must be integer")),
@@ -280,7 +280,7 @@ fn builtin_range(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     Ok(Value::List((start..end).map(Value::Int).collect()))
 }
 
-fn builtin_is_empty(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_is_empty(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => Ok(Value::Bool(l.is_empty())),
         Value::String(s) => Ok(Value::Bool(s.is_empty())),
@@ -292,7 +292,7 @@ fn builtin_is_empty(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
     }
 }
 
-fn builtin_find(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_find(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let list = match &args[0] {
         Value::List(l) => l,
         _ => return Err(InterpError::new("find: expected list")),
@@ -308,7 +308,7 @@ fn builtin_find(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
 
 // ── Sort ────────────────────────────────────────────────
 
-fn builtin_sort_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_sort_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let mut list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("sort: expected list")),
@@ -332,7 +332,7 @@ fn builtin_sort_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 
 // ── Transform ───────────────────────────────────────────
 
-fn builtin_reverse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_reverse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
             let mut reversed = l.clone();
@@ -344,7 +344,7 @@ fn builtin_reverse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
 }
 
-fn builtin_flatten(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_flatten(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
             let mut result = Vec::new();
@@ -360,7 +360,7 @@ fn builtin_flatten(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
 }
 
-fn builtin_enumerate(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_enumerate(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
             let result: Vec<Value> = l
@@ -374,7 +374,7 @@ fn builtin_enumerate(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn builtin_zip(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_zip(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::List(a), Value::List(b)) => {
             let result: Vec<Value> = a
@@ -388,7 +388,7 @@ fn builtin_zip(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     }
 }
 
-fn builtin_sum(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_sum(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
             let mut int_sum: i64 = 0;
@@ -418,7 +418,7 @@ fn builtin_sum(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     }
 }
 
-fn builtin_to_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_to_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(_) => Ok(args[0].clone()),
         Value::Tuple(t) => Ok(Value::List(t.clone())),
@@ -430,17 +430,17 @@ fn builtin_to_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
 }
 
-fn builtin_clone(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_clone(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     Ok(args[0].clone())
 }
 
 // ── Map operations ──────────────────────────────────────
 
-fn builtin_map_new(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_map_new(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Record(None, std::collections::HashMap::new()))
 }
 
-fn builtin_map_get(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_map_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Record(_, fields), Value::String(key)) => match fields.get(key) {
             Some(v) => Ok(Value::Tuple(vec![Value::Bool(true), v.clone()])),
@@ -451,7 +451,7 @@ fn builtin_map_get(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
 }
 
-fn builtin_map_set(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_map_set(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Record(ty, fields), Value::String(key)) => {
             let mut new_fields = fields.clone();
@@ -464,7 +464,7 @@ fn builtin_map_set(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     }
 }
 
-fn builtin_map_remove(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_map_remove(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Record(ty, fields), Value::String(key)) => {
             let mut new_fields = fields.clone();
@@ -487,7 +487,7 @@ fn builtin_map_remove(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
 }
 
 /// insert: 2 args = set insert (set, value), 3 args = map insert (map, key, value).
-fn builtin_insert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_insert(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match args.len() {
         2 => {
             // Set insert: insert(set, value)
@@ -510,14 +510,14 @@ fn builtin_insert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     }
 }
 
-fn builtin_map_size(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_map_size(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => Ok(Value::Int(fields.len() as i64)),
         _ => Err(InterpError::new("map_size: expected map")),
     }
 }
 
-fn builtin_map_from_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_map_from_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(pairs) => {
             let mut fields = std::collections::HashMap::new();
@@ -541,14 +541,14 @@ fn builtin_map_from_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     }
 }
 
-fn builtin_has_key(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_has_key(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::Record(_, fields), Value::String(key)) => Ok(Value::Bool(fields.contains_key(key))),
         _ => Err(InterpError::new("has_key: expected (map, string key)")),
     }
 }
 
-fn builtin_keys(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_keys(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
             let keys: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
@@ -558,7 +558,7 @@ fn builtin_keys(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
     }
 }
 
-fn builtin_values(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_values(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
             let values: Vec<Value> = fields.values().cloned().collect();
@@ -570,7 +570,7 @@ fn builtin_values(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
 
 // ── Option ──────────────────────────────────────────────
 
-fn builtin_option_value_or(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_option_value_or(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Variant(name, payload) if name == "Some" || name == "Ok" => {
             Ok(payload.first().cloned().unwrap_or(Value::Unit))
@@ -586,7 +586,7 @@ fn builtin_option_value_or(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 /// start/end are already resolved by the compiler (defaults: 0 / len).
 /// Bounds are strict (tree-walker parity): start > len, end > len, and
 /// start > end are errors, not clamps.
-fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_slice(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let target = &args[0];
     let start_raw = match &args[1] {
         Value::Int(i) => *i,
@@ -660,7 +660,7 @@ fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
 
 // ── Type reflection ─────────────────────────────────────
 
-fn builtin_type_name(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_type_name(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // Match tree-walker's value_type_name semantics (i32/f64, variant/record names).
     let name = match &args[0] {
         Value::Int(_) => "i32",

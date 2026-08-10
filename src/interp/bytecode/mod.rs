@@ -26,7 +26,7 @@ mod tests {
     use super::*;
 
     /// Helper: compile a simple program and run it.
-    fn run_program(prog: &BytecodeProgram) -> Result<i64, String> {
+    fn run_program(prog: std::sync::Arc<BytecodeProgram>) -> Result<i64, String> {
         let mut vm = BytecodeVM::new(prog);
         vm.run().map_err(|e| e.to_string())
     }
@@ -57,7 +57,7 @@ mod tests {
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
-        assert_eq!(run_program(&prog), Ok(42));
+        assert_eq!(run_program(std::sync::Arc::new(prog.clone())), Ok(42));
     }
 
     #[test]
@@ -111,7 +111,7 @@ mod tests {
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
-        assert_eq!(run_program(&prog), Ok(50));
+        assert_eq!(run_program(std::sync::Arc::new(prog.clone())), Ok(50));
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
             ast: None,
             record_fields: std::collections::HashMap::new(),
         };
-        assert_eq!(run_program(&prog), Ok(7));
+        assert_eq!(run_program(std::sync::Arc::new(prog.clone())), Ok(7));
     }
 
     #[test]
@@ -290,7 +290,7 @@ mod tests {
             record_fields: std::collections::HashMap::new(),
         };
         // fib(10) = 55
-        assert_eq!(run_program(&prog), Ok(55));
+        assert_eq!(run_program(std::sync::Arc::new(prog.clone())), Ok(55));
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
             record_fields: std::collections::HashMap::new(),
         };
         // sum(0..99) = 4950
-        assert_eq!(run_program(&prog), Ok(4950));
+        assert_eq!(run_program(std::sync::Arc::new(prog.clone())), Ok(4950));
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -396,7 +396,7 @@ mod tests {
         let prog = compiler
             .compile_file(&file)
             .map_err(|e| format!("compiler: {}", e))?;
-        run_program(&prog)
+        run_program(prog.clone())
     }
 
     #[test]
@@ -522,7 +522,7 @@ mod tests {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         let code = vm.run().unwrap();
         assert_eq!(code, 0);
         assert_eq!(vm.stdout().trim(), "42");
@@ -544,7 +544,7 @@ mod tests {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         let code = vm.run().unwrap();
         assert_eq!(code, 0);
         assert_eq!(vm.stdout().trim(), "610"); // fib(15) = 610
@@ -578,7 +578,7 @@ mod tests {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         vm.run().unwrap();
         assert_eq!(vm.stdout().trim(), "hello world");
     }
@@ -1052,7 +1052,7 @@ mod tests {
         let main_proto = &prog.functions[prog.entry as usize];
         eprintln!("main register_count = {}", main_proto.register_count);
         // Just verify it runs correctly.
-        let result = run_program(&prog);
+        let result = run_program(prog.clone());
         assert_eq!(result, Ok(2));
     }
 }
@@ -1083,7 +1083,7 @@ func main() -> i32 {
         let compile_time = t1.elapsed();
 
         let t2 = Instant::now();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         let bc_result = vm.run().unwrap();
         let bc_time = t2.elapsed();
 
@@ -1127,7 +1127,7 @@ func main() -> i32 {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         assert_eq!(vm.run().unwrap(), 42);
     }
 
@@ -1145,7 +1145,7 @@ func main() -> i32 {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         assert_eq!(vm.run().unwrap(), 42);
     }
 
@@ -1162,7 +1162,7 @@ func main() -> i32 {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         assert_eq!(vm.run().unwrap(), 0);
     }
 
@@ -1180,7 +1180,7 @@ func main() -> i32 {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         assert_eq!(vm.run().unwrap(), 0);
     }
 
@@ -1200,7 +1200,7 @@ func main() -> i32 {
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(prog.clone());
         assert_eq!(vm.run().unwrap(), 10);
     }
 }
