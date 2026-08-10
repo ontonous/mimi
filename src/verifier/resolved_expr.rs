@@ -584,14 +584,26 @@ pub(crate) struct ResolvedIntDefinedness {
     pub(crate) failure: &'static str,
 }
 
-/// H-24 (audit 2026-08-05): the Resolved engine previously emitted NO i32
-/// definedness VCs — `ensures: result > x; x + 1` verified Proven at
-/// x == i32::MAX while the runtime traps (SD-7 trap semantics). Mirror the
-/// AST engine's `collect_i32_definedness` machinery: every i32-typed
-/// Add/Sub/Mul must stay in range, Div/Rem needs a non-zero divisor and must
-/// not be MIN / -1, Negate must not hit MIN. Only `PrimitiveType::I32`
-/// sub-expressions generate obligations (i64/int remain unbounded, matching
-/// the documented V-6 gap in the AST engine).
+/// Bounds for a checked (trap-semantics) integer type. SD-7: integer
+/// overflow traps at runtime (E0801); the verifier must model every checked
+/// integer type with its real bounds — i32 previously got obligations while
+/// i64 was modeled unbounded, so `i64::MAX + 1` verified Proven even though
+/// the runtime traps (H2).
+fn int_bounds(expr: &ResolvedExpr, types: &ResolvedTypeTable) -> Option<(i64, i64)> {
+    match types.get(&expr.ty)? {
+        ResolvedType::Primitive(PrimitiveType::I32) => Some((i32::MIN as i64, i32::MAX as i64)),
+        ResolvedType::Primitive(PrimitiveType::I64) => Some((i64::MIN, i64::MAX)),
+        _ => None,
+    }
+}
+
+/// H-24 + H2: every checked (trap-semantics) integer sub-expression generates
+/// a definedness obligation in its OWN bounds — i32 and i64 (the language's
+/// checked integer types; SD-7 traps on overflow for both). The old code only
+/// handled i32 and left i64 unbounded: `ensures: result > x; x + 1` verified
+/// Proven at x == i64::MAX while the runtime traps. Add/Sub/Mul must stay in
+/// range, Div/Rem needs a non-zero divisor and must not be MIN / -1, Negate
+/// must not hit MIN.
 fn collect_expr_i32_definedness(
     expr: &ResolvedExpr,
     body: &ResolvedBody,
@@ -599,15 +611,12 @@ fn collect_expr_i32_definedness(
     vars: &mut Z3VarMap,
     obligations: &mut Vec<ResolvedIntDefinedness>,
 ) -> Option<()> {
-    let is_i32 = matches!(
-        types.get(&expr.ty),
-        Some(ResolvedType::Primitive(PrimitiveType::I32))
-    );
+    let bounds = int_bounds(expr, types);
     match &expr.kind {
         ResolvedExprKind::Binary { op, left, right } => {
             collect_expr_i32_definedness(left, body, types, vars, obligations)?;
             collect_expr_i32_definedness(right, body, types, vars, obligations)?;
-            if is_i32 {
+            if let Some((lo, hi)) = bounds {
                 let l = resolved_to_z3_int(left, body, types, vars)?;
                 let r = resolved_to_z3_int(right, body, types, vars)?;
                 match op {
@@ -619,11 +628,11 @@ fn collect_expr_i32_definedness(
                             ResolvedBinaryOp::Subtract => Z3Int::sub(&[&l, &r]),
                             ResolvedBinaryOp::Multiply => Z3Int::mul(&[&l, &r]),
                             _ => unreachable!(
-                                "resolved i32 definedness: only Add/Sub/Mul push range checks"
+                                "resolved integer definedness: only Add/Sub/Mul push range checks"
                             ),
                         };
-                        let lo = Z3Int::from_i64(i32::MIN as i64);
-                        let hi = Z3Int::from_i64(i32::MAX as i64);
+                        let lo = Z3Int::from_i64(lo);
+                        let hi = Z3Int::from_i64(hi);
                         obligations.push(ResolvedIntDefinedness {
                             condition: Z3Bool::and(&[&result.ge(&lo), &result.le(&hi)]),
                             failure: "integer overflow is not excluded by preconditions",
@@ -631,7 +640,7 @@ fn collect_expr_i32_definedness(
                     }
                     ResolvedBinaryOp::Divide | ResolvedBinaryOp::Remainder => {
                         let zero = Z3Int::from_i64(0);
-                        let min = Z3Int::from_i64(i32::MIN as i64);
+                        let min = Z3Int::from_i64(lo);
                         let neg_one = Z3Int::from_i64(-1);
                         let min_overflow = Z3Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
                         obligations.push(ResolvedIntDefinedness {
@@ -645,13 +654,15 @@ fn collect_expr_i32_definedness(
         }
         ResolvedExprKind::Unary { op, operand } => {
             collect_expr_i32_definedness(operand, body, types, vars, obligations)?;
-            if *op == ResolvedUnaryOp::Negate && is_i32 {
-                let v = resolved_to_z3_int(operand, body, types, vars)?;
-                let min = Z3Int::from_i64(i32::MIN as i64);
-                obligations.push(ResolvedIntDefinedness {
-                    condition: v.ne(&min),
-                    failure: "integer overflow is not excluded by preconditions",
-                });
+            if *op == ResolvedUnaryOp::Negate {
+                if let Some((lo, _hi)) = bounds {
+                    let v = resolved_to_z3_int(operand, body, types, vars)?;
+                    let min = Z3Int::from_i64(lo);
+                    obligations.push(ResolvedIntDefinedness {
+                        condition: v.ne(&min),
+                        failure: "integer overflow is not excluded by preconditions",
+                    });
+                }
             }
         }
         ResolvedExprKind::If {
@@ -814,13 +825,21 @@ fn create_parameter_vars(
             Z3TypeCategory::Int => {
                 let iv = Z3Int::new_const(key.as_str());
                 vars.insert_int(&key, iv.clone());
-                // V-H4: constrain i32 params to machine range
-                if let Some(crate::core::ir::ResolvedType::Primitive(
-                    crate::core::ir::PrimitiveType::I32,
-                )) = types.get(&local.ty)
-                {
-                    let lo = Z3Int::from_i64(i32::MIN as i64);
-                    let hi = Z3Int::from_i64(i32::MAX as i64);
+                // V-H4 + H2: constrain checked integer params/locals to
+                // machine range so unbounded Z3 Int does not prove false
+                // modular properties. H2 extends this from i32-only to i64 —
+                // without the i64 range pin, `x == i64::MAX` is unreachable
+                // to the solver and overflow obligations validate vacuously.
+                let int_bounds = match types.get(&local.ty) {
+                    Some(ResolvedType::Primitive(PrimitiveType::I32)) => {
+                        Some((i32::MIN as i64, i32::MAX as i64))
+                    }
+                    Some(ResolvedType::Primitive(PrimitiveType::I64)) => Some((i64::MIN, i64::MAX)),
+                    _ => None,
+                };
+                if let Some((lo, hi)) = int_bounds {
+                    let lo = Z3Int::from_i64(lo);
+                    let hi = Z3Int::from_i64(hi);
                     session.solver.assert(iv.ge(&lo));
                     session.solver.assert(iv.le(&hi));
                 }
@@ -930,13 +949,20 @@ pub(crate) fn verify_contracts_from_resolved(
         Z3TypeCategory::Int => {
             let rv = Z3Int::new_const(result_key.as_str());
             vars.insert_int(&result_key, rv.clone());
-            // V-H4: constrain i32 result to machine range
-            if let Some(crate::core::ir::ResolvedType::Primitive(
-                crate::core::ir::PrimitiveType::I32,
-            )) = types.get(&callable.signature.result)
-            {
-                let lo = Z3Int::from_i64(i32::MIN as i64);
-                let hi = Z3Int::from_i64(i32::MAX as i64);
+            // V-H4 + H2: constrain checked integer result to machine
+            // range (same rationale as the local pin above — i64 was modeled
+            // unbounded, so overflow-adjacent postconditions could verify
+            // vacuously).
+            let int_bounds = match types.get(&callable.signature.result) {
+                Some(ResolvedType::Primitive(PrimitiveType::I32)) => {
+                    Some((i32::MIN as i64, i32::MAX as i64))
+                }
+                Some(ResolvedType::Primitive(PrimitiveType::I64)) => Some((i64::MIN, i64::MAX)),
+                _ => None,
+            };
+            if let Some((lo, hi)) = int_bounds {
+                let lo = Z3Int::from_i64(lo);
+                let hi = Z3Int::from_i64(hi);
                 session.solver.assert(rv.ge(&lo));
                 session.solver.assert(rv.le(&hi));
             }

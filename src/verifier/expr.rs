@@ -9,7 +9,7 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 /// May create field access variables on-the-fly when encountering Expr::Field.
 ///
 /// Values use unbounded Z3 Int terms. Checked machine-integer definedness is
-/// proved separately by `i32_definedness_obligations`, before a value equation
+/// proved separately by `int_definedness_obligations`, before a value equation
 /// may be used to prove a postcondition.
 pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> {
     match expr.unlocated() {
@@ -135,27 +135,38 @@ pub(crate) struct IntDefinedness {
     pub(crate) failure: &'static str,
 }
 
-/// Collect the definedness VCs for checked i32 arithmetic in evaluation order.
-/// The value terms remain mathematical Ints so C-style truncating division is
-/// preserved; each intermediate result must independently fit in i32.
-pub(crate) fn i32_definedness_obligations(
+/// Collect the definedness VCs for checked integer arithmetic in evaluation
+/// order, using the given machine bounds. The value terms remain mathematical
+/// Ints so C-style truncating division is preserved; each intermediate result
+/// must independently fit in `[lo, hi]`.
+///
+/// H2: previously only i32 was supported (`i32_definedness_obligations` pinned
+/// i32::MIN/MAX); i64 flows took the unbounded path, so `i64::MAX + 1`
+/// verified Proven while the runtime traps (SD-7). Bounds are now a parameter
+/// so the caller (which knows the function return type) must supply the real
+/// machine range.
+pub(crate) fn int_definedness_obligations(
     expr: &Expr,
     vars: &mut Z3VarMap,
+    lo: i64,
+    hi: i64,
 ) -> Option<Vec<IntDefinedness>> {
     let mut obligations = Vec::new();
-    collect_i32_definedness(expr, vars, &mut obligations)?;
+    collect_int_definedness(expr, vars, lo, hi, &mut obligations)?;
     Some(obligations)
 }
 
-fn collect_i32_definedness(
+fn collect_int_definedness(
     expr: &Expr,
     vars: &mut Z3VarMap,
+    lo: i64,
+    hi: i64,
     obligations: &mut Vec<IntDefinedness>,
 ) -> Option<()> {
     match expr.unlocated() {
         Expr::Binary(op, lhs, rhs) => {
-            collect_i32_definedness(lhs, vars, obligations)?;
-            collect_i32_definedness(rhs, vars, obligations)?;
+            collect_int_definedness(lhs, vars, lo, hi, obligations)?;
+            collect_int_definedness(rhs, vars, lo, hi, obligations)?;
             let l = expr_to_z3_int(lhs, vars)?;
             let r = expr_to_z3_int(rhs, vars)?;
             match op {
@@ -165,19 +176,19 @@ fn collect_i32_definedness(
                         BinOp::Sub => Z3Int::sub(&[&l, &r]),
                         BinOp::Mul => Z3Int::mul(&[&l, &r]),
                         _ => unreachable!(
-                            "checked_int_overflow: only Add/Sub/Mul are checked for i32 overflow"
+                            "checked_int_overflow: only Add/Sub/Mul are checked for integer overflow"
                         ),
                     };
-                    let lo = Z3Int::from_i64(i32::MIN as i64);
-                    let hi = Z3Int::from_i64(i32::MAX as i64);
+                    let zlo = Z3Int::from_i64(lo);
+                    let zhi = Z3Int::from_i64(hi);
                     obligations.push(IntDefinedness {
-                        condition: Z3Bool::and(&[&result.ge(&lo), &result.le(&hi)]),
+                        condition: Z3Bool::and(&[&result.ge(&zlo), &result.le(&zhi)]),
                         failure: "integer overflow is not excluded by preconditions",
                     });
                 }
                 BinOp::Div | BinOp::Mod => {
                     let zero = Z3Int::from_i64(0);
-                    let min = Z3Int::from_i64(i32::MIN as i64);
+                    let min = Z3Int::from_i64(lo);
                     let neg_one = Z3Int::from_i64(-1);
                     let min_overflow = Z3Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
                     obligations.push(IntDefinedness {
@@ -189,9 +200,9 @@ fn collect_i32_definedness(
             }
         }
         Expr::Unary(UnOp::Neg, inner) => {
-            collect_i32_definedness(inner, vars, obligations)?;
+            collect_int_definedness(inner, vars, lo, hi, obligations)?;
             let value = expr_to_z3_int(inner, vars)?;
-            let min = Z3Int::from_i64(i32::MIN as i64);
+            let min = Z3Int::from_i64(lo);
             obligations.push(IntDefinedness {
                 condition: value.ne(&min),
                 failure: "integer overflow is not excluded by preconditions",
@@ -200,14 +211,14 @@ fn collect_i32_definedness(
         Expr::If { cond, then_, else_ } => {
             let condition = expr_to_z3_bool(cond, vars)?;
             if let Some(then_expr) = block_tail_expr(then_) {
-                let mut branch = i32_definedness_obligations(&then_expr, vars)?;
+                let mut branch = int_definedness_obligations(&then_expr, vars, lo, hi)?;
                 for obligation in &mut branch {
                     obligation.condition = condition.implies(&obligation.condition);
                 }
                 obligations.extend(branch);
             }
             if let Some(else_expr) = else_.as_ref().and_then(|block| block_tail_expr(block)) {
-                let mut branch = i32_definedness_obligations(&else_expr, vars)?;
+                let mut branch = int_definedness_obligations(&else_expr, vars, lo, hi)?;
                 let else_condition = condition.not();
                 for obligation in &mut branch {
                     obligation.condition = else_condition.implies(&obligation.condition);
@@ -217,7 +228,7 @@ fn collect_i32_definedness(
         }
         Expr::Block(stmts) => {
             if let Some(tail) = block_tail_expr(stmts) {
-                collect_i32_definedness(&tail, vars, obligations)?;
+                collect_int_definedness(&tail, vars, lo, hi, obligations)?;
             }
         }
         Expr::Match(scrutinee, arms) => {
@@ -225,7 +236,7 @@ fn collect_i32_definedness(
             // division inside a match arm body generated no obligation and
             // `ensures` that hold under Z3's uninterpreted `div x 0` verified
             // Proven while the runtime traps with E0801.
-            collect_i32_definedness(scrutinee, vars, obligations)?;
+            collect_int_definedness(scrutinee, vars, lo, hi, obligations)?;
             // The scrutinee term drives pattern-condition gating; when it is
             // not int-encodable, arm obligations fall back to unconditional
             // (conservative — never weaker than the runtime semantics).
@@ -239,7 +250,7 @@ fn collect_i32_definedness(
                 // definedness is gated by the pattern condition alone.
                 if let Some(guard) = &arm.guard {
                     let mut guard_obligations = Vec::new();
-                    collect_i32_definedness(guard, vars, &mut guard_obligations)?;
+                    collect_int_definedness(guard, vars, lo, hi, &mut guard_obligations)?;
                     for obligation in &mut guard_obligations {
                         if let Some(pc) = &pattern_cond {
                             obligation.condition = pc.implies(&obligation.condition);
@@ -251,7 +262,7 @@ fn collect_i32_definedness(
                 // The body runs only when the pattern matched AND the guard
                 // (if any) evaluated true.
                 let mut body_obligations = Vec::new();
-                collect_i32_definedness(&arm.body, vars, &mut body_obligations)?;
+                collect_int_definedness(&arm.body, vars, lo, hi, &mut body_obligations)?;
                 let guard_cond = arm.guard.as_ref().and_then(|g| expr_to_z3_bool(g, vars));
                 for obligation in &mut body_obligations {
                     let mut antecedents: Vec<&Z3Bool> = Vec::new();
@@ -273,20 +284,20 @@ fn collect_i32_definedness(
             // V-1 (audit 2026-08-05): this arm was missing entirely — a
             // division inside a call argument generated no obligation
             // (arguments are evaluated before the call).
-            collect_i32_definedness(callee, vars, obligations)?;
+            collect_int_definedness(callee, vars, lo, hi, obligations)?;
             for arg in call_args {
-                collect_i32_definedness(arg, vars, obligations)?;
+                collect_int_definedness(arg, vars, lo, hi, obligations)?;
             }
         }
         Expr::Field(obj, _) | Expr::TupleIndex(obj, _) => {
-            collect_i32_definedness(obj, vars, obligations)?;
+            collect_int_definedness(obj, vars, lo, hi, obligations)?;
         }
         // Note: Lambda bodies intentionally generate no obligations here —
         // their divisions execute in the (unknown) higher-order call context,
         // not at lambda construction. Modeling that requires HOF semantics the
         // AST path does not have (conservative gap, same as pre-audit).
         Expr::Spawn(inner) | Expr::Await(inner) => {
-            collect_i32_definedness(inner, vars, obligations)?;
+            collect_int_definedness(inner, vars, lo, hi, obligations)?;
         }
         _ => {}
     }

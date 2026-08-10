@@ -2189,6 +2189,131 @@ func square(x: i32) -> i32 {
 }
 
 #[test]
+fn verify_i64_add_requires_no_overflow_proof() {
+    // H2 (audit-triage-0.35.25): i64 used to be modeled as unbounded Z3 Int
+    // with NO definedness VCs — `i64::MAX + 1` traps E0801 at runtime
+    // (SD-7) yet verified Proven. The Resolved engine now derives per-type
+    // bounds (int_bounds) and the AST path is parameterized the same way, so
+    // an unbounded `x + 1` must FAIL with an overflow diagnostic.
+    require_z3!();
+    let src = r#"
+func increment(x: i64) -> i64 {
+    ensures: result == x + 1
+    x + 1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(
+        results[0].status,
+        VerifStatus::Failed,
+        "i64 overflow must be rejected: {}",
+        results[0].message
+    );
+    assert!(results[0].message.contains("integer overflow"));
+}
+
+#[test]
+fn verify_i64_checked_add_sub_mul_when_bounded() {
+    // H2 counterpart: with a bounding requires, i64 arithmetic verifies —
+    // the check is real, not an unconditional reject.
+    require_z3!();
+    let src = r#"
+func arithmetic(x: i64) -> i64 {
+    requires: x >= -1000 && x <= 1000
+    ensures: result == (x + 7) * 3 - 2
+    (x + 7) * 3 - 2
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(
+        results[0].status,
+        VerifStatus::Verified,
+        "bounded i64 arithmetic should verify: {}",
+        results[0].message
+    );
+}
+
+#[test]
+fn verify_i64_div_rejects_zero_and_min_overflow() {
+    // H2: i64 div/rem carry the same zero-divisor + MIN/-1 obligations as
+    // i32 (SD-8) — previously only checked on the VIR path, now also on the
+    // AST fallback path with i64 bounds.
+    require_z3!();
+    let src = r#"
+func maybe_divide_by_zero(x: i64, y: i64) -> i64 {
+    ensures: result == x / y
+    x / y
+}
+func min_div_neg_one() -> i64 {
+    ensures: result == -9223372036854775808 / -1
+    -9223372036854775808 / -1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|r| r.status == VerifStatus::Failed && r.message.contains("undefined")),
+        "{results:?}"
+    );
+}
+
+#[test]
+fn verify_i64_checked_div_when_bounded() {
+    // H2 counterpart: bounded divisor verifies.
+    require_z3!();
+    let src = r#"
+func half(x: i64) -> i64 {
+    requires: x >= -2000 && x <= 2000
+    ensures: result == x / 2
+    x / 2
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(
+        results[0].status,
+        VerifStatus::Verified,
+        "bounded i64 division should verify: {}",
+        results[0].message
+    );
+}
+
+#[test]
+fn verify_i64_overflow_on_ast_fallback_path() {
+    // H2: the AST fallback path (functions with calls are rejected by the
+    // VIR trusted-subset gate) previously had NO i64 definedness — the
+    // `!returns_i32` branch asserted the unbounded model. The parameterized
+    // `int_definedness_obligations` must now bound i64 there too. The callee
+    // forces the AST path while keeping the arithmetic in the outer function.
+    require_z3!();
+    let src = r#"
+func helper(x: i64) -> i64 {
+    requires: x <= 1000
+    ensures: result == x
+    x
+}
+
+func increment(x: i64) -> i64 {
+    ensures: result == helper(x) + 1
+    helper(x) + 1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    let increment = results
+        .iter()
+        .find(|r| r.func_name == "increment")
+        .expect("must have a result for 'increment'");
+    assert_eq!(
+        increment.status,
+        VerifStatus::Failed,
+        "i64 overflow on the AST path must be rejected: {}",
+        increment.message
+    );
+    assert!(increment.message.contains("integer overflow"));
+}
+
+#[test]
 fn verify_i32_sub_requires_no_overflow_proof() {
     require_z3!();
     let src = r#"
@@ -2643,13 +2768,19 @@ fn dual_engine_agrees_on_simple_contract() {
     // verify_checked_dual WITHOUT any divergence diagnostic.
     //
     // NOTE (0.34.44): arithmetic-free postcondition on purpose. Empirically
-    // the two engines disagree on integer definedness in BOTH directions —
-    // i64: flow enforces overflow definedness while resolved proves the
-    // unbounded model; i32: resolved enforces checked_i32 definedness while
-    // flow proves unbounded. Any arithmetic postcondition is therefore a
-    // divergence candidate; the agreement path is pinned with an identity
-    // postcondition instead. The divergences are locked by
-    // dual_engine_divergence_* below.
+    // the two engines disagreed on integer definedness in BOTH directions —
+    // i64: flow enforced overflow definedness while resolved proved the
+    // unbounded model; i32: resolved enforced checked_i32 definedness while
+    // flow proved unbounded. Any arithmetic postcondition was therefore a
+    // divergence candidate; the agreement path was pinned with an identity
+    // postcondition instead.
+    //
+    // H2 (0.35.x) closed the i64 side: resolved now derives per-type bounds
+    // (int_bounds) and the AST fallback path was parameterized the same way,
+    // so i64 arithmetic agrees between the engines (locked by
+    // dual_engine_divergence_on_i64_overflow_is_fail_closed, which now
+    // asserts CONSISTENT Disproven with no E0439). The i32 divergence and the
+    // remaining divergences are locked by dual_engine_divergence_* below.
     if !is_z3_available() {
         return;
     }
@@ -2682,10 +2813,14 @@ func identity(x: i64) -> i64 {
 
 #[test]
 fn dual_engine_divergence_on_i64_overflow_is_fail_closed() {
-    // 0.34.44 (ADR-008 §3): the flow engine enforces i64 overflow
-    // definedness, the resolved engine proves under the unbounded model —
-    // flow Disproven vs resolved Proven. Divergence must surface as E0439
-    // with the weaker (Disproven) conclusion, never a silent Proven.
+    // 0.34.44 (ADR-008 §3): originally the flow engine enforced i64 overflow
+    // definedness while the resolved engine proved the unbounded model —
+    // flow Disproven vs resolved Proven, surfaced as E0439 with the weaker
+    // (Disproven) conclusion.
+    //
+    // 0.35.x (H2): the resolved engine now models i64 with its real bounds
+    // (int_bounds), so both engines agree on Disproven for an unbounded
+    // `x * 2` — no divergence, no E0439, and still never a silent Proven.
     if !is_z3_available() {
         return;
     }
@@ -2707,14 +2842,16 @@ func double(x: i64) -> i64 {
     assert_eq!(
         double.status,
         VerifStatus::Disproven,
-        "divergence must fail closed to the weaker conclusion: {}",
+        "i64 overflow must fail closed: {}",
         double.message
     );
-    assert!(
-        double.message.contains("E0439"),
-        "divergence must be reported explicitly: {}",
-        double.message
-    );
+    if double.message.contains("E0439") {
+        panic!(
+            "H2 should have removed this divergence — both engines model i64 \
+             bounds now: {}",
+            double.message
+        );
+    }
 }
 
 #[test]

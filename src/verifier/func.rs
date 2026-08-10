@@ -407,6 +407,10 @@ impl VerifierCtx {
             .ret
             .as_ref()
             .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "i32" || n == "Int"));
+        let returns_i64 = func
+            .ret
+            .as_ref()
+            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "i64"));
 
         let mut vars = Z3VarMap::new();
         let mut old_names: Vec<String> = Vec::with_capacity(func.params.len());
@@ -444,11 +448,21 @@ impl VerifierCtx {
             } else {
                 let iv = Z3Int::new_const(p.name.as_str());
                 vars.insert_int(p.name.as_str(), iv.clone());
-                // V-H4 (partial): constrain i32 params to machine range so
-                // unbounded Z3 Int does not prove false modular properties.
-                if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "i32" || n == "Int") {
-                    let lo = Z3Int::from_i64(i32::MIN as i64);
-                    let hi = Z3Int::from_i64(i32::MAX as i64);
+                // V-H4 (partial) + H2: constrain checked integer params to
+                // their machine range so unbounded Z3 Int does not prove false
+                // modular properties. H2 extends this from i32-only to i64 —
+                // without the i64 range pin, `x == i64::MAX` is unreachable to
+                // the solver and overflow obligations validate vacuously.
+                let int_bounds = match p.ty.unlocated() {
+                    Type::Name(n, _) if n == "i32" || n == "Int" => {
+                        Some((i32::MIN as i64, i32::MAX as i64))
+                    }
+                    Type::Name(n, _) if n == "i64" => Some((i64::MIN, i64::MAX)),
+                    _ => None,
+                };
+                if let Some((lo, hi)) = int_bounds {
+                    let lo = Z3Int::from_i64(lo);
+                    let hi = Z3Int::from_i64(hi);
                     session.solver.assert(iv.ge(&lo));
                     session.solver.assert(iv.le(&hi));
                 }
@@ -771,7 +785,7 @@ impl VerifierCtx {
                         "could not encode return expression — result may be unconstrained".into(),
                     );
                 }
-            } else if !returns_i32 {
+            } else if !returns_i32 && !returns_i64 {
                 if let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) {
                     if let Some(i) = vars.get_int("result") {
                         session.assert(i.eq(&body_z3));
@@ -781,9 +795,20 @@ impl VerifierCtx {
                         "could not encode return expression — result may be unconstrained".into(),
                     );
                 }
-            } else if let Some(obligations) =
-                expr::i32_definedness_obligations(return_expr, &mut vars)
-            {
+            } else if let Some(obligations) = expr::int_definedness_obligations(
+                return_expr,
+                &mut vars,
+                if returns_i64 {
+                    i64::MIN
+                } else {
+                    i32::MIN as i64
+                },
+                if returns_i64 {
+                    i64::MAX
+                } else {
+                    i32::MAX as i64
+                },
+            ) {
                 for obligation in obligations {
                     let (proof, _) = session.check_scope(obligation.condition.not());
                     match proof {
