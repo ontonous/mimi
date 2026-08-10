@@ -1661,6 +1661,17 @@ enum MapOwnedValueKind {
     /// malloc'd 16-byte list header `{i64 len, ptr data}` where `data` is a
     /// malloc'd array of `len` owned Pack pointers.
     ListOfPacks,
+    /// malloc'd 16-byte `{i64 disc, i64 payload}` result pack: disc == 0
+    /// means `Err` and `payload` is an alloc_c_string error message that
+    /// must be mimi_free'd; disc == 1 is `Ok` (payload owned by the caller
+    /// or an inner object — never freed by the map, see mimi_map_destroy
+    /// comment).
+    PackErrCString,
+    /// Box-allocated `MimiList` built by a `mimi_list_from_json_*` builder
+    /// (list itself owns its data + element packs). Freed via
+    /// `mimi_list_free(list, /* free_elements */ true)`, which reclaims the
+    /// data array and Record element pack bases.
+    ListObject,
 }
 
 /// Live count of map-owned value buffers (registered − freed). Observable
@@ -1710,6 +1721,30 @@ fn free_map_owned_value(vh: ValueHandle, kind: MapOwnedValueKind) {
                 }
                 libc::free(vh as *mut std::ffi::c_void);
             }
+        }
+        MapOwnedValueKind::PackErrCString => {
+            // SAFETY: `vh` was recorded as a malloc'd 16-byte {disc, payload}
+            // result pack. disc == 0 → payload is an Err message string we
+            // allocated (mimi_free); disc == 1 → payload is an Ok value whose
+            // ownership stays with the caller (never freed here).
+            unsafe {
+                let base = vh as *const i64;
+                if *base == 0 {
+                    let c = *base.add(1) as *mut std::ffi::c_void;
+                    if !c.is_null() {
+                        mimi_free(c);
+                    }
+                }
+                libc::free(vh as *mut std::ffi::c_void);
+            }
+        }
+        MapOwnedValueKind::ListObject => {
+            // `vh` was recorded as a Box-allocated MimiList built by a
+            // mimi_list_from_json_* builder. mimi_list_free reclaims the
+            // list struct (Box::from_raw), its owned data array, and Record
+            // element pack bases. Map/Set element handles are deliberately
+            // not freed (caller may hold them via map_get — bounded leak).
+            mimi_list_free(vh as *mut MimiList, true);
         }
     }
     MAP_OWNED_VALUE_BALANCE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -5802,11 +5837,19 @@ pub extern "C" fn mimi_map_from_json_result_map_product_i64(
             }
         }
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; `pack` is a valid heap-allocated result struct
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -6043,11 +6086,17 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
             let _ = n;
         }
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; `pack` is a valid heap-allocated Option-of-Result struct
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -6689,11 +6738,17 @@ pub extern "C" fn mimi_map_from_json_list_option_set_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -6827,11 +6882,17 @@ pub extern "C" fn mimi_map_from_json_list_option_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -7724,11 +7785,17 @@ pub extern "C" fn mimi_map_from_json_list_map_list_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -8020,11 +8087,17 @@ pub extern "C" fn mimi_map_from_json_option_map_list_product_i64(
             break;
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -10336,11 +10409,17 @@ pub extern "C" fn mimi_map_from_json_list_set_map_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -10607,11 +10686,17 @@ pub extern "C" fn mimi_map_from_json_list_map_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -10887,11 +10972,17 @@ pub extern "C" fn mimi_map_from_json_list_set_result_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -11025,11 +11116,17 @@ pub extern "C" fn mimi_map_from_json_list_set_option_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -11163,11 +11260,17 @@ pub extern "C" fn mimi_map_from_json_list_set_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -11746,11 +11849,17 @@ pub extern "C" fn mimi_map_from_json_list_result_option_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -11994,11 +12103,19 @@ pub extern "C" fn mimi_map_from_json_result_option_list_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 10937) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -12260,11 +12377,17 @@ pub extern "C" fn mimi_map_from_json_option_set_list_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 11247) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -12456,11 +12579,17 @@ pub extern "C" fn mimi_map_from_json_option_result_list_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 11467) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -12702,11 +12831,19 @@ pub extern "C" fn mimi_map_from_json_result_list_set_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 11679) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -12943,11 +13080,19 @@ pub extern "C" fn mimi_map_from_json_result_list_option_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 11919) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -13536,11 +13681,17 @@ pub extern "C" fn mimi_map_from_json_list_result_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12587) so `map_from_handle(handle)` returns a valid pointer
+        let vh = list_ptr as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, list_ptr as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this list_ptr was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::ListObject);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -13815,11 +13966,17 @@ pub extern "C" fn mimi_map_from_json_option_list_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12728) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -14142,11 +14299,19 @@ pub extern "C" fn mimi_map_from_json_result_list_product_i64(
             }
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 13043) so `map_from_handle(handle)` returns a valid pointer
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -14567,11 +14732,19 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 13377; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -14851,11 +15024,19 @@ pub extern "C" fn mimi_map_from_json_result_set_map_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 13792; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -15043,11 +15224,17 @@ pub extern "C" fn mimi_map_from_json_option_set_map_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 14057; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -15301,11 +15488,19 @@ pub extern "C" fn mimi_map_from_json_result_list_map_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 14239; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -15493,11 +15688,17 @@ pub extern "C" fn mimi_map_from_json_option_list_map_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 14504; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -15721,11 +15922,19 @@ pub extern "C" fn mimi_map_from_json_result_set_list_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 14688; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -15959,11 +16168,19 @@ pub extern "C" fn mimi_map_from_json_result_set_product_i64(
             }
             // SAFETY: `handle` was validated non-zero at line 14924; map_from_handle returns a valid, aligned map instance pointer
         }
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr)
+                .owned
+                .insert(vh, MapOwnedValueKind::PackErrCString);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -16163,11 +16380,17 @@ pub extern "C" fn mimi_map_from_json_option_set_product_i64(
             // SAFETY: `handle` was validated non-zero at line 15160; map_from_handle returns a valid, aligned map instance pointer
         }
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -16357,11 +16580,17 @@ pub extern "C" fn mimi_map_from_json_option_map_product_i64(
             }
         }
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
+        let vh = pack as ValueHandle;
+        // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
         unsafe {
-            (*map_from_handle(handle))
-                .inner
-                .insert(key, pack as ValueHandle);
+            let map_ptr = map_from_handle(handle);
+            (*map_ptr).inner.insert(key, vh);
+            // §10-#35: this pack was malloc'd by the builder — register so
+            // destroy() can reclaim its base (inner object handles are
+            // intentional bounded leaks, see mimi_map_destroy comment).
+            (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
         }
+        MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     handle
 }
@@ -20543,5 +20772,119 @@ mod audit_pkgd_tests {
             ok,
             "destroy must free headers + data arrays + element packs"
         );
+    }
+
+    // ── 0.35.28 H5: nested from_json builders must register their own      ──
+    // shell (tagged pack / Box list) so destroy() reclaims it. Inner object
+    // handles (map/set/list) stay bounded leaks by design — a caller may
+    // hold them via map_get; see mimi_map_destroy comment. Errored Result
+    // messages are builder-owned C strings and are reclaimed.
+
+    fn nested_reclaim_check(build: impl Fn() -> MapHandle, entries: i64) -> bool {
+        let h = build();
+        if h == 0 {
+            return false;
+        }
+        // Race-free exact registration proof: one registered shell per entry.
+        let registered = mimi_map_owned_value_count(h) == entries;
+        let after_build = mimi_runtime_map_owned_value_balance();
+        mimi_map_destroy(h);
+        let after_destroy = mimi_runtime_map_owned_value_balance();
+        // destroy() must reclaim exactly the shells this map registered.
+        // Inner map/set/list handles stay as bounded leaks by design (a
+        // caller may hold them via map_get), so they are excluded from the
+        // balance delta; their own shells are reclaimed when *they* die.
+        registered && after_destroy == after_build - entries
+    }
+
+    #[test]
+    fn map_destroy_reclaims_nested_option_pack_shells() {
+        // Map of Option of Map of product: None = null, Some = inner map.
+        let json = b"{\"a\":null,\"b\":{\"x\":[3,4]},\"c\":{\"y\":[5,6]}}\0";
+        let ok = (0..5).any(|_| {
+            nested_reclaim_check(
+                || mimi_map_from_json_option_map_product_i64(json.as_ptr() as _, 2),
+                3,
+            )
+        });
+        assert!(ok, "option pack shells must be registered + reclaimed");
+        // Serialization round-trips while live.
+        let h = mimi_map_from_json_option_map_product_i64(json.as_ptr() as _, 2);
+        assert_ne!(h, 0);
+        let out = owned_str(mimi_map_to_json_option_map_product_i64(h, 2, 0));
+        assert_eq!(
+            out,
+            "{\"a\":\"None\",\"b\":{\"Some\":[{\"x\":[3,4]}]},\"c\":{\"Some\":[{\"y\":[5,6]}]}}"
+        );
+        mimi_map_destroy(h);
+    }
+
+    #[test]
+    fn map_destroy_reclaims_nested_result_pack_shells_and_err_messages() {
+        // Map of Result of Map of product: Ok = {"Ok":{...}}, Err = {"Err":"msg"}
+        // — the Err message is a builder-owned C string freed on destroy.
+        let json = b"{\"a\":{\"Err\":\"boom\"},\"b\":{\"Ok\":{\"x\":[7,8]}}}\0";
+        let ok = (0..5).any(|_| {
+            nested_reclaim_check(
+                || mimi_map_from_json_result_map_product_i64(json.as_ptr() as _, 2),
+                2,
+            )
+        });
+        assert!(ok, "result pack shells must be registered + reclaimed");
+        let h = mimi_map_from_json_result_map_product_i64(json.as_ptr() as _, 2);
+        assert_ne!(h, 0);
+        let out = owned_str(mimi_map_to_json_result_map_product_i64(h, 2, 0));
+        assert_eq!(
+            out,
+            "{\"a\":{\"Err\":[\"boom\"]},\"b\":{\"Ok\":[{\"x\":[7,8]}]}}"
+        );
+        mimi_map_destroy(h);
+    }
+
+    #[test]
+    fn map_destroy_reclaims_nested_list_object() {
+        // Map of List of Option of product: the list is a Box-allocated
+        // MimiList from mimi_list_from_json_* — destroy must mimi_list_free
+        // it (struct + data array + Record element pack bases).
+        let json = b"{\"a\":[null,[1,2]],\"b\":[[3,4],null]}\0";
+        let ok = (0..5).any(|_| {
+            nested_reclaim_check(
+                || mimi_map_from_json_list_option_product_i64(json.as_ptr() as _, 2),
+                2,
+            )
+        });
+        assert!(ok, "Box MimiList shells must be registered + reclaimed");
+        let h = mimi_map_from_json_list_option_product_i64(json.as_ptr() as _, 2);
+        assert_ne!(h, 0);
+        assert_eq!(mimi_map_owned_value_count(h), 2);
+        let out = owned_str(mimi_map_to_json_list_option_product_i64(h, 2, 0));
+        assert_eq!(
+            out,
+            "{\"a\":[\"None\",{\"Some\":[[1,2]]}],\"b\":[{\"Some\":[[3,4]]},\"None\"]}"
+        );
+        assert_eq!(mimi_map_owned_value_count(h), 2, "serialize must not free");
+        mimi_map_destroy(h);
+    }
+
+    #[test]
+    fn map_destroy_reclaims_deeply_nested_result_option_list() {
+        // Result of Option of List of product — exercises the PackErrCString
+        // shell (Ok(None) + Err branches; inner list header stays bounded).
+        let json = b"{\"a\":{\"Ok\":null},\"b\":{\"Err\":\"nope\"}}\0";
+        let ok = (0..5).any(|_| {
+            nested_reclaim_check(
+                || mimi_map_from_json_result_option_list_product_i64(json.as_ptr() as _, 2),
+                2,
+            )
+        });
+        assert!(ok, "deeply nested result shells must be reclaimed");
+        let h = mimi_map_from_json_result_option_list_product_i64(json.as_ptr() as _, 2);
+        assert_ne!(h, 0);
+        let out = owned_str(mimi_map_to_json_result_option_list_product_i64(h, 2, 0));
+        assert_eq!(
+            out,
+            "{\"a\":{\"Ok\":[\"None\"]},\"b\":{\"Err\":[\"nope\"]}}"
+        );
+        mimi_map_destroy(h);
     }
 }
