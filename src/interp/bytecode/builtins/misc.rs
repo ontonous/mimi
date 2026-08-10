@@ -1118,39 +1118,22 @@ fn builtin_exec(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
             if cmd.contains('\0') {
                 return Err(InterpError::new("exec: command contains null byte"));
             }
-            match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                Ok(out) => {
-                    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024;
-                    let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
-                        &out.stdout[..MAX_EXEC_OUTPUT]
-                    } else {
-                        &out.stdout
-                    };
-                    let stderr_bytes = if out.stderr.len() > MAX_EXEC_OUTPUT {
-                        &out.stderr[..MAX_EXEC_OUTPUT]
-                    } else {
-                        &out.stderr
-                    };
-                    let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
-                    let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
-                    let exit_code = out.status.code().unwrap_or(-1);
-                    let mut fields = std::collections::HashMap::new();
-                    fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
-                    fields.insert("stdout".to_string(), Value::String(stdout));
-                    fields.insert("stderr".to_string(), Value::String(stderr));
-                    Ok(Value::Record(Some("ExecResult".to_string()), fields))
-                }
-                Err(e) => {
-                    let mut fields = std::collections::HashMap::new();
-                    fields.insert("exit_code".to_string(), Value::Int(-1));
-                    fields.insert("stdout".to_string(), Value::String(String::new()));
-                    fields.insert(
-                        "stderr".to_string(),
-                        Value::String(format!("exec error: {}", e)),
-                    );
-                    Ok(Value::Record(Some("ExecResult".to_string()), fields))
-                }
-            }
+            // 0.35.29 (H12): share the runtime's capped executor — the old
+            // `Command::output()` collected the FULL output then truncated,
+            // so a chatty child OOM'd the VM. run_exec_capped captures 10 MB
+            // per stream and keeps draining (child can never block), and is
+            // the same code path the codegen backend uses (L1 by construction).
+            let (stdout_bytes, stderr_bytes, code) = crate::runtime::fs::run_exec_capped(
+                std::process::Command::new("sh").arg("-c").arg(cmd),
+            );
+            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+            let exit_code = code.unwrap_or(-1);
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
+            fields.insert("stdout".to_string(), Value::String(stdout));
+            fields.insert("stderr".to_string(), Value::String(stderr));
+            Ok(Value::Record(Some("ExecResult".to_string()), fields))
         }
         _ => Err(InterpError::new("exec expects a string command")),
     }
@@ -1165,13 +1148,13 @@ fn builtin_exec_pipe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
             if cmd.contains('\0') {
                 return Err(InterpError::new("exec_pipe: command contains null byte"));
             }
-            match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    Ok(Value::String(stdout))
-                }
-                Err(e) => Err(InterpError::new(format!("exec_pipe error: {}", e))),
-            }
+            // H12: this was the worst of the family — NO cap at all.
+            // Shared capped executor (10 MB, keep draining) like exec/exec_safe.
+            let (stdout_bytes, _stderr, _code) = crate::runtime::fs::run_exec_capped(
+                std::process::Command::new("sh").arg("-c").arg(cmd),
+            );
+            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+            Ok(Value::String(stdout))
         }
         _ => Err(InterpError::new("exec_pipe expects a string command")),
     }
@@ -1200,28 +1183,17 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
             _ => return Err(InterpError::new("exec_safe: all arguments must be strings")),
         }
     }
-    match cmd.output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let exit_code = out.status.code().unwrap_or(-1);
-            let mut fields = std::collections::HashMap::new();
-            fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
-            fields.insert("stdout".to_string(), Value::String(stdout));
-            fields.insert("stderr".to_string(), Value::String(stderr));
-            Ok(Value::Record(Some("ExecResult".to_string()), fields))
-        }
-        Err(e) => {
-            let mut fields = std::collections::HashMap::new();
-            fields.insert("exit_code".to_string(), Value::Int(-1));
-            fields.insert("stdout".to_string(), Value::String(String::new()));
-            fields.insert(
-                "stderr".to_string(),
-                Value::String(format!("exec error: {}", e)),
-            );
-            Ok(Value::Record(Some("ExecResult".to_string()), fields))
-        }
-    }
+    // H12: shared capped executor (10 MB per stream, keeps draining — no OOM,
+    // no child deadlock). Same code path as the codegen side.
+    let (stdout_bytes, stderr_bytes, code) = crate::runtime::fs::run_exec_capped(&mut cmd);
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+    let exit_code = code.unwrap_or(-1);
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
+    fields.insert("stdout".to_string(), Value::String(stdout));
+    fields.insert("stderr".to_string(), Value::String(stderr));
+    Ok(Value::Record(Some("ExecResult".to_string()), fields))
 }
 
 // ── FS extended ─────────────────────────────────────────
