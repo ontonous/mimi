@@ -3829,12 +3829,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // reference). We iterate get_basic_blocks() which returns a
                 // snapshot — deleting the first block repeatedly until no
                 // blocks remain.
+                // H11 (0.35.37): the old loop did `let _ = bb.delete()` —
+                // inkwell's delete returns Result<(), ()>, and an Err meant
+                // the block stayed in the function while the loop kept
+                // spinning on count_basic_blocks() > 0: a compiler hang.
+                // Fail closed instead: report the deletion error and abort
+                // the build, and guard against the (impossible-in-practice)
+                // count>0-but-no-first-block divergence.
                 unsafe {
                     // SAFETY: inkwell delete() 要求可变函数上下文；count_basic_blocks()>0 保证至少一个块，删除后引用不再使用。
                     while function.count_basic_blocks() > 0 {
-                        if let Some(bb) = function.get_first_basic_block() {
-                            let _ = bb.delete();
-                        }
+                        let Some(bb) = function.get_first_basic_block() else {
+                            return Err(CompileError::LlvmError(format!(
+                                "H11: function '{}' has {} basic blocks but get_first_basic_block \
+                                 returned None — refusing to loop forever",
+                                func.name,
+                                function.count_basic_blocks()
+                            )));
+                        };
+                        // SAFETY: bb is owned and removed from the function by
+                        // delete(); its address is not used afterwards.
+                        bb.delete().map_err(|_| {
+                            CompileError::LlvmError(format!(
+                                "H11: failed to delete basic block of '{}' during resolved \
+                                 emitter recovery — block count still {}",
+                                func.name,
+                                function.count_basic_blocks()
+                            ))
+                        })?;
                     }
                 }
             } else {
