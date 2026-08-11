@@ -169,7 +169,15 @@ pub fn detect_session_cycle(env: &HashMap<String, SessionType>) -> Option<Vec<St
             let edges = refs.get(node).unwrap_or(&no_edges);
             if idx < edges.len() {
                 let next: &str = edges[idx].as_str();
-                stack.last_mut().expect("stack non-empty").1 += 1;
+                // M9 (0.35.37): the old `stack.last_mut().expect(...)`
+                // relied on the `stack.last()` check two lines up — a
+                // cross-line invariant that panics the LSP process if a
+                // future edit breaks it. Defensive: re-check instead of
+                // assuming.
+                let Some(&mut (_, ref mut frame_idx)) = stack.last_mut() else {
+                    break;
+                };
+                *frame_idx += 1;
                 match color.get(next).copied().unwrap_or(0) {
                     0 => {
                         color.insert(next, 1);
@@ -178,10 +186,12 @@ pub fn detect_session_cycle(env: &HashMap<String, SessionType>) -> Option<Vec<St
                     }
                     1 => {
                         // Gray node on the current path: extract the cycle.
-                        let pos = path
-                            .iter()
-                            .position(|n| *n == next)
-                            .expect("gray node must be on the current path");
+                        // M9: the gray-node-on-path invariant is guaranteed
+                        // by the DFS coloring, but if it ever breaks we
+                        // must not crash the LSP process — treat as no cycle.
+                        let Some(pos) = path.iter().position(|n| *n == next) else {
+                            return None;
+                        };
                         let mut cycle: Vec<String> =
                             path[pos..].iter().map(|n| n.to_string()).collect();
                         cycle.push(next.to_string());
@@ -412,5 +422,38 @@ mod tests {
             SessionType::Recv(_, cont) => assert_eq!(*cont, SessionType::End),
             other => panic!("expected Recv, got {:?}", other),
         }
+    }
+
+    // ── M9 (0.35.37): cycle detection must not panic on broken invariants ──
+
+    #[test]
+    fn detect_cycle_no_panic_on_acyclic_and_cyclic() {
+        // Acyclic graph: must return None (no panic).
+        let mut acyclic = HashMap::new();
+        acyclic.insert(
+            "A".to_string(),
+            SessionType::Send(i32_ty(), Box::new(SessionType::End)),
+        );
+        acyclic.insert(
+            "B".to_string(),
+            SessionType::Recv(i32_ty(), Box::new(SessionType::Name("A".into()))),
+        );
+        assert!(
+            detect_session_cycle(&acyclic).is_none(),
+            "acyclic graph must report no cycle"
+        );
+
+        // Self-cycle: must return a cycle (the DFS gray-node path).
+        let mut cyclic = HashMap::new();
+        cyclic.insert(
+            "A".to_string(),
+            SessionType::Send(i32_ty(), Box::new(SessionType::Name("A".into()))),
+        );
+        let cycle =
+            detect_session_cycle(&cyclic).expect("self-cycle must be detected (not a panic)");
+        assert!(
+            cycle.first() == cycle.last(),
+            "cycle must close back on itself, got {cycle:?}"
+        );
     }
 }

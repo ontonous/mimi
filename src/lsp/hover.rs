@@ -624,7 +624,15 @@ impl LspServer {
             Type::ForAll(params, body) => {
                 format!("forall {}. {}", params.join(", "), Self::type_display(body))
             }
-            Type::Located { .. } => unreachable!("unlocated() returned Type::Located"),
+            Type::Located { .. } => {
+                // M9 (0.35.37): type_display matches on ty.unlocated(), so a
+                // top-level Type::Located here means unlocated() failed to
+                // strip a nested Located (e.g. a future zonk path that keeps
+                // Located in query results). The old unreachable!() would
+                // crash the LSP process on hover — degrade to a visible
+                // placeholder instead.
+                "«located»".to_string()
+            }
         }
     }
 

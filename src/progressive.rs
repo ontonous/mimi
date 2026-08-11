@@ -27,14 +27,17 @@ pub fn apply_progressive_typestate(file: &mut File) -> bool {
     }
     // Script mode: inject invisible Main / Single.
     file.implicit_single = true;
-    let main_meta = file
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Func(function) if function.name == "main" => Some(function.meta),
-            _ => None,
-        })
-        .expect("has_top_level_main guaranteed a main function");
+    // M9 (0.35.37): has_top_level_main above uses the same predicate as this
+    // find_map, so the expect was invariant-guaranteed — but if the two ever
+    // drift (e.g. a future main-inside-module rule), the old expect panicked
+    // the compiler. Degrade to "no injection" instead of crashing.
+    let Some(main_meta) = file.items.iter().find_map(|item| match item {
+        Item::Func(function) if function.name == "main" => Some(function.meta),
+        _ => None,
+    }) else {
+        file.implicit_single = false;
+        return false;
+    };
     file.items
         .insert(0, Item::Flow(make_implicit_main_flow(main_meta)));
     true
