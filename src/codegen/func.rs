@@ -2934,14 +2934,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Some(decl_ty) = &ty {
                             self.register_list_elem_type(name, decl_ty);
                         }
-                        // Track capability variables
-                        if let Some(Type::Cap(_) | Type::CapAtom(_)) =
-                            ty.as_ref().map(Type::unlocated)
-                        {
-                            if let Some(&(alloca, _)) = vars.get(name) {
-                                self.register_cap(name, alloca);
-                            }
-                        }
                     }
                     // For tuple patterns, push the tuple type onto tuple_type_stack
                     // so that compile_pattern_bind can load the struct correctly
@@ -2972,6 +2964,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     self.compile_pattern_bind(pat, val, vars)?;
+                    // M2 (0.35.37): register capability variables AFTER
+                    // pattern binding — the old check ran before
+                    // compile_pattern_bind, vars.get(name) was always None,
+                    // and `let c: cap X = ...` never entered cap_vars, so
+                    // Stmt::Drop silently skipped the consume/release
+                    // emission (CAP_TABLE leak, exactly-once broken).
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Some(Type::Cap(_) | Type::CapAtom(_)) =
+                            ty.as_ref().map(Type::unlocated)
+                        {
+                            if let Some(&(cap_alloca, _)) = vars.get(name) {
+                                self.register_cap(name, cap_alloca);
+                            }
+                        }
+                    }
                     // Pop tuple type stack if we pushed it
                     if let PatternKind::Tuple(sub_pats) = &pat.kind {
                         if !sub_pats.is_empty() {

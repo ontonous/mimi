@@ -2262,6 +2262,17 @@ fn register_g5_refcounted_heap_allocation_for_shared_values_defined_in_mimi_rt_c
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // M2 (0.35.37): mimi_cap_drop(cap) — release a capability handle without
+    // consuming it from the registry (used by split-receiver cleanup and
+    // block-level Drop). Was never declared, so block.rs/method.rs
+    // get_function("mimi_cap_drop") always returned None and the drop call
+    // was silently never emitted — a silent CAP_TABLE leak that broke the
+    // exactly-once contract. Declaring it makes the call actually emit.
+    module.add_function(
+        "mimi_cap_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 
     // F7: Tuple FFI serialization — serialize heterogeneous tuple to JSON string.
     // mimi_tuple_serialize(values: *const i64, count: i64, elem_types: *const i64) -> i8*

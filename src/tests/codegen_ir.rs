@@ -797,3 +797,51 @@ fn ir_nested_compile_keeps_caller_var_type_registration() {
         ir
     );
 }
+
+// ── M2 (0.35.37): mimi_cap_drop declaration + fail-closed error path ──
+// Two silent defects are locked by these tests:
+//  1. mimi_cap_drop was never declared by the codegen builtin table, so
+//     block.rs/method.rs get_function("mimi_cap_drop") returned None and
+//     block/split drops were silently skipped (CAP_TABLE leak).
+//  2. block.rs/method.rs swallowed build_call errors (`let _ =`) — a failed
+//     emission would silently leak the handle. Now the errors propagate.
+
+#[test]
+fn ir_cap_drop_symbol_is_declared() {
+    let ir = compile_to_ir(
+        r#"
+        cap FileReadCap;
+        func main() -> i32 {
+            let c: cap FileReadCap = FileReadCap
+            drop(c)
+            42
+        }
+        "#,
+    );
+    assert!(
+        ir.contains("declare void @mimi_cap_drop"),
+        "mimi_cap_drop must be declared in the module (was missing before          M2, making block/split drops silent no-ops), got:\n{}",
+        ir
+    );
+}
+
+/// An EXPLICITLY-typed cap (`let c: FileReadCap = ...`) registers in cap_vars
+/// via the declared-type path (func.rs), so its drop emits mimi_cap_consume.
+#[test]
+fn ir_cap_drop_explicit_typing_emits_consume() {
+    let ir = compile_to_ir(
+        r#"
+        cap FileReadCap;
+        func main() -> i32 {
+            let c: cap FileReadCap = FileReadCap
+            drop(c)
+            42
+        }
+        "#,
+    );
+    assert!(
+        ir.contains("call i32 @mimi_cap_consume"),
+        "explicitly-typed cap drop must emit the consume call, got:\n{}",
+        ir
+    );
+}

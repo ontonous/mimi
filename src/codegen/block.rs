@@ -1126,26 +1126,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // bytecode VM (pure Value::Cap, no registry) stayed flat.
                     if let Expr::Ident(name) = expr.unlocated() {
                         if self.is_cap_var(name) {
-                            if let Some(drop_fn) = self.module.get_function("mimi_cap_drop") {
-                                if let Some((alloca, _)) = vars.get(name) {
-                                    let handle = self
-                                        .build_load(
-                                            self.context.i64_type(),
-                                            *alloca,
-                                            "cap_drop_handle",
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!(
-                                                "cap drop load error: {}",
-                                                e
-                                            ))
-                                        })?;
-                                    let _ = self.builder.build_call(
-                                        drop_fn,
-                                        &[handle.into()],
-                                        "cap_drop",
-                                    );
-                                }
+                            // M2 (0.35.37): mirrored fix — a swallowed
+                            // mimi_cap_drop emission leaks the runtime cap
+                            // handle (exactly-once silently violated).
+                            let drop_fn =
+                                self.module.get_function("mimi_cap_drop").ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "M2: mimi_cap_drop not declared while compiling Drop \
+                                         of capability '{}' — the runtime handle would leak \
+                                         (exactly-once violated)",
+                                        name
+                                    ))
+                                })?;
+                            if let Some((alloca, _)) = vars.get(name) {
+                                let handle = self
+                                    .build_load(self.context.i64_type(), *alloca, "cap_drop_handle")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "cap drop load error: {}",
+                                            e
+                                        ))
+                                    })?;
+                                self.builder
+                                    .build_call(drop_fn, &[handle.into()], "cap_drop")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "M2: mimi_cap_drop call failed while dropping \
+                                             capability '{}': {} — the runtime handle would \
+                                             leak (exactly-once violated)",
+                                            name, e
+                                        ))
+                                    })?;
                             }
                             self.consume_cap(name)?;
                         }
@@ -2263,19 +2274,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // runtime cap handle (mirrors compile_block's Drop, H4).
                     if let Expr::Ident(name) = expr.unlocated() {
                         if self.is_cap_var(name) {
-                            if let Some(drop_fn) = self.module.get_function("mimi_cap_drop") {
-                                if let Some((alloca, _)) = vars.get(name) {
-                                    let handle = self.build_load(
-                                        self.context.i64_type(),
-                                        *alloca,
-                                        "cap_drop_handle",
-                                    )?;
-                                    let _ = self.builder.build_call(
-                                        drop_fn,
-                                        &[handle.into()],
-                                        "cap_drop",
-                                    );
-                                }
+                            // M2 (0.35.37): the old `let _ = build_call(...)`
+                            // swallowed a failed mimi_cap_drop emission — a
+                            // silent runtime cap leak that breaks the
+                            // exactly-once contract. Fail the build instead:
+                            // the runtime handle would never be released.
+                            let drop_fn =
+                                self.module.get_function("mimi_cap_drop").ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "M2: mimi_cap_drop not declared while compiling Drop \
+                                         of capability '{}' — the runtime handle would leak \
+                                         (exactly-once violated)",
+                                        name
+                                    ))
+                                })?;
+                            if let Some((alloca, _)) = vars.get(name) {
+                                let handle = self.build_load(
+                                    self.context.i64_type(),
+                                    *alloca,
+                                    "cap_drop_handle",
+                                )?;
+                                self.builder
+                                    .build_call(drop_fn, &[handle.into()], "cap_drop")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "M2: mimi_cap_drop call failed while dropping \
+                                             capability '{}': {} — the runtime handle would \
+                                             leak (exactly-once violated)",
+                                            name, e
+                                        ))
+                                    })?;
                             }
                             self.consume_cap(name)?;
                         }

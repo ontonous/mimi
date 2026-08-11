@@ -129,22 +129,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // must be released — the split components get their own fresh
                 // handles, so keeping the original in CAP_TABLE leaks one entry
                 // per split (loop-invariant: bytecode VM has no registry).
-                if let Some(drop_fn) = self.module.get_function("mimi_cap_drop") {
-                    if let Some((alloca, _)) = vars.get(receiver_name) {
-                        let handle = self
-                            .build_load(self.context.i64_type(), *alloca, "cap_split_old_handle")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!(
-                                    "cap split old-handle load error: {}",
-                                    e
-                                ))
-                            })?;
-                        let _ = self.builder.build_call(
-                            drop_fn,
-                            &[handle.into()],
-                            "cap_split_old_drop",
-                        );
-                    }
+                // M2 (0.35.37): a swallowed drop call leaked the handle
+                // silently — fail the build instead.
+                let drop_fn = self.module.get_function("mimi_cap_drop").ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "M2: mimi_cap_drop not declared while splitting capability \
+                             '{}' — the consumed receiver handle would leak \
+                             (exactly-once violated)",
+                        receiver_name
+                    ))
+                })?;
+                if let Some((alloca, _)) = vars.get(receiver_name) {
+                    let handle = self
+                        .build_load(self.context.i64_type(), *alloca, "cap_split_old_handle")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!(
+                                "cap split old-handle load error: {}",
+                                e
+                            ))
+                        })?;
+                    self.builder
+                        .build_call(drop_fn, &[handle.into()], "cap_split_old_drop")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!(
+                                "M2: mimi_cap_drop call failed while splitting capability \
+                                 '{}': {} — the consumed receiver handle would leak \
+                                 (exactly-once violated)",
+                                receiver_name, e
+                            ))
+                        })?;
                 }
                 self.consume_cap(receiver_name)?;
             }
