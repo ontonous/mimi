@@ -419,6 +419,8 @@ declare i64 @mimi_cap_register(ptr)
 
 declare i32 @mimi_cap_consume(i64, ptr)
 
+declare void @mimi_cap_drop(i64)
+
 declare ptr @mimi_tuple_serialize(ptr, i64, ptr)
 
 declare i64 @mimi_tuple_deserialize(ptr, i64, ptr, ptr)
