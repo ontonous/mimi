@@ -727,4 +727,10 @@ impl LspServer {
     pub(crate) fn drain_pending_notifications(&mut self) -> Vec<Value> {
         self.pending_notifications.drain(..).collect()
     }
+
+    /// Test-only: configure the workspace root (M10 sandbox tests).
+    #[cfg(test)]
+    pub(crate) fn set_workspace_root_for_test(&mut self, root: PathBuf) {
+        self.workspace_root = Some(root);
+    }
 }

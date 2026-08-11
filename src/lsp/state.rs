@@ -98,7 +98,14 @@ fn verification_diagnostic_origin(
 
 impl LspServer {
     fn register_uri_source(&self, uri: &str) -> Result<(SourceId, SourceRegistry), String> {
-        let disk_path = Self::uri_to_path(uri).map(|path| path.canonicalize().unwrap_or(path));
+        // M10 (0.35.37): was uri_to_path (unsandboxed) — the active document's
+        // URI canonicalize() probed path existence even when the URI pointed
+        // outside the workspace (a client could didOpen file:///etc/passwd and
+        // learn it exists via the registration result). The sandboxed variant
+        // rejects out-of-workspace paths identically to the import path.
+        let disk_path = self
+            .uri_to_path_sandboxed(uri)
+            .map(|path| path.canonicalize().unwrap_or(path));
         let key = match disk_path.as_deref() {
             Some(path) => {
                 let context = crate::loader::source_context_for_path(path)?;
@@ -679,5 +686,60 @@ impl LspServer {
         self.save_cache();
 
         diagnostics
+    }
+}
+
+#[cfg(test)]
+mod m10_tests {
+    use super::*;
+
+    fn server_with_workspace(root: &std::path::Path) -> LspServer {
+        let mut server = LspServer::new();
+        server.set_workspace_root_for_test(root.to_path_buf());
+        server
+    }
+
+    /// M10: a URI inside the workspace resolves to its canonical path.
+    #[test]
+    fn sandbox_accepts_in_workspace_uri() {
+        let dir = std::env::temp_dir().join(format!("mimi_m10_in_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let server = server_with_workspace(&dir);
+        let in_uri = format!("file://{}/main.mimi", dir.display());
+        let path = server.uri_to_path_sandboxed(&in_uri);
+        assert!(
+            path.is_some(),
+            "in-workspace URI must resolve, got {path:?}"
+        );
+        let resolved = path.unwrap();
+        assert!(
+            resolved.starts_with(&dir),
+            "resolved path must stay under the workspace root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a URI pointing outside the workspace (e.g. /etc/passwd) must be
+    /// rejected — the sandbox must not leak path-existence information.
+    #[test]
+    fn sandbox_rejects_out_of_workspace_uri() {
+        let dir = std::env::temp_dir().join(format!("mimi_m10_out_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let server = server_with_workspace(&dir);
+        let out_uri = "file:///etc/passwd";
+        assert!(
+            server.uri_to_path_sandboxed(out_uri).is_none(),
+            "out-of-workspace URI must be rejected"
+        );
+        // Crafted parent traversal must also be rejected after normalization.
+        let escape_uri = format!("file://{}/../etc/passwd", dir.display());
+        let resolved = server.uri_to_path_sandboxed(&escape_uri);
+        if let Some(p) = resolved {
+            assert!(
+                !p.to_string_lossy().contains("/etc/"),
+                "traversal must not escape into /etc, got {p:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
