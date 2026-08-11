@@ -578,31 +578,72 @@ fn try_parse_callback_category(name: &str) -> Option<AbiCallbackCategory> {
 /// which rejects unknown primitives instead of silently falling back.
 /// This function is only safe to call on validated data.
 ///
-/// GAP-2: The silent fallback to I64 is a known design gap. Unknown
-/// primitives are mapped to I64, which may cause incorrect ABI layout.
+/// M6 (0.35.37): the fallback is no longer SILENT — an unknown primitive
+/// name emits a one-time stderr warning (red line #2: no silent error
+/// swallowing). The ABI layout is still corrupted (I64 is wrong for the
+/// real type), but the corruption is now observable instead of invisible.
 fn parse_primitive(name: &str) -> AbiPrimitive {
-    try_parse_primitive(name).unwrap_or(AbiPrimitive::I64)
+    match try_parse_primitive(name) {
+        Some(p) => p,
+        None => {
+            warn_abi_fallback("primitive type", name, "I64");
+            AbiPrimitive::I64
+        }
+    }
+}
+
+/// One-time warning helper for ABI fallbacks — the first unknown name for
+/// each category is reported to stderr, subsequent ones are counted.
+/// Prevents log flooding while making the silent-mapping observable.
+fn warn_abi_fallback(category: &str, name: &str, fallback: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[mimi component] WARNING: unknown {category} name '{name}' in .mimiabi — \
+             mapped to {fallback}; ABI layout may be wrong. Use \
+             from_json_validated to reject unknown names instead."
+        );
+    }
 }
 
 /// Parse a symbol kind with fallback to Function.
 ///
 /// See [`parse_primitive`] for security notes.
 fn parse_symbol_kind(name: &str) -> AbiSymbolKind {
-    try_parse_symbol_kind(name).unwrap_or(AbiSymbolKind::Function)
+    match try_parse_symbol_kind(name) {
+        Some(k) => k,
+        None => {
+            warn_abi_fallback("symbol kind", name, "Function");
+            AbiSymbolKind::Function
+        }
+    }
 }
 
 /// Parse a calling convention with fallback to C.
 ///
 /// See [`parse_primitive`] for security notes.
 fn parse_call_conv(name: &str) -> AbiCallConv {
-    try_parse_call_conv(name).unwrap_or(AbiCallConv::C)
+    match try_parse_call_conv(name) {
+        Some(c) => c,
+        None => {
+            warn_abi_fallback("calling convention", name, "C");
+            AbiCallConv::C
+        }
+    }
 }
 
 /// Parse a callback category with fallback to SyncSameThread.
 ///
 /// See [`parse_primitive`] for security notes.
 fn parse_callback_category(name: &str) -> AbiCallbackCategory {
-    try_parse_callback_category(name).unwrap_or(AbiCallbackCategory::SyncSameThread)
+    match try_parse_callback_category(name) {
+        Some(c) => c,
+        None => {
+            warn_abi_fallback("callback category", name, "SyncSameThread");
+            AbiCallbackCategory::SyncSameThread
+        }
+    }
 }
 
 #[cfg(test)]
@@ -863,6 +904,57 @@ mod tests {
         assert_eq!(
             sym.ret,
             crate::component::AbiTypeRef::Primitive(AbiPrimitive::I64)
+        );
+    }
+
+    // ── M6 (0.35.37): ABI fallback is observable, not silent ──
+
+    /// Unknown primitive names in a hand-built .mimiabi must be REJECTED by
+    /// the validated path (never silently I64), and the unvalidated
+    /// fallback must map to I64 (the documented legacy behavior — now with
+    /// a warning instead of silence).
+    #[test]
+    fn m6_validated_path_rejects_unknown_primitive() {
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0.1.0", "abi_version": 1 },
+            "exports": [],
+            "imports": [],
+            "types": [{
+                "kind": "Struct", "name": "S",
+                "fields": [{
+                    "name": "x",
+                    "ty": { "kind": "Primitive", "value": "TotallyUnknown" },
+                    "offset": 0
+                }],
+                "size": 8, "align": 8
+            }]
+        }"#;
+        let err = MimiAbi::from_json_validated(json).expect_err("unknown primitive must fail");
+        assert!(
+            matches!(err, MimiAbiError::UnknownPrimitive(_)),
+            "expected UnknownPrimitive, got {err:?}"
+        );
+    }
+
+    /// The unvalidated reverse-conversion path must not crash on unknown
+    /// names and must warn (not silently fall back).
+    #[test]
+    fn m6_unvalidated_fallback_maps_to_i64() {
+        // parse_primitive with an unknown name maps to I64 (with warning).
+        let p = parse_primitive("TotallyUnknown");
+        assert_eq!(p, AbiPrimitive::I64);
+        // Valid names still parse correctly.
+        assert_eq!(parse_primitive("U64"), AbiPrimitive::U64);
+        assert_eq!(parse_primitive("F64"), AbiPrimitive::F64);
+        // Symbol kind fallback.
+        assert_eq!(parse_symbol_kind("BogusKind"), AbiSymbolKind::Function);
+        // Call conv fallback.
+        assert_eq!(parse_call_conv("bogus"), AbiCallConv::C);
+        // Callback category fallback.
+        assert_eq!(
+            parse_callback_category("bogus"),
+            AbiCallbackCategory::SyncSameThread
         );
     }
 }
