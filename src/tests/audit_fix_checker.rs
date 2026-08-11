@@ -786,6 +786,47 @@ func main() -> i32 {
     );
 }
 
+/// M3 (0.35.37): a Capability-typed function must fall back to legacy
+/// (fail-closed), never silently accepted by the resolved emitter with a
+/// no-op Drop. Locks the K-5 eligibility contract for an EXPLICITLY typed
+/// cap local (declared-type path) — must compile and run through the
+/// legacy path with the release actually emitted.
+///
+/// NOTE: passing a cap to a function (`consume_param(c)`) is accepted by
+/// the checker (transfer-on-call consumption) but the legacy cap_vars
+/// tracker still demands an explicit drop — a known checker/codegen
+/// alignment gap tracked outside this audit item. The test therefore
+/// exercises independent typed-local drops.
+#[test]
+fn audit_m3_cap_typed_functions_fallback_not_silently_accepted() {
+    let src = r#"
+cap FileReadCap;
+
+func typed_local_a() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    drop(c)
+    11
+}
+
+func typed_local_b() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    drop(c)
+    13
+}
+
+func main() -> i32 {
+    println(typed_local_a())
+    println(typed_local_b())
+    0
+}
+"#;
+    let native = checked_compile_and_run(src).expect("cap fallback must compile and run");
+    assert!(
+        native.contains("11") && native.contains("13"),
+        "cap fallback program should print 11 and 13, got: {native}"
+    );
+}
+
 /// H-9 (Wave-2, closed 2026-08-07): match 落空必须发射 NON_EXHAUSTIVE_MATCH
 /// （运行时 E0805 panic），而非静默 LoadUnit。此前 compiler.rs 落空分支
 /// `fc.emit(Op::LoadUnit { rd })` 使新 opcode 零发射——VM 与 codegen

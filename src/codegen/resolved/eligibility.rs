@@ -690,11 +690,21 @@ fn require_block(
             // (fail-closed) instead of silently leaking the handle.
             // Non-cap drops are pure no-ops on all three backends (VM/legacy/
             // resolved) — verified empirically.
+            // M3 (0.35.37): if a Drop place is NOT found in locals (e.g. a
+            // parameter slot the resolved lowering did not register), the old
+            // `if let Some` silently accepted the drop — for a Capability the
+            // handle then leaked with the resolved emitter's no-op Drop. Fail
+            // closed: an unregistered drop place is unsupported.
             ResolvedStmtKind::Drop(places) => {
                 for place in places {
-                    if let Some(local) = locals.get(&place.base) {
-                        require_scalar_type(program, owner, &local.ty)?;
-                    }
+                    let local = locals.get(&place.base).ok_or_else(|| {
+                        UnsupportedResolvedNode::new(
+                            owner,
+                            &statement.node_id,
+                            "drop place is not in the resolved local table",
+                        )
+                    })?;
+                    require_scalar_type(program, owner, &local.ty)?;
                 }
             }
             ResolvedStmtKind::Contract { condition, .. } => {
