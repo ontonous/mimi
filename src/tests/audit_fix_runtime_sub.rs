@@ -230,30 +230,43 @@ fn audit_m8_buf_nul_terminate_positive_writes_exact_nul() {
 
 #[test]
 fn audit_m8_buf_nul_terminate_oob_aborts_in_child() {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     // Re-run this same test binary with a filter that forces the abort path.
+    //
+    // 0.35.37 hardening: Stdio::piped() allocated fresh fds that raced with
+    // audit_h13's close_fd tests under --test-threads (EBADF on spawn).
+    // Redirect the child's stderr to a FILE opened before spawn instead:
+    // the fd is stable for the child's lifetime, no piped allocation race,
+    // and the abort message is still captured for the fail-loud assertion.
     let exe = std::env::current_exe().expect("current exe");
-    let child = Command::new(exe)
+    let err_path = std::env::temp_dir().join(format!(
+        "mimi_m8_err_{}_{}.log",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("t")
+    ));
+    let err_file = std::fs::File::create(&err_path).expect("create stderr file");
+    // SAFETY: err_file is a valid OS handle for Stdio::from.
+    let status = Command::new(exe)
         .args([
             "--exact",
             "tests::audit_fix_runtime_sub::audit_m8_oob_abort_helper",
             "--nocapture",
         ])
         .env("MIMI_M8_OOB_HELPER", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(err_file))
+        .status()
         .expect("spawn child");
-    let out = child.wait_with_output().expect("wait child");
     assert!(
-        !out.status.success(),
+        !status.success(),
         "out-of-bounds NUL terminate must abort (got success)"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
     assert!(
         stderr.contains("heap-corrupting write prevented"),
         "abort message must name the hazard, got: {stderr}"
     );
+    let _ = std::fs::remove_file(&err_path);
 }
 
 /// Helper executed in a child process: an offset past the allocation must
