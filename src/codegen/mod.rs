@@ -3643,6 +3643,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))?;
         }
 
+        if std::env::var("MIMI_DUMP_MODULE_OPT").is_ok() {
+            if let Ok(path) = std::env::var("MIMI_DUMP_MODULE_OPT") {
+                let _ = self.module.print_to_file(&path);
+            }
+        }
         tm.write_to_file(
             &self.module,
             inkwell::targets::FileType::Object,
