@@ -3037,6 +3037,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             if self.cap_type_names.contains(fn_name.as_str()) {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
+                                // 0.35.37 (exactly-once alignment): `let c =
+                                // FileReadCap` (no type annotation) registers
+                                // ONLY in var_type_names — never in cap_vars —
+                                // so Stmt::Drop silently skipped the release
+                                // and call-argument consumption had nothing to
+                                // consume. Register the alloca now that
+                                // compile_pattern_bind has run (vars holds it).
+                                if let Some(&(cap_alloca, _)) = vars.get(name) {
+                                    self.register_cap(name, cap_alloca);
+                                }
                             }
                         }
                         // 0.35.14 (DX backlog #18): tuple fn-element extraction.
