@@ -7542,12 +7542,78 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Vec<BasicValueEnum<'ctx>>, CompileError> {
-        args.iter()
-            .map(|arg| match arg.unlocated() {
-                Expr::NamedArg(_, value) => self.compile_expr(value, vars),
-                other => self.compile_expr(other, vars),
-            })
-            .collect()
+        let mut compiled = Vec::with_capacity(args.len());
+        for arg in args {
+            let val = match arg.unlocated() {
+                Expr::NamedArg(_, value) => self.compile_expr(value, vars)?,
+                other => self.compile_expr(other, vars)?,
+            };
+            // 0.35.37 (exactly-once alignment): the CFG checker consumes a
+            // capability passed as a call argument (Move semantics — see
+            // resource_lower.rs capability_places / emit_consumes on Call
+            // arguments), recursively through Tuple/List/Set/Record/Project
+            // values. The legacy emitter never marked arguments consumed, so
+            // `sink(c)` or `sink([c])` left `c` registered and codegen
+            // demanded an extra drop(c) the checker did not require —
+            // valid programs failed to compile. Collect every capability
+            // variable reachable from the argument and mark it consumed,
+            // mirroring the checker.
+            let mut places = Vec::new();
+            Self::collect_arg_cap_places(arg, vars, &mut places);
+            for name in places {
+                if self.is_cap_var(&name) {
+                    self.consume_cap(&name)?;
+                }
+            }
+            compiled.push(val);
+        }
+        Ok(compiled)
+    }
+
+    /// Mirror of `resource_lower.rs::collect_capability_places`: collect
+    /// capability variable names reachable from an argument expression
+    /// (Ident, and recursively through tuple/list/set/record literals and
+    /// projections). Used to align call-argument consumption with the
+    /// checker's Move semantics.
+    fn collect_arg_cap_places(
+        arg: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        out: &mut Vec<String>,
+    ) {
+        match arg.unlocated() {
+            Expr::Ident(name) => {
+                if vars.contains_key(name) {
+                    out.push(name.clone());
+                }
+            }
+            Expr::NamedArg(_, value) => Self::collect_arg_cap_places(value, vars, out),
+            Expr::Tuple(values) => {
+                for v in values {
+                    Self::collect_arg_cap_places(v, vars, out);
+                }
+            }
+            Expr::List(values) => {
+                for v in values {
+                    Self::collect_arg_cap_places(v, vars, out);
+                }
+            }
+            Expr::SetLiteral(values) => {
+                for v in values {
+                    Self::collect_arg_cap_places(v, vars, out);
+                }
+            }
+            Expr::Record { fields, .. } => {
+                for field in fields {
+                    Self::collect_arg_cap_places(&field.value, vars, out);
+                }
+            }
+            Expr::Field(obj, _) => Self::collect_arg_cap_places(obj, vars, out),
+            Expr::Index(base, index) => {
+                Self::collect_arg_cap_places(base, vars, out);
+                Self::collect_arg_cap_places(index, vars, out);
+            }
+            _ => {}
+        }
     }
 
     /// Reorder named args to positional order for a known function definition.

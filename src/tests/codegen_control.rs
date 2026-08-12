@@ -1114,6 +1114,7 @@ fn codegen_cap_register() {
         cap FileReadCap;
         func main() -> i32 {
             let c = FileReadCap
+            drop(c)
             42
         }
     "#,

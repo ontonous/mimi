@@ -1029,6 +1029,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             if self.cap_type_names.contains(fn_name.as_str()) {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
+                                // 0.35.37 (exactly-once alignment): mirror
+                                // func.rs — register unannotated cap vars so
+                                // block-level Drop and call-argument
+                                // consumption see them.
+                                if let Some(&(cap_alloca, _)) = vars.get(name) {
+                                    self.register_cap(name, cap_alloca);
+                                }
                             }
                         }
                         // 0.35.14 (DX backlog #18): tuple fn-element extraction.
@@ -1970,6 +1977,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             if self.cap_type_names.contains(fn_name.as_str()) {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
+                                // 0.35.37 (exactly-once alignment): mirror
+                                // func.rs — register unannotated cap vars so
+                                // block-level Drop and call-argument
+                                // consumption see them.
+                                if let Some(&(cap_alloca, _)) = vars.get(name) {
+                                    self.register_cap(name, cap_alloca);
+                                }
                             }
                             // Track return types for builtins whose result is
                             // a List<T> or other type the caller needs to

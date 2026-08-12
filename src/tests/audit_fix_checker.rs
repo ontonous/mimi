@@ -827,6 +827,77 @@ func main() -> i32 {
     );
 }
 
+/// 0.35.37 (exactly-once alignment): passing a capability to a function is a
+/// MOVE — the CFG checker consumes the argument (resource_lower.rs
+/// emit_consumes on Call arguments), so the caller must NOT be required to
+/// drop(c) again. Previously the legacy emitter never marked call arguments
+/// consumed, so `sink(c)` left `c` registered and codegen demanded an extra
+/// drop the checker did not require (compilation failed on valid code).
+/// Also: `let c = FileReadCap` (no annotation) now registers in cap_vars, so
+/// its drop actually emits the release.
+#[test]
+fn audit_cap_argument_transfer_aligns_checker_and_codegen() {
+    let src = r#"
+cap FileReadCap;
+
+func sink(c: cap FileReadCap) -> i32 {
+    drop(c)
+    21
+}
+
+func sink_list(v: List<cap FileReadCap>) -> i32 {
+    drop(v)
+    23
+}
+
+func unannotated_drop() -> i32 {
+    let c = FileReadCap
+    drop(c)
+    22
+}
+
+func main() -> i32 {
+    let c = FileReadCap
+    println(sink(c))
+    let c2 = FileReadCap
+    println(sink_list([c2]))
+    println(unannotated_drop())
+    0
+}
+"#;
+    // Checker must accept (transfer consumes the cap, incl. inside a list).
+    let file = parse(src);
+    core::check(&file).expect("checker must accept argument transfer");
+    // Codegen must compile AND run without demanding an extra drop(c).
+    let native = checked_compile_and_run(src).expect("transfer must compile and run");
+    assert!(
+        native.contains("21") && native.contains("22") && native.contains("23"),
+        "transfer program should print 21, 22 and 23, got: {native}"
+    );
+    // Double use must be rejected (moved-after-consumed) — checker and
+    // codegen agree.
+    let bad = r#"
+cap FileReadCap;
+func sink(c: cap FileReadCap) -> i32 { drop(c); 21 }
+func main() -> i32 {
+    let c = FileReadCap
+    sink(c)
+    sink(c)
+    0
+}
+"#;
+    let diags = check_source(bad).expect_err("double transfer must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") || rendered.contains("moved"),
+        "double use must report moved-after-consumed, got:\n{rendered}"
+    );
+}
+
 /// H-9 (Wave-2, closed 2026-08-07): match 落空必须发射 NON_EXHAUSTIVE_MATCH
 /// （运行时 E0805 panic），而非静默 LoadUnit。此前 compiler.rs 落空分支
 /// `fc.emit(Op::LoadUnit { rd })` 使新 opcode 零发射——VM 与 codegen
