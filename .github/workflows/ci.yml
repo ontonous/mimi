@@ -96,3 +96,9 @@ jobs:
         if: always()
         continue-on-error: true
         run: cargo test -- --ignored --test-threads=1
+
+      # ── 性能门禁（0.35.46，C2 教训闭环）──────────────────────────
+      # release 构建 + 宽松阈值，只拦截灾难性回退（native dsp >3× C -O2 或
+      # VM dsp >20s），不拦截共享 runner 噪声。细粒度复测仍用本地 quadrant.sh。
+      - name: Performance gate (release, gross-regression only)
+        run: bash scripts/perf-gate.sh
