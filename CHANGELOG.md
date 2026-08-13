@@ -1,9 +1,15 @@
 # Changelog
 
-## [Unreleased] — 0.1.5-dev
+## [0.1.5] — 2026-08-13
 
-> 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
-> `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
+> **性能主线 + 审查收口 + 质量次线（Phase A–I）**。
+> 0.1.5 里程碑：trap 成本消减（SD-9 链式末端收敛 + cold 权重，dsp O1 3.97×→1.04×
+> 追平 C -O2）、resolved 覆盖扩展（fallback 0.3027→0.2735）、O1 正确性切片、深度
+> 可用性评估（demos 双后端差分 10+ bug 家族）、外部审查 4C+13H+10M 全闭环、僵尸
+> 关键字裁撤（80→67）、VM 性能 R1/R3/R4/R5（RUN dsp 8.9s→4.7s）、双后端统一
+> U1/U2/U3/U5、性能门禁入 CI。质量次线：resolve→zonk 迁移（31 处）、parser panic
+> 审计、LSP Span/Origin 迁移、trivia 化（desc:/rule:/mms{}）、fmt 评估、错误消息
+> CO-H2 精确 span。已知排期外项（native dsp ≤1.15×、RUN dsp ≤1s）登记 0.2/1.x。
 
 ### 0.35.47 — R5 VM 循环不变量 LOAD_CONST 提升（LICM-lite）
 
