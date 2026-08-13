@@ -43,7 +43,7 @@ fn flow_parse_debug() {
     // parse_block() should consume { } and leave the final } for the flow body.
     // v0.29.10: transfer matrix injects Fault + fallbacks for missing (state,event).
     let file = parse(src);
-    assert_eq!(file.items.len(), 1);
+    assert_eq!(file.items.len(), 3);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
@@ -64,7 +64,7 @@ fn flow_parse_states_only() {
     // No transitions → only Fault state is injected (no event matrix cells).
     let src = "flow F { state Idle state Active }";
     let file = parse(src);
-    assert_eq!(file.items.len(), 1);
+    assert_eq!(file.items.len(), 3);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
@@ -89,7 +89,7 @@ fn flow_parse_states_only() {
 fn flow_parse_transition_semicolon() {
     let src = "flow F { state A state B transition go(A) -> B; }";
     let file = parse(src);
-    assert_eq!(file.items.len(), 1);
+    assert_eq!(file.items.len(), 3);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
@@ -109,7 +109,7 @@ fn flow_parse_transition_semicolon() {
 fn flow_parse_empty_block() {
     let src = "flow F { state A state B transition go(A) -> B { } }";
     let file = parse(src);
-    assert_eq!(file.items.len(), 1);
+    assert_eq!(file.items.len(), 3);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
@@ -254,7 +254,7 @@ flow Processor {
 }
 "#;
     let file = parse(src);
-    assert_eq!(file.items.len(), 1);
+    assert_eq!(file.items.len(), 3);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(user_states(f), vec!["Idle", "Active", "OverloadWarning"]);
@@ -2074,7 +2074,7 @@ func main() -> i32 {
     assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines, vec!["Live", "panic:E0801"], "got {:?}", lines);
+    assert_eq!(lines, vec!["Live()", "Panic(E0801)"], "got {:?}", lines);
 }
 
 #[test]
@@ -2089,8 +2089,8 @@ flow S {
     state Active { n: i32 }
     transition fail(Active) -> Fault {
         return Fault {
-            last_state: "Active",
-            unexpected_event: "fail",
+            last_state: Active,
+            unexpected_event: fail,
             snapshot: "user fail",
             trace: SystemTrace {
                 last_state_name: "Active",
@@ -2119,7 +2119,7 @@ func main() -> i32 {
     assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines, vec!["Active", "Active"], "got {:?}", lines);
+    assert_eq!(lines, vec!["Active()", "Active"], "got {:?}", lines);
 }
 
 #[test]
@@ -2160,7 +2160,7 @@ func main() -> i32 {
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(
         lines,
-        vec!["A", "panic:E0801", "A", "panic:E0801", "2"],
+        vec!["A()", "Panic(E0801)", "A", "panic:E0801", "2"],
         "got {:?}",
         lines
     );
@@ -2207,7 +2207,7 @@ func main() -> i32 {
     // trace.snapshot is "" (empty middle line, preserved by lines()).
     assert_eq!(
         lines,
-        vec!["Zero", "", "panic:E0801", "Zero", "panic:E0801"],
+        vec!["Zero()", "", "Panic(E0801)", "Zero", "panic:E0801"],
         "got {:?}",
         lines
     );
@@ -2298,12 +2298,13 @@ func main() -> i32 {
     let f = Calc::boom(s, 0)
     match f {
         Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
-            if last_state == "Ready" {
-                if unexpected_event == "panic:E0801" {
-                    return 1
+            match last_state {
+                Ready => match unexpected_event {
+                    Panic(_) => return 1
+                    _ => 0
                 }
+                _ => 0
             }
-            0
         }
         _ => 0
     }
@@ -2684,8 +2685,8 @@ flow Parent {
     state Working { child: CIdle }
     transition boom(Working) -> Fault {
         return Fault {
-            last_state: "Working",
-            unexpected_event: "boom",
+            last_state: Working,
+            unexpected_event: boom,
             snapshot: "user",
             trace: SystemTrace {
                 last_state_name: "Working",
@@ -3363,7 +3364,7 @@ func main() -> i32 {
     );
     assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "Live\npeer_fault");
+    assert_eq!(out.trim(), "Live()\npeer_fault()");
 }
 
 #[test]
@@ -4772,7 +4773,7 @@ func main() -> i32 {
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
     assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
-    assert_eq!(out.trim(), "FFI_Pinned");
+    assert_eq!(out.trim(), "FFI_Pinned()");
 }
 
 #[test]
@@ -5201,9 +5202,9 @@ func main() -> i32 {
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
     let (_, bytecode_out) = run_source_bytecode_with_stdout(src);
-    assert_eq!(bytecode_out.trim(), "r1 A\nB");
+    assert_eq!(bytecode_out.trim(), "r1 A\nB()");
     let native = compile_and_run(src).expect("codegen must not mis-tag subset Fault");
-    assert_eq!(native.trim(), "r1 A\nB");
+    assert_eq!(native.trim(), "r1 A\nB()");
 }
 
 #[test]
@@ -6198,7 +6199,7 @@ func main() -> i32 {
     let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
     let native = checked_compile_and_run(src).expect("codegen typed fault absorption");
-    assert_eq!(native.trim(), "Idle\n0", "got {:?}", native);
+    assert_eq!(native.trim(), "Idle()\n0", "got {:?}", native);
 }
 
 #[test]
@@ -6255,13 +6256,13 @@ func main() -> i32 {
     let (_, bc) = run_source_bytecode_with_stdout(src);
     assert_eq!(
         bc.trim(),
-        "Ready\npanic:E0801",
+        "Ready()\nPanic(E0801)",
         "bytecode absorbed div-by-zero"
     );
     let native = compile_and_run(src).expect("codegen must absorb div-by-zero, not abort");
     assert_eq!(
         native.trim(),
-        "Ready\npanic:E0801",
+        "Ready()\nPanic(E0801)",
         "codegen absorbed div-by-zero"
     );
 }
@@ -6294,13 +6295,13 @@ func main() -> i32 {
     let (_, bc) = run_source_bytecode_with_stdout(src);
     assert_eq!(
         bc.trim(),
-        "S\npanic:E0801\n10",
+        "S()\nPanic(E0801)\n10",
         "bytecode shadows persistent draft into Fault"
     );
     let native = compile_and_run(src).expect("codegen must absorb div-by-zero, not abort");
     assert_eq!(
         native.trim(),
-        "S\npanic:E0801\n10",
+        "S()\nPanic(E0801)\n10",
         "codegen must shadow the persistent draft value (10), not the default (0)"
     );
 }
@@ -6362,9 +6363,13 @@ func main() -> i32 {
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
     let (_, bc) = run_source_bytecode_with_stdout(src);
-    assert_eq!(bc.trim(), "S\nT", "bytecode multi-flow fault dispatch");
+    assert_eq!(bc.trim(), "S()\nT()", "bytecode multi-flow fault dispatch");
     let native = compile_and_run(src).expect("codegen multi-flow fault dispatch must not abort");
-    assert_eq!(native.trim(), "S\nT", "codegen multi-flow fault dispatch");
+    assert_eq!(
+        native.trim(),
+        "S()\nT()",
+        "codegen multi-flow fault dispatch"
+    );
 }
 
 #[test]

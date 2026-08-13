@@ -72,6 +72,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
 
+                // 0.36.4 Fault nominal (裁决 1): a bare state/event name in call
+                // position that is a StateId/EventId variant compiles to a nominal
+                // variant value (build_nominal_variant). Panic { code } carries a
+                // single string payload; other variants are no-payload.
+                if let Some(enum_type) = self.nominal_variant_enum(name.as_str()) {
+                    let payload = if args.len() == 1 {
+                        match args[0].unlocated() {
+                            Expr::Literal(Lit::String(s)) => Some(s.clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    return self.build_nominal_variant(&enum_type, name, payload.as_deref());
+                }
+
                 self.compile_call(name, args, vars)
             }
             Expr::Field(obj, method_name) => {

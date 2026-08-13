@@ -91,7 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // We need to decode that struct and bind each inner pattern to its
                 // respective field, instead of binding the entire payload to every
                 // inner pattern variable.
-                let variant_owner = self.find_variant_owner(name);
+                let variant_owner = self.find_variant_owner_scoped(name, scrutinee_type);
                 let variant_arg_tys: Option<Vec<crate::ast::Type>> =
                     variant_owner.as_ref().and_then(|(owner, _)| {
                         self.type_defs.get(owner).and_then(|td| {

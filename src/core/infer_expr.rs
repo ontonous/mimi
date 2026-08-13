@@ -43,6 +43,12 @@ impl<'a> Checker<'a> {
                     self.infer_expr(expr, scopes)
                 }
             }
+            // 0.36.4 Fault nominal: a bare state/event name in flow-scoped
+            // StateId/EventId context resolves as a no-payload variant
+            // (e.g. `Fault { last_state: Working, unexpected_event: boom }`).
+            Expr::Ident(name) if self.nominal_variant_arity(expected, name) == Some(0) => {
+                expected.clone()
+            }
             Expr::Call(callee, args) => {
                 if let Expr::Ident(name) = callee.unlocated() {
                     let option_inner = match expected.unlocated() {
@@ -77,6 +83,22 @@ impl<'a> Checker<'a> {
                         if let Some((_, error)) = result_parts {
                             let actual = self.check_expr(error, &args[0], scopes);
                             self.freeze_variant_payload(error, &actual);
+                            return expected.clone();
+                        }
+                    } else if let Some(arity) = self.nominal_variant_arity(expected, name) {
+                        // 0.36.4 Fault nominal (裁决 1): a bare state/event name
+                        // in flow-scoped StateId/EventId context resolves scoped to
+                        // the expected enum type (cross-flow disambiguation),
+                        // mirroring the Some/None/Ok/Err handling above.
+                        if args.len() == arity {
+                            // Panic { code: string } carries a single string payload.
+                            for arg in args {
+                                self.check_expr(
+                                    &Type::Name("string".to_string(), vec![]),
+                                    arg,
+                                    scopes,
+                                );
+                            }
                             return expected.clone();
                         }
                     } else if name == "unsafe_cast_protocol" && args.len() == 1 {
@@ -147,6 +169,30 @@ impl<'a> Checker<'a> {
             }
             // For all other expressions, fall back to inference
             _ => self.infer_expr(expr, scopes),
+        }
+    }
+
+    /// 0.36.4 Fault nominal (裁决 1): if `expected` is a flow-scoped
+    /// `StateId`/`EventId` enum type and `name` is one of its variants, return
+    /// the variant's payload arity. Used by `check_expr_inner` to resolve bare
+    /// state/event names scoped to the expected enum type — disambiguating
+    /// cross-flow name collisions (mirrors the __MultiTarget union scoping).
+    fn nominal_variant_arity(&self, expected: &Type, name: &str) -> Option<usize> {
+        let Type::Name(enum_name, _) = expected.unlocated() else {
+            return None;
+        };
+        if !(enum_name.ends_with("::StateId") || enum_name.ends_with("::EventId")) {
+            return None;
+        }
+        let td = self.types.get(enum_name)?;
+        let TypeDefKind::Enum(variants) = &td.kind else {
+            return None;
+        };
+        let variant = variants.iter().find(|v| v.name == name)?;
+        match &variant.payload {
+            None => Some(0),
+            Some(VariantPayload::Tuple(types)) => Some(types.len()),
+            Some(VariantPayload::Record(fields)) => Some(fields.len()),
         }
     }
 

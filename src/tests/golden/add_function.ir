@@ -1,16 +1,15 @@
 ; ModuleID = 'golden_test'
 source_filename = "golden_test"
 
-@str = private unnamed_addr constant [7 x i8] c"Single\00", align 1
-@str.1 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
-@str.2 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
-@str.3 = private unnamed_addr constant [7 x i8] c"Single\00", align 1
-@str.4 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
-@str.5 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@payload_malloc_oom_msg = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
+@str = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@str.1 = private unnamed_addr constant [7 x i8] c"Single\00", align 1
+@str.2 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
+@str.3 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@str.4 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
+@str.5 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.6 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
-@str.7 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
-@str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
-@str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@str.7 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
 @op_name = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
@@ -748,6 +747,101 @@ declare void @mimi_trap_div_overflow()
 
 declare void @mimi_trap_float_not_finite(ptr)
 
+define internal { i32, i64 } @"flow::Main::StateId_Fault"() {
+entry:
+  %"flow::Main::StateId_Fault" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::StateId_Fault", i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::StateId_Fault", i32 0, i32 1
+  %"flow::Main::StateId_Fault1" = load { i32, i64 }, ptr %"flow::Main::StateId_Fault", align 4
+  ret { i32, i64 } %"flow::Main::StateId_Fault1"
+}
+
+define internal { i32, i64 } @"flow::Main::StateId_Single"() {
+entry:
+  %"flow::Main::StateId_Single" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::StateId_Single", i32 0, i32 0
+  store i32 1, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::StateId_Single", i32 0, i32 1
+  %"flow::Main::StateId_Single1" = load { i32, i64 }, ptr %"flow::Main::StateId_Single", align 4
+  ret { i32, i64 } %"flow::Main::StateId_Single1"
+}
+
+define internal { i32, i64 } @"flow::Main::EventId_Panic"({ ptr, i64 } %0) {
+entry:
+  %"flow::Main::EventId_Panic" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_Panic", i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_Panic", i32 0, i32 1
+  %payload_malloc_malloc = call ptr @malloc(i64 64)
+  %payload_malloc_is_null = icmp eq ptr %payload_malloc_malloc, null
+  br i1 %payload_malloc_is_null, label %payload_malloc_oom, label %payload_malloc_ok
+
+payload_malloc_ok:                                ; preds = %entry
+  store { ptr, i64 } %0, ptr %payload_malloc_malloc, align 8
+  %payload_int = ptrtoint ptr %payload_malloc_malloc to i64
+  store i64 %payload_int, ptr %payload, align 4
+  %"flow::Main::EventId_Panic1" = load { i32, i64 }, ptr %"flow::Main::EventId_Panic", align 4
+  ret { i32, i64 } %"flow::Main::EventId_Panic1"
+
+payload_malloc_oom:                               ; preds = %entry
+  call void @mimi_runtime_abort(ptr @payload_malloc_oom_msg)
+  unreachable
+}
+
+; Function Attrs: noreturn
+declare void @mimi_runtime_abort(ptr) #0
+
+define internal { i32, i64 } @"flow::Main::EventId_ffi_crash"() {
+entry:
+  %"flow::Main::EventId_ffi_crash" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_ffi_crash", i32 0, i32 0
+  store i32 1, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_ffi_crash", i32 0, i32 1
+  %"flow::Main::EventId_ffi_crash1" = load { i32, i64 }, ptr %"flow::Main::EventId_ffi_crash", align 4
+  ret { i32, i64 } %"flow::Main::EventId_ffi_crash1"
+}
+
+define internal { i32, i64 } @"flow::Main::EventId_peer_fault"() {
+entry:
+  %"flow::Main::EventId_peer_fault" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_peer_fault", i32 0, i32 0
+  store i32 2, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_peer_fault", i32 0, i32 1
+  %"flow::Main::EventId_peer_fault1" = load { i32, i64 }, ptr %"flow::Main::EventId_peer_fault", align 4
+  ret { i32, i64 } %"flow::Main::EventId_peer_fault1"
+}
+
+define internal { i32, i64 } @"flow::Main::EventId_recover"() {
+entry:
+  %"flow::Main::EventId_recover" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_recover", i32 0, i32 0
+  store i32 3, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_recover", i32 0, i32 1
+  %"flow::Main::EventId_recover1" = load { i32, i64 }, ptr %"flow::Main::EventId_recover", align 4
+  ret { i32, i64 } %"flow::Main::EventId_recover1"
+}
+
+define internal { i32, i64 } @"flow::Main::EventId_reset"() {
+entry:
+  %"flow::Main::EventId_reset" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_reset", i32 0, i32 0
+  store i32 4, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_reset", i32 0, i32 1
+  %"flow::Main::EventId_reset1" = load { i32, i64 }, ptr %"flow::Main::EventId_reset", align 4
+  ret { i32, i64 } %"flow::Main::EventId_reset1"
+}
+
+define internal { i32, i64 } @"flow::Main::EventId_run"() {
+entry:
+  %"flow::Main::EventId_run" = alloca { i32, i64 }, align 8
+  %tag = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_run", i32 0, i32 0
+  store i32 5, ptr %tag, align 4
+  %payload = getelementptr inbounds { i32, i64 }, ptr %"flow::Main::EventId_run", i32 0, i32 1
+  %"flow::Main::EventId_run1" = load { i32, i64 }, ptr %"flow::Main::EventId_run", align 4
+  ret { i32, i64 } %"flow::Main::EventId_run1"
+}
+
 define i32 @add(i32 %0, i32 %1) {
 entry:
   %b = alloca i32, align 4
@@ -786,58 +880,66 @@ entry:
   ret {} %ret_load
 }
 
-define {} @Main__reset__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
+define {} @Main__reset__from_Fault({ { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
   %Single = alloca {}, align 8
-  %self = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
+  %self = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
   %ret_load = load {}, ptr %Single, align 1
   ret {} %ret_load
 }
 
-define {} @Main__recover__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
+define {} @Main__recover__from_Fault({ { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
   %Single = alloca {}, align 8
-  %self = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
+  %self = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
   %ret_load = load {}, ptr %Single, align 1
   ret {} %ret_load
 }
 
-define { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Single({} %0) {
+define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Single({} %0) {
 entry:
   %PanicPayload = alloca { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, align 8
   %MemoryDump = alloca { { ptr, i64 }, i32 }, align 8
   %SystemTrace = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, align 8
-  %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %nominal_variant1 = alloca { i32, i64 }, align 8
+  %nominal_variant = alloca { i32, i64 }, align 8
+  %Fault = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %self = alloca {}, align 8
   store {} %0, ptr %self, align 1
+  %variant_tag = getelementptr inbounds { i32, i64 }, ptr %nominal_variant, i32 0, i32 0
+  store i32 1, ptr %variant_tag, align 4
+  %variant_payload = getelementptr inbounds { i32, i64 }, ptr %nominal_variant, i32 0, i32 1
+  store i64 0, ptr %variant_payload, align 4
+  %variant_val = load { i32, i64 }, ptr %nominal_variant, align 4
+  %last_state = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
+  store { i32, i64 } %variant_val, ptr %last_state, align 4
+  %variant_tag2 = getelementptr inbounds { i32, i64 }, ptr %nominal_variant1, i32 0, i32 0
+  store i32 2, ptr %variant_tag2, align 4
+  %variant_payload3 = getelementptr inbounds { i32, i64 }, ptr %nominal_variant1, i32 0, i32 1
+  store i64 0, ptr %variant_payload3, align 4
+  %variant_val4 = load { i32, i64 }, ptr %nominal_variant1, align 4
+  %unexpected_event = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
+  store { i32, i64 } %variant_val4, ptr %unexpected_event, align 4
   %strlen_call = call i64 @strlen(ptr @str)
   %str_wrap_len = insertvalue { ptr, i64 } { ptr @str, i64 undef }, i64 %strlen_call, 1
-  %last_state = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
-  store { ptr, i64 } %str_wrap_len, ptr %last_state, align 8
-  %strlen_call1 = call i64 @strlen(ptr @str.1)
-  %str_wrap_len2 = insertvalue { ptr, i64 } { ptr @str.1, i64 undef }, i64 %strlen_call1, 1
-  %unexpected_event = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
-  store { ptr, i64 } %str_wrap_len2, ptr %unexpected_event, align 8
-  %strlen_call3 = call i64 @strlen(ptr @str.2)
-  %str_wrap_len4 = insertvalue { ptr, i64 } { ptr @str.2, i64 undef }, i64 %strlen_call3, 1
-  %snapshot = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
-  store { ptr, i64 } %str_wrap_len4, ptr %snapshot, align 8
-  %strlen_call5 = call i64 @strlen(ptr @str.3)
-  %str_wrap_len6 = insertvalue { ptr, i64 } { ptr @str.3, i64 undef }, i64 %strlen_call5, 1
+  %snapshot = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
+  store { ptr, i64 } %str_wrap_len, ptr %snapshot, align 8
+  %strlen_call5 = call i64 @strlen(ptr @str.1)
+  %str_wrap_len6 = insertvalue { ptr, i64 } { ptr @str.1, i64 undef }, i64 %strlen_call5, 1
   %last_state_name = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 0
   store { ptr, i64 } %str_wrap_len6, ptr %last_state_name, align 8
-  %strlen_call7 = call i64 @strlen(ptr @str.4)
-  %str_wrap_len8 = insertvalue { ptr, i64 } { ptr @str.4, i64 undef }, i64 %strlen_call7, 1
+  %strlen_call7 = call i64 @strlen(ptr @str.2)
+  %str_wrap_len8 = insertvalue { ptr, i64 } { ptr @str.2, i64 undef }, i64 %strlen_call7, 1
   %unexpected_event9 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 1
   store { ptr, i64 } %str_wrap_len8, ptr %unexpected_event9, align 8
-  %strlen_call10 = call i64 @strlen(ptr @str.5)
-  %str_wrap_len11 = insertvalue { ptr, i64 } { ptr @str.5, i64 undef }, i64 %strlen_call10, 1
+  %strlen_call10 = call i64 @strlen(ptr @str.3)
+  %str_wrap_len11 = insertvalue { ptr, i64 } { ptr @str.3, i64 undef }, i64 %strlen_call10, 1
   %snapshot12 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 2
   store { ptr, i64 } %str_wrap_len11, ptr %snapshot12, align 8
-  %strlen_call13 = call i64 @strlen(ptr @str.6)
-  %str_wrap_len14 = insertvalue { ptr, i64 } { ptr @str.6, i64 undef }, i64 %strlen_call13, 1
+  %strlen_call13 = call i64 @strlen(ptr @str.4)
+  %str_wrap_len14 = insertvalue { ptr, i64 } { ptr @str.4, i64 undef }, i64 %strlen_call13, 1
   %fields = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 0
   store { ptr, i64 } %str_wrap_len14, ptr %fields, align 8
   %count = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 1
@@ -845,117 +947,109 @@ entry:
   %memory_dump = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 3
   %load_memory_dump = load { { ptr, i64 }, i32 }, ptr %MemoryDump, align 8
   store { { ptr, i64 }, i32 } %load_memory_dump, ptr %memory_dump, align 8
-  %strlen_call15 = call i64 @strlen(ptr @str.7)
-  %str_wrap_len16 = insertvalue { ptr, i64 } { ptr @str.7, i64 undef }, i64 %strlen_call15, 1
+  %strlen_call15 = call i64 @strlen(ptr @str.5)
+  %str_wrap_len16 = insertvalue { ptr, i64 } { ptr @str.5, i64 undef }, i64 %strlen_call15, 1
   %error_type = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 0
   store { ptr, i64 } %str_wrap_len16, ptr %error_type, align 8
-  %strlen_call17 = call i64 @strlen(ptr @str.8)
-  %str_wrap_len18 = insertvalue { ptr, i64 } { ptr @str.8, i64 undef }, i64 %strlen_call17, 1
+  %strlen_call17 = call i64 @strlen(ptr @str.6)
+  %str_wrap_len18 = insertvalue { ptr, i64 } { ptr @str.6, i64 undef }, i64 %strlen_call17, 1
   %file = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 1
   store { ptr, i64 } %str_wrap_len18, ptr %file, align 8
   %line = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 2
   store i32 0, ptr %line, align 4
-  %strlen_call19 = call i64 @strlen(ptr @str.9)
-  %str_wrap_len20 = insertvalue { ptr, i64 } { ptr @str.9, i64 undef }, i64 %strlen_call19, 1
+  %strlen_call19 = call i64 @strlen(ptr @str.7)
+  %str_wrap_len20 = insertvalue { ptr, i64 } { ptr @str.7, i64 undef }, i64 %strlen_call19, 1
   %stack = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 3
   store { ptr, i64 } %str_wrap_len20, ptr %stack, align 8
   %panic_payload = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 4
   %load_panic_payload = load { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, align 8
   store { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %load_panic_payload, ptr %panic_payload, align 8
-  %trace = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 3
+  %trace = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 3
   %load_trace = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %load_trace, ptr %trace, align 8
-  %agg_claim_ld = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
-  %agg_str_field = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 0
+  %agg_claim_ld = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
+  %agg_str_field = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
   %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
-  %agg_str_field21 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 1
-  %agg_str_data22 = extractvalue { ptr, i64 } %agg_str_field21, 0
-  %agg_str_field23 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
-  %agg_str_data24 = extractvalue { ptr, i64 } %agg_str_field23, 0
-  %ret_load = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
-  %ret_rec_f = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
-  %ret_rec_nf = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { ptr, i64 } %ret_rec_f, 0
-  %ret_rec_f25 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
-  %ret_rec_nf26 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { ptr, i64 } %ret_rec_f25, 1
-  %ret_rec_f27 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf26, 2
-  %ret_rec_nf28 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf26, { ptr, i64 } %ret_rec_f27, 2
-  %ret_rec_f29 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf28, 3
-  %ret_rec_f30 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f29, 0
-  %ret_rec_nf31 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f29, { ptr, i64 } %ret_rec_f30, 0
-  %ret_rec_f32 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, 1
-  %ret_rec_nf33 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, { ptr, i64 } %ret_rec_f32, 1
-  %ret_rec_f34 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf33, 2
-  %ret_rec_nf35 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf33, { ptr, i64 } %ret_rec_f34, 2
-  %ret_rec_f36 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf35, 3
-  %ret_rec_f37 = extractvalue { { ptr, i64 }, i32 } %ret_rec_f36, 0
-  %ret_rec_nf38 = insertvalue { { ptr, i64 }, i32 } %ret_rec_f36, { ptr, i64 } %ret_rec_f37, 0
-  %ret_rec_f39 = extractvalue { { ptr, i64 }, i32 } %ret_rec_nf38, 1
-  %ret_rec_nf40 = insertvalue { { ptr, i64 }, i32 } %ret_rec_nf38, i32 %ret_rec_f39, 1
-  %ret_rec_nf41 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf35, { { ptr, i64 }, i32 } %ret_rec_nf40, 3
-  %ret_rec_f42 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf41, 4
-  %ret_rec_f43 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f42, 0
-  %ret_rec_nf44 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f42, { ptr, i64 } %ret_rec_f43, 0
-  %ret_rec_f45 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, 1
-  %ret_rec_nf46 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, { ptr, i64 } %ret_rec_f45, 1
-  %ret_rec_f47 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf46, 2
-  %ret_rec_nf48 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf46, i32 %ret_rec_f47, 2
-  %ret_rec_f49 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf48, 3
-  %ret_rec_nf50 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf48, { ptr, i64 } %ret_rec_f49, 3
-  %ret_rec_nf51 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf41, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf50, 4
-  %ret_rec_nf52 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf28, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf51, 3
-  ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf52
+  %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
+  %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
+  %ret_rec_nf = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { i32, i64 } %ret_rec_f, 0
+  %ret_rec_f21 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
+  %ret_rec_nf22 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { i32, i64 } %ret_rec_f21, 1
+  %ret_rec_f23 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf22, 2
+  %ret_rec_nf24 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf22, { ptr, i64 } %ret_rec_f23, 2
+  %ret_rec_f25 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf24, 3
+  %ret_rec_f26 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f25, 0
+  %ret_rec_nf27 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f25, { ptr, i64 } %ret_rec_f26, 0
+  %ret_rec_f28 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf27, 1
+  %ret_rec_nf29 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf27, { ptr, i64 } %ret_rec_f28, 1
+  %ret_rec_f30 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf29, 2
+  %ret_rec_nf31 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf29, { ptr, i64 } %ret_rec_f30, 2
+  %ret_rec_f32 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, 3
+  %ret_rec_f33 = extractvalue { { ptr, i64 }, i32 } %ret_rec_f32, 0
+  %ret_rec_nf34 = insertvalue { { ptr, i64 }, i32 } %ret_rec_f32, { ptr, i64 } %ret_rec_f33, 0
+  %ret_rec_f35 = extractvalue { { ptr, i64 }, i32 } %ret_rec_nf34, 1
+  %ret_rec_nf36 = insertvalue { { ptr, i64 }, i32 } %ret_rec_nf34, i32 %ret_rec_f35, 1
+  %ret_rec_nf37 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, { { ptr, i64 }, i32 } %ret_rec_nf36, 3
+  %ret_rec_f38 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf37, 4
+  %ret_rec_f39 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f38, 0
+  %ret_rec_nf40 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f38, { ptr, i64 } %ret_rec_f39, 0
+  %ret_rec_f41 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf40, 1
+  %ret_rec_nf42 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf40, { ptr, i64 } %ret_rec_f41, 1
+  %ret_rec_f43 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf42, 2
+  %ret_rec_nf44 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf42, i32 %ret_rec_f43, 2
+  %ret_rec_f45 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, 3
+  %ret_rec_nf46 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, { ptr, i64 } %ret_rec_f45, 3
+  %ret_rec_nf47 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf37, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf46, 4
+  %ret_rec_nf48 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf24, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf47, 3
+  ret { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf48
 }
 
-define { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
+define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Fault({ { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
-  %tmp13 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  %tmp9 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  %tmp5 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  %tmp = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  %self = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
-  %self1 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self1, ptr %tmp, align 8
-  %last_state = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp, i32 0, i32 0
-  %last_state2 = load { ptr, i64 }, ptr %last_state, align 8
-  %last_state3 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
-  store { ptr, i64 } %last_state2, ptr %last_state3, align 8
-  %self4 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self4, ptr %tmp5, align 8
-  %unexpected_event = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp5, i32 0, i32 1
-  %unexpected_event6 = load { ptr, i64 }, ptr %unexpected_event, align 8
-  %unexpected_event7 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
-  store { ptr, i64 } %unexpected_event6, ptr %unexpected_event7, align 8
-  %self8 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self8, ptr %tmp9, align 8
-  %snapshot = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp9, i32 0, i32 2
+  %tmp13 = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %tmp9 = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %tmp5 = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %tmp = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %Fault = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %self = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
+  %self1 = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self1, ptr %tmp, align 8
+  %last_state = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp, i32 0, i32 0
+  %last_state2 = load { i32, i64 }, ptr %last_state, align 4
+  %last_state3 = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
+  store { i32, i64 } %last_state2, ptr %last_state3, align 4
+  %self4 = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self4, ptr %tmp5, align 8
+  %unexpected_event = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp5, i32 0, i32 1
+  %unexpected_event6 = load { i32, i64 }, ptr %unexpected_event, align 4
+  %unexpected_event7 = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
+  store { i32, i64 } %unexpected_event6, ptr %unexpected_event7, align 4
+  %self8 = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self8, ptr %tmp9, align 8
+  %snapshot = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp9, i32 0, i32 2
   %snapshot10 = load { ptr, i64 }, ptr %snapshot, align 8
-  %snapshot11 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
+  %snapshot11 = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
   store { ptr, i64 } %snapshot10, ptr %snapshot11, align 8
-  %self12 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self12, ptr %tmp13, align 8
-  %trace = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp13, i32 0, i32 3
+  %self12 = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self12, ptr %tmp13, align 8
+  %trace = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp13, i32 0, i32 3
   %trace14 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %trace, align 8
-  %trace15 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 3
+  %trace15 = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 3
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %trace14, ptr %trace15, align 8
-  %agg_claim_ld = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
-  %agg_str_field = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 0
+  %agg_claim_ld = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
+  %agg_str_field = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
   %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
-  %agg_str_field16 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 1
-  %agg_str_data17 = extractvalue { ptr, i64 } %agg_str_field16, 0
-  %agg_str_field18 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
-  %agg_str_data19 = extractvalue { ptr, i64 } %agg_str_field18, 0
-  %ret_load = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
-  %ret_rec_f = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
-  %ret_rec_nf = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { ptr, i64 } %ret_rec_f, 0
-  %ret_rec_f20 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
-  %ret_rec_nf21 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { ptr, i64 } %ret_rec_f20, 1
-  %ret_rec_f22 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf21, 2
-  %ret_rec_nf23 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf21, { ptr, i64 } %ret_rec_f22, 2
-  %ret_rec_f24 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf23, 3
-  %ret_rec_nf25 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf23, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f24, 3
-  ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf25
+  %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
+  %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
+  %ret_rec_nf = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { i32, i64 } %ret_rec_f, 0
+  %ret_rec_f16 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
+  %ret_rec_nf17 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { i32, i64 } %ret_rec_f16, 1
+  %ret_rec_f18 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf17, 2
+  %ret_rec_nf19 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf17, { ptr, i64 } %ret_rec_f18, 2
+  %ret_rec_f20 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf19, 3
+  %ret_rec_nf21 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf19, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f20, 3
+  ret { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf21
 }
 
 ; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)

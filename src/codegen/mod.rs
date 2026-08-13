@@ -3040,12 +3040,38 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn find_variant_info(&self, name: &str) -> Option<(String, u64)> {
         for td in self.type_defs.values() {
             if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                // 0.36.4 Fault nominal: the flow-scoped StateId/EventId enums
+                // are never resolved globally — their variants resolve scoped
+                // (construction via build_nominal_variant, match via the direct
+                // enum name in owner_enum_of_scrutinee). Skipping them keeps the
+                // global lookup unambiguous for the __MultiTarget union whose
+                // variant names (state names / Fault) they otherwise shadow.
+                if td.name.ends_with("::StateId") || td.name.ends_with("::EventId") {
+                    continue;
+                }
                 let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
                 sorted.sort_by_key(|v| &v.name);
                 for (i, v) in sorted.iter().enumerate() {
                     if v.name == name {
                         return Some((td.name.clone(), i as u64));
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// 0.36.4 Fault nominal: find the flow-scoped StateId/EventId enum whose
+    /// variants include `name`. Unlike `find_variant_info` (which skips these
+    /// enums for __MultiTarget disambiguation), this looks them up explicitly.
+    pub(in crate::codegen) fn nominal_variant_enum(&self, name: &str) -> Option<String> {
+        for td in self.type_defs.values() {
+            if !(td.name.ends_with("::StateId") || td.name.ends_with("::EventId")) {
+                continue;
+            }
+            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                if variants.iter().any(|v| v.name == name) {
+                    return Some(td.name.clone());
                 }
             }
         }
@@ -3097,6 +3123,31 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.find_variant_ordinal(name)
+    }
+
+    /// 0.36.4 Fault nominal: like `find_variant_ordinal_scoped` but returns the
+    /// (owner enum name, ordinal) pair. Used by match-arm field binding so the
+    /// shared `Fault` variant resolves to THIS flow's `__MultiTarget` enum —
+    /// otherwise the Fault record payload (and its flow-specific StateId/EventId
+    /// field types) resolves to a different flow's Fault, corrupting the enum
+    /// Display for multi-flow programs.
+    pub(super) fn find_variant_owner_scoped(
+        &self,
+        name: &str,
+        scrutinee_type: Option<&crate::ast::Type>,
+    ) -> Option<(String, u64)> {
+        if let Some(owner) = scrutinee_type.and_then(|ty| self.owner_enum_of_scrutinee(ty)) {
+            if let Some(td) = self.type_defs.get(&owner) {
+                if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                    let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+                    sorted.sort_by_key(|v| &v.name);
+                    if let Some(i) = sorted.iter().position(|v| v.name == name) {
+                        return Some((owner, i as u64));
+                    }
+                }
+            }
+        }
+        self.find_variant_owner(name)
     }
 
     /// v0.34.18a: Determine the owning enum type name for a match scrutinee's

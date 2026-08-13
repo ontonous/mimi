@@ -82,7 +82,7 @@ fn generated_stmt(stmt: Stmt, origin: AstOrigin, span: Span) -> Stmt {
 /// reset/recover/Fault bodies can default nested subflow payloads correctly.
 pub fn expand_file(file: &mut File) {
     let shapes = collect_record_shapes(&file.items);
-    expand_items(&mut file.items, &shapes);
+    expand_items(&mut file.items, &shapes, "");
 }
 
 /// Collect unqualified state-name → payload fields for every flow state in `items`.
@@ -119,14 +119,105 @@ fn collect_record_shapes_items(items: &[Item], shapes: &mut HashMap<String, Vec<
     }
 }
 
-fn expand_items(items: &mut [Item], shapes: &HashMap<String, Vec<Field>>) {
+fn expand_items(items: &mut Vec<Item>, shapes: &HashMap<String, Vec<Field>>, module: &str) {
+    let mut injected: Vec<Item> = Vec::new();
     for item in items.iter_mut() {
         match item {
-            Item::Flow(flow) => expand_flow_with_shapes(flow, shapes),
-            Item::Module(m) => expand_items(&mut m.items, shapes),
+            Item::Flow(flow) => {
+                expand_flow_with_shapes(flow, shapes, module);
+                // 0.36.4 Fault nominal (裁决 1): inject the per-flow StateId/
+                // EventId nominal enums as top-level TypeDef items in the file
+                // AST — the checker's self.types is NOT a backend input
+                // (from_checked_file_base derives type_defs from the file AST).
+                injected.extend(fault_nominal_type_defs(flow, module));
+            }
+            Item::Module(m) => {
+                let child_module = if module.is_empty() {
+                    m.name.clone()
+                } else {
+                    format!("{}::{}", module, m.name)
+                };
+                expand_items(&mut m.items, shapes, &child_module);
+            }
             _ => {}
         }
     }
+    items.extend(injected);
+}
+
+/// 0.36.4 Fault nominal (裁决 1): per-flow `StateId`/`EventId` nominal enums.
+/// Variant names are bare state/event names; cross-flow collisions are resolved
+/// scoped (check_expr expected type on the construction side, match scrutinee
+/// type on the consumption side) — mirroring the __MultiTarget union.
+fn fault_nominal_type_defs(flow: &FlowDef, module: &str) -> Vec<Item> {
+    // CompilationRoot parent: these are generated top-level declarations not
+    // caused by another source declaration — avoids the resolved IR treating
+    // the `flow::<name>::` prefix as a module path (missing Origin parent).
+    let meta = flow_generated_meta(flow, AstOrigin::Desugared("flow_matrix.fault_nominal"))
+        .with_parent(AstParentHint::CompilationRoot);
+    let qualified_flow = if module.is_empty() {
+        flow.name.clone()
+    } else {
+        format!("{}::{}", module, flow.name)
+    };
+    let state_id_name = format!("flow::{}::StateId", qualified_flow);
+    let event_id_name = format!("flow::{}::EventId", qualified_flow);
+
+    let state_id_variants: Vec<Variant> = flow
+        .states
+        .iter()
+        .map(|s| Variant {
+            meta,
+            name: s.name.clone(),
+            payload: None,
+        })
+        .collect();
+
+    let mut event_names: Vec<String> = flow.transitions.iter().map(|t| t.name.clone()).collect();
+    event_names.extend(
+        ["reset", "recover", "peer_fault", "ffi_crash"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    event_names.sort();
+    event_names.dedup();
+    let mut event_id_variants: Vec<Variant> = event_names
+        .iter()
+        .map(|e| Variant {
+            meta,
+            name: e.clone(),
+            payload: None,
+        })
+        .collect();
+    event_id_variants.push(Variant {
+        meta,
+        name: "Panic".to_string(),
+        payload: Some(VariantPayload::Tuple(vec![Type::Name(
+            "string".to_string(),
+            vec![],
+        )])),
+    });
+
+    vec![
+        Item::Type(TypeDef {
+            meta,
+            name: state_id_name,
+            pub_: false,
+            kind: TypeDefKind::Enum(state_id_variants),
+            generics: vec![],
+            derives: vec![],
+            attributes: vec![],
+        }),
+        Item::Type(TypeDef {
+            meta,
+            name: event_id_name,
+            pub_: false,
+            kind: TypeDefKind::Enum(event_id_variants),
+            generics: vec![],
+            derives: vec![],
+            attributes: vec![],
+        }),
+    ]
 }
 
 /// Expand a single flow: ensure Fault exists, inject missing (state, event) → Fault,
@@ -141,12 +232,12 @@ pub fn expand_flow(flow: &mut FlowDef) {
                 .or_insert_with(|| state.payload.clone().unwrap_or_default());
         }
     }
-    expand_flow_with_shapes(flow, &shapes);
+    expand_flow_with_shapes(flow, &shapes, "");
 }
 
-fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
+fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>, module: &str) {
     // Always ensure Fault exists so recovery verbs have a source state.
-    ensure_fault_state(flow);
+    ensure_fault_state(flow, module);
 
     // v0.34.18b (amendment clause 1, sparse-irreversible): the former @dense N×M
     // fallback injection lived here. It is repealed — an undeclared (state, event)
@@ -608,20 +699,30 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
 /// ```
 /// Flat fields keep existing MCDD / dual-backend tests working; `trace` is the
 /// structured view for user `match self.trace` recovery paths.
-fn ensure_fault_state(flow: &mut FlowDef) {
+fn ensure_fault_state(flow: &mut FlowDef, module: &str) {
     if !flow.states.iter().any(|s| s.name == "Fault") {
         let origin = AstOrigin::RuntimeSystem("flow.fault_state");
         let meta = flow_generated_meta(flow, origin);
+        // 0.36.4 Fault nominal (裁决 1): last_state/unexpected_event are the
+        // per-flow nominal StateId/EventId enums (injected by expand_items), not
+        // bare strings. snapshot stays string (human-readable summary).
+        let qualified_flow = if module.is_empty() {
+            flow.name.clone()
+        } else {
+            format!("{}::{}", module, flow.name)
+        };
+        let state_id_ty = format!("flow::{}::StateId", qualified_flow);
+        let event_id_ty = format!("flow::{}::EventId", qualified_flow);
         let mut fields = vec![
             Field {
                 meta,
                 name: "last_state".to_string(),
-                ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
+                ty: Type::Name(state_id_ty, vec![]).deep_reorigin(meta),
             },
             Field {
                 meta,
                 name: "unexpected_event".to_string(),
-                ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
+                ty: Type::Name(event_id_ty, vec![]).deep_reorigin(meta),
             },
             Field {
                 meta,
@@ -861,9 +962,26 @@ fn default_field_value(
     // Prefer SystemTrace semantics for well-known field names.
     match field {
         "last_state" | "last_state_name" => {
+            // 0.36.4 Fault nominal: top-level Fault.last_state is StateId (a
+            // no-payload enum variant); SystemTrace.last_state_name stays string.
+            if matches!(ty.unlocated(), Type::Name(n, _) if n.ends_with("::StateId")) {
+                return Expr::Call(Box::new(Expr::Ident(from_state.to_string())), vec![]);
+            }
             return Expr::Literal(Lit::String(from_state.to_string()));
         }
         "unexpected_event" => {
+            // 0.36.4 Fault nominal: top-level Fault.unexpected_event is EventId;
+            // "panic:<code>" becomes EventId::Panic { code }. SystemTrace's
+            // unexpected_event field stays string.
+            if matches!(ty.unlocated(), Type::Name(n, _) if n.ends_with("::EventId")) {
+                if let Some(code) = event.strip_prefix("panic:") {
+                    return Expr::Call(
+                        Box::new(Expr::Ident("Panic".to_string())),
+                        vec![Expr::Literal(Lit::String(code.to_string()))],
+                    );
+                }
+                return Expr::Call(Box::new(Expr::Ident(event.to_string())), vec![]);
+            }
             return Expr::Literal(Lit::String(event.to_string()));
         }
         "snapshot" => {
@@ -986,11 +1104,20 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
     let mut fields = HashMap::new();
     fields.insert(
         "last_state".to_string(),
-        Value::String(Arc::new(from_state.to_string())),
+        // 0.36.4 Fault nominal: StateId no-payload variant.
+        Value::Variant(from_state.to_string(), vec![]),
     );
     fields.insert(
         "unexpected_event".to_string(),
-        Value::String(Arc::new(event.to_string())),
+        // 0.36.4 Fault nominal: EventId variant; "panic:<code>" → Panic { code }.
+        if let Some(code) = event.strip_prefix("panic:") {
+            Value::Variant(
+                "Panic".to_string(),
+                vec![Value::String(Arc::new(code.to_string()))],
+            )
+        } else {
+            Value::Variant(event.to_string(), vec![])
+        },
     );
     fields.insert(
         "snapshot".to_string(),
