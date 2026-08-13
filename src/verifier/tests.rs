@@ -1284,6 +1284,47 @@ func main() -> i64 { 0 }
 }
 
 #[test]
+fn verify_callee_unencodable_ensures_is_fail_closed() {
+    // M4 (audit-triage-0.35.25): a callee postcondition that could not be
+    // encoded after call-argument substitution was silently dropped — the
+    // caller's proof ran against a weaker context and a flip to Disproven was
+    // untraceable (red line #2). `pos` verifies on its own (`result == x` is
+    // encodable with x as an i32 param), but the caller passes `arr[0]` — the
+    // substituted ensures `result == arr[0]` contains an Index expression that
+    // expr_to_z3_bool cannot encode. The caller must come back "not verified"
+    // naming the postcondition, never Proven. (The callee has NO requires, so
+    // the H1 requires walker cannot mask this.)
+    require_z3!();
+    let src = r#"
+func pos(x: i32) -> i32 {
+    ensures: result == x
+    x
+}
+func caller(arr: List<i32>) -> i32 {
+    ensures: result >= 0
+    pos(arr[0])
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("verify unencodable callee ensures");
+    let caller = results
+        .iter()
+        .find(|r| r.func_name == "caller")
+        .expect("caller result");
+    assert_ne!(
+        caller.status,
+        VerifStatus::Proven,
+        "unencodable callee ensures must not verify the caller: {}",
+        caller.message
+    );
+    assert!(
+        caller.message.contains("postcondition") && caller.message.contains("cannot be encoded"),
+        "failure must name the unencodable postcondition: {}",
+        caller.message
+    );
+}
+
+#[test]
 fn verify_branch_callee_ensures_not_unconditional() {
     require_z3!();
     // V-C5: callee ensures inside a never-taken branch must not prove caller.

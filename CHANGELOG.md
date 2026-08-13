@@ -5,6 +5,114 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.37 — 审查 MEDIUM 批量 + H 系列收尾（audit-triage-0.35.25.md）
+
+- **#H6 CAP_TABLE 跨线程静默失败**：thread-local 线性能力语义保留，新增全局
+  `CAP_OWNERSHIP` 归属注册表——check/consume/drop 失败路径读归属线程 emit
+  warn_cross_thread 诊断；owner 线程 happy path 零成本；
+- **#H7 PENDING_C_STRINGS 超限静默 drain**：thread-local `RECLAIMED_C_STRINGS`
+  危险注册表，drain 回收前登记，`mimi_string_as_c_str_free` 命中时显式 UAF
+  警告并退出租约（非静默 no-op）；
+- **#H8 callback store 锁中毒静默跳过插入**：`insert if let Ok` →
+  `unwrap_or_else(into_inner)`——锁中毒可恢复（guard 持有数据），注册不得
+  静默跳过；callback/ffi_runtime 其余 lock 点统一 into_inner 模式；
+- **#H9 CBufferInner Sync 结构强制**：ptr/size 字段私有化 + 只读访问器，
+  任何 `&CBufferInner` 无法写 buffer，Sync 健全性由构造保证（编译期断言锁住）；
+- **#H11 失败函数体块删除循环吞错**：`delete()` Err 显式 LlvmError（含 block
+  count）fail-closed；count>0 但 get_first None 显式守卫（原 `let _ =`
+  挂死编译器）；
+- **#M2 cap drop 发射错误被吞**：`mimi_cap_drop` 声明补全 + block.rs×2 /
+  method.rs `let _ = build_call` → 错误传播；register_cap 移到
+  compile_pattern_bind 后（否则 `let c: cap X` 的 Drop 静默跳过）；
+- **#M3 Capability 回退门禁**：ResolvedType::Capability 已是独立变体
+  catch-all 拒绝（K-5 早已 fail-closed）；真实缺口是 Drop 的 `locals.get`
+  静默跳过 → ok_or_else fail-closed + 回归锁；
+- **#M6 ABI 反序列化静默回退 → 可观测**：parse_primitive/symbol_kind/
+  call_conv/callback_category fallback 首例 emit 一次性警告（点名未知值）；
+- **#M7 map_from_list 静默截断/坏 key 跳过**：cap 超限截断显式警告（含丢弃
+  数）+ key 校验失败首例警告；values 不可 mincore 校验登记为 caller 契约；
+- **#M8 buf_nul_terminate 堆越界写**：codegen total `sadd.with.overflow` 溢出
+  trap + runtime helper 加 alloc_size，offset ≥ alloc_size → mimi_runtime_abort
+  （child-process 回归锁验证 abort 消息）；
+- **#M9 expect/unreachable 不变量崩溃面 → 降级**：session cycle DFS 两处
+  expect → let-else；hover Type::Located unreachable → 占位文本；progressive
+  find_map expect → 降级 no-injection；
+- **#M10 LSP active 文档 URI 沙箱**：register_uri_source 改
+  uri_to_path_sandboxed（didOpen 不再探测 workspace 外路径存在性）；
+- **顺带**：MIMI_DUMP_MODULE_OPT 诊断（post-pipeline IR dump）、capability
+  argument 转移对齐 checker 语义、M8 child-abort 测试防 fd race 加固；
+- **验证**：5378 lib + 15 real_world + 31 real_world_cli 全绿；clippy/fmt 零警告。
+
+### 0.35.34 — 审查 H1/H2 verifier 静默缺口（audit-triage-0.35.25.md）
+
+- **#H1 callee requires 静默跳过（fail-open）→ fail-closed**：不可编码前置
+  条件（调用/字符串）→ 显式 "cannot be encoded — not verified"（原静默
+  跳过）；Unknown 超时 → "could not be decided — not verified"（原被当满足
+  吞掉）；Sat 保持 "may violate"。与 V-C4（只采纳已验证 callee ensures）+
+  V-2 fail-closed 哲学对齐；
+- **#H2 i64 Z3 全程无界建模（definedness 仅 i32 硬编码）**：Resolved 引擎
+  int_bounds 按类型表取机器界，collect_* definedness 扩到 i32+i64（Add/Sub/
+  Mul 溢出 + Div/Rem 零除数/MIN÷-1 + Negate MIN）；AST 回退路径参数化为
+  `int_definedness_obligations(expr, vars, lo, hi)`；i64 溢出从"仅 E0439 分歧
+  兜底"升级为双引擎一致 Disproven；
+- **验证**：5363 lib + 15 real_world + 31 real_world_cli 全绿。
+
+### 0.35.29 — 审查 H4/H10/H12/H13 net/runtime 家族（audit-triage-0.35.25.md）
+
+- **#H4 SSRF 校验被 [IPv6] 括号绕过**：死代码 ssrf_validate_host 转正为唯一
+  守卫（剥 [v6] 括号）；runtime 三份逻辑统一为一份；新增 inet_aton 兼容 IPv4
+  解码（十进制/hex/octal、1-4 段点分、127.1 短形式、::ffff: IPv4-mapped）；
+  VM 侧镜像同逻辑；fe80::/10 link-local 缺口修复；172.16/12 判定修正；
+- **#H10 str_repeat 无上限**：`s.repeat(*n as usize)` 裸奔（i64::MAX 容量溢出
+  panic / 大值 OOM）→ checked_mul + 8 GiB cap，超限/溢出干净 Err 非崩溃，
+  双端一致；
+- **#H13 close_fd 可关闭 stdio**：对齐 net.rs connect 的 fd ≤ 2 守卫——VM
+  builtin_close_fd → Err（指名 standard stream）；runtime mimi_close → -1
+  哨兵；
+- **#H12 exec 大输出 OOM + socket/HTTP 无超时无上限**：runtime/fs.rs 新增共享
+  run_exec_capped（spawn + 边读边截 + 超限继续 drain），7 个变体统一走此
+  helper（VM 复用 runtime 实现 L1 by construction）；HTTP VM 镜像 runtime
+  （connect/read/write 5s 超时 + MAX_HTTP_RESPONSE 100MB）；builtin_recv 补
+  MAX_RECV_SIZE 100MB（`vec![0u8; i64::MAX]` 此前直接 abort）；
+- **验证**：5358 lib + 15 real_world + 31 real_world_cli 全绿。
+
+### 0.35.28 — 审查 H3/H5 CFG 与 JSON owned（audit-triage-0.35.25.md）
+
+- **#H3 CFG Continue 边漏出循环门（L2 双漏报）**：E0415 借阅检查对称补齐
+  Continue 边（body 终止于 Continue、永不产生 Backedge 时 loan 跨迭代存活）；
+  is_diverging_sink 对称补齐 Continue 边（`loop { continue }` 持 cap 不再绕过
+  E0256 消费门）；
+- **#H5 JSON map 嵌套变体外壳未登记 owned（destroy 永不释放）**：台账"6 个
+  变体"复核为 **29 处泄漏**（pack 系 19 + Box<MimiList> 系 10 + 自建 16B
+  header 2）；新增 MapOwnedValueKind::PackErrCString / ListObject，嵌套外壳随
+  destroy 释放；内嵌 map/set/list handle 不递归释放（bounded leak 换 UAF
+  防护，与 mimi_map_destroy 注释哲学一致）；
+- **验证**：5344 lib + 15 real_world + 31 real_world_cli 全绿。
+
+### 0.35.27 — 审查 C3/C4 悬垂与深度守卫（audit-triage-0.35.25.md）
+
+- **#C3 FFI 跨线程异步回调悬垂指针 UAF**：方案 A1 严格 Arc 化——BytecodeProgram
+  生产返回 Arc；BytecodeVM 删生命周期；`Value::BytecodeClosure` 携带所属
+  program Arc（闭包自包含，跨线程/跨 VM 永不错配、永不悬垂）；删除整套旧机制
+  （SendProgramPtr/CALLBACK_PROGRAM/set_callback_program）；
+- **#C4 JSON strict 校验路径无递归深度限制**：strict_value 与 permissive 共享
+  self.depth（进入 +1 / 超限 false / 退出 -1），>64 层一律拒绝（50000 层栈溢出
+  崩溃消除）；
+- **验证**：5337 lib + 15 real_world + 31 real_world_cli 全绿；FFI 106 + actor 98 全绿。
+
+### 0.35.25-26 — 审查 C1/C2/M1 正确性 P0（audit-triage-0.35.25.md）
+
+- **#C1 float_chain 传播性收紧（miscompilation）**：is_chain_op 重构（FDiv/FRem
+  仅被除数位置 + libm 白名单 + 用户函数 call 黑盒排除）——FDiv/FRem 除数位置
+  漏 trap 影响所有默认 O1 构建，c1_poc2 三端对等（VM/O0/O1 均 E0813 trap，
+  修复前 O1 打印 0 通过）；
+- **#C2 f-string 深度逃逸**：子解析器继承外层 recursion_depth（唯一生产路径
+  逃逸面）+ f-string 专用预算 DEPTH_MAX_FSTRING=64（6000 层 → ParseError 不
+  崩溃）；2MB 栈 31 层安全 / 40 层预算拦截；
+- **#M1 PROBE 后门删除**：MIMI_PROBE_CAP 环境变量（深度上限可被覆盖到任意值，
+  与 C2 叠加放大，违反红线 #3）删除；probe 测试保留（inert）；
+- **验证**：5336 lib + 15 real_world + 31 real_world_cli 全绿。
+
 ### 0.35.24 — claim_returned_lists / 赋值路径 claim 收口（deep-eval 遗留观察 1 + 根因家族）
 
 - **Call 分支删除**（`src/codegen/func.rs`）：`claim_returned_lists` 不再
