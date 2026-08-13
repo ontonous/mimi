@@ -513,6 +513,16 @@ impl<'a> Checker<'a> {
                         self.funcs.insert(t.name.clone(), (vec![inner], self_ty));
                     }
                     TypeDefKind::Enum(variants) => {
+                        // 0.36.4 Fault nominal: the flow-generated StateId/EventId
+                        // enums resolve their variants *scoped* (check_expr expected
+                        // type on construction, match scrutinee type on consumption),
+                        // not via bare-name funcs. Skip constructor registration so
+                        // cross-flow shared variant names (Fault/reset/recover/…) do
+                        // not trip the CK3 shadow diagnostic or clobber each other.
+                        let synthetic = matches!(
+                            t.meta.origin,
+                            crate::ast::AstOrigin::Desugared("flow_matrix.fault_nominal")
+                        );
                         // CK2: Build self_ty with generic args for proper substitution
                         let generic_args: Vec<Type> = t
                             .generics
@@ -520,34 +530,36 @@ impl<'a> Checker<'a> {
                             .map(|g| Type::Name(g.name.clone(), vec![]))
                             .collect();
                         let self_ty = Type::Name(t.name.clone(), generic_args);
-                        for v in variants {
-                            // CK3: Check constructor doesn't shadow existing function
-                            if self.funcs.contains_key(&v.name) {
-                                self.emit_code(
-                                    crate::diagnostic::codes::E0402,
-                                    format!(
-                                        "variant constructor '{}' shadows existing function '{}'",
-                                        v.name, v.name
-                                    ),
-                                );
-                            }
-                            let ret = self_ty.clone();
-                            let params = match &v.payload {
-                                None => vec![],
-                                Some(VariantPayload::Tuple(types)) => {
-                                    types.iter().map(|ty| self.resolve_type(ty)).collect()
+                        if !synthetic {
+                            for v in variants {
+                                // CK3: Check constructor doesn't shadow existing function
+                                if self.funcs.contains_key(&v.name) {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0402,
+                                        format!(
+                                            "variant constructor '{}' shadows existing function '{}'",
+                                            v.name, v.name
+                                        ),
+                                    );
                                 }
-                                Some(VariantPayload::Record(fields)) => {
-                                    fields.iter().map(|f| self.resolve_type(&f.ty)).collect()
+                                let ret = self_ty.clone();
+                                let params = match &v.payload {
+                                    None => vec![],
+                                    Some(VariantPayload::Tuple(types)) => {
+                                        types.iter().map(|ty| self.resolve_type(ty)).collect()
+                                    }
+                                    Some(VariantPayload::Record(fields)) => {
+                                        fields.iter().map(|f| self.resolve_type(&f.ty)).collect()
+                                    }
+                                };
+                                for p in &params {
+                                    self.check_type_well_formed(
+                                        p,
+                                        &format!("variant '{}' of enum '{}'", v.name, t.name),
+                                    );
                                 }
-                            };
-                            for p in &params {
-                                self.check_type_well_formed(
-                                    p,
-                                    &format!("variant '{}' of enum '{}'", v.name, t.name),
-                                );
+                                self.funcs.insert(v.name.clone(), (params, ret));
                             }
-                            self.funcs.insert(v.name.clone(), (params, ret));
                         }
                     }
                     TypeDefKind::Record(fields) => {
@@ -1066,16 +1078,23 @@ impl<'a> Checker<'a> {
                             // T-H8: cross-flow unqualified name collision — payloads must match.
                             let current_fields = state.payload.as_deref().unwrap_or_default();
                             if let TypeDefKind::Record(existing_fields) = &existing.kind {
-                                let compatible = current_fields.len() == existing_fields.len()
-                                    && current_fields.iter().zip(existing_fields.iter()).all(
-                                        |(a, b)| {
-                                            a.name == b.name
-                                                && types_compatible(
-                                                    &self.resolve_type(&a.ty),
-                                                    &self.resolve_type(&b.ty),
-                                                )
-                                        },
-                                    );
+                                // 0.36.4 Fault nominal: the system Fault sink's
+                                // last_state/unexpected_event are flow-scoped
+                                // StateId/EventId, so two flows' Fault payloads are
+                                // inherently type-incompatible. Treat "Fault" as
+                                // always compatible (W0402 advisory only) — never
+                                // E0402 — since the sink is system-generated.
+                                let compatible = state.name == "Fault"
+                                    || (current_fields.len() == existing_fields.len()
+                                        && current_fields.iter().zip(existing_fields.iter()).all(
+                                            |(a, b)| {
+                                                a.name == b.name
+                                                    && types_compatible(
+                                                        &self.resolve_type(&a.ty),
+                                                        &self.resolve_type(&b.ty),
+                                                    )
+                                            },
+                                        ));
                                 if !compatible {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0402,
@@ -1773,6 +1792,29 @@ impl<'a> Checker<'a> {
             }
             Item::Flow(f) => {
                 self.set_span(f.meta.span);
+                // 0.36.4 Fault nominal: re-point the unqualified "Fault" sink to
+                // THIS flow's Fault before checking bodies. collect_item_decls
+                // registered all flows first (unqualified "Fault" → first flow),
+                // but bodies are checked per-flow here, so re-anchor per flow.
+                if let Some(fault_state) = f.states.iter().find(|s| s.name == "Fault") {
+                    if let Some(fields) = &fault_state.payload {
+                        self.types.insert(
+                            "Fault".to_string(),
+                            TypeDef {
+                                meta: AstNodeMeta::inherited(
+                                    fault_state.meta.span,
+                                    AstOrigin::Desugared("checker.flow_state_type_projection"),
+                                ),
+                                name: "Fault".to_string(),
+                                pub_: false,
+                                kind: TypeDefKind::Record(fields.clone()),
+                                generics: vec![],
+                                derives: vec![],
+                                attributes: vec![],
+                            },
+                        );
+                    }
+                }
                 // Check state name uniqueness
                 let mut seen_states: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();

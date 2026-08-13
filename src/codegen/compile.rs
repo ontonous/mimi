@@ -647,6 +647,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         // `comptime func name()` calls can fold to constants at codegen time.
         self.fold_comptime_items(file)?;
 
+        // 0.36.4 Fault nominal: pre-register ALL type defs (including the
+        // flow-generated StateId/EventId enums, which expand_items appends after
+        // each flow) BEFORE the flow-state pass below. Otherwise the Fault
+        // record's `last_state: flow::<name>::StateId` field lowers via
+        // llvm_type_for before the enum is registered, falling back to i64 and
+        // corrupting the Fault record LLVM layout (enum Display prints raw
+        // tag/payload). register_type_def is idempotent (constructor/type_llvm
+        // inserts overwrite), so the later pass is a harmless no-op.
+        Self::process_items(&file.items, &mut |item| {
+            if let Item::Type(t) = item {
+                self.register_type_def(t)?;
+            }
+            Ok(())
+        })?;
+
         // First pass: collect type definitions, function definitions, and cap definitions
         Self::process_items(&file.items, &mut |item| {
             match item {

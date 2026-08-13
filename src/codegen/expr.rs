@@ -759,6 +759,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 Err(format!("cap literal '{}' requires mimi_cap_register runtime", name).into())
             }
+        } else if let Some(enum_type) = self.nominal_variant_enum(name.as_str()) {
+            // 0.36.4 Fault nominal: a bare state/event name as a no-payload
+            // StateId/EventId variant (e.g. `Fault { last_state: Working }`).
+            self.build_nominal_variant(&enum_type, name, None)
         } else if self.find_variant_owner(name).is_some() {
             // Unit enum variant used as a value (e.g. `Yes` or `Pending`)
             self.compile_call(name, &[], vars)

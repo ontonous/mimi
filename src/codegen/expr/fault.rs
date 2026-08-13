@@ -125,8 +125,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_field_type_at_index(i as u32)
                 .ok_or_else(|| CompileError::LlvmError(format!("Fault field {} type", i)))?;
             let val = match field.name.as_str() {
-                "last_state" => self.build_const_string(last_state)?,
-                "unexpected_event" => self.build_const_string(unexpected_event)?,
+                "last_state" => self.build_nominal_variant(
+                    &format!("flow::{}::StateId", self.current_flow_name),
+                    last_state,
+                    None,
+                )?,
+                "unexpected_event" => {
+                    let code = unexpected_event
+                        .strip_prefix("panic:")
+                        .unwrap_or(unexpected_event);
+                    self.build_nominal_variant(
+                        &format!("flow::{}::EventId", self.current_flow_name),
+                        "Panic",
+                        Some(code),
+                    )?
+                }
                 // snapshot="" matches the bytecode absorber (vm.rs absorb_flow_fault
                 // → make_fault_value(from_state, "panic:<code>", "")) — L1 parity.
                 "snapshot" => self.build_const_string("")?,
@@ -390,6 +403,90 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("fault string error: {}", e)))?;
         let len = self.context.i64_type().const_int(s.len() as u64, false);
         self.build_string_struct(global.as_pointer_value(), len)
+    }
+
+    /// 0.36.4 Fault nominal (裁决 1): build a nominal enum variant value
+    /// `{i32 tag, i64 payload}` for `variant_name` in the flow-scoped
+    /// `enum_type_name` (`flow::<flow>::StateId` / `flow::<flow>::EventId`).
+    /// The tag is the variant's alphabetical ordinal (matching the enum's
+    /// uniform layout). A no-payload variant uses payload=0; `Some(code)`
+    /// boxes the string payload (Panic { code }) into the i64 slot.
+    pub(in crate::codegen) fn build_nominal_variant(
+        &self,
+        enum_type_name: &str,
+        variant_name: &str,
+        payload: Option<&str>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let td = self.type_defs.get(enum_type_name).ok_or_else(|| {
+            CompileError::LlvmError(format!("nominal enum '{}' not registered", enum_type_name))
+        })?;
+        let TypeDefKind::Enum(variants) = &td.kind else {
+            return Err(CompileError::LlvmError(format!(
+                "'{}' is not an enum type",
+                enum_type_name
+            )));
+        };
+        let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+        sorted.sort_by_key(|v| &v.name);
+        let tag = sorted
+            .iter()
+            .position(|v| v.name == variant_name)
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "variant '{}' not found in enum '{}'",
+                    variant_name, enum_type_name
+                ))
+            })? as u64;
+
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let struct_ty = self
+            .context
+            .struct_type(&[i32_ty.into(), i64_ty.into()], false);
+
+        let payload_i64 = match payload {
+            Some(code) => {
+                // 0.36.4: the code is a compile-time constant, so materialize a
+                // GLOBAL `{i8*, i64}` string struct (not a heap box). The heap
+                // box leaked (valgrind L3: 16 bytes per absorbed fault), because
+                // the Fault record is returned via the multi-target union and the
+                // nested box is never freed. A constant global has no lifetime.
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let bytes_global = self
+                    .builder
+                    .build_global_string_ptr(code, "fault_code_bytes")
+                    .map_err(|e| CompileError::LlvmError(format!("fault code str: {}", e)))?;
+                let len = i64_ty.const_int(code.len() as u64, false);
+                let str_struct_ty = self
+                    .context
+                    .struct_type(&[i8_ptr_ty.into(), i64_ty.into()], false);
+                let global = self.module.add_global(
+                    str_struct_ty,
+                    None,
+                    &format!("fault_code_struct_{}", code),
+                );
+                global.set_initializer(
+                    &str_struct_ty
+                        .const_named_struct(&[bytes_global.as_pointer_value().into(), len.into()]),
+                );
+                global.set_constant(true);
+                self.build_ptr_to_int(global.as_pointer_value(), i64_ty, "fault_code_ptr")?
+            }
+            None => i64_ty.const_int(0, false),
+        };
+
+        let alloca = self.build_alloca(struct_ty, "nominal_variant")?;
+        let tag_gep = self
+            .gep()
+            .build_struct_gep(struct_ty, alloca, 0, "variant_tag")
+            .map_err(|e| CompileError::LlvmError(format!("variant tag gep: {}", e)))?;
+        self.build_store(tag_gep, i32_ty.const_int(tag, false))?;
+        let payload_gep = self
+            .gep()
+            .build_struct_gep(struct_ty, alloca, 1, "variant_payload")
+            .map_err(|e| CompileError::LlvmError(format!("variant payload gep: {}", e)))?;
+        self.build_store(payload_gep, payload_i64)?;
+        self.build_load(BasicTypeEnum::StructType(struct_ty), alloca, "variant_val")
     }
 
     /// Field list of a record type from `type_defs`.

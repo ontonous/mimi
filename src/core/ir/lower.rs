@@ -2332,6 +2332,23 @@ impl BodyLowerer<'_> {
                 "call has no checker-resolved call-site record",
             )]
         })?;
+        // 0.36.4 Fault nominal (裁决 1): StateId/EventId variant constructions
+        // are resolved scoped by the checker (check_expr_inner) WITHOUT a variant
+        // call-site kind. Detect them via the expression's nominal type and lower
+        // as a variant constructor directly — regardless of `site.kind`.
+        if let Expr::Ident(name) = callee.unlocated() {
+            let result_ty = self.expression_type(node_id)?;
+            if let Some(ResolvedType::Nominal { item, .. }) = self.types.get(&result_ty) {
+                let item_name = item.as_str();
+                if item_name.ends_with("::StateId") || item_name.ends_with("::EventId") {
+                    if let Some(call) =
+                        self.lower_variant_constructor_call(node_id, name, arguments, role)?
+                    {
+                        return Ok(call);
+                    }
+                }
+            }
+        }
         if let Expr::Field(flow, event) = callee.unlocated() {
             if let Expr::Ident(flow) = flow.unlocated() {
                 if self.has_transition_callee(flow, event) {

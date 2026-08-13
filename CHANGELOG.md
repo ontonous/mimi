@@ -7,6 +7,36 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.4 — Fault nominal 实现落地（四层打通，挣绿）
+
+- **核心变更**：`Fault.last_state`/`Fault.unexpected_event` 由 `string` 名义化为
+  per-flow `StateId`/`EventId` enum（`snapshot` 保留 string、SystemTrace 子记录
+  暂留 string）；`"panic:<code>"` → `EventId::Panic { code }`。`if last_state == "…"`
+  全仓归零（DoD 达成，grep 0 残留）；
+- **file AST 注入**（flow_matrix）：`expand_items` 在 flow 展开后注入 StateId/
+  EventId 顶层 TypeDef（`CompilationRoot` 父提示 + module 路径贯穿消歧）；checker
+  `self.types` 不是后端输入（`from_checked_file_base` 从 file AST 派生）；
+- **checker scoped 构造**（infer_expr）：`check_expr_inner` 增 `nominal_variant_arity`
+  分支——裸 state/event 名在 `expected: flow::X::StateId/EventId` 上下文按枚举
+  作用域消歧（Call + 裸 Ident 两形态，镜像 Some/None/Ok/Err）；`collect_item_decls`
+  跳过合成 enum 的变体构造器注册（避 E0402 shadow）；
+- **跨 flow Fault 重锚**（checker items）：`check_item(Flow)` 开头把 unqualified
+  `Fault` 重锚到当前 flow 的 sink（collect_item_decls 先注册全部 flow，unqualified
+  指向首个）；T-H8 对 Fault 恒兼容（W0402 非 E0402）；
+- **resolved IR 变体 lowering**（core/ir/lower）：`lower_call` 按名义类型识别
+  StateId/EventId 变体构造（`lower_variant_constructor_call`）；
+- **codegen**：`build_nominal_variant`（`{i32 tag, i64 payload}`，Panic 用全局
+  string struct 免 heap leak）；`compile_call_expr`/`compile_ident_expr` legacy
+  变体识别；`find_variant_info` 跳过 StateId/EventId（避 `__MultiTarget` 遮蔽 →
+  修正常路径静默误编译）；`find_variant_owner_scoped`（match 字段绑定按 scrutinee
+  锚定，修多 flow 枚举 Display）；**codegen 预注册全部 TypeDef**（Fault record 的
+  enum 字段在 flow 状态注册前已 lower，否则 i64 回退坏 layout）；
+- **interp**：`make_fault_value` → `Value::Variant`；
+- **测试迁移**：5 个 parse 测试 `items.len 1→3`、用户 Fault 构造 string→enum、
+  枚举 Display 期望串、golden IR 重生成（21 文件）、LSP code lens 跳过合成 enum；
+- **验证**：5327 lib 全绿（flow_features 235 / codegen_golden 21 / e2e_valgrind /
+  lsp_extended / resolved canonical_flow_ids）；dual_ 等价 + `if last_state ==` 归零。
+
 ### 0.36.4 — Phase A 实现作战计划 + 变体作用域关键发现
 
 - **作战计划落地**：`devdocs/v0.36/phase-a-implementation-plan.md` 把裁决 1+2 判定为

@@ -60,6 +60,15 @@ impl LspServer {
                     }
                 }
                 Item::Type(t) => {
+                    // 0.36.4 Fault nominal: skip the synthetic StateId/EventId
+                    // enums injected by flow expansion — they are internal
+                    // implementation detail, not user-visible code lenses.
+                    if matches!(
+                        t.meta.origin,
+                        crate::ast::AstOrigin::Desugared("flow_matrix.fault_nominal")
+                    ) {
+                        continue;
+                    }
                     // 0.35.15 (DX backlog #3): AST span replaces the
                     // `type {name}` substring scan.
                     let def_line = t.meta.span.start_line.saturating_sub(1);
