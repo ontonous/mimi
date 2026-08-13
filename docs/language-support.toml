@@ -6,6 +6,10 @@ implementation_version = "0.1.4-dev (internal sprint 0.34.X)"
 # ⚠ 2026-08-02：本文件由 0.31.36 落后状态在 0.34.5 刷新版本号。
 # 与实现冲突时以 devdocs/v0.34/golden-document.md 与
 # golden/syntax-reference.golden.md 为准。probe 规则见 golden-document §9.3。
+#
+# ⚠ 成熟度框架澄清（2026-08）：本矩阵描述"当前锚定态"（给 sprint 的稳定靶子），
+# 不是 1.0 锁定承诺。Mimi 是实验性早期语言，breaking 自由；核心深度闭环
+# （0.36.x，见 devdocs/v0.36/README.md）可推翻本矩阵中的 stable 项。
 
 # Every dimension uses:
 # unsupported | partial | complete | not_applicable

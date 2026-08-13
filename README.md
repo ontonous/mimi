@@ -62,7 +62,9 @@ Mimi is the production compilation backend. Intent-level design lives in **MimiS
 
 ## Design Invariants
 
-The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1.0.md) established 10 irreversible invariants after nine rounds of external blind review:
+The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1.0.md) established 10 design rulings after nine rounds of external blind review:
+
+> **⚠ Design rulings, not a frozen API.** Mimi is an early experimental language far from 1.0: breaking changes are freely allowed, and "freeze" means **anchoring** development, not **locking** surface syntax. The rulings fix design *orientation* (sparse over dense, no nested Flow, no WAL) — their surface spelling is still breakable. The only long-term assets are the design ideas and the invariant suite (L1/L2/L3 + dual-backend equivalence). See `devdocs/v0.36/README.md`.
 
 | # | Invariant | Meaning |
 |---|-----------|---------|
@@ -417,13 +419,14 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Status & Key References
 
-**Current**: 0.1.5-dev. 0.1.4 shipped (syntax freeze, semantic rulings, architecture freeze Phase G, O1 default). 0.1.5 focuses on performance (trap-cost reduction) with DX quality as secondary line — see `devdocs/v0.35/README.md`.
+**Current**: 0.1.5-dev. 0.1.4 shipped (syntax freeze, semantic rulings, architecture freeze Phase G, O1 default). 0.1.5 focuses on performance (trap-cost reduction) with DX quality as secondary line — see `devdocs/v0.35/README.md`. Next: 0.1.6 (0.36.x) pivots to **core deep closure** — see `devdocs/v0.36/README.md`.
 
 ### Key References
 
 | Document | Role |
 |----------|------|
 | [`devdocs/v0.35/README.md`](devdocs/v0.35/README.md) | 0.1.5 roadmap: performance mainline + DX quality secondary (authoritative for 0.1.5) |
+| [`devdocs/v0.36/README.md`](devdocs/v0.36/README.md) | 0.1.6 roadmap: core deep closure, pillar-by-pillar "redesign → anchor → earn green" |
 | [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 golden document: semantic rulings + sprint plan (authoritative for 0.1.4) |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | Authoritative roadmap (31 requirements, exit conditions) |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | Architecture Amendment: 13 clauses + 10 invariants (supersedes white paper) |
@@ -442,6 +445,7 @@ Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurre
 | Version | Highlight |
 |---------|-----------|
 | **0.1.5-dev** | **Current**. Performance mainline: trap-cost reduction (O1 default baseline), resolved dispatch coverage extension (strings/collections module bodies, contract guard emission), O1 correctness slices. Quality secondary: resolve→zonk migration (31 sites), parser panic audit, LSP Span/Origin migration, trivia-ization of `desc:`/`rule:`/`mms{}`, actor runs_flow three-layer integration, flow_order fails-transition SIGSEGV fix. See `devdocs/v0.35/README.md`. |
+| **0.1.6** | **Planned**. Core deep closure (Deep over Broad): pillar-by-pillar "redesign → anchor → earn green" — failure attribution (Fault nominalization), state semantics (Actor mut), abstraction (Protocol/Session), linear system (generics×linear + Session lowering), syntax redesign. Edge capabilities decoupled. 0.36.x can span 100+ sprints. See `devdocs/v0.36/README.md`. |
 | **0.1.4** | **Shipped (2026-08-08)**. Syntax freeze + semantic rulings + language self-consistency (golden document): become/stay removal (ADR-001, sole terminal `return State {}`), multi-target stable tagged-union ABI (ADR-002), `'a` removal (ADR-004), `do` wrapper removal (keywords 81→80), and/or/not soft keywords, if-let/for-destructuring, `ieee_float {}`, single-direction numeric coercion, View/Mutate closure. Doc-sync campaign closed the four verdicts across spec/pre-0.1/support/syntax-reference; trivia-ization of `desc:`/`rule:`/`mms{}` registered for 0.1.5. Phase G (architecture freeze): ADR-005~008, dispatch gate (fallback 0.3027, eligible 3783), contracts + stdlib module bodies on resolved slice, view/mutate borrow ABI, verifier engine isolation (E0439), ABI layout freeze (native-abi-1 §7/§8), pre-0.1 rename, 0.minor=major strategy, O1 default optimization. RC gates green (5287 lib). |
 | **0.1.3** | Bytecode VM becomes the sole interpreter: tree-walker (24,976 LOC) + ResolvedInterpreter (4,375 lines) deleted, `--legacy` removed, FFI/Actor/quote fully on bytecode. |
 | **0.1.2** | Codegen full migration: `raw_ast()` privatized (3 permanent consumers), gap filling, performance baseline. |

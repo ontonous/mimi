@@ -6,6 +6,14 @@
 >
 > **Target status**: Normative sections are `stable` unless explicitly marked `experimental`, `reserved`, or `removed`. Current implementation maturity is non-normative and lives only in `docs/language-support.toml`.
 >
+> **⚠ Philosophy note (2026-08)**: `stable` here means **anchored for the current
+> development cycle** (a stable target for sprints), **not a frozen 1.0 API
+> commitment**. Mimi is an early experimental language far from 1.0; breaking
+> changes are freely allowed pre-1.0, including overturning "frozen" syntax. The
+> long-term assets are the design ideas and the invariant suite (L1/L2/L3 +
+> dual-backend equivalence), not any particular surface spelling. See
+> `devdocs/v0.36/README.md`.
+>
 > **Version**: v1.0-spec-draft (2026-07-17)
 
 > **⚠ 实现差异登记（2026-08-01 立账，0.34.33 全部闭环）**：本文件为 1.0 规范草案；
