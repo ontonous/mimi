@@ -7,7 +7,31 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
-### 0.36.5 — Fault nominal 穷尽 match 负测试 + DoD grep 门禁（裁决 2 收官）
+### 0.36.6 — 二次 Fault 升级（裁决 4）+ 跨 flow Fault 调用点名义化补全（裁决 1）
+
+- **E0440：Fault 不是合法转移 source**（裁决 4, DoD #5）：checker 拒绝用户声明的
+  `transition x(Fault)`（recover/reset 系统动词与 fallback 豁免）——`Fault` 只能经
+  recover/reset 离开，任何其他事件在 Fault 上都会静默 `Fault → Fault` 自循环；
+  fail-closed（E0440，描述含迁移注记）。
+- **二次 Fault 升级负测试**（裁决 4, DoD #5）：`fault_recover_body_trap_escalates_not_loops`
+  ——recover 体内再 trap（`1/0`）→ **升级 + trap（E0801）而非静默循环回 Fault**；**双后端**（bytecode + native）均断言 fail-closed，native 侧硬 trap 不
+  回环（旧 `flow_panic_from_fault_does_not_rewrap` 仅覆盖 interp，现补 L1 parity）。
+- **跨 flow Fault 调用点名义化补全**（裁决 1 剩余集成点，L1 修复）：`real_world`
+  双后端套件 3 程序（flow_elevator/flow_sensor_network/flow_system_trace）native
+  打印错误枚举（如 `open_door()` 而非 `peer_fault()`、`HumIdle()` 两次）——根因是
+  flow transition 调用的**返回值类型用 unqualified to-state 名**（`Fault`），main()
+  中字段访问经 `self.types["Fault"]` 解析到**最后注册 flow** 的 Fault record，
+  StateId/EventId 字段类型随错 flow。修复三件套：
+  1. checker 调用点类型：单目标 `-> Fault` 的签名返回值 → `flow::<name>::Fault`
+     （checker `self.types` 已有该 qualified record，字段访问即按 flow 解析）；
+  2. 调用参数归一：method.rs flow-call 路径（overload key + arg unify +
+     runs_flow_transition unify）对 `flow::` 前缀名义名剥前缀后比对（`::` 不可能
+     出现在用户标识符，前缀必为生成物）——qualified 结果可回传 recover/reset 等
+     裸名参数；
+  3. resolved IR 目录别名：flow state 额外注册 `flow::<id>::<state>` 键
+     （**不带短名别名**，避免裸名跨 flow 变歧义），qualified 调用结果可 intern。
+- **验证**：`real_world_flow_dual_backend_suite` 24/24 全绿（3 程序修复）；
+  flow_features 238 / dual_ 882 全绿；`check_language_docs.py` 门禁绿。
 
 - **穷尽 match 负测试**（裁决 2, DoD #3）：`fault_recover_exhaustive_match_missing_arm_rejected`
   ——recover 内对 `self.last_state`（StateId）做非穷尽 match（缺 `Fault` 臂）→

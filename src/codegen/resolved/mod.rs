@@ -7327,11 +7327,12 @@ fn resolved_type_display_name(program: &CheckedProgram, ty: &ResolvedTypeId) -> 
         Nominal {
             item, arguments, ..
         } => {
-            let name = if let Some(stripped) = item.as_str().strip_prefix("builtin:type:") {
-                stripped.to_string()
-            } else {
-                item.as_str().to_string()
-            };
+            let name = item
+                .as_str()
+                .strip_prefix("builtin:type:")
+                .or_else(|| item.as_str().strip_prefix("type:"))
+                .unwrap_or(item.as_str())
+                .to_string();
             if arguments.is_empty() {
                 name
             } else {

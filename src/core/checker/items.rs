@@ -1216,7 +1216,18 @@ impl<'a> Checker<'a> {
                         params.push(self.resolve_type(&p.ty));
                     }
                     let ret = if let Some(first) = t.to_states.first() {
-                        Type::Name(first.clone(), vec![])
+                        if first == "Fault" {
+                            // 0.36.6 (裁决 1 跨 flow 补全): the Fault sink's
+                            // last_state/unexpected_event/trace payload fields are
+                            // flow-scoped StateId/EventId enums, so an unqualified
+                            // call result would resolve field access in main()
+                            // against the LAST-registered flow's Fault record
+                            // (cross-flow pollution → wrong enum in native
+                            // prints). Qualify the sink at the call-site type.
+                            Type::Name(format!("{}::Fault", qualified), vec![])
+                        } else {
+                            Type::Name(first.clone(), vec![])
+                        }
                     } else {
                         Type::Name("unit".into(), vec![])
                     };
@@ -1888,6 +1899,24 @@ impl<'a> Checker<'a> {
                             crate::diagnostic::codes::E0404,
                             format!("state '{}' referenced in transition '{}' is not defined in flow '{}'",
                                     t.from_state, t.name, f.name),
+                        );
+                    }
+                    // 0.36.6 (裁决 4, 二次 Fault 升级): Fault is not a legal
+                    // transition source — only recover/reset may leave it. A user
+                    // transition from Fault would silently loop Fault → Fault;
+                    // fail-closed (E0440). System-injected fallbacks (peer_fault
+                    // no-op self-loop, recover/reset verbs) are exempt.
+                    if !t.is_fallback
+                        && t.from_state == "Fault"
+                        && t.name != "recover"
+                        && t.name != "reset"
+                    {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0440,
+                            format!(
+                                "transition '{}(Fault)' in flow '{}' is illegal: Fault may only be exited via recover/reset (二次 Fault 升级)",
+                                t.name, f.name
+                            ),
                         );
                     }
                     for to_state in &t.to_states {

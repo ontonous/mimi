@@ -2321,63 +2321,90 @@ func main() -> i32 {
     let _ = src2;
 }
 
-#[test]
-fn flow_panic_from_fault_does_not_rewrap() {
-    // Panic while already in Fault should propagate, not re-absorb.
-    let src = r#"
-flow F {
-    state A
+// ── 0.36.6 Fault nominal: 二次 Fault 升级 (裁决 4, DoD #5) ────────────
 
-    transition go(A) -> Fault {
+#[test]
+fn fault_recover_body_trap_escalates_not_loops() {
+    // 0.36.6 (裁决 4, DoD #5): a recover body that traps again must escalate to a
+    // trap (E0801), NOT silently re-absorb into a fresh Fault — that would loop
+    // Fault → recover → Fault forever. `from_state == "Fault"` is not re-absorbable;
+    // both backends fail-closed.
+    let src = r#"
+flow Svc {
+    state Active { n: i32 }
+    transition crash(Active) -> Fault {
         return Fault {
-            last_state: "A",
-            unexpected_event: "go",
-            snapshot: "manual",
+            last_state: Active,
+            unexpected_event: crash,
+            snapshot: "boom",
             trace: SystemTrace {
-                last_state_name: "A",
-                unexpected_event: "go",
-                snapshot: "manual",
+                last_state_name: "Active",
+                unexpected_event: "crash",
+                snapshot: "boom",
                 memory_dump: MemoryDump { fields: "", count: 0 },
-                panic_payload: PanicPayload { error_type: "go", file: "", line: 0, stack: "manual" }
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "boom" }
             }
         }
     }
-    transition boom(Fault, denom: i32) -> Fault {
+    transition recover(Fault) -> Active {
+        let denom = 0
         let x = 1 / denom
-        return Fault {
-            last_state: "Fault",
-            unexpected_event: "boom",
-            snapshot: "unreachable",
-            trace: SystemTrace {
-                last_state_name: "Fault",
-                unexpected_event: "boom",
-                snapshot: "unreachable",
-                memory_dump: MemoryDump { fields: "", count: 0 },
-                panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "unreachable" }
-            }
-        }
+        return Active { n: x }
     }
 }
 
 func main() -> i32 {
-    let a = A { }
-    let f = F::go(a)
-    let _r = F::boom(f, 0)
-    0
+    let f = Svc::crash(Active { n: 7 })
+    let r = Svc::recover(f)
+    r.n
 }
 "#;
-    // boom from Fault with div-by-zero should error (not re-wrap to Fault)
     let result = run_source_bytecode_result(src);
     assert!(
         result.is_err(),
-        "expected panic to propagate from Fault, got {:?}",
+        "recover body trap must escalate (not silently loop), got {:?}",
         result
     );
     let err = result.unwrap_err();
     assert!(
         err.contains("division") || err.contains("E0801") || err.contains("zero"),
-        "error should mention division by zero: {}",
+        "escalated trap should be division-by-zero: {}",
         err
+    );
+    // L1 parity: the native backend must also fail-closed (hard trap), not loop.
+    let native = compile_and_run(src);
+    assert!(
+        native.is_err(),
+        "native recover body trap must fail-closed, got {:?}",
+        native
+    );
+}
+
+#[test]
+fn fault_transition_from_fault_rejected() {
+    // 0.36.6 (裁决 4, 二次 Fault 升级): a user-declared transition from Fault
+    // (other than recover/reset) is illegal — Fault may only be exited via
+    // recover/reset; any other event on Fault would silently self-loop.
+    // Uses E0440.
+    let src = r#"
+flow Svc {
+    state Active { n: i32 }
+    transition crash(Active) -> Active { return Active { n: self.n } }
+    transition boom(Fault) -> Active { return Active { n: 0 } }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0440)),
+        "user transition from Fault must be E0440, got: {:?}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
     );
 }
 

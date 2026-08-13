@@ -4,6 +4,26 @@ use crate::core::helpers::{fmt_type, is_numeric_coercion, subst_type_params, sug
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 
+/// 0.36.6 (裁决 1 跨 flow 补全): strip the surface `flow::<name>::` prefix from
+/// a nominal type. `::` cannot appear in user identifiers, so any
+/// `flow::`-prefixed name is generator-made — the checker types Fault sink
+/// call results as `flow::<flow>::Fault` so field access resolves the correct
+/// per-flow record, and this normalizer lets those results unify against the
+/// unqualified parameter/overload names the flow matrix registers (`Fault`).
+fn strip_flow_qualifier(ty: &Type) -> Type {
+    match ty.unlocated() {
+        Type::Name(n, args) if n.starts_with("flow::") => {
+            let short = n
+                .rsplit("::")
+                .next()
+                .map(str::to_string)
+                .unwrap_or_else(|| n.clone());
+            Type::Name(short, args.clone())
+        }
+        _ => ty.clone(),
+    }
+}
+
 impl<'a> Checker<'a> {
     pub(in crate::core) fn infer_method_call(
         &mut self,
@@ -52,7 +72,10 @@ impl<'a> Checker<'a> {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
-                let overload_key = match from_ty.unlocated() {
+                // 0.36.6: a qualified flow result (e.g. `flow::Svc::Fault`) must
+                // still match the unqualified overload key (`Fault`).
+                let from_short = strip_flow_qualifier(&from_ty);
+                let overload_key = match from_short.unlocated() {
                     Type::Name(n, _) => format!("{}::{}", short_key, n),
                     _ => short_key.clone(),
                 };
@@ -77,8 +100,10 @@ impl<'a> Checker<'a> {
                         for (index, (actual, expected)) in
                             arg_types.iter().zip(params.iter()).enumerate()
                         {
-                            let coerced = is_numeric_coercion(expected, actual);
-                            if !coerced && self.unification.unify(expected, actual).is_err() {
+                            let actual_clean = strip_flow_qualifier(actual);
+                            let coerced = is_numeric_coercion(expected, &actual_clean);
+                            if !coerced && self.unification.unify(expected, &actual_clean).is_err()
+                            {
                                 self.errors.push(Diagnostic::error_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -391,7 +416,13 @@ impl<'a> Checker<'a> {
                                 args.iter().zip(method_params.iter()).enumerate()
                             {
                                 let at = self.infer_expr(arg, scopes);
-                                if self.unification.unify(&at, param).is_err() {
+                                // 0.36.6: qualified flow results unify against
+                                // the unqualified runs_flow param names.
+                                if self
+                                    .unification
+                                    .unify(&strip_flow_qualifier(&at), param)
+                                    .is_err()
+                                {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0211,
                                         format!(
