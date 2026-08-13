@@ -28,7 +28,17 @@
   TypeDef，而非 checker `self.types`，否则报 `no resolved nominal identity`；
   (2) 裸变体名经 `self.funcs` 全局注册跨 flow 歧义（`expected flow::A::StateId,
   found flow::B::StateId`），构造侧须用 flow-scoped 变体引用；
-- **结论**：0.36.4 主体按"file AST 注入 enum + flow-scoped 变体构造"重排后执行。
+- **第二次实现尝试回执**（按纠正路线重做，三项验证成功，已回退保持绿）：(1)
+  file AST 注入 + `AstParentHint::CompilationRoot` 父提示 → nominal identity 正常
+  解析；(2) checker `check_expr_inner` 增 `nominal_variant_arity` scoped 分支 →
+  跨 flow 构造消歧（镜像 Some/None/Ok/Err）；(3) codegen `find_variant_info` 跳过
+  `*::StateId`/`*::EventId` → 消除 StateId 变体与 `__MultiTarget` 变体在全局查找
+  中的遮蔽（否则正常路径**静默误编译**：native 打垃圾 `1078350640` 而非 `5`，L1
+  违反）。**剩余两集成点**：resolved IR/codegen 需识别 StateId/EventId 变体构造
+  （现报 `undefined function 'peer_fault' in codegen`）+ 4 个 dual_backend 测试
+  期望串迁移（`Ready`→`Ready()`、`panic:E0801`→`Panic(E0801)`）；
+- **结论**：0.36.4 主体改造面已全量映射（checker + resolved IR + codegen + 测试
+  四层），三项已验证的修复可直接复用，下一轮补齐剩余两集成点即可挣绿。
 
 ### 0.36.3 — Phase A 锚定：Fault nominal 重设计裁决
 
