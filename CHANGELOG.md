@@ -5,6 +5,20 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.45 — U3 契约派生 arity 断言 + U5 E 码描述字典单点
+
+- **U3 契约派生 arity 强制**：checker 的 builtin 分发前新增**单一通用 arity 检查**，
+  直接消费 `core::builtins::builtin_arity` 表——固定 arity 的 builtin 由表驱动拒绝
+  surplus/缺失实参（E0242），变参（`usize::MAX`）与特殊臂（`log` 1–2 等）保留各自
+  精确规则；**修复 `pi(1)` 等缺口**（原报 TOOL-RESOLUTION-001 混淆错误 → 现
+  `pi expects 0 argument(s)`）；`builtin_arity_contract_derived_assertions` 测试
+  用表派生的合法/超参调用锁定 checker 强制与表一致；
+- **U5 E 码描述字典补全**：`describe()` 覆盖所有已分配 E/W 码（补 W0400/W0401/
+  W0402 三个 flow 警告描述），`diagnostic_codes_no_duplicates` 测试追加断言——
+  任何已分配码不得回退 "unknown error"（漂移信号）；
+- **验证**：5325 lib + 15 main + 31 real_world + 1 cli 全绿；dual_ 882 绿；
+  clippy/fmt 全绿。
+
 ### 0.35.44 — R4 builtin 快路径 + U1 登记表单点 + U2 trap 常量单点
 
 - **R4 builtin 内联快路径**：`BuiltinRegistry::fast_path` 表 + VM `CallBuiltin`

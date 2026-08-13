@@ -587,6 +587,49 @@ func main() -> i32 {
     .expect("legal handle-builtin arities must still check");
 }
 
+// U3 (0.35.45): contract-derived arity assertions. The legal arity is read
+// from the single-point `core::builtins::builtin_arity` table (U1) and the
+// checker's per-builtin enforcement must agree: legal arity checks, arity+1
+// is rejected at check time (E0242). A drift between the table and the
+// checker is caught here.
+#[test]
+fn builtin_arity_contract_derived_assertions() {
+    // (builtin name, legal call, wrong-arity call with one surplus literal)
+    let cases: &[(&str, &str, &str)] = &[
+        ("pi", "pi()", "pi(1)"),
+        ("random", "random()", "random(1)"),
+        ("now", "now()", "now(1)"),
+        ("abs", "abs(1)", "abs(1, 1)"),
+        ("sqrt", "sqrt(4.0)", "sqrt(4.0, 1.0)"),
+        ("min", "min(1, 2)", "min(1, 2, 3)"),
+        ("max", "max(1, 2)", "max(1, 2, 3)"),
+        ("pow", "pow(2, 3)", "pow(2, 3, 4)"),
+        ("range", "range(0, 10)", "range(0, 10, 1)"),
+        ("to_string", "to_string(1)", "to_string(1, 2)"),
+        (
+            "is_close",
+            "is_close(1.0, 1.0, 0.1)",
+            "is_close(1.0, 1.0, 0.1, 1.0)",
+        ),
+    ];
+    for (name, legal_call, wrong_call) in cases {
+        // Table must know the builtin and agree it is fixed-arity (not variadic).
+        let arity = crate::core::builtins::builtin_arity(name)
+            .unwrap_or_else(|| panic!("{name} missing from builtin_arity table"));
+        assert_ne!(
+            arity,
+            usize::MAX,
+            "{name} expected a fixed arity in the table"
+        );
+
+        let ok = format!("func main() -> i32 {{ let _ = {legal_call}\n0 }}");
+        check_source(&ok).unwrap_or_else(|e| panic!("{name} legal call should check: {e:?}"));
+
+        let bad = format!("func main() -> i32 {{ let _ = {wrong_call}\n0 }}");
+        assert_err_code(&bad, crate::diagnostic::codes::E0242);
+    }
+}
+
 // §2-#15 (audit 2026-08-05): expect's message arg was checked when present
 // but SURPLUS args were silently accepted (`o.expect("m", 1, 2)`), and
 // Op::Unwrap has no message slot so extras are never honored — check/run
