@@ -874,6 +874,346 @@ pub enum Op {
     FaultRetEarly,
 }
 
+impl Op {
+    /// Destination register for pure single-destination compute ops.
+    ///
+    /// Returns `Some(rd)` only for ops that write exactly one register and
+    /// have no side effects (no memory mutation, no control-flow, no trap
+    /// that a caller could observe differently after copy-propagation). Used
+    /// by the peephole pass (R3) to fuse `op rd=X; MOV rd=Y, rs=X` into
+    /// `op rd=Y`. Returns `None` for everything else (conservative).
+    pub fn dest_reg(&self) -> Option<Reg> {
+        use Op::*;
+        Some(match self {
+            LoadConst { rd, .. } | LoadUnit { rd } | LoadTrue { rd } | LoadFalse { rd } => *rd,
+            Mov { rd, .. } => *rd,
+            AddInt { rd, .. }
+            | SubInt { rd, .. }
+            | MulInt { rd, .. }
+            | DivInt { rd, .. }
+            | ModInt { rd, .. }
+            | NegInt { rd, .. }
+            | AddFloat { rd, .. }
+            | SubFloat { rd, .. }
+            | MulFloat { rd, .. }
+            | DivFloat { rd, .. }
+            | NegFloat { rd, .. }
+            | PowInt { rd, .. }
+            | PowFloat { rd, .. }
+            | IntToFloat { rd, .. }
+            | Cast { rd, .. }
+            | EqInt { rd, .. }
+            | NeInt { rd, .. }
+            | LtInt { rd, .. }
+            | GtInt { rd, .. }
+            | LeInt { rd, .. }
+            | GeInt { rd, .. }
+            | EqFloat { rd, .. }
+            | LtFloat { rd, .. }
+            | GtFloat { rd, .. }
+            | LeFloat { rd, .. }
+            | GeFloat { rd, .. }
+            | Eq { rd, .. }
+            | Ne { rd, .. }
+            | BitAnd { rd, .. }
+            | BitOr { rd, .. }
+            | BitXor { rd, .. }
+            | Shl { rd, .. }
+            | Shr { rd, .. }
+            | BitNot { rd, .. }
+            | Not { rd, .. }
+            | And { rd, .. }
+            | Or { rd, .. }
+            | ConcatStr { rd, .. }
+            | Len { rd, .. }
+            | NewList { rd, .. }
+            | NewTuple { rd, .. }
+            | NewRecord { rd, .. }
+            | NewVariant { rd, .. }
+            | NewMap { rd, .. }
+            | NewSet { rd, .. }
+            | ListGet { rd, .. }
+            | ListPop { rd, .. }
+            | TupleGet { rd, .. }
+            | RecordGet { rd, .. }
+            | VariantTag { rd, .. }
+            | VariantPayload { rd, .. }
+            | VariantGet { rd, .. }
+            | MapGet { rd, .. }
+            | MapContains { rd, .. }
+            | SetContains { rd, .. }
+            | Some { rd, .. }
+            | None { rd, .. }
+            | NewCap { rd, .. }
+            | Ok { rd, .. }
+            | Err { rd, .. }
+            | IsSome { rd, .. }
+            | Unwrap { rd, .. }
+            | IsVariant { rd, .. }
+            | PatternField { rd, .. }
+            | NewClosure { rd, .. }
+            | Spawn { rd, .. }
+            | Await { rd, .. }
+            | ToString { rd, .. }
+            | TypeOf { rd, .. }
+            | SharedNew { rd, .. }
+            | WeakNew { rd, .. }
+            | DerefValue { rd, .. }
+            | Call { rd, .. }
+            | CallBuiltin { rd, .. }
+            | CallExtern { rd, .. }
+            | CallIndirect { rd, .. }
+            | DynMethodCall { rd, .. }
+            | FlowTransition { rd, .. }
+            | ActorSpawn { rd, .. }
+            | ActorSpawnDetached { rd, .. } => *rd,
+            _ => return None,
+        })
+    }
+
+    /// Clone this op with a different destination register. Only valid for
+    /// ops where `dest_reg()` is `Some` — otherwise returns `self` unchanged.
+    pub fn with_dest(&self, new_rd: Reg) -> Op {
+        let mut op = *self;
+        match &mut op {
+            Op::LoadConst { rd, .. } => *rd = new_rd,
+            Op::LoadUnit { rd } => *rd = new_rd,
+            Op::LoadTrue { rd } => *rd = new_rd,
+            Op::LoadFalse { rd } => *rd = new_rd,
+            Op::Mov { rd, .. } => *rd = new_rd,
+            Op::AddInt { rd, .. }
+            | Op::SubInt { rd, .. }
+            | Op::MulInt { rd, .. }
+            | Op::DivInt { rd, .. }
+            | Op::ModInt { rd, .. }
+            | Op::NegInt { rd, .. }
+            | Op::AddFloat { rd, .. }
+            | Op::SubFloat { rd, .. }
+            | Op::MulFloat { rd, .. }
+            | Op::DivFloat { rd, .. }
+            | Op::NegFloat { rd, .. }
+            | Op::PowInt { rd, .. }
+            | Op::PowFloat { rd, .. }
+            | Op::IntToFloat { rd, .. }
+            | Op::Cast { rd, .. }
+            | Op::EqInt { rd, .. }
+            | Op::NeInt { rd, .. }
+            | Op::LtInt { rd, .. }
+            | Op::GtInt { rd, .. }
+            | Op::LeInt { rd, .. }
+            | Op::GeInt { rd, .. }
+            | Op::EqFloat { rd, .. }
+            | Op::LtFloat { rd, .. }
+            | Op::GtFloat { rd, .. }
+            | Op::LeFloat { rd, .. }
+            | Op::GeFloat { rd, .. }
+            | Op::Eq { rd, .. }
+            | Op::Ne { rd, .. }
+            | Op::BitAnd { rd, .. }
+            | Op::BitOr { rd, .. }
+            | Op::BitXor { rd, .. }
+            | Op::Shl { rd, .. }
+            | Op::Shr { rd, .. }
+            | Op::BitNot { rd, .. }
+            | Op::Not { rd, .. }
+            | Op::And { rd, .. }
+            | Op::Or { rd, .. }
+            | Op::ConcatStr { rd, .. }
+            | Op::Len { rd, .. }
+            | Op::NewList { rd, .. }
+            | Op::NewTuple { rd, .. }
+            | Op::NewRecord { rd, .. }
+            | Op::NewVariant { rd, .. }
+            | Op::NewMap { rd, .. }
+            | Op::NewSet { rd, .. }
+            | Op::ListGet { rd, .. }
+            | Op::ListPop { rd, .. }
+            | Op::TupleGet { rd, .. }
+            | Op::RecordGet { rd, .. }
+            | Op::VariantTag { rd, .. }
+            | Op::VariantPayload { rd, .. }
+            | Op::VariantGet { rd, .. }
+            | Op::MapGet { rd, .. }
+            | Op::MapContains { rd, .. }
+            | Op::SetContains { rd, .. }
+            | Op::Some { rd, .. }
+            | Op::None { rd, .. }
+            | Op::NewCap { rd, .. }
+            | Op::Ok { rd, .. }
+            | Op::Err { rd, .. }
+            | Op::IsSome { rd, .. }
+            | Op::Unwrap { rd, .. }
+            | Op::IsVariant { rd, .. }
+            | Op::PatternField { rd, .. }
+            | Op::NewClosure { rd, .. }
+            | Op::Spawn { rd, .. }
+            | Op::Await { rd, .. }
+            | Op::ToString { rd, .. }
+            | Op::TypeOf { rd, .. }
+            | Op::SharedNew { rd, .. }
+            | Op::WeakNew { rd, .. }
+            | Op::DerefValue { rd, .. }
+            | Op::Call { rd, .. }
+            | Op::CallBuiltin { rd, .. }
+            | Op::CallExtern { rd, .. }
+            | Op::CallIndirect { rd, .. }
+            | Op::DynMethodCall { rd, .. }
+            | Op::FlowTransition { rd, .. }
+            | Op::ActorSpawn { rd, .. }
+            | Op::ActorSpawnDetached { rd, .. } => *rd = new_rd,
+            _ => {}
+        }
+        op
+    }
+
+    /// True if this op reads `reg` in any operand register.
+    pub fn reads_reg(&self, reg: Reg) -> bool {
+        use Op::*;
+        // Range read: base..base+count.
+        fn reads_range(base: Reg, count: u16, reg: Reg) -> bool {
+            reg >= base && reg < base + count
+        }
+        match self {
+            // Ops that read no register:
+            LoadConst { .. }
+            | LoadUnit { .. }
+            | LoadTrue { .. }
+            | LoadFalse { .. }
+            | None { .. }
+            | NewMap { .. }
+            | NewSet { .. }
+            | NewCap { .. }
+            | Nop
+            | Jmp { .. }
+            | SetFaultPc { .. }
+            | ClearFaultPc
+            | IeeeEnter
+            | IeeeExit
+            | Trap { .. }
+            | RetUnit
+            | FaultRetEarly => false,
+            Mov { rs, .. } => *rs == reg,
+            AddInt { ra, rb, .. }
+            | SubInt { ra, rb, .. }
+            | MulInt { ra, rb, .. }
+            | DivInt { ra, rb, .. }
+            | ModInt { ra, rb, .. }
+            | AddFloat { ra, rb, .. }
+            | SubFloat { ra, rb, .. }
+            | MulFloat { ra, rb, .. }
+            | DivFloat { ra, rb, .. }
+            | EqInt { ra, rb, .. }
+            | NeInt { ra, rb, .. }
+            | LtInt { ra, rb, .. }
+            | GtInt { ra, rb, .. }
+            | LeInt { ra, rb, .. }
+            | GeInt { ra, rb, .. }
+            | EqFloat { ra, rb, .. }
+            | LtFloat { ra, rb, .. }
+            | GtFloat { ra, rb, .. }
+            | LeFloat { ra, rb, .. }
+            | GeFloat { ra, rb, .. }
+            | Eq { ra, rb, .. }
+            | Ne { ra, rb, .. }
+            | BitAnd { ra, rb, .. }
+            | BitOr { ra, rb, .. }
+            | BitXor { ra, rb, .. }
+            | Shl { ra, rb, .. }
+            | Shr { ra, rb, .. }
+            | PowInt { ra, rb, .. }
+            | PowFloat { ra, rb, .. }
+            | ConcatStr { ra, rb, .. }
+            | StrAppend { ra, rb, .. }
+            | CheckI32DivRem { ra, rb, .. }
+            | ListPush { ra, rb, .. }
+            | ListGet { ra, rb, .. }
+            | ListSet { ra, rb, .. }
+            | MapGet { ra, rb, .. }
+            | MapSet { ra, rb, .. }
+            | MapContains { ra, rb, .. }
+            | SetAdd { ra, rb, .. }
+            | SetContains { ra, rb, .. }
+            | RecordSet { ra, rb, .. }
+            | TupleSet { ra, rb, .. }
+            | SharedSet { ra, rb, .. } => *ra == reg || *rb == reg,
+            NegInt { ra, .. }
+            | NegFloat { ra, .. }
+            | BitNot { ra, .. }
+            | Not { ra, .. }
+            | IntToFloat { ra, .. }
+            | Cast { ra, .. }
+            | DerefValue { ra, .. }
+            | Some { ra, .. }
+            | Ok { ra, .. }
+            | Err { ra, .. }
+            | IsSome { ra, .. }
+            | Unwrap { ra, .. }
+            | Await { ra, .. }
+            | ToString { ra, .. }
+            | TypeOf { ra, .. }
+            | IsVariant { ra, .. }
+            | PatternField { ra, .. }
+            | VariantTag { ra, .. }
+            | VariantPayload { ra, .. }
+            | VariantGet { ra, .. }
+            | TupleGet { ra, .. }
+            | RecordGet { ra, .. }
+            | Len { ra, .. }
+            | ListPop { ra, .. }
+            | SharedNew { ra, .. }
+            | WeakNew { ra, .. }
+            | Ret { ra, .. }
+            | RetEarly { ra, .. }
+            | JmpIf { ra, .. }
+            | JmpIfNot { ra, .. } => *ra == reg,
+            MaskShiftAmt { rb, .. } => *rb == reg,
+            CheckI32 { rd, .. } | WrapI32 { rd, .. } => *rd == reg,
+            And { ra, rb, .. } | Or { ra, rb, .. } => *ra == reg || *rb == reg,
+            Call {
+                args_base, argc, ..
+            }
+            | CallBuiltin {
+                args_base, argc, ..
+            }
+            | CallExtern {
+                args_base, argc, ..
+            }
+            | DynMethodCall {
+                args_base, argc, ..
+            }
+            | FlowTransition {
+                args_base, argc, ..
+            }
+            | Spawn {
+                args_base, argc, ..
+            } => reads_range(*args_base, *argc, reg),
+            CallIndirect {
+                callee,
+                args_base,
+                argc,
+                ..
+            } => *callee == reg || reads_range(*args_base, *argc, reg),
+            NewClosure {
+                captures_base,
+                capture_count,
+                ..
+            } => reads_range(*captures_base, *capture_count, reg),
+            MutateSetup {
+                regs_base, count, ..
+            }
+            | MutateSetupField {
+                regs_base, count, ..
+            } => reads_range(*regs_base, *count, reg),
+            NewTuple { base, arity, .. } | NewVariant { base, arity, .. } => {
+                reads_range(*base, *arity, reg)
+            }
+            NewRecord { base, count, .. } => reads_range(*base, *count, reg),
+            // Conservative: any op not enumerated above may read the register.
+            _ => true,
+        }
+    }
+}
+
 /// A compiled function: constant pool + instruction stream + metadata.
 #[derive(Debug, Clone)]
 pub struct FunctionProto {
