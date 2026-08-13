@@ -5,6 +5,21 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.47 — R5 VM 循环不变量 LOAD_CONST 提升（LICM-lite）
+
+- **LICM-lite**（`hoist_loop_invariant_loads`，peephole 之后）：`LoadConst` 无
+  寄存器操作数，只要其目标寄存器在循环体**唯一定义 + 支配全部使用 + 循环后无
+  读**（live-out），即可安全提升到 pre-header——每条迭代省一次 dispatch。
+  逐循环迭代到定点（嵌套循环逐层剥离）；后向 `Jmp` 边重映射到提升后的新头；
+- **健全性**（L1 dual_ 882 绿锁定）：`while false { x = 0 } x` 这类 live-out
+  场景被条件 3（循环后无读）正确拒绝——初版只查"唯一定义"误提升 `x = 0`
+  导致返回 42→0，已修并加回归锁；
+- **实测 VM dsp（release）**：5.8s → 4.7s（~1.25×，循环 13→10 指令）；R1+R3+
+  R4+R5 合计 8.9s → 4.7s（**~1.9×**）。仍非 ≤1s——余量在 156-Op 单 match 分发
+  （V2），需 1.x direct-threading/JIT；
+- **验证**：5327 lib + 15 main + 31 real_world + 1 cli 全绿；dual_ 882 绿；
+  clippy/fmt 全绿。
+
 ### 0.35.46 — 收口基建：性能门禁入 CI + AGENTS 模块表补 Semantic IR
 
 - **性能门禁入 CI**（C2 教训闭环）：`scripts/perf-gate.sh` 以 release 构建 +

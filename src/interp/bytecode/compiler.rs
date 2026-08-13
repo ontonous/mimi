@@ -1129,6 +1129,11 @@ impl BytecodeCompiler {
         // R3 (0.35.43): peephole — copy-propagate Mov, drop duplicate
         // CheckI32, and fuse `op rd=X; MOV rd=Y, rs=X` into `op rd=Y`.
         peephole_optimize(&mut fc.proto.code);
+        // R5 (0.35.47): hoist loop-invariant LoadConst out of hot loops.
+        // LoadConst has no register operands, so a sole-written LoadConst is
+        // trivially loop-invariant; hoisting it removes one dispatch per
+        // iteration (dsp loop 13 → 10 instructions).
+        hoist_loop_invariant_loads(&mut fc.proto.code);
 
         Ok(fc.proto)
     }
@@ -6977,6 +6982,111 @@ fn writes_once(code: &[Op], reg: Reg) -> bool {
     code.iter().filter(|op| op.dest_reg() == Some(reg)).count() == 1
 }
 
+/// R5 (0.35.47): hoist loop-invariant `LoadConst` instructions out of loops.
+///
+/// `LoadConst` has no register operands, so a `LoadConst` whose destination
+/// register is written exactly once in a loop body is trivially loop-invariant:
+/// it evaluates to the same constant on every iteration. Hoisting it to the
+/// loop pre-header removes one dispatch per iteration. Iterated until a fixed
+/// point so nested loops are peeled one level at a time (a LoadConst invariant
+/// to the innermost loop is hoisted to that loop's pre-header first).
+///
+/// Only the back-edge `Jmp` (negative offset) is treated as a loop marker —
+/// the common `while`/`for` lowering. The loop header after hoisting moves to
+/// the first non-hoisted instruction of the body; a backward edge that used to
+/// target a hoisted header is remapped forward (see `remap_target`'s fallback
+/// past `usize::MAX` slots) so it does not re-execute the hoisted LoadConst.
+fn hoist_loop_invariant_loads(code: &mut Vec<Op>) {
+    loop {
+        // Find the first backward Jmp (back edge).
+        let mut found = None;
+        for (i, op) in code.iter().enumerate() {
+            if let Op::Jmp { offset } = op {
+                if *offset < 0 {
+                    let target = i as i32 + *offset + 1;
+                    if target >= 0 && (target as usize) < i {
+                        found = Some((i, target as usize));
+                        break;
+                    }
+                }
+            }
+        }
+        let Some((back_pc, header_pc)) = found else {
+            break;
+        };
+
+        // Loop-invariant LoadConsts: sole writer of its destination register
+        // across the whole loop body [header_pc, back_pc], dominating all of
+        // its uses. Three conditions (fail-closed):
+        //   1. rd is written exactly once in the body (loop-invariant def);
+        //   2. no read of rd *before* the LoadConst within the body (dominance
+        //      over in-loop uses — a read before the def is a live-in use);
+        //   3. no read of rd *after* the loop (hoisting must not clobber a
+        //      live-out value — e.g. `while false { x = 0 } x` keeps x = 42).
+        let mut hoist: Vec<(usize, Op)> = Vec::new();
+        for pc in header_pc..=back_pc {
+            if let op @ Op::LoadConst { rd, .. } = code[pc] {
+                let writes_once = (header_pc..=back_pc)
+                    .filter(|&j| code[j].dest_reg() == Some(rd))
+                    .count()
+                    == 1;
+                let no_read_before = !(header_pc..pc).any(|j| code[j].reads_reg(rd));
+                let no_read_after = !(back_pc + 1..code.len()).any(|j| code[j].reads_reg(rd));
+                if writes_once && no_read_before && no_read_after {
+                    hoist.push((pc, op));
+                }
+            }
+        }
+        if hoist.is_empty() {
+            break;
+        }
+
+        // Rebuild: pre-header [0, header_pc) ++ hoisted ++ body minus hoisted.
+        let hoist_pcs: std::collections::HashSet<usize> = hoist.iter().map(|(pc, _)| *pc).collect();
+        let mut new_code: Vec<Op> = Vec::with_capacity(code.len());
+        let mut old_of_new: Vec<usize> = Vec::with_capacity(code.len());
+        // remap[old] = new index; hoisted slots stay usize::MAX so jump targets
+        // fall forward to the (moved) loop header rather than the hoisted block.
+        let mut remap: Vec<usize> = vec![usize::MAX; code.len()];
+        for pc in 0..header_pc {
+            remap[pc] = new_code.len();
+            new_code.push(code[pc]);
+            old_of_new.push(pc);
+        }
+        for (pc, op) in &hoist {
+            let _ = pc;
+            new_code.push(*op);
+            old_of_new.push(*pc);
+        }
+        for pc in header_pc..code.len() {
+            if hoist_pcs.contains(&pc) {
+                continue;
+            }
+            remap[pc] = new_code.len();
+            new_code.push(code[pc]);
+            old_of_new.push(pc);
+        }
+
+        // Remap jump offsets + fault-handler PCs (same scheme as peephole).
+        for np in 0..new_code.len() {
+            let old_idx = old_of_new[np];
+            match &mut new_code[np] {
+                Op::Jmp { offset } | Op::JmpIf { offset, .. } | Op::JmpIfNot { offset, .. } => {
+                    let old_target = old_idx as i32 + *offset + 1;
+                    let new_target = remap_target(&remap, old_target);
+                    *offset = new_target as i32 - np as i32 - 1;
+                }
+                Op::SetFaultPc { handler_pc } => {
+                    *handler_pc = remap_target(&remap, *handler_pc as i32) as u32;
+                }
+                _ => {}
+            }
+        }
+
+        *code = new_code;
+    }
+}
+
 #[cfg(test)]
 mod peephole_tests {
     use super::*;
@@ -7017,5 +7127,66 @@ mod peephole_tests {
             "fused: {:?}",
             code
         );
+    }
+
+    #[test]
+    fn licm_hoists_loop_invariant_loadconst() {
+        // Loop: header LoadConst(9) is read only inside the loop → hoist.
+        // 0 LoadConst r7=0; 1 LoadConst r9=<bound>; 2 LtInt r10=r7<r9;
+        // 3 JmpIfNot r10 ->6; 4 AddInt r7=r7+1; 5 Jmp ->1; 6 Ret r7
+        let mut code = vec![
+            Op::LoadConst { rd: 7, idx: 0 },
+            Op::LoadConst { rd: 9, idx: 1 },
+            Op::LtInt {
+                rd: 10,
+                ra: 7,
+                rb: 9,
+            },
+            Op::JmpIfNot { ra: 10, offset: 3 },
+            Op::AddInt {
+                rd: 7,
+                ra: 7,
+                rb: 16,
+            },
+            Op::Jmp { offset: -5 },
+            Op::Ret { ra: 7 },
+        ];
+        hoist_loop_invariant_loads(&mut code);
+        // r9's LoadConst (old index 1) hoisted to before the loop; the loop
+        // header (old LtInt) now starts after the hoisted LoadConst.
+        assert!(
+            matches!(code[1], Op::LoadConst { rd: 9, .. }),
+            "r9 LoadConst hoisted to pre-header: {:?}",
+            code
+        );
+        // The loop body no longer contains a LoadConst for r9.
+        let back = code
+            .iter()
+            .position(|op| matches!(op, Op::Jmp { offset } if *offset < 0))
+            .expect("back edge");
+        assert!(
+            !code[2..=back]
+                .iter()
+                .any(|op| matches!(op, Op::LoadConst { rd: 9, .. })),
+            "r9 LoadConst must be out of the loop: {:?}",
+            code
+        );
+    }
+
+    #[test]
+    fn licm_does_not_hoist_live_out_loadconst() {
+        // `while false { x = 0 } x` — the body LoadConst(r1=0) is read after
+        // the loop (Ret r1), so hoisting would clobber the live-in 42.
+        let mut code = vec![
+            Op::LoadConst { rd: 1, idx: 0 }, // x = 42
+            Op::LoadFalse { rd: 3 },
+            Op::JmpIfNot { ra: 3, offset: 4 },
+            Op::LoadConst { rd: 1, idx: 1 }, // x = 0 (body)
+            Op::Jmp { offset: -4 },
+            Op::Ret { ra: 1 }, // reads r1 after loop
+        ];
+        let before = code.clone();
+        hoist_loop_invariant_loads(&mut code);
+        assert_eq!(code, before, "live-out LoadConst must NOT be hoisted");
     }
 }
