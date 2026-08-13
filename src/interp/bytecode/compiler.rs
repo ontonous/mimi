@@ -1126,6 +1126,10 @@ impl BytecodeCompiler {
             self.compile_contract_funcs(&mut fc.proto, f)?;
         }
 
+        // R3 (0.35.43): peephole — copy-propagate Mov, drop duplicate
+        // CheckI32, and fuse `op rd=X; MOV rd=Y, rs=X` into `op rd=Y`.
+        peephole_optimize(&mut fc.proto.code);
+
         Ok(fc.proto)
     }
 
@@ -6830,4 +6834,188 @@ pub fn eval_quoted_ast_bytecode(
     let mut comptime_values = captures.clone();
     comptime_values.extend(interp_values);
     eval_comptime_block_bytecode(file, &block, &comptime_values)
+}
+
+/// R3 (0.35.43) peephole optimizer — copy-propagate `Mov`, drop adjacent
+/// duplicate `CheckI32`, and fuse `op rd=X; MOV rd=Y, rs=X` into `op rd=Y`.
+///
+/// Only safe fusions are applied: the fused-away temporary register must be
+/// dead after the `Mov` (not read by any later instruction), and the producer
+/// op must be a pure single-destination compute op (`Op::dest_reg`).
+///
+/// Jump offsets and `SetFaultPc` handler PCs are remapped across each pass so
+/// instruction removal never corrupts control flow.
+fn peephole_optimize(code: &mut Vec<Op>) {
+    loop {
+        let mut changed = false;
+        let mut new_code: Vec<Op> = Vec::with_capacity(code.len());
+        // old_of_new[np] = original index of new_code[np].
+        let mut old_of_new: Vec<usize> = Vec::with_capacity(code.len());
+        // remap[old_idx] = new index (or usize::MAX if removed/merged).
+        let mut remap: Vec<usize> = vec![usize::MAX; code.len()];
+
+        let mut i = 0;
+        while i < code.len() {
+            let new_idx = new_code.len();
+
+            // Rule 1: drop adjacent duplicate CheckI32.
+            if i + 1 < code.len() {
+                if let (Op::CheckI32 { rd: r1, kind: k1 }, Op::CheckI32 { rd: r2, kind: k2 }) =
+                    (&code[i], &code[i + 1])
+                {
+                    if r1 == r2 && k1 == k2 {
+                        new_code.push(code[i]);
+                        old_of_new.push(i);
+                        remap[i] = new_idx;
+                        remap[i + 1] = new_idx;
+                        i += 2;
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+
+            // Rule 2: CheckI32(X); MOV(Y=X) → MOV(Y=X); CheckI32(Y).
+            if i + 1 < code.len() {
+                if let (Op::CheckI32 { rd: x, kind: k }, Op::Mov { rd: y, rs }) =
+                    (&code[i], &code[i + 1])
+                {
+                    if x == rs {
+                        new_code.push(Op::Mov { rd: *y, rs: *rs });
+                        new_code.push(Op::CheckI32 { rd: *y, kind: *k });
+                        old_of_new.push(i + 1);
+                        old_of_new.push(i);
+                        remap[i] = new_idx + 1;
+                        remap[i + 1] = new_idx;
+                        i += 2;
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+
+            // Rule 3: op rd=X; MOV rd=Y, rs=X → op rd=Y (X dead after MOV AND
+            // X has exactly one definition — a merge-point register written by
+            // multiple branches must not be copy-propagated).
+            if i + 1 < code.len() {
+                if let Op::Mov { rd: y, rs: x } = &code[i + 1] {
+                    if code[i].dest_reg() == Some(*x)
+                        && !reads_after(code, i + 1, *x)
+                        && writes_once(code, *x)
+                    {
+                        new_code.push(code[i].with_dest(*y));
+                        old_of_new.push(i);
+                        remap[i] = new_idx;
+                        remap[i + 1] = usize::MAX;
+                        i += 2;
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+
+            new_code.push(code[i]);
+            old_of_new.push(i);
+            remap[i] = new_idx;
+            i += 1;
+        }
+
+        // Remap jump offsets + fault-handler PCs.
+        for np in 0..new_code.len() {
+            let old_idx = old_of_new[np];
+            match &mut new_code[np] {
+                Op::Jmp { offset } | Op::JmpIf { offset, .. } | Op::JmpIfNot { offset, .. } => {
+                    let old_target = old_idx as i32 + *offset + 1;
+                    let new_target = remap_target(&remap, old_target);
+                    *offset = new_target as i32 - np as i32 - 1;
+                }
+                Op::SetFaultPc { handler_pc } => {
+                    *handler_pc = remap_target(&remap, *handler_pc as i32) as u32;
+                }
+                _ => {}
+            }
+        }
+
+        *code = new_code;
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Map an old instruction index to its new index after peephole rewriting.
+/// A removed/merged index maps to the nearest following live instruction.
+fn remap_target(remap: &[usize], old: i32) -> usize {
+    if old < 0 {
+        return 0;
+    }
+    let old = old as usize;
+    if old < remap.len() && remap[old] != usize::MAX {
+        return remap[old];
+    }
+    for j in old + 1..remap.len() {
+        if remap[j] != usize::MAX {
+            return remap[j];
+        }
+    }
+    remap.len()
+}
+
+/// True if any instruction after `pos` reads `reg`.
+fn reads_after(code: &[Op], pos: usize, reg: Reg) -> bool {
+    if pos + 1 >= code.len() {
+        return false;
+    }
+    code[pos + 1..].iter().any(|op| op.reads_reg(reg))
+}
+
+/// True if `reg` is written exactly once in the whole instruction stream.
+/// Merge-point registers (written by multiple `if`/`match` branches) are
+/// excluded from copy-propagation: rewriting a single branch's producer to a
+/// different destination would orphan the other branch's write.
+fn writes_once(code: &[Op], reg: Reg) -> bool {
+    code.iter().filter(|op| op.dest_reg() == Some(reg)).count() == 1
+}
+
+#[cfg(test)]
+mod peephole_tests {
+    use super::*;
+
+    #[test]
+    fn peephole_fuses_loadconst_mov() {
+        let mut code = vec![
+            Op::LoadConst { rd: 0, idx: 0 },
+            Op::Mov { rd: 1, rs: 0 },
+            Op::Ret { ra: 1 },
+        ];
+        peephole_optimize(&mut code);
+        assert_eq!(code.len(), 2, "MOV should be fused: {:?}", code);
+        assert!(
+            matches!(code[0], Op::LoadConst { rd: 1, .. }),
+            "dest rewritten: {:?}",
+            code
+        );
+    }
+
+    #[test]
+    fn peephole_fuses_addint_check_mov() {
+        let mut code = vec![
+            Op::AddInt {
+                rd: 18,
+                ra: 7,
+                rb: 17,
+            },
+            Op::CheckI32 { rd: 18, kind: 0 },
+            Op::CheckI32 { rd: 18, kind: 0 },
+            Op::Mov { rd: 7, rs: 18 },
+            Op::Ret { ra: 7 },
+        ];
+        peephole_optimize(&mut code);
+        assert_eq!(code.len(), 3, "expected 3 ops, got {:?}", code);
+        assert!(
+            matches!(code[0], Op::AddInt { rd: 7, .. }),
+            "fused: {:?}",
+            code
+        );
+    }
 }

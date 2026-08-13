@@ -5,6 +5,22 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.43 — R3 VM 字节码 peephole（MOV 传播 + 冗余 CHECK_I32 消除）
+
+- **peephole 优化 pass**（`peephole_optimize`，compile_func 末尾）：
+  1. 复制传播 `op rd=X; MOV rd=Y, rs=X → op rd=Y`（X 死 + 单一定义，跳过 merge 点）；
+  2. 相邻重复 `CHECK_I32` 消除；
+  3. `CHECK_I32(X); MOV(Y=X)` 重排为 `MOV; CHECK_I32(Y)` 使后续可传播；
+- **健全性**：`Op::dest_reg`/`reads_reg`/`with_dest` 完整枚举（含 Unwrap/Call/
+  Some 等），`writes_once` 单一定义门禁排除 `if`/`match` merge 寄存器；跳转
+  offset 与 `SetFaultPc.handler_pc` 逐 pass 重映射——L1 dual_ 882 绿锁定；
+- **实测 VM dsp（release）**：8.4s → 5.8s（~1.45×，循环 17→13 指令）；R1+R3
+  合计 8.9s → 5.8s（1.54×）。**未达 ≤1s**：余量在 156 Op 单 match 分发（V2）
+  与 const-operand 融合，需 R2 后续（寄存器池已就绪）+ const-op 融合，1.x
+  评估 direct-threading/JIT；
+- **验证**：5322 lib + 15 main + 31 real_world + 1 cli 全绿；dual_ 882 绿；
+  clippy/fmt 全绿。
+
 ### 0.35.42 — R1 VM 载荷 Arc 化（String/List 先行）
 
 - **`Value::String(String)` → `Value::String(Arc<String>)`、`Value::List(Vec<Value>)`
