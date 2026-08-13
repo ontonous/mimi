@@ -68,6 +68,9 @@ references/
 # Agent workspace
 .mimocode/
 .qoder/
+# Local LLVM wrapper (canonical location is /tmp/llvm-wrapper; workspace copy
+# used when /tmp does not persist, e.g. sandboxed agent shells)
+.llvm-wrapper/
 
 # Real-world suite generated binaries (kept by .mimi sources/scripts/docs)
 tests/real_world/**/*
