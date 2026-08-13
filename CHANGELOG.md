@@ -7,6 +7,22 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.4 — Phase A 实现作战计划 + 变体作用域关键发现
+
+- **作战计划落地**：`devdocs/v0.36/phase-a-implementation-plan.md` 把裁决 1+2 判定为
+  原子核心变更（字段类型 + 值构造 + 消费端同步改），锁定改造面 S1–S10（flow_matrix
+  ensure_fault_state/system_trace_expr/default_field_value/make_fault_value、
+  codegen compile.rs SystemTrace 注册 + expr/fault.rs build_fault_record、checker
+  items.rs Fault 校验、resolved SystemTrace 类型、VM absorb_flow_fault、测试消费端）；
+- **变体作用域关键发现**：`StateId` 变体名 = state 名，而 `find_variant_info`
+  （codegen/mod.rs:3040）是全局 HashMap 迭代序查找——两 flow 同有 state `Active`
+  时裸查找歧义。此问题已被 `__MultiTarget` 先例解决（`find_variant_ordinal_scoped`
+  + `owner_enum_of_scrutinee` 按 scrutinee 类型锚定 owning enum）；`StateId`/`EventId`
+  复用同机制：match 侧按 scrutinee 锚定、构造侧按 `current_flow_name` 锚定，
+  enum 类型名 flow-qualified（`flow::<name>::StateId`），变体名保留裸名靠 scoping
+  消歧——与 `__MultiTarget` 完全同构；
+- **结论**：原子核心变更（0.36.4 主体）改造面与消歧机制均已锁定，可执行。
+
 ### 0.36.3 — Phase A 锚定：Fault nominal 重设计裁决
 
 - **spec 裁决落地**：`devdocs/v0.36/phase-a-fault-nominal-verdict.md` 锚定 Phase A
