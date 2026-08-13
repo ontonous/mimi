@@ -8363,6 +8363,16 @@ fn build_canonical_function_signatures(
                 &format!("{}::{}", flow.id.0, state.id.name),
                 &state.node_id,
             );
+            // 0.36.6 (裁决 1 跨 flow 补全): the checker types Fault-sink call
+            // results as `flow::<flow>::Fault` (so field access resolves the
+            // per-flow StateId/EventId field types). Key the surface-qualified
+            // form WITHOUT the short-name alias (register_nominal would add a
+            // bare `Fault`/state-name key and make previously-unique short
+            // names ambiguous across flows).
+            nominal_catalog
+                .entry(format!("flow::{}::{}", flow.id.0, state.id.name))
+                .or_default()
+                .insert(state.node_id.0.clone());
         }
     }
     for protocol in program.protocols.values() {
