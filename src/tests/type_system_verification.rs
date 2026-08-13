@@ -94,14 +94,19 @@ mod verification {
 
     #[test]
     fn test_passport_types() {
-        let src = "extern \"C\" { func a(x: c_shared i32) -> i32; func b(x: c_borrow i32) -> i32; func c(x: c_borrow_mut i32) -> i32; func d(x: *i32) -> i32; func e(x: *mut i32) -> i32; }\nfunc main() -> i32 { 0 }";
+        let src = "extern \"C\" { func d(x: *i32) -> i32; func e(x: *mut i32) -> i32; }\nfunc main() -> i32 { 0 }";
         assert!(parse_and_check(src).is_ok(), "passport types should work");
     }
 
     #[test]
-    fn test_raw_string_type() {
+    fn test_raw_string_keyword_removed() {
+        // 0.35.39: `raw_string` was culled. `string` is the only C-string
+        // FFI type; the removed keyword is now rejected as an unknown type.
         let src = "extern \"C\" { func transfer(s: raw_string) -> i32; }\nfunc main() -> i32 { 0 }";
-        assert!(parse_and_check(src).is_ok(), "raw_string should work");
+        assert!(
+            parse_and_check(src).is_err(),
+            "raw_string is no longer a type"
+        );
     }
 
     #[test]

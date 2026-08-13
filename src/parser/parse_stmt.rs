@@ -65,33 +65,17 @@ impl Parser {
             // v0.34.10a (SD-9): `ieee_float` is a soft keyword — expression/
             // statement position, binding position still an identifier.
             TokenKind::Ident(name) if name == "ieee_float" => self.parse_ieee_float(),
-            TokenKind::Alloc if self.is_alloc_block() => self.parse_alloc(),
             TokenKind::Shared => self.parse_shared_let(SharedKind::Shared),
-            TokenKind::LocalShared => self.parse_shared_let(SharedKind::LocalShared),
             TokenKind::Weak => self.parse_shared_let(SharedKind::Weak),
-            TokenKind::WeakLocal => self.parse_shared_let(SharedKind::WeakLocal),
             // 0.35.13 (DX backlog #10 trivia-ization): desc:/rule:/mms{}
             // no longer produce AST statements. Block loops consume them as
             // trivia; reaching them outside a block is a syntax error.
-            TokenKind::Mms => Err(ParseError::new(
-                "`mms` blocks are trivia (consumed inside blocks only)",
-                self.peek().line,
-                self.peek().col,
-            )),
+            // 0.35.39: desc/rule/mms are no longer keywords — they lex as
+            // identifiers and are consumed as trivia by the block loop above.
             TokenKind::LBrace => {
                 self.advance();
                 Ok(Stmt::Block(self.parse_block()?))
             }
-            TokenKind::Desc => Err(ParseError::new(
-                "`desc:` is trivia (consumed inside blocks only)",
-                self.peek().line,
-                self.peek().col,
-            )),
-            TokenKind::Rule => Err(ParseError::new(
-                "`rule:` is trivia (consumed inside blocks only)",
-                self.peek().line,
-                self.peek().col,
-            )),
             TokenKind::Ellipsis => {
                 self.advance();
                 if !self.is_sketch() {
@@ -333,51 +317,6 @@ impl Parser {
         Ok(Stmt::IeeeFloat(body))
     }
 
-    fn parse_alloc(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(TokenKind::Alloc, "`alloc`")?;
-        self.expect(TokenKind::LParen, "`(`")?;
-        let kind_tok = self.peek().clone();
-        let kind = match &kind_tok.kind {
-            TokenKind::Ident(name) => {
-                self.advance();
-                match name.as_str() {
-                    "System" => AllocKind::System,
-                    "Arena" => AllocKind::Arena,
-                    "Bump" => AllocKind::Bump,
-                    _ => {
-                        return Err(ParseError::new(
-                            format!(
-                                "expected allocator type (System, Arena, Bump), found `{}`",
-                                name
-                            ),
-                            kind_tok.line,
-                            kind_tok.col,
-                        ))
-                    }
-                }
-            }
-            TokenKind::Arena => {
-                self.advance();
-                AllocKind::Arena
-            }
-            _ => {
-                return Err(ParseError::new(
-                    format!(
-                        "expected allocator type (System, Arena, Bump), found {}",
-                        kind_tok.kind
-                    ),
-                    kind_tok.line,
-                    kind_tok.col,
-                ))
-            }
-        };
-        self.expect(TokenKind::RParen, "`)`")?;
-        self.skip_newlines();
-        self.expect(TokenKind::LBrace, "`{`")?;
-        let body = self.parse_block()?;
-        Ok(Stmt::Alloc { kind, body })
-    }
-
     /// Parse content inside { ... } as raw text (for desc/rule blocks)
     fn parse_brace_block_content(&mut self) -> Result<String, ParseError> {
         self.expect(TokenKind::LBrace, "`{`")?;
@@ -422,7 +361,7 @@ impl Parser {
     }
 
     fn parse_mms_block(&mut self) -> Result<(), ParseError> {
-        self.expect(TokenKind::Mms, "`mms`")?;
+        self.expect_ident_name("mms")?;
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         if matches!(self.peek_kind(), TokenKind::String(_)) {
@@ -466,8 +405,7 @@ impl Parser {
                         "expected variable name after '{}'",
                         match kind {
                             SharedKind::Shared => "shared",
-                            SharedKind::LocalShared => "local_shared",
-                            SharedKind::Weak | SharedKind::WeakLocal => "weak",
+                            SharedKind::Weak => "weak",
                         }
                     ),
                     tok.line,
@@ -1079,7 +1017,9 @@ impl Parser {
             }
             // 0.35.13 (DX backlog #10 trivia-ization): desc:/rule:/mms{}
             // are consumed as trivia — validated but never enter the AST.
-            if self.at(&TokenKind::Desc) {
+            // 0.35.39: desc/rule/mms no longer lex as keywords — they are
+            // ordinary identifiers matched here by name.
+            if self.at_ident_name("desc") {
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     self.parse_brace_block_content()?;
@@ -1089,7 +1029,7 @@ impl Parser {
                 }
                 continue;
             }
-            if self.at(&TokenKind::Rule) {
+            if self.at_ident_name("rule") {
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     self.parse_brace_block_content()?;
@@ -1099,7 +1039,7 @@ impl Parser {
                 }
                 continue;
             }
-            if self.at(&TokenKind::Mms) {
+            if self.at_ident_name("mms") {
                 self.parse_mms_block()?;
                 continue;
             }
@@ -1208,7 +1148,7 @@ impl Parser {
                 continue;
             }
             // 0.35.13 trivia-ization (recovery loop): consume-and-discard.
-            if self.at(&TokenKind::Desc) {
+            if self.at_ident_name("desc") {
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     let _ = self.parse_brace_block_content();
@@ -1217,7 +1157,7 @@ impl Parser {
                 }
                 continue;
             }
-            if self.at(&TokenKind::Rule) {
+            if self.at_ident_name("rule") {
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     let _ = self.parse_brace_block_content();
@@ -1226,7 +1166,7 @@ impl Parser {
                 }
                 continue;
             }
-            if self.at(&TokenKind::Mms) {
+            if self.at_ident_name("mms") {
                 let _ = self.parse_mms_block();
                 continue;
             }

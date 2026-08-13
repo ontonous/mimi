@@ -50,7 +50,6 @@ mimi bindgen math.mimi -o bindings
 | `string` | `char*` | `String` / `*mut c_char` | `string` | `str` |
 | `#[repr(C)] record` | `struct X` | `MimiX` | `X` | `X` |
 | `func(...) -> ...` | 函数指针 | `unsafe extern "C" fn(...)` | `func(...)` | `Callable[..., Any]` |
-| `c_shared T` | `int64_t` handle | `i64` | `int64` | `int` |
 
 ## 5. 内存所有权
 
@@ -63,9 +62,9 @@ mimi bindgen math.mimi -o bindings
 
 按值传递，不涉及堆分配。绑定生成器会为目标语言生成 layout-compatible 的结构体，字段顺序与类型必须严格一致。
 
-### 5.3 shared / cap
+### 5.3 cap
 
-`c_shared T` 和 `Cap` 以不透明 handle（`int64_t`）穿越边界。handle 由 Mimi 运行时表管理，详细生命周期见 `src/ffi/runtime.rs`。
+`Cap` 以不透明 handle（`int64_t`）穿越边界。handle 由 Mimi 运行时表管理，详细生命周期见 `src/ffi/runtime.rs`。（`c_shared`/`c_borrow` 类型已在 0.35.39 移除，FFI 边界句柄概念下沉 Component IR 属性层，0.2 再做。）
 
 ## 6. 回调
 

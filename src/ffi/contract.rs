@@ -417,10 +417,6 @@ impl FfiArgContract {
             Type::Cap(_) | Type::CapAtom(_) => FfiArgContract::Cap(CapMode::Move),
             Type::RawPtr(inner) => FfiArgContract::RawPtr(inner.clone()),
             Type::RawPtrMut(inner) => FfiArgContract::RawPtrMut(inner.clone()),
-            Type::CShared(inner) => FfiArgContract::CShared(inner.clone()),
-            Type::CBorrow(inner) => FfiArgContract::CBorrow(inner.clone()),
-            Type::CBorrowMut(inner) => FfiArgContract::CBorrowMut(inner.clone()),
-            Type::RawString => FfiArgContract::StringTransfer,
             Type::ExternFunc(param_types, ret_type) | Type::Func(param_types, ret_type) => {
                 FfiArgContract::Callback {
                     param_types: param_types.clone(),
@@ -464,10 +460,6 @@ impl FfiRetContract {
             },
             Type::RawPtr(inner) => FfiRetContract::RawPtr(inner.clone()),
             Type::RawPtrMut(inner) => FfiRetContract::RawPtrMut(inner.clone()),
-            Type::CShared(inner) => FfiRetContract::CShared(inner.clone()),
-            Type::CBorrow(inner) => FfiRetContract::CBorrow(inner.clone()),
-            Type::CBorrowMut(inner) => FfiRetContract::CBorrowMut(inner.clone()),
-            Type::RawString => FfiRetContract::StringOwned,
             Type::ExternFunc(_, _) => {
                 FfiRetContract::RawPtr(Box::new(Type::Name("unit".to_string(), vec![])))
             }

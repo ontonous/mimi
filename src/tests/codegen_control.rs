@@ -1053,28 +1053,6 @@ fn codegen_extern_in_module() {
 }
 
 #[test]
-fn codegen_extern_block_c_shared() {
-    let ir = compile_to_ir(
-        r#"
-        extern "C" {
-            func process_data(data: c_shared i64) -> i32;
-        }
-        func main() -> i32 {
-            42
-        }
-    "#,
-    );
-    assert!(
-        ir.contains("mimi_shared_retain"),
-        "IR should contain retain call for c_shared param"
-    );
-    assert!(
-        ir.contains("mimi_shared_release"),
-        "IR should contain release call for c_shared param"
-    );
-}
-
-#[test]
 fn codegen_extern_block_cap() {
     let ir = compile_to_ir(
         r#"
@@ -1090,20 +1068,6 @@ fn codegen_extern_block_cap() {
     assert!(
         ir.contains("mimi_cap_check"),
         "IR should contain cap_check call for cap param"
-    );
-}
-
-#[test]
-fn codegen_extern_block_c_borrow() {
-    assert_compiles(
-        r#"
-        extern "C" {
-            func process(data: c_borrow i64) -> i32;
-        }
-        func main() -> i32 {
-            42
-        }
-    "#,
     );
 }
 
@@ -1556,20 +1520,6 @@ fn codegen_arena_block() {
     );
 }
 
-#[test]
-fn codegen_alloc_block() {
-    assert_compiles(
-        r#"
-        func main() -> i32 {
-            alloc(arena) {
-                let x = 42
-                x
-            }
-        }
-    "#,
-    );
-}
-
 // ===================== Phase 1: Cap Linear Capability Codegen Tests =====================
 
 #[test]
@@ -1870,70 +1820,6 @@ fn codegen_parasteps_sequential_fallback() {
             0
         }
     "#,
-    );
-}
-
-// ===================== Async Func Codegen Tests =====================
-
-#[test]
-fn codegen_async_func_basic() {
-    // Verify async func compiles with spawner + body
-    let ir = compile_to_ir(
-        r#"
-        async func compute(x: i32) -> i32 {
-            x + 1
-        }
-        func main() -> i32 {
-            let f = compute(41)
-            await f
-        }
-    "#,
-    );
-    // Should have the async body function
-    assert!(
-        ir.contains("__async_body"),
-        "IR should contain async body:\n{}",
-        ir
-    );
-    // Should have future alloc (from async fn constructor)
-    assert!(
-        ir.contains("mimi_future_alloc"),
-        "IR should contain mimi_future_alloc:\n{}",
-        ir
-    );
-    // Should have future set_completed (from async fn constructor)
-    assert!(
-        ir.contains("mimi_future_set_completed"),
-        "IR should contain mimi_future_set_completed:\n{}",
-        ir
-    );
-    // Should have future free (from await)
-    assert!(
-        ir.contains("mimi_future_free"),
-        "IR should contain mimi_future_free:\n{}",
-        ir
-    );
-}
-
-#[test]
-fn codegen_async_func_returns_ptr() {
-    // The async function should return ptr (future pointer) not i64 (thread ID)
-    let ir = compile_to_ir(
-        r#"
-        async func compute() -> i32 {
-            42
-        }
-        func main() -> i32 {
-            let f = compute()
-            await f
-        }
-    "#,
-    );
-    // The async function (same name) should return ptr
-    assert!(
-        ir.contains("define ptr @compute"),
-        "Async func should return ptr:\n{}",
-        ir
     );
 }
 

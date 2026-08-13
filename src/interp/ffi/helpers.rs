@@ -184,13 +184,12 @@ impl<'a> Interpreter<'a> {
 }
 
 /// Compute which callback parameters are C-allocated strings that Mimi must free.
-/// `true` for `string`, `RawString`, and `CBuffer` types.
+/// `true` for `string` and `CBuffer` types.
 pub(crate) fn compute_arg_free_mask(param_types: &[Type]) -> Vec<bool> {
     param_types
         .iter()
         .map(|pt| {
             matches!(pt.unlocated(), Type::Name(n, _) if n == "string")
-                || matches!(pt.unlocated(), Type::RawString)
                 || matches!(pt.unlocated(), Type::CBuffer(_))
         })
         .collect()
@@ -206,7 +205,6 @@ pub(crate) fn compute_arg_kinds(
         .map(|pt| match pt.unlocated() {
             Type::Name(n, _) if n == "f64" || n == "f32" => CallbackArgKind::Float,
             Type::Name(n, _) if n == "string" => CallbackArgKind::CString,
-            Type::RawString | Type::CBuffer(_) => CallbackArgKind::CString,
             _ => CallbackArgKind::Int,
         })
         .collect()

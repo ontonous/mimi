@@ -207,14 +207,6 @@ impl Parser {
                 f.is_comptime = true;
                 Ok(Item::Func(f))
             }
-            TokenKind::Async => {
-                // async func ... — async function modifier
-                self.advance();
-                let mut f = self.parse_func()?;
-                f.pub_ = pub_;
-                f.is_async = true;
-                Ok(Item::Func(f))
-            }
             TokenKind::Func => {
                 let mut f = self.parse_func()?;
                 f.pub_ = pub_;
@@ -806,21 +798,10 @@ impl Parser {
             self.expect(TokenKind::Colon, "`:`")?;
             self.skip_newlines();
         }
-        // v0.34.18c (§4.2 ruling): the `with` effect clause is abolished. Effect
-        // annotations guaranteed nothing (a parseable but unenforced model) and
-        // duplicate contracts. `with` stays a reserved keyword (good error here).
-        if self.at(&TokenKind::With) {
-            let tok = self.peek();
-            return Err(ParseError::new(
-                "the `with` effect clause was abolished (0.34 architecture ruling §4.2): \
-                 effect annotations guaranteed nothing and duplicate contracts. Remove `with ...`. \
-                 Side-effect obligations are expressed by contracts (requires/ensures) and \
-                 capability tokens (cap); `with` remains a reserved keyword."
-                    .to_string(),
-                tok.line,
-                tok.col,
-            ));
-        }
+        // 0.35.39: `with` is no longer a keyword (zombie removal). The 0.34.18c
+        // effect-clause ruling stands — effect annotations are abolished — but
+        // the reserved-keyword diagnostic is gone with the keyword. A stray
+        // `with` here now surfaces as a generic parse error.
         let effects: Vec<String> = Vec::new();
         self.expect_block_start("function body")?;
         let body = self.parse_block()?;
@@ -1865,7 +1846,7 @@ mod attribute_tests {
             span_for(func_source, "T: Clone + Eq", source_id),
         );
 
-        let modified_source = "pub async func work(value: i32) -> i32 { value }";
+        let modified_source = "pub func work(value: i32) -> i32 { value }";
         let modified =
             parse_with_source(modified_source, source_id).expect("parse modified function");
         let Item::Func(work) = &modified.items[0] else {

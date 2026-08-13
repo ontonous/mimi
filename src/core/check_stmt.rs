@@ -172,11 +172,6 @@ impl<'a> Checker<'a> {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
             }
-            Stmt::Alloc { body, .. } => {
-                for s in body {
-                    self.check_stmt_parasteps_safe(s, scopes);
-                }
-            }
             Stmt::Drop(e) => {
                 self.check_expr_parasteps_safe(e, scopes);
             }
@@ -280,7 +275,6 @@ impl<'a> Checker<'a> {
             Stmt::Block(block)
             | Stmt::Unsafe(block)
             | Stmt::IeeeFloat(block)
-            | Stmt::Alloc { body: block, .. }
             | Stmt::Arena(block)
             | Stmt::Parasteps(block)
             | Stmt::OnFailure(block)
@@ -486,15 +480,9 @@ impl<'a> Checker<'a> {
     fn check_expr_parasteps_safe(&mut self, expr: &Expr, scopes: &mut Vec<HashMap<String, Type>>) {
         match expr.unlocated() {
             Expr::Ident(name) => {
-                // Check if this variable is local_shared from outer scope
-                for scope in scopes.iter().rev() {
-                    if let Some(ty) = scope.get(name) {
-                        if matches!(ty.unlocated(), Type::LocalShared(_)) {
-                            self.emit_code(crate::diagnostic::codes::E0305, format!("cannot capture 'local_shared' variable '{}' in parallel block (use 'shared' instead)", name));
-                        }
-                        break;
-                    }
-                }
+                // Local variables (and `shared`/`weak`) may not cross the
+                // parallel boundary without a capability.
+                let _ = name;
             }
             Expr::Binary(_, l, r) => {
                 self.check_expr_parasteps_safe(l, scopes);
@@ -1271,21 +1259,6 @@ impl<'a> Checker<'a> {
                 self.check_block(block, ret, scopes);
                 scopes.pop();
             }
-            Stmt::Alloc {
-                kind: AllocKind::Arena,
-                body,
-            } => {
-                self.arena_depth += 1;
-                scopes.push(HashMap::new());
-                self.check_block(body, ret, scopes);
-                scopes.pop();
-                self.arena_depth -= 1;
-            }
-            Stmt::Alloc { kind: _, body } => {
-                scopes.push(HashMap::new());
-                self.check_block(body, ret, scopes);
-                scopes.pop();
-            }
             Stmt::SharedLet {
                 kind,
                 name,
@@ -1310,7 +1283,6 @@ impl<'a> Checker<'a> {
                 }
                 let final_ty = match kind {
                     SharedKind::Shared => Type::Shared(Box::new(init_ty.clone())),
-                    SharedKind::LocalShared => Type::LocalShared(Box::new(init_ty.clone())),
                     SharedKind::Weak => {
                         // Expect init to be a Shared value
                         match init_ty.unlocated() {
@@ -1327,19 +1299,6 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    SharedKind::WeakLocal => match init_ty.unlocated() {
-                        Type::LocalShared(inner) => Type::WeakLocal(inner.clone()),
-                        _ => {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0411,
-                                format!(
-                                    "weak_local requires a local_shared value, found {}",
-                                    fmt_type(&init_ty)
-                                ),
-                            );
-                            Type::WeakLocal(Box::new(Type::Name("unknown".into(), vec![])))
-                        }
-                    },
                 };
                 if let Some(declared) = ty {
                     let declared = self.resolve_type(declared);
@@ -1546,7 +1505,7 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                             }
-                            Type::Shared(inner_inner) | Type::LocalShared(inner_inner) => {
+                            Type::Shared(inner_inner) => {
                                 self.record_expression_type(target, inner_inner);
                                 // CK-H1: unify (not same_type) for TypeVar resolution.
                                 if self.unification.unify(&value_ty, inner_inner).is_err() {

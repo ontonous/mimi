@@ -46,7 +46,7 @@ fn interp_ffi_strlen_raw() {
     let result = run_source_bytecode_result(
         r#"
         extern "C" {
-            func test_strlen(s: raw_string) -> i32
+            func test_strlen(s: string) -> i32
         }
         func main() -> i32 {
             test_strlen("Hello World")
@@ -74,7 +74,7 @@ fn interp_ffi_greet_raw() {
     let result = run_source_bytecode_result(
         r#"
         extern "C" {
-            func test_greet(x: i32) -> raw_string
+            func test_greet(x: i32) -> string
         }
         func main() -> i32 {
             if test_greet(42) == "Hello 42" { 42 } else { 0 }
@@ -282,7 +282,7 @@ fn interp_ffi_parse_int_raw_string() {
     let result = run_source_bytecode_result(
         r#"
         extern "C" {
-            func test_parse_int(s: raw_string) -> i32
+            func test_parse_int(s: string) -> i32
         }
         func main() -> i32 {
             test_parse_int("42")

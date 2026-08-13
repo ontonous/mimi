@@ -2172,7 +2172,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Expr::Ident(obj_name) = obj.unlocated() {
             if let Some(ty) = self.var_types.get(obj_name).cloned() {
                 let inner = match ty.unlocated() {
-                    Type::Weak(inner) | Type::WeakLocal(inner) => inner.clone(),
+                    Type::Weak(inner) => inner.clone(),
                     _ => return,
                 };
                 let inner_name = crate::core::fmt_type(&inner);
@@ -3254,7 +3254,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         match kind {
-            crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared => {
+            crate::ast::SharedKind::Shared => {
                 // Shared reference copy: `shared q = p` where p is already shared.
                 // Share the same heap allocation and retain, rather than copying the value.
                 if let Expr::Ident(src_name) = init.unlocated() {
@@ -3263,7 +3263,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
+            crate::ast::SharedKind::Weak => {
                 // Weak reference: init must be an existing shared variable.
                 if let Expr::Ident(src_name) = init.unlocated() {
                     let &(src_alloca, val_ty) = vars.get(src_name).ok_or_else(|| {

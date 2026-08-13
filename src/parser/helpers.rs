@@ -171,6 +171,29 @@ impl Parser {
         *self.peek_kind() == *kind
     }
 
+    /// True when the current token is an identifier with the given name.
+    /// 0.35.39: used for trivia keywords (desc/rule/mms) that were demoted
+    /// from TokenKind to plain identifiers.
+    pub(crate) fn at_ident_name(&self, name: &str) -> bool {
+        matches!(self.peek_kind(), TokenKind::Ident(n) if n == name)
+    }
+
+    /// Consume the current token, requiring it to be an identifier with the
+    /// given name. 0.35.39: mirrors `expect` for demoted trivia keywords.
+    pub(crate) fn expect_ident_name(&mut self, name: &str) -> Result<(), ParseError> {
+        if self.at_ident_name(name) {
+            self.advance();
+            Ok(())
+        } else {
+            let tok = self.peek();
+            Err(ParseError::new(
+                format!("expected `{name}`, found {}", tok.kind),
+                tok.line,
+                tok.col,
+            ))
+        }
+    }
+
     pub(crate) fn expect(&mut self, kind: TokenKind, expected: &str) -> Result<&Token, ParseError> {
         if self.at(&kind) {
             Ok(self.advance())
@@ -271,29 +294,6 @@ impl Parser {
         }
         found
     }
-    /// Check if current position is `alloc(Arena) {` or `alloc(System) {` or `alloc(Bump) {`
-    pub(crate) fn is_alloc_block(&self) -> bool {
-        if !self.at(&TokenKind::Alloc) {
-            return false;
-        }
-        // Peek ahead: alloc must be followed by LParen
-        if self.pos + 1 >= self.tokens.len() {
-            return false;
-        }
-        if self.tokens[self.pos + 1].kind != TokenKind::LParen {
-            return false;
-        }
-        // Check the token after LParen: must be Arena/System/Bump identifier
-        if self.pos + 2 >= self.tokens.len() {
-            return false;
-        }
-        matches!(&self.tokens[self.pos + 2].kind, TokenKind::Arena)
-            || matches!(
-                &self.tokens[self.pos + 2].kind,
-                TokenKind::Ident(name) if name == "System" || name == "Bump" || name == "Arena"
-            )
-    }
-
     pub(crate) fn match_semi(&mut self) {
         // SIF (Semicolon Inference): both explicit `;` and newline act as statement terminators
         if matches!(self.peek_kind(), TokenKind::Semi | TokenKind::Newline) {

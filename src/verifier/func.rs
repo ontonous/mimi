@@ -3151,9 +3151,6 @@ impl VerifierCtx {
             Stmt::Block(body) | Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Parasteps(body) => {
                 self.assert_callee_ensures_in_block(session, body, vars, caller_name, errors);
             }
-            Stmt::Alloc { body, .. } => {
-                self.assert_callee_ensures_in_block(session, body, vars, caller_name, errors);
-            }
             _ => {}
         }
     }
@@ -3231,9 +3228,6 @@ impl VerifierCtx {
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
             | Stmt::Parasteps(body) => {
-                self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
-            }
-            Stmt::Alloc { body, .. } => {
                 self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
             }
             _ => {}
@@ -3436,9 +3430,6 @@ impl VerifierCtx {
                 }
                 Stmt::SharedLet { init, .. } => {
                     Self::build_let_subst_in_expr(init, subst);
-                }
-                Stmt::Alloc { body, .. } => {
-                    Self::build_let_subst_in_block(body, subst);
                 }
                 _ => {}
             }
@@ -3682,9 +3673,6 @@ impl VerifierCtx {
                 | Stmt::OnFailure(body) => {
                     Self::collect_loop_assigned_idents(body, out);
                 }
-                Stmt::Alloc { body, .. } => {
-                    Self::collect_loop_assigned_idents(body, out);
-                }
                 _ => {}
             }
         }
@@ -3715,9 +3703,6 @@ impl VerifierCtx {
                 | Stmt::Unsafe(body)
                 | Stmt::Parasteps(body)
                 | Stmt::OnFailure(body) => {
-                    Self::collect_assigned_idents_in_block(body, out);
-                }
-                Stmt::Alloc { body, .. } => {
                     Self::collect_assigned_idents_in_block(body, out);
                 }
                 _ => {}

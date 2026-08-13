@@ -83,48 +83,6 @@ mod ffi_verification_tests {
     }
 
     #[test]
-    fn test_passport_types_in_extern() {
-        let src = r#"
-        extern "C" {
-            func process_buffer(buf: c_shared u8) -> i32;
-            func inspect_buffer(buf: c_borrow u8) -> i32;
-            func modify_buffer(buf: c_borrow_mut u8) -> i32;
-        }
-
-        func main() -> i32 {
-            0
-        }
-        "#;
-
-        let result = check_source(src);
-        assert!(
-            result.is_ok(),
-            "Passport types should parse and type-check: {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
-    fn test_raw_string_type() {
-        let src = r#"
-        extern "C" {
-            func transfer_string(s: raw_string) -> i32;
-        }
-
-        func main() -> i32 {
-            0
-        }
-        "#;
-
-        let result = check_source(src);
-        assert!(
-            result.is_ok(),
-            "raw_string type should parse and type-check: {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
     fn test_ffi_contract_generation() {
         let func = ExternFunc {
             meta: AstNodeMeta::synthetic(AstOrigin::User),

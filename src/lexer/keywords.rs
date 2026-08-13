@@ -24,15 +24,8 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Mut
             | TokenKind::Ref
             | TokenKind::Shared
-            | TokenKind::LocalShared
             | TokenKind::Weak
-            | TokenKind::WeakLocal
-            | TokenKind::CShared
-            | TokenKind::CBorrow
-            | TokenKind::CBorrowMut
-            | TokenKind::RawString
             | TokenKind::Arena
-            | TokenKind::Alloc
             | TokenKind::Cap
             | TokenKind::Trait
             | TokenKind::Impl
@@ -59,17 +52,11 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Ensures
             | TokenKind::Invariant
             | TokenKind::Math
-            | TokenKind::Desc
-            | TokenKind::Rule
             | TokenKind::Old
-            | TokenKind::Mms
-            | TokenKind::With
-            | TokenKind::Async
             | TokenKind::Comptime
             | TokenKind::Spawn
             | TokenKind::Await
             | TokenKind::Quote
-            | TokenKind::Nothing
             | TokenKind::Loop
             | TokenKind::As
             | TokenKind::True
@@ -102,15 +89,8 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "mut" => TokenKind::Mut,
         "ref" => TokenKind::Ref,
         "shared" => TokenKind::Shared,
-        "local_shared" => TokenKind::LocalShared,
         "weak" => TokenKind::Weak,
-        "weak_local" => TokenKind::WeakLocal,
-        "c_shared" => TokenKind::CShared,
-        "c_borrow" => TokenKind::CBorrow,
-        "c_borrow_mut" => TokenKind::CBorrowMut,
-        "raw_string" => TokenKind::RawString,
         "arena" => TokenKind::Arena,
-        "alloc" => TokenKind::Alloc,
         "cap" => TokenKind::Cap,
         "trait" => TokenKind::Trait,
         "impl" => TokenKind::Impl,
@@ -135,7 +115,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "drop" => TokenKind::Drop,
         "defer" => TokenKind::Defer,
         "await" => TokenKind::Await,
-        "async" => TokenKind::Async,
         "unsafe" => TokenKind::Unsafe,
         "spawn" => TokenKind::Spawn,
         "parasteps" => TokenKind::Parasteps,
@@ -146,10 +125,7 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "ensures" => TokenKind::Ensures,
         "invariant" => TokenKind::Invariant,
         "math" => TokenKind::Math,
-        "desc" => TokenKind::Desc,
-        "rule" => TokenKind::Rule,
         "old" => TokenKind::Old,
-        "mms" => TokenKind::Mms,
         "flow" => TokenKind::Flow,
         "state" => TokenKind::State,
         "transition" => TokenKind::Transition,
@@ -161,7 +137,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "session" => TokenKind::Session,
         "dual" => TokenKind::Dual,
         "end" => TokenKind::End,
-        "with" => TokenKind::With,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,
@@ -171,7 +146,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "false" => TokenKind::False,
         "unit" => TokenKind::Unit,
         "i32" | "i64" | "f64" | "bool" | "string" => TokenKind::Ident(name.into()),
-        "nothing" => TokenKind::Nothing,
         _ => TokenKind::Ident(name.into()),
     }
 }
@@ -210,7 +184,32 @@ mod tests {
         assert_eq!(keyword_or_ident("else"), TokenKind::Else);
         assert_eq!(keyword_or_ident("old"), TokenKind::Old);
         assert_eq!(keyword_or_ident("invariant"), TokenKind::Invariant);
-        assert_eq!(keyword_or_ident("nothing"), TokenKind::Nothing);
+        // Removed zombie keywords tokenize as identifiers again.
+        assert!(matches!(keyword_or_ident("nothing"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("c_shared"), TokenKind::Ident(_)));
+        assert!(matches!(
+            keyword_or_ident("local_shared"),
+            TokenKind::Ident(_)
+        ));
+        assert!(matches!(
+            keyword_or_ident("weak_local"),
+            TokenKind::Ident(_)
+        ));
+        assert!(matches!(
+            keyword_or_ident("raw_string"),
+            TokenKind::Ident(_)
+        ));
+        assert!(matches!(keyword_or_ident("alloc"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("async"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("with"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("desc"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("rule"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("mms"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("c_borrow"), TokenKind::Ident(_)));
+        assert!(matches!(
+            keyword_or_ident("c_borrow_mut"),
+            TokenKind::Ident(_)
+        ));
         // Type names remain identifiers (they're not reserved at lex time).
         assert_eq!(keyword_or_ident("i32"), TokenKind::Ident("i32".into()));
     }

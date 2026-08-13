@@ -239,22 +239,6 @@ func main() -> i32 {
 }
 
 #[test]
-fn local_shared_basic() {
-    let src = r#"
-func main() -> i32 {
-    local_shared x = 42;
-    42
-}
-"#;
-    let result = check_source(src);
-    assert!(
-        result.is_ok(),
-        "local_shared should pass: {:?}",
-        result.err()
-    );
-}
-
-#[test]
 fn weak_shared_basic() {
     let src = r#"
 func main() -> i32 {

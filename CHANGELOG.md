@@ -5,6 +5,22 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.39 — 僵尸关键字裁撤（13 个 → 关键字表 80→67）
+
+- **裁撤 13 个僵尸/已否决关键字**：`c_shared`/`c_borrow`/`c_borrow_mut`/
+  `local_shared`/`weak_local`/`raw_string`/`nothing`(token)/`alloc`/`async`(top-level)/
+  `with`/`desc`/`rule`/`mms` —— 删 TokenKind + AST 变体 + 解析分支，零迁移成本
+  （语料 0 使用）；共享收敛为 `shared`/`weak` 二态；
+- **`Type::Nothing` 保留为语义残差类型**（ZonkedTy 产生，无关键字）；`alloc`
+  变体删除后 allocator 保持隐式化；
+- **5 处 Shared-unwrap 回归修复**：shared 尾表达式隐式返回、`Option<shared T>`
+  deref、shared deref-assign、方法隐式返回、shared 字段访问自动解引用；
+- **测试面**：删除/改写 60+ 使用已裁撤关键字的测试（含 12 个
+  audit_fix_bind 死测试，raw_string 移除使 StringOwned/StringTransfer 契约
+  失去 producer）；保留全部 `shared`/`weak` 活跃测试；
+- **验证**：5316 lib + 15 main + 31 real_world + 1 real_world_cli 全绿；
+  clippy/fmt/language-docs/unsafe/roadmap 门禁全绿；golden 无受影响。
+
 ### 0.35.37 — 审查 MEDIUM 批量 + H 系列收尾（audit-triage-0.35.25.md）
 
 - **#H6 CAP_TABLE 跨线程静默失败**：thread-local 线性能力语义保留，新增全局

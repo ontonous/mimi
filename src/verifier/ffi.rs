@@ -210,10 +210,6 @@ impl VerifierCtx {
             | Stmt::Parasteps(body) => {
                 Self::find_extern_calls_in_block(body, extern_names, calls);
             }
-            Stmt::Alloc { body, .. } => {
-                // AU-V2: alloc block initializers/statements.
-                Self::find_extern_calls_in_block(body, extern_names, calls);
-            }
             Stmt::Pinned { expr, body, .. } => {
                 Self::find_extern_calls_in_expr(expr, extern_names, calls);
                 Self::find_extern_calls_in_block(body, extern_names, calls);

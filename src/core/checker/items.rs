@@ -297,16 +297,11 @@ impl<'a> Checker<'a> {
             | Type::RefMut(_, inner)
             | Type::Option(inner)
             | Type::Shared(inner)
-            | Type::LocalShared(inner)
             | Type::Weak(inner)
-            | Type::WeakLocal(inner)
             | Type::Array(inner, _)
             | Type::Slice(inner)
             | Type::RawPtr(inner)
             | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner)
             | Type::CBuffer(inner) => Self::extract_type_names(inner),
             Type::Result(ok, err) => {
                 let mut names = Self::extract_type_names(ok);
@@ -2356,7 +2351,7 @@ impl<'a> Checker<'a> {
         let Some(actual) = implicit else { return };
         let actual = self.unification.zonk_or_unknown(&actual);
         let actual = match actual.into_unlocated() {
-            Type::Shared(inner) | Type::LocalShared(inner) | Type::CShared(inner) => *inner,
+            Type::Shared(inner) => *inner,
             other => other,
         };
         if !is_numeric_coercion(declared, &actual)

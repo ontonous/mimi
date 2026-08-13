@@ -245,7 +245,6 @@ fn collect_decls_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         Stmt::Unsafe(body) => collect_decls_in_block(body, info),
         Stmt::OnFailure(body) => collect_decls_in_block(body, info),
         Stmt::Parasteps(body) => collect_decls_in_block(body, info),
-        Stmt::Alloc { body, .. } => collect_decls_in_block(body, info),
         Stmt::Func(func) => {
             info.declared.insert(func.name.clone());
             collect_decls_in_block(&func.body, info);
@@ -349,7 +348,6 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         Stmt::Drop(e) => collect_refs_in_expr(e, info),
         Stmt::Defer(body) => collect_refs_in_block(body, info),
         Stmt::SharedLet { init, .. } => collect_refs_in_expr(init, info),
-        Stmt::Alloc { body, .. } => collect_refs_in_block(body, info),
         Stmt::Requires(e, _) | Stmt::Ensures(e, _) | Stmt::Invariant(e, _) => {
             collect_refs_in_expr(e, info);
         }
@@ -520,8 +518,7 @@ fn detect_eq_bool_in_stmt(stmt: &Stmt, diagnostics: &mut Vec<Diagnostic>, func_p
         | Stmt::Unsafe(body)
         | Stmt::IeeeFloat(body)
         | Stmt::OnFailure(body)
-        | Stmt::Parasteps(body)
-        | Stmt::Alloc { body, .. } => {
+        | Stmt::Parasteps(body) => {
             detect_eq_bool(body, diagnostics, func_pos);
         }
         Stmt::For { iterable, body, .. } => {
@@ -766,8 +763,7 @@ fn calls_self_directly(block: &[Stmt], name: &str) -> bool {
             | Stmt::Unsafe(body)
             | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
-            | Stmt::Parasteps(body)
-            | Stmt::Alloc { body, .. } => {
+            | Stmt::Parasteps(body) => {
                 if calls_self_directly(body, name) {
                     return true;
                 }
@@ -1158,8 +1154,7 @@ fn collect_names_in_block(block: &[Stmt], names: &mut std::collections::HashSet<
             | Stmt::Unsafe(body)
             | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
-            | Stmt::Parasteps(body)
-            | Stmt::Alloc { body, .. } => collect_names_in_block(body, names),
+            | Stmt::Parasteps(body) => collect_names_in_block(body, names),
             Stmt::For { iterable, body, .. } => {
                 collect_names_in_expr(iterable, names);
                 collect_names_in_block(body, names);
@@ -1820,10 +1815,7 @@ fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
             walk_stmts(body, visit)
         }
         Stmt::WhileLet { body, .. } => walk_stmts(body, visit),
-        Stmt::Arena(body)
-        | Stmt::Unsafe(body)
-        | Stmt::IeeeFloat(body)
-        | Stmt::Alloc { body, .. } => walk_stmts(body, visit),
+        Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::IeeeFloat(body) => walk_stmts(body, visit),
         // audit (MEDIUM): recurse into nested function bodies and pinned
         // blocks so W012 escape-hatch detection covers all scopes.
         Stmt::Pinned { body, .. } => walk_stmts(body, visit),

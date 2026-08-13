@@ -440,9 +440,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let previous_block = self.builder.get_insert_block();
         self.builder.position_at_end(entry);
 
-        // Phase 1: Retain c_shared/c_borrow/c_borrow_mut params before C call
-        let shared_params = self.emit_shared_param_retains(&ef, wrapper_fn)?;
-
         // Phase 2: Check cap params
         self.emit_cap_checks(&ef, wrapper_fn)?;
 
@@ -494,8 +491,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Free temporary allocations, release shared params, restore handlers.
-        self.emit_ffi_cleanup(&ef, wrapper_fn, &json_strings, &shared_params)?;
+        // Free temporary allocations, restore handlers.
+        self.emit_ffi_cleanup(&ef, &json_strings)?;
 
         // Phase 5: Check ensures contract after C call
         if self.verify_contracts {
@@ -821,47 +818,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(inkwell::module::Linkage::Internal),
         );
         Ok((extern_fn, wrapper_fn))
-    }
-
-    /// Phase 1: retain c_shared/c_borrow/c_borrow_mut params before the C call.
-    fn emit_shared_param_retains(
-        &self,
-        ef: &crate::ast::ExternFunc,
-        wrapper_fn: inkwell::values::FunctionValue<'ctx>,
-    ) -> MimiResult<Vec<(usize, BasicValueEnum<'ctx>)>> {
-        let mut shared_params = Vec::new();
-        let i64_ty = self.context.i64_type();
-        for (i, p) in ef.params.iter().enumerate() {
-            if matches!(p.ty.unlocated(), crate::ast::Type::CShared(_))
-                || matches!(p.ty.unlocated(), crate::ast::Type::CBorrow(_))
-                || matches!(p.ty.unlocated(), crate::ast::Type::CBorrowMut(_))
-            {
-                let param = wrapper_fn
-                    .get_nth_param(i as u32)
-                    .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
-                if let Some(retain_fn) = self.module.get_function("mimi_shared_retain") {
-                    let param_i64 = match param {
-                        BasicValueEnum::IntValue(iv) => iv,
-                        BasicValueEnum::PointerValue(pv) => {
-                            self.build_ptr_to_int(pv, i64_ty, &format!("ptr_to_i64_{}", i))?
-                        }
-                        _ => {
-                            return Err(CompileError::TypeMismatch(format!(
-                                "c_shared/c_borrow param {} must be pointer or int",
-                                i
-                            )))
-                        }
-                    };
-                    self.build_call(
-                        retain_fn,
-                        &[BasicMetadataValueEnum::IntValue(param_i64)],
-                        &format!("retain_{}", i),
-                    )?;
-                }
-                shared_params.push((i, param));
-            }
-        }
-        Ok(shared_params)
     }
 
     /// Phase 2: validate capability parameters, aborting the process if absent.
@@ -1625,47 +1581,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(BasicMetadataValueEnum::PointerValue(c_ptr))
     }
 
-    /// Free temporary JSON strings, release shared passport params, and restore no_panic handlers.
+    /// Free temporary JSON strings and restore no_panic handlers.
     fn emit_ffi_cleanup(
         &self,
         ef: &crate::ast::ExternFunc,
-        wrapper_fn: inkwell::values::FunctionValue<'ctx>,
         json_strings: &[PointerValue<'ctx>],
-        shared_params: &[(usize, BasicValueEnum<'ctx>)],
     ) -> MimiResult<()> {
-        let i64_ty = self.context.i64_type();
-
         for (j, json_pv) in json_strings.iter().enumerate() {
             if let Some(free_fn) = self.module.get_function("free") {
                 self.build_call(
                     free_fn,
                     &[BasicMetadataValueEnum::PointerValue(*json_pv)],
                     &format!("free_json_{}", j),
-                )?;
-            }
-        }
-
-        for (i, _) in shared_params {
-            if let Some(release_fn) = self.module.get_function("mimi_shared_release") {
-                let orig_param = wrapper_fn
-                    .get_nth_param(*i as u32)
-                    .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
-                let param_i64 = match orig_param {
-                    BasicValueEnum::IntValue(iv) => iv,
-                    BasicValueEnum::PointerValue(pv) => {
-                        self.build_ptr_to_int(pv, i64_ty, &format!("ptr_to_i64_rel_{}", i))?
-                    }
-                    _ => {
-                        return Err(CompileError::TypeMismatch(format!(
-                            "c_shared/c_borrow param {} must be pointer or int",
-                            i
-                        )))
-                    }
-                };
-                self.build_call(
-                    release_fn,
-                    &[BasicMetadataValueEnum::IntValue(param_i64)],
-                    &format!("release_{}", i),
                 )?;
             }
         }

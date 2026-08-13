@@ -277,7 +277,7 @@ pub fn resolve_builtin_method(
                 && matches!(
                     types.get(inner),
                     Some(ResolvedType::Ownership {
-                        kind: OwnershipTypeKind::Shared | OwnershipTypeKind::LocalShared,
+                        kind: OwnershipTypeKind::Shared,
                         ..
                     })
                 ));
@@ -305,13 +305,7 @@ pub fn resolve_builtin_method(
                 matches!(method, "clone" | "deref" | "inner"),
                 Permission::View,
             ),
-            OwnershipTypeKind::LocalShared => (
-                "local_shared",
-                matches!(method, "clone" | "deref" | "inner"),
-                Permission::View,
-            ),
             OwnershipTypeKind::Weak => ("weak", method == "upgrade", Permission::View),
-            OwnershipTypeKind::WeakLocal => ("weak_local", method == "upgrade", Permission::View),
         },
         ResolvedType::Primitive(PrimitiveType::String) => (
             "string",

@@ -123,14 +123,7 @@ fn audit_jni_borrowed_string_return_is_not_freed() {
 }
 
 #[test]
-fn audit_jni_owned_and_json_returns_still_freed() {
-    // raw_string return -> StringOwned: Mimi frees after copying.
-    let owned = gen_c(&[func("clone_label", vec![], Some(Type::RawString))]);
-    assert!(
-        owned.contains("mimi_string_free(raw_ret);"),
-        "StringOwned return must be freed:\n{}",
-        owned
-    );
+fn audit_jni_json_return_still_freed() {
     // List return -> Json: owned string, freed after copying; the bridge type
     // is jstring (old code fell into the wildcard arm and returned 0 as jlong).
     let json = gen_c(&[func(
@@ -150,35 +143,6 @@ fn audit_jni_owned_and_json_returns_still_freed() {
         Some(Type::Name("List".to_string(), vec![])),
     )]);
     assert!(java.contains("public static native String fetch_list();"));
-}
-
-// ---------------------------------------------------------------------------
-// [HIGH] Fix 4b: StringTransfer args — ownership moves to C. The old code
-// released the JVM buffer post-call while C still held it (double-free/UAF).
-// Copy into a malloc'd buffer, release the JVM buffer eagerly, never release
-// the transferred buffer.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn audit_jni_string_transfer_arg_moves_ownership() {
-    let c = gen_c(&[func("sink_string", vec![param("s", Type::RawString)], None)]);
-    // malloc'd copy for C ...
-    assert!(
-        c.contains("s_str = (char*)malloc(strlen(s_utf) + 1);"),
-        "StringTransfer must hand over a malloc'd buffer:\n{}",
-        c
-    );
-    assert!(c.contains("strcpy(s_str, s_utf)"));
-    // ... the JVM buffer is released immediately after the copy ...
-    assert!(c.contains("(*env)->ReleaseStringUTFChars(env, s, s_utf);"));
-    // ... the call receives the malloc'd buffer ...
-    assert!(c.contains("sink_string((char*)s_str);"));
-    // ... and the transferred buffer is NEVER released post-call.
-    assert!(
-        !c.contains("ReleaseStringUTFChars(env, s, s_str)"),
-        "transferred buffer must not be released — C owns it:\n{}",
-        c
-    );
 }
 
 #[test]

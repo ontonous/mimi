@@ -27,14 +27,9 @@ pub fn type_any(ty: &Type, pred: &dyn Fn(&Type) -> bool) -> bool {
         | Type::Ref(_, inner)
         | Type::RefMut(_, inner)
         | Type::Shared(inner)
-        | Type::LocalShared(inner)
         | Type::Weak(inner)
-        | Type::WeakLocal(inner)
         | Type::RawPtr(inner)
         | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
         | Type::CBuffer(inner)
         | Type::Array(inner, _)
         | Type::Slice(inner)
@@ -43,11 +38,9 @@ pub fn type_any(ty: &Type, pred: &dyn Fn(&Type) -> bool) -> bool {
         // Leaf types with no children
         Type::Infer
         | Type::TypeVar(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString
         | Type::Cap(_)
         | Type::CapAtom(_)
+        | Type::Nothing
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => false,
@@ -88,14 +81,9 @@ pub fn type_try_visit<E>(ty: &Type, pred: &dyn Fn(&Type) -> Result<(), E>) -> Re
         | Type::Ref(_, inner)
         | Type::RefMut(_, inner)
         | Type::Shared(inner)
-        | Type::LocalShared(inner)
         | Type::Weak(inner)
-        | Type::WeakLocal(inner)
         | Type::RawPtr(inner)
         | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
         | Type::CBuffer(inner)
         | Type::Array(inner, _)
         | Type::Slice(inner)
@@ -104,11 +92,9 @@ pub fn type_try_visit<E>(ty: &Type, pred: &dyn Fn(&Type) -> Result<(), E>) -> Re
         // Leaf types with no children
         Type::Infer
         | Type::TypeVar(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString
         | Type::Cap(_)
         | Type::CapAtom(_)
+        | Type::Nothing
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => Ok(()),
@@ -164,17 +150,9 @@ pub fn walk_type(ty: Type, folder: &mut dyn TypeFolder) -> Type {
             let inner = walk_type(*inner, folder);
             folder.fold_shared(inner)
         }
-        Type::LocalShared(inner) => {
-            let inner = walk_type(*inner, folder);
-            folder.fold_local_shared(inner)
-        }
         Type::Weak(inner) => {
             let inner = walk_type(*inner, folder);
             folder.fold_weak(inner)
-        }
-        Type::WeakLocal(inner) => {
-            let inner = walk_type(*inner, folder);
-            folder.fold_weak_local(inner)
         }
         Type::RawPtr(inner) => {
             let inner = walk_type(*inner, folder);
@@ -183,18 +161,6 @@ pub fn walk_type(ty: Type, folder: &mut dyn TypeFolder) -> Type {
         Type::RawPtrMut(inner) => {
             let inner = walk_type(*inner, folder);
             folder.fold_raw_ptr_mut(inner)
-        }
-        Type::CShared(inner) => {
-            let inner = walk_type(*inner, folder);
-            folder.fold_c_shared(inner)
-        }
-        Type::CBorrow(inner) => {
-            let inner = walk_type(*inner, folder);
-            folder.fold_c_borrow(inner)
-        }
-        Type::CBorrowMut(inner) => {
-            let inner = walk_type(*inner, folder);
-            folder.fold_c_borrow_mut(inner)
         }
         Type::CBuffer(inner) => {
             let inner = walk_type(*inner, folder);
@@ -220,11 +186,9 @@ pub fn walk_type(ty: Type, folder: &mut dyn TypeFolder) -> Type {
         }
         Type::Infer
         | Type::TypeVar(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString
         | Type::Cap(_)
         | Type::CapAtom(_)
+        | Type::Nothing
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => folder.fold_leaf(ty),
@@ -263,29 +227,14 @@ pub trait TypeFolder {
     fn fold_shared(&mut self, inner: Type) -> Type {
         Type::Shared(Box::new(inner))
     }
-    fn fold_local_shared(&mut self, inner: Type) -> Type {
-        Type::LocalShared(Box::new(inner))
-    }
     fn fold_weak(&mut self, inner: Type) -> Type {
         Type::Weak(Box::new(inner))
-    }
-    fn fold_weak_local(&mut self, inner: Type) -> Type {
-        Type::WeakLocal(Box::new(inner))
     }
     fn fold_raw_ptr(&mut self, inner: Type) -> Type {
         Type::RawPtr(Box::new(inner))
     }
     fn fold_raw_ptr_mut(&mut self, inner: Type) -> Type {
         Type::RawPtrMut(Box::new(inner))
-    }
-    fn fold_c_shared(&mut self, inner: Type) -> Type {
-        Type::CShared(Box::new(inner))
-    }
-    fn fold_c_borrow(&mut self, inner: Type) -> Type {
-        Type::CBorrow(Box::new(inner))
-    }
-    fn fold_c_borrow_mut(&mut self, inner: Type) -> Type {
-        Type::CBorrowMut(Box::new(inner))
     }
     fn fold_c_buffer(&mut self, inner: Type) -> Type {
         Type::CBuffer(Box::new(inner))

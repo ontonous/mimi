@@ -122,12 +122,10 @@ impl<'a> Checker<'a> {
         }
 
         // Check for contracts on shared-param functions (E0502)
-        let has_shared_param = func.params.iter().any(|p| {
-            matches!(
-                p.ty.unlocated(),
-                Type::Shared(_) | Type::LocalShared(_) | Type::CShared(_)
-            )
-        });
+        let has_shared_param = func
+            .params
+            .iter()
+            .any(|p| matches!(p.ty.unlocated(), Type::Shared(_)));
         if has_shared_param {
             let has_contract = func.body.iter().any(|s| {
                 matches!(
@@ -172,7 +170,7 @@ impl<'a> Checker<'a> {
             let last_ty = self.unification.zonk_or_unknown(&last_ty);
             // Unwrap shared/aliasing wrappers for return type compatibility
             let last_ty_clean = match last_ty.unlocated() {
-                Type::Shared(i) | Type::LocalShared(i) | Type::CShared(i) => (**i).clone(),
+                Type::Shared(i) => (**i).clone(),
                 _ => last_ty.clone(),
             };
             let coerced = is_numeric_coercion(&ret, &last_ty_clean);
@@ -310,9 +308,6 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
-                Stmt::Alloc { kind: _, body } if self.block_returns_on_all_paths(body) => {
-                    return true;
-                }
                 Stmt::Loop(body) => {
                     // T-3 (audit 2026-08-05): an infinite loop whose body
                     // returns on all paths only guarantees a function return
@@ -368,7 +363,6 @@ impl<'a> Checker<'a> {
             | Stmt::Unsafe(inner)
             | Stmt::IeeeFloat(inner)
             | Stmt::Defer(inner) => self.loop_body_can_break(inner),
-            Stmt::Alloc { body, .. } => self.loop_body_can_break(body),
             Stmt::Expr(expr) => self.expr_can_break(expr),
             // Breaks inside nested loops target the INNER loop; a nested
             // loop statement cannot by itself exit the analyzed loop.

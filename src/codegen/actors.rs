@@ -1418,15 +1418,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             Stmt::Arena(block) => {
                 self.compile_arena_block(block, vars, "arena")?;
             }
-            Stmt::Alloc {
-                kind: AllocKind::Arena,
-                body,
-            } => {
-                self.compile_arena_block(body, vars, "alloc(Arena)")?;
-            }
-            Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
-                self.compile_block(block, vars)?;
-            }
             Stmt::SharedLet {
                 kind,
                 name,

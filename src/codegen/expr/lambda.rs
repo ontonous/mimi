@@ -468,9 +468,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::OnFailure(block) | Stmt::Arena(block) | Stmt::Unsafe(block) => {
                     self.collect_free_vars(block, &defined, vars, free_vars);
                 }
-                Stmt::Alloc { body, .. } => {
-                    self.collect_free_vars(body, &defined, vars, free_vars);
-                }
                 Stmt::Parasteps(block) => {
                     self.collect_free_vars(block, &defined, vars, free_vars);
                 }

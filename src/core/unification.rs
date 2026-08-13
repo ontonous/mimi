@@ -352,29 +352,14 @@ impl UnificationTable {
             Type::Shared(inner) => {
                 Type::Shared(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::LocalShared(inner) => {
-                Type::LocalShared(Box::new(self.resolve_with_depth(inner, next, resolving)?))
-            }
             Type::Weak(inner) => {
                 Type::Weak(Box::new(self.resolve_with_depth(inner, next, resolving)?))
-            }
-            Type::WeakLocal(inner) => {
-                Type::WeakLocal(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
             Type::RawPtr(inner) => {
                 Type::RawPtr(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
             Type::RawPtrMut(inner) => {
                 Type::RawPtrMut(Box::new(self.resolve_with_depth(inner, next, resolving)?))
-            }
-            Type::CShared(inner) => {
-                Type::CShared(Box::new(self.resolve_with_depth(inner, next, resolving)?))
-            }
-            Type::CBorrow(inner) => {
-                Type::CBorrow(Box::new(self.resolve_with_depth(inner, next, resolving)?))
-            }
-            Type::CBorrowMut(inner) => {
-                Type::CBorrowMut(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
             Type::CBuffer(inner) => {
                 Type::CBuffer(Box::new(self.resolve_with_depth(inner, next, resolving)?))
@@ -406,11 +391,9 @@ impl UnificationTable {
             Type::ForAll(..) => ty.clone(),
             // Leaf types — no TypeVars inside
             Type::Infer
-            | Type::Nothing
-            | Type::Allocator
-            | Type::RawString
             | Type::Cap(_)
             | Type::CapAtom(_)
+            | Type::Nothing
             | Type::ImplTrait(_)
             | Type::DynTrait(_)
             | Type::TyErr => ty.clone(),
@@ -641,14 +624,9 @@ impl UnificationTable {
             (Type::Ref(_, a), Type::Ref(_, b)) => self.unify_inference_inner(a, b),
             (Type::RefMut(_, a), Type::RefMut(_, b)) => self.unify_inference_inner(a, b),
             (Type::Shared(a), Type::Shared(b)) => self.unify_inference_inner(a, b),
-            (Type::LocalShared(a), Type::LocalShared(b)) => self.unify_inference_inner(a, b),
             (Type::Weak(a), Type::Weak(b)) => self.unify_inference_inner(a, b),
-            (Type::WeakLocal(a), Type::WeakLocal(b)) => self.unify_inference_inner(a, b),
             (Type::RawPtr(a), Type::RawPtr(b)) => self.unify_inference_inner(a, b),
             (Type::RawPtrMut(a), Type::RawPtrMut(b)) => self.unify_inference_inner(a, b),
-            (Type::CShared(a), Type::CShared(b)) => self.unify_inference_inner(a, b),
-            (Type::CBorrow(a), Type::CBorrow(b)) => self.unify_inference_inner(a, b),
-            (Type::CBorrowMut(a), Type::CBorrowMut(b)) => self.unify_inference_inner(a, b),
             (Type::CBuffer(a), Type::CBuffer(b)) => self.unify_inference_inner(a, b),
             (Type::Slice(a), Type::Slice(b)) => self.unify_inference_inner(a, b),
             (Type::Array(a, na), Type::Array(b, nb)) if na == nb => {
@@ -687,9 +665,6 @@ impl UnificationTable {
             }
 
             // Literal/constant types
-            (Type::Nothing, Type::Nothing)
-            | (Type::Allocator, Type::Allocator)
-            | (Type::RawString, Type::RawString) => Ok(()),
             (Type::Cap(a), Type::Cap(b))
             | (Type::CapAtom(a), Type::CapAtom(b))
             | (Type::CapAtom(a), Type::Cap(b))
@@ -1123,7 +1098,6 @@ mod tests {
     #[test]
     fn tyerr_equality() {
         assert_eq!(Type::TyErr, Type::TyErr);
-        assert_ne!(Type::TyErr, Type::Nothing);
         assert_ne!(Type::TyErr, i32_ty());
     }
 

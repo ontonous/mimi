@@ -36,18 +36,17 @@
 | 布尔 | `true` / `false` | parse_expr.rs:278-287 |
 | 单元 | `()`（表达式与类型两处均归一化为 `unit`） | parse_expr.rs:288-292；parse_type.rs:139-140 |
 
-### 1.3 关键字（80 个 `=> TokenKind` 映射：77 硬关键字 + and/or/not 软关键字，keywords.rs:92-177；0.34.33 实测）
+### 1.3 关键字（67 个 `=> TokenKind` 映射：64 硬关键字 + and/or/not 软关键字，keywords.rs:81-147；0.35.39 实测）
 
 ```
 module type func fn actor newtype let const mut ref
-shared local_shared weak weak_local c_shared c_borrow c_borrow_mut
-raw_string arena alloc cap trait impl dyn where extern
+shared weak arena cap trait impl dyn where extern
 if else for fault fails in while return reset recover break continue
-match use pub drop defer await async unsafe spawn parasteps
-quote comptime failure requires ensures invariant math desc rule old mms
+match use pub drop defer await unsafe spawn parasteps
+quote comptime failure requires ensures invariant math old
 flow state transition protocol pinned persistent view mutate
-session dual end with and or not loop as
-true false unit nothing
+session dual end and or not loop as
+true false unit
 ```
 
 v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
@@ -56,7 +55,8 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 - `delegate` **已软化为标识符**（tokenize 为 Ident，keywords.rs:242 测试断言；`let delegate = 5` / `func delegate()` 合法）；仅语句起始位置保留条款 2 拒绝诊断（parse_stmt.rs:131，与 `on` 同模式，parse_stmt.rs:182）。
 - [建议] 再审查：`reset`/`recover`（仅系统注入 transition 名）、`nothing`。
 - **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。
-- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **80 个** `=> TokenKind` 映射（实测 keywords.rs:92-177，含 and/or/not 软关键字映射；其中 77 个硬关键字，`is_keyword_kind` 判定），达成 0.1.4 ≤80 目标（golden-document.md §1.4）。
+- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **67 个** `=> TokenKind` 映射（实测 keywords.rs:81-147，含 and/or/not 软关键字映射；其中 64 个硬关键字，`is_keyword_kind` 判定）。
+- **v0.35.39 已删除**（僵尸关键字裁撤，13 个）：`c_shared`/`c_borrow`/`c_borrow_mut`/`local_shared`/`weak_local`/`raw_string`/`nothing`(token)/`alloc`/`async`(top-level)/`with`/`desc`/`rule`/`mms`——关键字表 80 → 67，共享收敛为 `shared`/`weak` 二态；`Type::Nothing` 保留为语义残差类型（无关键字）。
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
@@ -73,19 +73,11 @@ TypeAtom :=
       Ident                    (* 命名类型，含 Result/List/Option 等，parse_type.rs:81-85 *)
     | '_'                      (* Type::Infer，:77-80 *)
     | 'CBuffer<' Type '>'      (* :70-76 *)
-    | 'alloc'                  (* Type::Allocator，:86-89 *)
-    | 'nothing'                (* Type::Nothing，:90-93 *)
     | '&' [ 'mut' ] Type           (* Ref/RefMut，:94-121；v0.34.4 ADR-004 删 '\'' lifetime *)
     | '&' [ 'mut' ] '[' Type ']'   (* Slice，:109-113 *)
     | '(' { Type ',' } ')'     (* 空 → unit，:123-144 *)
     | 'shared' Type            (* :145-149 *)
-    | 'local_shared' Type      (* :150-154 *)
     | 'weak' Type              (* :155-159 *)
-    | 'weak_local' Type        (* :160-164 *)
-    | 'c_shared' Type          (* :165-169 *)
-    | 'c_borrow' Type          (* :170-174 *)
-    | 'c_borrow_mut' Type      (* :175-179 *)
-    | 'raw_string'             (* :180-183 *)
     | '*' [ 'mut' ] Type       (* RawPtr/RawPtrMut，:184-196 *)
     | 'cap' Ident              (* :197-212 *)
     | 'func' '(' { Type ',' } ')' [ '->' Type ]      (* :213-237 *)
@@ -150,11 +142,7 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
       | 'for' Pattern 'in' Expr '{' Block '}'                                (* :624-637；ast.rs For.var: Pattern。v0.34.3 起绑定为 Pattern（`(k, v)` 解构）；0.34.24 起解释器与 native codegen 均支持单标识符与 tuple 解构（audit-syntax C2，880384bc） *)
       | 'arena' '{' Block '}' ';'                                            (* :298-305 *)
       | 'unsafe' '{' Block '}' ';'                                           (* :307-314 *)
-      | 'alloc' '(' (Ident|'arena') ')' '{' Block '}'                        (* :316-359，System/Arena/Bump *)
-      | ('shared'|'local_shared'|'weak'|'weak_local') Ident [ ':' Type ] '=' Expr ';'  (* :456-494 *)
-      | 'mms' '{' text '}' ';'                                               (* :404-454，MimiSpec 嵌入 *)
-      | 'desc' ('{' text '}' | String) ';'                                   (* :56-67 *)
-      | 'rule' ('{' text '}' | String) ';'                                   (* :68-79 *)
+      | ('shared'|'weak') Ident [ ':' Type ] '=' Expr ';'                     (* :456-494 *)
       | '...' ';'                                                            (* sketch-only，:80-91 *)
       | 'drop' '(' Expr ')' ';'                                              (* :92-99 *)
       | 'defer' '{' Block '}' ';'                                            (* :100-107 *)
@@ -181,7 +169,6 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
 'ensures'  ':' Expr ';'*
 'invariant' ':' Expr ';'*
 'math' ':' '{' { Expr ';' } '}' ';'    (* :844-861 *)
-'desc' / 'rule'（同 §4.1）
 ```
 
 ---
@@ -259,7 +246,6 @@ Cast := ... 'as' Type                         (* 收尾，:523-529 *)
 ```
 Item := [ 'pub' ] [ Attributes ] (
           'comptime' 'func' FuncDef            (* :191-198 *)
-        | 'async' 'func' FuncDef               (* :199-206 *)
         | 'func' FuncDef                       (* :207-211 *)
         | 'module' Ident '{' { 'use' ... } Items '}'   (* :694-718，parse_module *)
         | 'type' ... / 'newtype' ...           (* §2.1 *)

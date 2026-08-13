@@ -57,7 +57,7 @@
 | **C 分配，C 释放** | `malloc`/`free` 或 `libc::free` |
 | **RAII 封装** | C++ `MimiString`、Rust `CString` 自动释放 |
 | **GC 语言** | Go/Node.js/Java 通过 finalizer 或 `defer` 释放 |
-| **Handle 表** | `c_shared`/`c_borrow` 类型通过引用计数管理 |
+| **Handle 表** | `Cap` 通过运行时表管理（`c_shared`/`c_borrow` 类型已在 0.35.39 移除） |
 
 ## 5. 使用示例
 

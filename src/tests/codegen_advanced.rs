@@ -160,34 +160,6 @@ fn adv_spawn_basic() {
     );
 }
 
-// ===================== Async Functions =====================
-
-#[test]
-fn adv_async_func() {
-    let ir = compile_to_ir(
-        r#"
-        async func compute(x: i32) -> i32 { x + 1 }
-        func main() -> i32 { let f = compute(41); await f }
-    "#,
-    );
-    assert!(
-        ir.contains("__async_body"),
-        "async func should have body fn"
-    );
-    assert!(
-        ir.contains("mimi_future_alloc"),
-        "async func should allocate a future"
-    );
-    assert!(
-        ir.contains("mimi_future_set_completed"),
-        "async func should mark future completed"
-    );
-    assert!(
-        ir.contains("mimi_future_free"),
-        "await should free the future"
-    );
-}
-
 // ===================== Capabilities =====================
 
 #[test]
@@ -206,11 +178,6 @@ fn adv_cap_linear_drop() {
 #[test]
 fn adv_arena_block() {
     assert_compiles("func main() -> i32 { arena { let x = 42; x } }");
-}
-
-#[test]
-fn adv_alloc_block() {
-    assert_compiles("func main() -> i32 { alloc(arena) { let x = 42; x } }");
 }
 
 // ===================== Recursion =====================

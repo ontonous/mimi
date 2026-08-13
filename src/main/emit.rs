@@ -221,7 +221,7 @@ func main() -> i32 { 0 }
             r#"
 #[no_panic]
 extern "C" {
-    func read(&buf: c_borrow u8) -> i32
+    func read(&buf: *mut u8) -> i32
 }
 "#,
         );

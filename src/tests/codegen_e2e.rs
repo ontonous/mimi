@@ -663,48 +663,6 @@ fn e2e_extern_nop() {
 }
 
 #[test]
-fn e2e_extern_greet_raw() {
-    if !can_link() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    let stdout = compile_and_run(
-        r#"
-        extern "C" {
-            func __mimi_extern_test_greet(x: i32) -> raw_string
-        }
-        func main() -> i32 {
-            println(__mimi_extern_test_greet(42))
-            0
-        }
-    "#,
-    )
-    .expect("src/tests/codegen_e2e.rs:410 unwrap failed");
-    assert_eq!(stdout.trim(), "Hello 42");
-}
-
-#[test]
-fn e2e_extern_parse_int_raw_string() {
-    if !can_link() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    let stdout = compile_and_run(
-        r#"
-        extern "C" {
-            func __mimi_extern_test_parse_int(s: raw_string) -> i32
-        }
-        func main() -> i32 {
-            println(__mimi_extern_test_parse_int("42"))
-            0
-        }
-    "#,
-    )
-    .expect("src/tests/codegen_e2e.rs:425 unwrap failed");
-    assert_eq!(stdout.trim(), "42");
-}
-
-#[test]
 fn e2e_extern_json_sum() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -1923,47 +1881,6 @@ func main() -> i32 {
     assert_eq!(stdout.trim(), "42");
 }
 
-// ===================== c_shared retain/release (codegen E2E) =====================
-
-fn can_link_shared() -> bool {
-    std::process::Command::new("cc")
-        .arg("--version")
-        .output()
-        .is_ok()
-}
-
-#[test]
-fn e2e_c_shared_retain_release() {
-    if !can_link_shared() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    let extra_c = r#"
-#include <stdint.h>
-typedef int64_t MimiHandle;
-MimiHandle mimi_shared_retain(MimiHandle handle) { return handle; }
-void mimi_shared_release(MimiHandle handle) { (void)handle; }
-MimiHandle __mimi_extern_test_c_shared(MimiHandle handle) {
-    return handle + 1;
-}
-"#;
-    let stdout = compile_and_run_with_csrc(
-        r#"
-        extern "C" {
-            func __mimi_extern_test_c_shared(x: c_shared i64) -> i64;
-        }
-        func main() -> i32 {
-            let result = __mimi_extern_test_c_shared(41)
-            println(result)
-            0
-        }
-    "#,
-        extra_c,
-    )
-    .expect("src/tests/codegen_e2e.rs:1267 unwrap failed");
-    assert_eq!(stdout.trim(), "42");
-}
-
 // ===================== Sanitizer Tests =====================
 // These tests run the compiled binary under valgrind (memcheck) or with
 // AddressSanitizer. They are #[ignore] by default — run with:
@@ -2307,31 +2224,6 @@ fn e2e_weak_upgrade_some() {
         stdout.trim(),
         "1",
         "weak.upgrade() should return Some while shared is alive"
-    );
-}
-
-#[test]
-fn e2e_weak_local_upgrade_some() {
-    if !can_link() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    let stdout = compile_and_run(
-        r#"
-        func main() -> i32 {
-            local_shared x = 42;
-            weak_local w: weak_local i32 = x;
-            let upgraded: Option<i32> = w.upgrade();
-            println(if upgraded.is_some() { 1 } else { 0 });
-            0
-        }
-    "#,
-    )
-    .expect("src/tests/codegen_e2e.rs:e2e_weak_local_upgrade_some unwrap failed");
-    assert_eq!(
-        stdout.trim(),
-        "1",
-        "weak_local.upgrade() should return Some while local_shared is alive"
     );
 }
 

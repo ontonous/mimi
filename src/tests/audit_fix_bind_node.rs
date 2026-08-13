@@ -49,7 +49,7 @@ fn unit_ty() -> Type {
     Type::Name("unit".into(), vec![])
 }
 fn raw_string_ty() -> Type {
-    Type::RawString
+    Type::Name("string".into(), vec![])
 }
 fn raw_ptr_i32() -> Type {
     Type::RawPtr(Box::new(i32_ty()))
@@ -133,43 +133,6 @@ fn node_every_napi_status_checked_via_macro() {
 
 /// Fix 2 (node_bind.rs:589-602): FfiRetContract::String returns are borrowed
 /// and must NOT be freed; StringOwned returns keep the free.
-#[test]
-fn node_string_return_borrowed_not_freed() {
-    let gen = NodeBindGenerator::new(HashMap::new(), "audit");
-    let out = gen
-        .generate(&[
-            extern_fn("borrow_str", vec![], Some(string_ty())),
-            extern_fn("owned_str", vec![], Some(raw_string_ty())),
-        ])
-        .unwrap();
-
-    assert!(out.contains("/* Contract FfiRetContract::String: borrowed from C — do NOT free. */"));
-    assert!(out.contains("/* Contract FfiRetContract::StringOwned: owned — free after copying. */"));
-    // Exactly one free — the owned return. The borrowed return must not free.
-    assert_eq!(out.matches("mimi_string_free(ret);").count(), 1);
-    // NULL returns become undefined instead of crashing napi_create_string_utf8.
-    assert!(out.contains("if (ret == NULL)"));
-}
-
-/// Fix 2 (node_bind.rs:492-507+621-627): StringTransfer args transfer buffer
-/// ownership to C; the post-call free was a double-free/UAF. Borrow/Json args
-/// still free their Mimi-owned temporaries.
-#[test]
-fn node_string_transfer_arg_not_freed_post_call() {
-    let gen = NodeBindGenerator::new(HashMap::new(), "audit");
-    let out = gen
-        .generate(&[
-            extern_fn("take", vec![("s", raw_string_ty())], Some(unit_ty())),
-            extern_fn("greet", vec![("name", string_ty())], Some(unit_ty())),
-        ])
-        .unwrap();
-
-    assert!(out.contains("/* s_buf: StringTransfer — ownership moved to C; do NOT free. */"));
-    assert!(!out.contains("free(s_buf)"));
-    // Control: borrowed string args still free the temporary buffer.
-    assert!(out.contains("free(name_buf);"));
-}
-
 /// Fix 3 (node_bind.rs:539): RawPtr/RawPtrMut args must marshal the actual JS
 /// pointer address (number or BigInt), not discard it as NULL.
 #[test]

@@ -795,20 +795,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     | Type::Cap(..)
                                                     | Type::CapAtom(..)
                                                     | Type::Shared(..)
-                                                    | Type::LocalShared(..)
                                                     | Type::Weak(..)
-                                                    | Type::WeakLocal(..)
-                                                    | Type::Nothing
-                                                    | Type::Allocator
                                                     | Type::Array(..)
                                                     | Type::Slice(..)
                                                     | Type::DynTrait(..)
                                                     | Type::RawPtr(..)
                                                     | Type::RawPtrMut(..)
-                                                    | Type::CShared(..)
-                                                    | Type::CBorrow(..)
-                                                    | Type::CBorrowMut(..)
-                                                    | Type::RawString
+                                                    | Type::Nothing
                                                     | Type::Infer
                                                     | Type::TyErr
                                                     | Type::TypeVar(..)
@@ -1208,16 +1201,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let r = self.compile_block(block, vars);
                     self.ieee_depth -= 1;
                     r?;
-                }
-                Stmt::Alloc {
-                    kind: AllocKind::Arena,
-                    body,
-                } => {
-                    self.compile_arena_block(body, vars, "alloc(Arena)")?;
-                }
-                Stmt::Alloc { body, .. } => {
-                    // Alloc: execute body sequentially (simplified)
-                    self.compile_block(body, vars)?;
                 }
                 Stmt::Requires(..)
                 | Stmt::Ensures(..)

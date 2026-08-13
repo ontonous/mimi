@@ -3427,32 +3427,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         r?;
                     }
                 }
-                Stmt::Alloc {
-                    kind: AllocKind::Arena,
-                    body,
-                } => {
-                    if is_tail {
-                        let inner_vars = &mut vars.clone();
-                        last_val = self.compile_block_last_val(body, inner_vars)?;
-                        last_val = self.adjust_int_val(last_val, ret_type)?;
-                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
-                        vars.extend(std::mem::take(inner_vars));
-                    } else {
-                        self.compile_arena_block(body, vars, "alloc(Arena)")?;
-                    }
-                }
-                Stmt::Alloc { body, .. } => {
-                    if is_tail {
-                        let inner_vars = &mut vars.clone();
-                        last_val = self.compile_block_last_val(body, inner_vars)?;
-                        last_val = self.adjust_int_val(last_val, ret_type)?;
-                        last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
-                        vars.extend(std::mem::take(inner_vars));
-                    } else {
-                        // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
-                        self.compile_block(body, vars)?;
-                    }
-                }
                 Stmt::Func(f) => {
                     if f.is_comptime {
                         // Comptime functions: skip codegen (interpreter-only)

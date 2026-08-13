@@ -212,11 +212,6 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_expr(e, uses);
                 }
             }
-            Stmt::Alloc { body, .. } => {
-                for s in body {
-                    Self::collect_uses_in_stmt(s, uses);
-                }
-            }
             Stmt::Func(func) => {
                 for s in &func.body {
                     Self::collect_uses_in_stmt(s, uses);

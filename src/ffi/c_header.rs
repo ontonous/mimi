@@ -391,14 +391,8 @@ impl CHeaderGenerator {
                 let inner_type = self.mimi_type_to_c_type(inner);
                 format!("{}*", inner_type)
             }
-            Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => "MimiHandle".to_string(),
             Type::Cap(_) | Type::CapAtom(_) => "MimiCap".to_string(),
-            Type::RawString => "char*".to_string(),
             Type::Infer => "void".to_string(),
-            Type::Shared(inner) | Type::LocalShared(inner) => {
-                let inner_type = self.mimi_type_to_c_type(inner);
-                format!("MimiHandle /* shared {} */", inner_type)
-            }
             Type::Ref(_, inner) | Type::RefMut(_, inner) => {
                 let inner_type = self.mimi_type_to_c_type(inner);
                 format!("{}*", inner_type)
