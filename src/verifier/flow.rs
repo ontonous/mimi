@@ -25,11 +25,16 @@ impl FlowAcc {
     }
 }
 
-/// Pre-collected step: either a function body or an extern function with contracts.
+/// Pre-collected step: either a function body, an extern function with
+/// contracts, or a Flow transition (verified with typestate context).
 #[derive(Debug, Clone)]
 pub enum StepKind {
     Func(FuncDef),
     Extern(ExternFunc),
+    Transition {
+        flow_name: String,
+        transition: TransitionDef,
+    },
 }
 
 /// Verifier state machine — strict Flow.
@@ -139,6 +144,24 @@ impl VerifierState {
                         acc,
                     })
                 }
+                Some(StepKind::Transition {
+                    flow_name,
+                    transition,
+                }) => {
+                    session.reset();
+                    let result = ctx.verify_transition(&mut session, &flow_name, &transition);
+                    ctx.func_status.insert(
+                        format!("{}::{}", flow_name, transition.name),
+                        result.status.clone(),
+                    );
+                    acc.results.push(result);
+                    Ok(VerifierState::Ready {
+                        session,
+                        ctx,
+                        queue,
+                        acc,
+                    })
+                }
                 None => Ok(VerifierState::Done(acc)),
             },
             (done @ VerifierState::Done(_), _) => Ok(done),
@@ -226,6 +249,18 @@ fn verify_queue_to_fixpoint(
                         acc.results.push(result);
                     }
                 }
+                StepKind::Transition {
+                    flow_name,
+                    transition,
+                } => {
+                    session.reset();
+                    let result = ctx.verify_transition(&mut session, &flow_name, &transition);
+                    ctx.func_status.insert(
+                        format!("{}::{}", flow_name, transition.name),
+                        result.status.clone(),
+                    );
+                    acc.results.push(result);
+                }
             }
         }
         if ctx.func_status == status_before {
@@ -307,29 +342,16 @@ fn flatten_items_prefixed(items: &[Item], prefix: &str, queue: &mut Vec<StepKind
             }
             Item::Flow(flow) => {
                 for t in &flow.transitions {
-                    if let Some(body) = &t.body {
-                        // Synthesize a FuncDef for the transition body.
-                        let f = FuncDef {
-                            meta: AstNodeMeta::inherited(
-                                t.meta.span,
-                                AstOrigin::RuntimeSystem("verifier.transition_function"),
-                            ),
-                            name: qualify(prefix, &format!("{}::{}", flow.name, t.name)),
-                            pub_: false,
-                            params: t.params.clone(),
-                            ret: None,
-                            body: body.clone(),
-                            where_clause: vec![],
-                            generics: vec![],
-                            effects: vec![],
-                            is_comptime: false,
-                            is_async: false,
-                            extern_abi: None,
-                            has_requires: false,
-                            has_ensures: false,
-                            has_mutate_params: false,
-                        };
-                        queue.push(StepKind::Func(f));
+                    if t.body.is_some() {
+                        // Verify the transition with typestate context (M5):
+                        // the verifier extracts the checker-verified
+                        // requires/ensures/invariant clauses into
+                        // TypestateAxioms instead of synthesizing a bare
+                        // FuncDef (which dropped the typestate context).
+                        queue.push(StepKind::Transition {
+                            flow_name: qualify(prefix, &flow.name),
+                            transition: t.clone(),
+                        });
                     }
                 }
             }
@@ -676,5 +698,65 @@ mod tests {
         // Step after Done should stay Done
         let state = state.transition(FlowEvent::Step).unwrap();
         assert!(state.is_done());
+    }
+
+    // ── M5 (0.35.40): Flow transition typestate context ──
+
+    #[test]
+    fn test_flow_transition_typestate_proven() {
+        if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
+            return; // Z3 unavailable
+        }
+        let results = flow_verify_source_unchecked(
+            "flow Counter {
+                state Zero { count: i32 }
+                state Positive { count: i32 }
+                transition inc(Zero, n: i32) -> Positive {
+                    requires: n > 0
+                    ensures: n > 0
+                    return Positive { count: n }
+                }
+            }",
+        )
+        .unwrap_or_else(|e| panic!("verifier failed: {}", e));
+        let inc = results
+            .iter()
+            .find(|r| r.func_name == "Counter::inc")
+            .expect("transition should be verified");
+        assert_eq!(
+            inc.status,
+            crate::verifier::ctx::VerifStatus::Proven,
+            "transition with trivially-satisfied typestate contract must be Proven: {}",
+            inc.message
+        );
+    }
+
+    #[test]
+    fn test_flow_transition_typestate_disproven() {
+        if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
+            return; // Z3 unavailable
+        }
+        let results = flow_verify_source_unchecked(
+            "flow Counter {
+                state Zero { count: i32 }
+                state Positive { count: i32 }
+                transition inc(Zero, n: i32) -> Positive {
+                    requires: n > 0
+                    ensures: n < 0
+                    return Positive { count: n }
+                }
+            }",
+        )
+        .unwrap_or_else(|e| panic!("verifier failed: {}", e));
+        let inc = results
+            .iter()
+            .find(|r| r.func_name == "Counter::inc")
+            .expect("transition should be verified");
+        assert_eq!(
+            inc.status,
+            crate::verifier::ctx::VerifStatus::Disproven,
+            "transition whose ensures contradicts its requires must be Disproven: {}",
+            inc.message
+        );
     }
 }

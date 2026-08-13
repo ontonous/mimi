@@ -5,6 +5,24 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.40 — M5 Flow typestate 公理填充（audit-triage-0.35.25.md）
+
+- **`lower_transition_to_vir` 转正**：原为无调用方的死代码（空 TypestateAxioms），
+  现从 transition body 的 checker 已验证契约子句填充三字段——`invariant:` →
+  `source_invariants`、`requires:` → `transition_guards`、`ensures:` →
+  `target_invariants`；
+- **Flow transition 验证路径重接**：`flatten_items` 不再把 transition 合成裸
+  FuncDef，改为 `StepKind::Transition` → `verify_transition`（VIR typestate
+  契约级证明 `(source_invariants ∧ transition_guards) ⊢ target_invariants`，
+  不可编码则回退 AST 路径验证可执行体）；
+- **只注入 checker 已验证项**：状态级 `invariant:`（`state { ... }` 声明）语言
+  尚无，`source_invariants` 仅在 transition 自身 `invariant:` 子句时非空，0.1.6
+  Flow typestate 支柱补齐；可执行体（record 构造/`self` 字段）由 checker 验证，
+  不进 Z3；
+- **回归锁**：`lower_transition_populates_typestate_context` + transition
+  Proven/Disproven 双案例；
+- **验证**：5319 lib + 15 main + 31 real_world + 1 real_world_cli 全绿；clippy/fmt 全绿。
+
 ### 0.35.39 — 僵尸关键字裁撤（13 个 → 关键字表 80→67）
 
 - **裁撤 13 个僵尸/已否决关键字**：`c_shared`/`c_borrow`/`c_borrow_mut`/
