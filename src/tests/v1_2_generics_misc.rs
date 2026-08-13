@@ -418,7 +418,10 @@ func main() -> string {
     b.value
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("hello".to_string()));
+    assert_eq!(
+        run_source(src),
+        interp::Value::String(Arc::new("hello".to_string()))
+    );
 }
 
 #[test]

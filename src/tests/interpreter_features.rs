@@ -66,7 +66,10 @@ fn stress_deeply_nested_arithmetic() {
 fn stress_long_chain_addition() {
     // Long string concatenation chain — tests string handling under load
     let v = run_source("func main() -> string { \"a\" + \"b\" + \"c\" + \"d\" + \"e\" + \"f\" + \"g\" + \"h\" + \"i\" + \"j\" + \"k\" + \"l\" + \"m\" + \"n\" + \"o\" + \"p\" }");
-    assert_eq!(v, interp::Value::String("abcdefghijklmnop".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("abcdefghijklmnop".to_string()))
+    );
 }
 
 // ====== Type System Edge Cases ======
@@ -135,7 +138,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String("int:42".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("int:42".to_string())));
 }
 
 // ====== Control Flow Edge Cases ======
@@ -180,7 +183,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String("small".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("small".to_string())));
 }
 
 #[test]
@@ -246,7 +249,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String("bad input".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("bad input".to_string())));
 }
 
 // ====== String Edge Cases ======
@@ -606,7 +609,9 @@ func main() -> string {
     );
     assert_eq!(
         v,
-        interp::Value::String("&lt;div class=\"test\"&gt;&amp;hello&lt;/div&gt;".to_string())
+        interp::Value::String(Arc::new(
+            "&lt;div class=\"test\"&gt;&amp;hello&lt;/div&gt;".to_string()
+        ))
     );
 }
 
@@ -645,9 +650,9 @@ func main() -> string {
     );
     assert_eq!(
         v,
-        interp::Value::String(
+        interp::Value::String(Arc::new(
             "{\"name\":\"mimi\",\"version\":\"1.0\",\"lang\":\"mimi\"}".to_string()
-        )
+        ))
     );
 }
 
@@ -688,7 +693,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String("mimi".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("mimi".to_string())));
 }
 
 #[test]

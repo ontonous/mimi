@@ -18,7 +18,7 @@ fn json_value(code: &str) -> interp::Value {
 fn json_from_json_valid_object() {
     assert_eq!(
         json_value(r#"from_json("{\"a\":1}")"#),
-        interp::Value::String("{\"a\":1}".into())
+        interp::Value::String(Arc::new("{\"a\":1}".into()))
     );
 }
 
@@ -26,7 +26,7 @@ fn json_from_json_valid_object() {
 fn json_from_json_valid_array() {
     assert_eq!(
         json_value(r#"from_json("[1, 2, 3]")"#),
-        interp::Value::String("[1, 2, 3]".into())
+        interp::Value::String(Arc::new("[1, 2, 3]".into()))
     );
 }
 
@@ -34,7 +34,7 @@ fn json_from_json_valid_array() {
 fn json_from_json_valid_string() {
     assert_eq!(
         json_value(r#"from_json("\"hello\"")"#),
-        interp::Value::String("\"hello\"".into())
+        interp::Value::String(Arc::new("\"hello\"".into()))
     );
 }
 
@@ -42,7 +42,7 @@ fn json_from_json_valid_string() {
 fn json_from_json_valid_number() {
     assert_eq!(
         json_value(r#"from_json("42")"#),
-        interp::Value::String("42".into())
+        interp::Value::String(Arc::new("42".into()))
     );
 }
 
@@ -50,7 +50,7 @@ fn json_from_json_valid_number() {
 fn json_from_json_valid_bool() {
     assert_eq!(
         json_value(r#"from_json("true")"#),
-        interp::Value::String("true".into())
+        interp::Value::String(Arc::new("true".into()))
     );
 }
 
@@ -58,7 +58,7 @@ fn json_from_json_valid_bool() {
 fn json_from_json_valid_null() {
     assert_eq!(
         json_value(r#"from_json("null")"#),
-        interp::Value::String("null".into())
+        interp::Value::String(Arc::new("null".into()))
     );
 }
 
@@ -67,7 +67,7 @@ fn json_from_json_valid_null() {
 fn json_from_json_nested_object() {
     assert_eq!(
         json_value(r#"from_json("{\"a\":{\"b\":{\"c\":1}}}")"#),
-        interp::Value::String("{\"a\":{\"b\":{\"c\":1}}}".into())
+        interp::Value::String(Arc::new("{\"a\":{\"b\":{\"c\":1}}}".into()))
     );
 }
 
@@ -75,7 +75,7 @@ fn json_from_json_nested_object() {
 fn json_from_json_nested_array() {
     assert_eq!(
         json_value(r#"from_json("[[1,2],[3,4]]")"#),
-        interp::Value::String("[[1,2],[3,4]]".into())
+        interp::Value::String(Arc::new("[[1,2],[3,4]]".into()))
     );
 }
 
@@ -84,7 +84,7 @@ fn json_from_json_nested_array() {
 fn json_from_json_unicode() {
     assert_eq!(
         json_value(r#"from_json("\"\\u0041\"")"#),
-        interp::Value::String("\"\\u0041\"".into())
+        interp::Value::String(Arc::new("\"\\u0041\"".into()))
     );
 }
 
@@ -93,7 +93,7 @@ fn json_from_json_unicode() {
 fn json_from_json_whitespace() {
     assert_eq!(
         json_value(r#"from_json("{  \"a\" : 1  }")"#),
-        interp::Value::String("{  \"a\" : 1  }".into())
+        interp::Value::String(Arc::new("{  \"a\" : 1  }".into()))
     );
 }
 
@@ -123,7 +123,7 @@ fn json_from_json_invalid_empty_string() {
 fn json_get_string_exists() {
     let v =
         run_source(r#"func main() -> string { json_get_string("{\"name\":\"Alice\"}", "name") }"#);
-    assert_eq!(v, interp::Value::String("Alice".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("Alice".into())));
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn json_get_string_missing_key() {
     let v = run_source(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
     assert_eq!(
         v,
-        interp::Value::String("".into()),
+        interp::Value::String(Arc::new("".into())),
         "json_get_string with missing key returns empty string"
     );
 }
@@ -140,7 +140,7 @@ fn json_get_string_missing_key() {
 fn json_get_string_not_a_string() {
     // json_get_string on non-string values returns string representation
     let v = run_source(r#"func main() -> string { json_get_string("{\"a\":42}", "a") }"#);
-    assert_eq!(v, interp::Value::String("42".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("42".into())));
 }
 
 // json_get_int: extract integer field
@@ -164,13 +164,13 @@ fn json_get_int_missing_key() {
 #[test]
 fn json_get_element_first() {
     let v = run_source(r#"func main() -> string { json_get_element("[10, 20, 30]", 0) }"#);
-    assert_eq!(v, interp::Value::String("10".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("10".into())));
 }
 
 #[test]
 fn json_get_element_middle() {
     let v = run_source(r#"func main() -> string { json_get_element("[10, 20, 30]", 1) }"#);
-    assert_eq!(v, interp::Value::String("20".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("20".into())));
 }
 
 #[test]
@@ -187,26 +187,26 @@ fn json_get_element_out_of_bounds() {
 fn json_get_element_object_in_array() {
     let v =
         run_source(r#"func main() -> string { json_get_element("[{\"x\":1}, {\"x\":2}]", 0) }"#);
-    assert_eq!(v, interp::Value::String("{\"x\":1}".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("{\"x\":1}".into())));
 }
 
 // to_json: serialization
 #[test]
 fn json_to_json_int() {
     let v = run_source(r#"func main() -> string { to_json(42) }"#);
-    assert_eq!(v, interp::Value::String("42".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("42".into())));
 }
 
 #[test]
 fn json_to_json_bool() {
     let v = run_source(r#"func main() -> string { to_json(true) }"#);
-    assert_eq!(v, interp::Value::String("true".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("true".into())));
 }
 
 #[test]
 fn json_to_json_string() {
     let v = run_source(r#"func main() -> string { to_json("hello") }"#);
-    assert_eq!(v, interp::Value::String("\"hello\"".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("\"hello\"".into())));
 }
 
 // stdlib-style wrappers (without module import)
@@ -235,7 +235,7 @@ func main() -> str {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("false".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("false".into())));
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn json_get_bool_missing_key() {
     let v = run_source(r#"func main() -> string { json_get_string("{\"a\": true}", "missing") }"#);
     assert_eq!(
         v,
-        interp::Value::String("".into()),
+        interp::Value::String(Arc::new("".into())),
         "json_get_string with missing key returns empty string"
     );
 }
@@ -338,7 +338,7 @@ fn json_from_json_typed_i32() {
 #[test]
 fn json_from_json_typed_string() {
     let v = run_source(r#"func main() -> string { from_json::<string>("\"hello\"") }"#);
-    assert_eq!(v, interp::Value::String("hello".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".into())));
 }
 
 #[test]
@@ -410,7 +410,7 @@ fn json_from_json_typed_option_none() {
         }
     "#,
     );
-    assert_eq!(v, interp::Value::String("None".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("None".into())));
 }
 
 #[test]
@@ -425,7 +425,10 @@ fn json_from_json_typed_nested_record() {
         }
     "#,
     );
-    assert_eq!(v, interp::Value::String("Alice lives in NYC".into()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("Alice lives in NYC".into()))
+    );
 }
 
 // ─── Additional typed deserialization edge cases ───────────────
@@ -453,7 +456,7 @@ fn json_from_json_typed_list_string() {
         }
     "#,
     );
-    assert_eq!(v, interp::Value::String("abc".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("abc".into())));
 }
 
 #[test]
@@ -485,7 +488,7 @@ fn json_from_json_typed_record_with_list() {
         }
     "#,
     );
-    assert_eq!(v, interp::Value::String("dev: A, B".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("dev: A, B".into())));
 }
 
 #[test]
@@ -499,7 +502,7 @@ fn json_from_json_typed_enum_unit_variant() {
         }
     "#,
     );
-    assert_eq!(v, interp::Value::String("Red".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("Red".into())));
 }
 
 #[test]
@@ -541,7 +544,7 @@ fn json_from_json_typed_type_mismatch_string_as_int() {
 #[test]
 fn json_from_json_untyped_backward_compat() {
     let v = run_source(r#"func main() -> string { from_json("\"hello\"") }"#);
-    assert_eq!(v, interp::Value::String("\"hello\"".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("\"hello\"".into())));
 }
 
 // ─── json_array_length tests ─────────────────────────────────

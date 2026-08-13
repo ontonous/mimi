@@ -6,6 +6,7 @@
 
 use crate::interp;
 use crate::tests::{compile_and_run, run_source, run_with_stdlib};
+use std::sync::Arc;
 
 // =====================================================================
 // v0.28.13 — trigonometric builtins (interpreter + codegen)
@@ -489,7 +490,7 @@ fn stdlib_v02813_array_get() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("hi".to_string())
+        interp::Value::String(Arc::new("hi".to_string()))
     );
 }
 
@@ -500,7 +501,7 @@ fn stdlib_v02813_array_get_out_of_bounds() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("".to_string())
+        interp::Value::String(Arc::new("".to_string()))
     );
 }
 
@@ -514,7 +515,7 @@ fn stdlib_v02813_array_set() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("y".to_string())
+        interp::Value::String(Arc::new("y".to_string()))
     );
 }
 
@@ -528,7 +529,7 @@ fn stdlib_v02813_array_fill() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("z".to_string())
+        interp::Value::String(Arc::new("z".to_string()))
     );
 }
 
@@ -558,7 +559,7 @@ fn stdlib_v02813_array_reverse() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("d".to_string())
+        interp::Value::String(Arc::new("d".to_string()))
     );
 }
 
@@ -573,7 +574,7 @@ fn stdlib_v02813_array_rotate_left_basic() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("c".to_string())
+        interp::Value::String(Arc::new("c".to_string()))
     );
 }
 
@@ -588,7 +589,7 @@ fn stdlib_v02813_array_rotate_right_basic() {
     "#;
     assert_eq!(
         run_with_stdlib("array.mimi", src),
-        interp::Value::String("d".to_string())
+        interp::Value::String(Arc::new("d".to_string()))
     );
 }
 
@@ -747,7 +748,7 @@ fn stdlib_v02813_iter_range_first_value() {
     "#;
     assert_eq!(
         run_with_stdlib("iter.mimi", src),
-        interp::Value::String("10".to_string())
+        interp::Value::String(Arc::new("10".to_string()))
     );
 }
 
@@ -760,7 +761,7 @@ fn stdlib_v02813_iter_zip_basic() {
     "#;
     assert_eq!(
         run_with_stdlib("iter.mimi", src),
-        interp::Value::String("b|y".to_string())
+        interp::Value::String(Arc::new("b|y".to_string()))
     );
 }
 
@@ -781,7 +782,7 @@ fn stdlib_v02813_iter_enumerate() {
     "#;
     assert_eq!(
         run_with_stdlib("iter.mimi", src),
-        interp::Value::String("2|c".to_string())
+        interp::Value::String(Arc::new("2|c".to_string()))
     );
 }
 
@@ -834,7 +835,7 @@ fn stdlib_v02813_iter_repeat() {
     "#;
     assert_eq!(
         run_with_stdlib("iter.mimi", src),
-        interp::Value::String("x".to_string())
+        interp::Value::String(Arc::new("x".to_string()))
     );
 }
 
@@ -845,7 +846,7 @@ fn stdlib_v02813_iter_reversed() {
     "#;
     assert_eq!(
         run_with_stdlib("iter.mimi", src),
-        interp::Value::String("c".to_string())
+        interp::Value::String(Arc::new("c".to_string()))
     );
 }
 
@@ -878,7 +879,7 @@ fn stdlib_v02813_iter_unique_preserves_order() {
     "#;
     assert_eq!(
         run_with_stdlib("iter.mimi", src),
-        interp::Value::String("b".to_string())
+        interp::Value::String(Arc::new("b".to_string()))
     );
 }
 

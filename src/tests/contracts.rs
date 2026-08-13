@@ -177,7 +177,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("helloworld".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("helloworld".to_string())));
 }
 
 #[test]
@@ -319,7 +319,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("helloworld".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("helloworld".to_string())));
 }
 
 #[test]

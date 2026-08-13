@@ -13,6 +13,7 @@ use crate::ffi::FfiContract;
 use crate::interp::error::InterpError;
 use crate::interp::ffi_runtime::{FfiClosureRunner, FfiRuntime};
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 /// A single function activation frame.
 struct Frame {
@@ -641,7 +642,9 @@ impl BytecodeVM {
                                 InterpError::integer_overflow("integer addition overflow")
                             })?)
                         }
-                        (Value::String(x), Value::String(y)) => Value::String(format!("{x}{y}")),
+                        (Value::String(x), Value::String(y)) => {
+                            Value::String(Arc::new(format!("{x}{y}")))
+                        }
                         _ => {
                             let af = value_to_f64(&a)?;
                             let bf = value_to_f64(&b)?;
@@ -1297,16 +1300,16 @@ impl BytecodeVM {
                 Op::ConcatStr { rd, ra, rb } => {
                     let frame = self.cur_frame_mut();
                     let result = format!("{}{}", frame.regs[ra as usize], frame.regs[rb as usize]);
-                    frame.regs[rd as usize] = Value::String(result);
+                    frame.regs[rd as usize] = Value::String(Arc::new(result));
                 }
                 Op::StrAppend { ra, rb } => {
                     let suffix = self.get_reg(rb).to_string();
                     let target = self.get_reg_mut(ra);
                     match target {
-                        Value::String(s) => s.push_str(&suffix),
+                        Value::String(s) => Arc::make_mut(s).push_str(&suffix),
                         other => {
                             let base = other.to_string();
-                            *other = Value::String(format!("{}{}", base, suffix));
+                            *other = Value::String(Arc::new(format!("{}{}", base, suffix)));
                         }
                     }
                 }
@@ -1427,7 +1430,7 @@ impl BytecodeVM {
                         let field_slot = obj_slot + 1;
                         match (self.get_reg(obj_slot), self.get_reg(field_slot)) {
                             (Value::Int(obj_reg), Value::String(field)) => {
-                                targets.push((*obj_reg as Reg, field.clone()));
+                                targets.push((*obj_reg as Reg, field.as_str().to_string()));
                             }
                             _ => {
                                 ok = false;
@@ -1859,13 +1862,13 @@ impl BytecodeVM {
                 // ── Data structures ────────────────────────────
                 Op::NewList { rd, capacity } => {
                     let list = Vec::with_capacity(capacity as usize);
-                    self.set_reg(rd, Value::List(list));
+                    self.set_reg(rd, Value::List(Arc::new(list)));
                 }
                 Op::ListPush { ra, rb } => {
                     let val = self.get_reg(rb).clone();
                     let list = self.get_reg_mut(ra);
                     match list {
-                        Value::List(l) => l.push(val),
+                        Value::List(l) => Arc::make_mut(l).push(val),
                         other => {
                             return Err(InterpError::new(format!(
                                 "push: expected List, got {}",
@@ -1882,7 +1885,7 @@ impl BytecodeVM {
                     // cannot write back; the compiler emits this op for
                     // `pop(var)` on a known local variable.
                     let popped = match self.get_reg_mut(ra) {
-                        Value::List(l) => l
+                        Value::List(l) => Arc::make_mut(l)
                             .pop()
                             .ok_or_else(|| InterpError::new("pop from empty list"))?,
                         other => {
@@ -1947,7 +1950,7 @@ impl BytecodeVM {
                                     chars.len()
                                 )));
                             }
-                            Value::String(chars[idx].to_string())
+                            Value::String(Arc::new(chars[idx].to_string()))
                         }
                         Value::Set(s) => {
                             let idx = if idx_raw < 0 {
@@ -2002,7 +2005,7 @@ impl BytecodeVM {
                                     l.len()
                                 )));
                             }
-                            l[idx] = val;
+                            Arc::make_mut(l)[idx] = val;
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -2264,7 +2267,7 @@ impl BytecodeVM {
                     // Borrow map, extract only the value (avoid cloning entire map).
                     let v = match (self.get_reg(ra), &key) {
                         (Value::Record(_, fields), Value::String(k)) => {
-                            fields.get(k).cloned().unwrap_or(Value::Unit)
+                            fields.get(k.as_str()).cloned().unwrap_or(Value::Unit)
                         }
                         _ => return Err(InterpError::new("map_get: expected (Map, String key)")),
                     };
@@ -2276,7 +2279,7 @@ impl BytecodeVM {
                     let map = self.get_reg_mut(ra);
                     match (map, &key) {
                         (Value::Record(_, fields), Value::String(k)) => {
-                            fields.insert(k.clone(), val);
+                            fields.insert(k.as_str().to_string(), val);
                         }
                         _ => return Err(InterpError::new("map_set: expected (Map, String key)")),
                     }
@@ -2284,7 +2287,9 @@ impl BytecodeVM {
                 Op::MapContains { rd, ra, rb } => {
                     let key = self.get_reg(rb).clone();
                     let contains = match (self.get_reg(ra), &key) {
-                        (Value::Record(_, fields), Value::String(k)) => fields.contains_key(k),
+                        (Value::Record(_, fields), Value::String(k)) => {
+                            fields.contains_key(k.as_str())
+                        }
                         _ => {
                             return Err(InterpError::new(
                                 "map_contains: expected (Map, String key)",
@@ -2546,7 +2551,7 @@ impl BytecodeVM {
                     match v {
                         Value::Variant(name, _) => {
                             // Return tag as a string (for comparison).
-                            self.set_reg(rd, Value::String(name.clone()));
+                            self.set_reg(rd, Value::String(Arc::new(name.clone())));
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -2637,7 +2642,7 @@ impl BytecodeVM {
                 // ── Misc ───────────────────────────────────────
                 Op::ToString { rd, ra } => {
                     let v = self.get_reg(ra).clone();
-                    self.set_reg(rd, Value::String(v.to_string()));
+                    self.set_reg(rd, Value::String(Arc::new(v.to_string())));
                 }
                 Op::Cast { rd, ra, target } => {
                     let v = self.get_reg(ra).clone();
@@ -2709,7 +2714,7 @@ impl BytecodeVM {
                         Value::Actor(_) => "actor".to_string(),
                         _ => crate::interp::type_name(v).to_string(),
                     };
-                    self.set_reg(rd, Value::String(name));
+                    self.set_reg(rd, Value::String(Arc::new(name)));
                 }
                 Op::Trap { msg } => {
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
@@ -2960,7 +2965,7 @@ impl BytecodeVM {
                                     ))
                                 }
                                 "size" | "len" => Ok(Value::Int(items.len() as i64)),
-                                "to_list" => Ok(Value::List(items.clone())),
+                                "to_list" => Ok(Value::List(Arc::new(items.clone()))),
                                 _ => {
                                     return Err(InterpError::new(format!(
                                         "cannot call method '{}' on Set",
@@ -3785,14 +3790,14 @@ impl BytecodeVM {
 
     pub(crate) fn get_str(&self, r: Reg) -> Result<String, InterpError> {
         match self.get_reg(r) {
-            Value::String(v) => Ok(v.clone()),
+            Value::String(v) => Ok(v.as_str().to_string()),
             other => Err(InterpError::new(format!("expected String, got {}", other))),
         }
     }
 
     pub(crate) fn get_list(&self, r: Reg) -> Result<Vec<Value>, InterpError> {
         match self.get_reg(r) {
-            Value::List(v) => Ok(v.clone()),
+            Value::List(v) => Ok(v.as_ref().clone()),
             other => Err(InterpError::new(format!("expected List, got {}", other))),
         }
     }
@@ -3826,9 +3831,9 @@ impl BytecodeVM {
             ConstValue::Int(v) => Value::Int(*v),
             ConstValue::Float(v) => Value::Float(*v),
             ConstValue::Bool(v) => Value::Bool(*v),
-            ConstValue::Str(v) => Value::String(v.clone()),
+            ConstValue::Str(v) => Value::String(Arc::new(v.clone())),
             ConstValue::Unit => Value::Unit,
-            ConstValue::Type(t) => Value::String(format!("<type {:?}>", t)),
+            ConstValue::Type(t) => Value::String(Arc::new(format!("<type {:?}>", t))),
             ConstValue::QuoteAst(q) => Value::QuoteAst(q.clone()),
             ConstValue::LambdaSpec { .. } => Value::Unit,
             ConstValue::Pattern(_) => Value::Unit,
@@ -3846,7 +3851,7 @@ impl BytecodeVM {
             Expr::Literal(Lit::Int(n)) => Some(Value::Int(*n)),
             Expr::Literal(Lit::Float(f)) => Some(Value::Float(*f)),
             Expr::Literal(Lit::Bool(b)) => Some(Value::Bool(*b)),
-            Expr::Literal(Lit::String(s)) => Some(Value::String(s.clone())),
+            Expr::Literal(Lit::String(s)) => Some(Value::String(Arc::new(s.clone()))),
             Expr::Literal(Lit::Unit) => Some(Value::Unit),
             // Negative literals: -42, -3.14
             Expr::Unary(UnOp::Neg, inner) => match Self::eval_init_expr(inner.unlocated())? {
@@ -3860,7 +3865,7 @@ impl BytecodeVM {
                 for elem in elems {
                     items.push(Self::eval_init_expr(elem.unlocated())?);
                 }
-                Some(Value::List(items))
+                Some(Value::List(Arc::new(items)))
             }
             // Tuple literal: (expr, expr, ...)
             Expr::Tuple(elems) => {
@@ -3928,9 +3933,11 @@ impl BytecodeVM {
                 crate::ast::Type::Name(n, _) if n == "i32" || n == "i64" => Value::Int(0),
                 crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
                 crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
-                crate::ast::Type::Name(n, _) if n == "string" => Value::String(String::new()),
+                crate::ast::Type::Name(n, _) if n == "string" => {
+                    Value::String(Arc::new(String::new()))
+                }
                 crate::ast::Type::Name(n, _) if n == "List" || n == "Vec" => {
-                    Value::List(Vec::new())
+                    Value::List(Arc::new(Vec::new()))
                 }
                 crate::ast::Type::Name(n, _) if n == "Map" => {
                     Value::Record(None, std::collections::HashMap::new())
@@ -3971,7 +3978,7 @@ impl BytecodeVM {
                                             Value::Bool(false)
                                         }
                                         crate::ast::Type::Name(n, _) if n == "string" => {
-                                            Value::String(String::new())
+                                            Value::String(Arc::new(String::new()))
                                         }
                                         _ => Value::Unit,
                                     };
@@ -4081,8 +4088,8 @@ fn default_value_for_runtime(sample: &Value) -> Value {
         Value::Int(_) => Value::Int(0),
         Value::Float(_) => Value::Float(0.0),
         Value::Bool(_) => Value::Bool(false),
-        Value::String(_) => Value::String(String::new()),
-        Value::List(_) => Value::List(vec![]),
+        Value::String(_) => Value::String(Arc::new(String::new())),
+        Value::List(_) => Value::List(Arc::new(vec![])),
         Value::Unit => Value::Unit,
         other => other.clone(), // keep shape for complex types
     }
@@ -4118,7 +4125,7 @@ fn default_value_for_type_str(
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => Value::Int(0),
         "f32" | "f64" | "float" => Value::Float(0.0),
         "bool" => Value::Bool(false),
-        "string" => Value::String(String::new()),
+        "string" => Value::String(Arc::new(String::new())),
         "unit" => Value::Unit,
         other => {
             if record_fields.contains_key(other) {

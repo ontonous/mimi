@@ -112,7 +112,7 @@ func main() -> string {
     // Generic function without trait constraint should work
     assert_eq!(
         run_source(src),
-        interp::Value::String("printed".to_string())
+        interp::Value::String(Arc::new("printed".to_string()))
     );
 }
 
@@ -244,7 +244,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String("Hello, World".into()));
+    assert_eq!(v, interp::Value::String(Arc::new("Hello, World".into())));
 }
 
 #[test]

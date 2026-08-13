@@ -227,7 +227,7 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("hello".to_string()))
+        Ok(interp::Value::String(Arc::new("hello".to_string())))
     );
 }
 
@@ -257,11 +257,11 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::List(vec![
+        Ok(interp::Value::List(Arc::new(vec![
             interp::Value::Int(1),
             interp::Value::Int(2),
             interp::Value::Int(3)
-        ]))
+        ])))
     );
 }
 
@@ -334,7 +334,7 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("hello".to_string()))
+        Ok(interp::Value::String(Arc::new("hello".to_string())))
     );
 }
 

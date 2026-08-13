@@ -181,7 +181,7 @@ func main() -> string {
     str_char_at("hello", 1)
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("e".into()));
+    assert_eq!(run_source(src), interp::Value::String(Arc::new("e".into())));
 }
 
 #[test]
@@ -191,7 +191,10 @@ func main() -> string {
     str_substring("hello world", 0, 5)
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("hello".into()));
+    assert_eq!(
+        run_source(src),
+        interp::Value::String(Arc::new("hello".into()))
+    );
 }
 
 #[test]

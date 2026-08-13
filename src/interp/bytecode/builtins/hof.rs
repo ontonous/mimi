@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc {
@@ -61,11 +62,11 @@ pub(crate) fn builtin_map_list(vm: &mut BytecodeVM, args: &[Value]) -> Result<Va
     };
     let closure = &args[1];
     let mut result = Vec::with_capacity(list.len());
-    for elem in list {
+    for elem in list.iter().cloned() {
         let ret = vm.call_closure(closure, &[elem])?;
         result.push(ret);
     }
-    Ok(Value::List(result))
+    Ok(Value::List(Arc::new(result)))
 }
 
 pub(crate) fn builtin_filter_list(
@@ -82,13 +83,13 @@ pub(crate) fn builtin_filter_list(
     };
     let closure = &args[1];
     let mut result = Vec::new();
-    for elem in list {
+    for elem in list.iter().cloned() {
         let ret = vm.call_closure(closure, std::slice::from_ref(&elem))?;
         if crate::interp::is_truthy(&ret) {
             result.push(elem);
         }
     }
-    Ok(Value::List(result))
+    Ok(Value::List(Arc::new(result)))
 }
 
 pub(crate) fn builtin_reduce_list(
@@ -105,7 +106,7 @@ pub(crate) fn builtin_reduce_list(
     };
     let closure = &args[1];
     let mut acc = args[2].clone();
-    for elem in list {
+    for elem in list.iter().cloned() {
         acc = vm.call_closure(closure, &[acc, elem])?;
     }
     Ok(acc)
@@ -117,7 +118,7 @@ fn builtin_any(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError
         _ => return Err(InterpError::new("any: first argument must be a list")),
     };
     let closure = &args[1];
-    for elem in list {
+    for elem in list.iter().cloned() {
         let ret = vm.call_closure(closure, &[elem])?;
         if crate::interp::is_truthy(&ret) {
             return Ok(Value::Bool(true));
@@ -132,7 +133,7 @@ fn builtin_all(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError
         _ => return Err(InterpError::new("all: first argument must be a list")),
     };
     let closure = &args[1];
-    for elem in list {
+    for elem in list.iter().cloned() {
         let ret = vm.call_closure(closure, &[elem])?;
         if !crate::interp::is_truthy(&ret) {
             return Ok(Value::Bool(false));

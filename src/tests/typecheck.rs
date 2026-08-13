@@ -820,7 +820,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
 }
 
 #[test]

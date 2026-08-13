@@ -27,7 +27,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("system".to_string()))
+        Ok(interp::Value::String(Arc::new("system".to_string())))
     );
 }
 
@@ -43,7 +43,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("arena".to_string()))
+        Ok(interp::Value::String(Arc::new("arena".to_string())))
     );
 }
 
@@ -59,7 +59,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("bump".to_string()))
+        Ok(interp::Value::String(Arc::new("bump".to_string())))
     );
 }
 

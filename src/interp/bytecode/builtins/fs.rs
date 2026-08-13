@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc {
@@ -144,7 +145,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
 
 fn expect_str(args: &[Value], idx: usize) -> Result<String, InterpError> {
     match args.get(idx) {
-        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::String(s)) => Ok(s.as_str().to_string()),
         Some(_) => Err(InterpError::new("expected a string argument")),
         None => Err(InterpError::new(format!(
             "missing argument at index {}",
@@ -162,15 +163,20 @@ fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         if meta.len() > crate::path_safety::MAX_SOURCE_BYTES {
             return Ok(Value::Variant(
                 "Err".into(),
-                vec![Value::String("read_file: file too large".to_string())],
+                vec![Value::String(Arc::new(
+                    "read_file: file too large".to_string(),
+                ))],
             ));
         }
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => Ok(Value::Variant("Ok".into(), vec![Value::String(content)])),
+        Ok(content) => Ok(Value::Variant(
+            "Ok".into(),
+            vec![Value::String(Arc::new(content))],
+        )),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(e.to_string())],
+            vec![Value::String(Arc::new(e.to_string()))],
         )),
     }
 }
@@ -182,7 +188,7 @@ fn builtin_write_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
         Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(e.to_string())],
+            vec![Value::String(Arc::new(e.to_string()))],
         )),
     }
 }
@@ -231,13 +237,13 @@ fn builtin_listdir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
         Ok(entries) => {
             let mut result = Vec::new();
             for entry in entries.flatten() {
-                result.push(Value::String(
+                result.push(Value::String(Arc::new(
                     entry.file_name().to_string_lossy().to_string(),
-                ));
+                )));
             }
-            Ok(Value::List(result))
+            Ok(Value::List(Arc::new(result)))
         }
-        Err(_) => Ok(Value::List(vec![])),
+        Err(_) => Ok(Value::List(Arc::new(vec![]))),
     }
 }
 
@@ -264,7 +270,12 @@ fn builtin_walk_dir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
     }
     let mut result = Vec::new();
     walk_recursive(std::path::Path::new(&path), &mut result);
-    Ok(Value::List(result.into_iter().map(Value::String).collect()))
+    Ok(Value::List(Arc::new(
+        result
+            .into_iter()
+            .map(|s| Value::String(Arc::new(s)))
+            .collect(),
+    )))
 }
 
 // ── Path operations ─────────────────────────────────────
@@ -275,7 +286,7 @@ fn builtin_path_basename(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(Value::String(basename))
+    Ok(Value::String(Arc::new(basename)))
 }
 
 fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -285,7 +296,7 @@ fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         .and_then(|p| p.to_str())
         .unwrap_or("")
         .to_string();
-    Ok(Value::String(dirname))
+    Ok(Value::String(Arc::new(dirname)))
 }
 
 fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -294,14 +305,16 @@ fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(Value::String(ext))
+    Ok(Value::String(Arc::new(ext)))
 }
 
 fn builtin_path_join(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let base = expect_str(args, 0)?;
     let other = expect_str(args, 1)?;
     let joined = std::path::Path::new(&base).join(&other);
-    Ok(Value::String(joined.to_string_lossy().to_string()))
+    Ok(Value::String(Arc::new(
+        joined.to_string_lossy().to_string(),
+    )))
 }
 
 // ── Env ─────────────────────────────────────────────────
@@ -310,18 +323,24 @@ fn builtin_args(vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpErr
     let args: Vec<Value> = vm
         .cli_args
         .iter()
-        .map(|s| Value::String(s.clone()))
+        .map(|s| Value::String(Arc::new(s.clone())))
         .collect();
-    Ok(Value::List(args))
+    Ok(Value::List(Arc::new(args)))
 }
 
 fn builtin_getenv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let key = expect_str(args, 0)?;
     match std::env::var(&key) {
-        Ok(val) => Ok(Value::Variant("Ok".into(), vec![Value::String(val)])),
+        Ok(val) => Ok(Value::Variant(
+            "Ok".into(),
+            vec![Value::String(Arc::new(val))],
+        )),
         Err(_) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(format!("env var '{}' not set", key))],
+            vec![Value::String(Arc::new(format!(
+                "env var '{}' not set",
+                key
+            )))],
         )),
     }
 }

@@ -36,7 +36,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello! world!".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("hello! world!".to_string()))
+    );
 }
 
 #[test]

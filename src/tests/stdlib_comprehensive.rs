@@ -69,35 +69,35 @@ fn edge_is_dir_on_symlink_like() {
 fn edge_path_join_trailing_slash() {
     // path_join with trailing slash in first component
     let v = run_source("func main() -> string { path_join(\"a/\", \"b\") }");
-    assert_eq!(v, interp::Value::String("a/b".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("a/b".to_string())));
 }
 
 #[test]
 fn path_ext_on_dotfile() {
     // Extension of a dotfile like ".gitignore" — Rust's Path::extension() returns "" for dotfiles
     let v = run_source("func main() -> string { path_ext(\".gitignore\") }");
-    assert_eq!(v, interp::Value::String("".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
 }
 
 #[test]
 fn path_ext_on_double_ext() {
     // Extension of "archive.tar.gz"
     let v = run_source("func main() -> string { path_ext(\"archive.tar.gz\") }");
-    assert_eq!(v, interp::Value::String("gz".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("gz".to_string())));
 }
 
 #[test]
 fn path_basename_of_dot() {
     // basename of "." — Rust's Path::file_name() returns None for "."
     let v = run_source("func main() -> string { path_basename(\".\") }");
-    assert_eq!(v, interp::Value::String("".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
 }
 
 #[test]
 fn path_dirname_of_dot() {
     // dirname of "."
     let v = run_source("func main() -> string { path_dirname(\".\") }");
-    assert_eq!(v, interp::Value::String("".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
 }
 
 // ====== Crypto — Known Test Vectors ======
@@ -108,9 +108,9 @@ fn sha256_test_vector_1() {
     let v = run_source("func main() -> string { sha256(\"abc\") }");
     assert_eq!(
         v,
-        interp::Value::String(
+        interp::Value::String(Arc::new(
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
-        )
+        ))
     );
 }
 
@@ -120,9 +120,9 @@ fn sha256_test_vector_2() {
     let v = run_source("func main() -> string { sha256(\"\") }");
     assert_eq!(
         v,
-        interp::Value::String(
+        interp::Value::String(Arc::new(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
-        )
+        ))
     );
 }
 
@@ -132,9 +132,9 @@ fn sha256_test_vector_3() {
     let v = run_source("func main() -> string { sha256(\"hello\") }");
     assert_eq!(
         v,
-        interp::Value::String(
+        interp::Value::String(Arc::new(
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string()
-        )
+        ))
     );
 }
 
@@ -232,7 +232,7 @@ fn str_split_consecutive_delimiters() {
 fn str_replace_no_match() {
     // Replace with no match returns original
     let v = run_source("func main() -> string { str_replace(\"hello\", \"xyz\", \"abc\") }");
-    assert_eq!(v, interp::Value::String("hello".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
 }
 
 #[test]
@@ -399,7 +399,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String("inner".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("inner".to_string())));
 }
 
 #[test]

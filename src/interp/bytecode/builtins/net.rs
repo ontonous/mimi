@@ -6,6 +6,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc {
@@ -331,11 +332,13 @@ fn builtin_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
         )));
     }
     if n == 0 {
-        return Ok(Value::String(String::new()));
+        return Ok(Value::String(Arc::new(String::new())));
     }
     let n = n as usize;
     buf.truncate(n);
-    Ok(Value::String(String::from_utf8_lossy(&buf).to_string()))
+    Ok(Value::String(Arc::new(
+        String::from_utf8_lossy(&buf).to_string(),
+    )))
 }
 
 // === HTTP builtins ===
@@ -759,7 +762,7 @@ fn builtin_http_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         .split_once("\r\n\r\n")
         .map(|(_, b)| b)
         .unwrap_or(&response);
-    Ok(Value::String(body.to_string()))
+    Ok(Value::String(Arc::new(body.to_string())))
 }
 
 fn builtin_http_post(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -789,7 +792,7 @@ fn builtin_http_post(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         .split_once("\r\n\r\n")
         .map(|(_, b)| b)
         .unwrap_or(&response);
-    Ok(Value::String(res_body.to_string()))
+    Ok(Value::String(Arc::new(res_body.to_string())))
 }
 
 #[cfg(test)]

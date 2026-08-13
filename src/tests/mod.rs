@@ -156,6 +156,7 @@ pub(crate) mod fmt_corpus_eval;
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
+use std::sync::Arc;
 
 /// Probe the system linker once per test process.
 ///

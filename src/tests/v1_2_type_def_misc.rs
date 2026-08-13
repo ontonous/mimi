@@ -24,7 +24,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("hello".to_string()))
+        Ok(interp::Value::String(Arc::new("hello".to_string())))
     );
 }
 
@@ -53,7 +53,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("i32".to_string()))
+        Ok(interp::Value::String(Arc::new("i32".to_string())))
     );
 }
 
@@ -67,7 +67,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("bool".to_string()))
+        Ok(interp::Value::String(Arc::new("bool".to_string())))
     );
 }
 
@@ -81,7 +81,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("string".to_string()))
+        Ok(interp::Value::String(Arc::new("string".to_string())))
     );
 }
 
@@ -95,7 +95,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("list".to_string()))
+        Ok(interp::Value::String(Arc::new("list".to_string())))
     );
 }
 
@@ -111,7 +111,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("Red".to_string()))
+        Ok(interp::Value::String(Arc::new("Red".to_string())))
     );
 }
 
@@ -130,7 +130,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("Point".to_string()))
+        Ok(interp::Value::String(Arc::new("Point".to_string())))
     );
 }
 
@@ -205,7 +205,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("i32".to_string()))
+        Ok(interp::Value::String(Arc::new("i32".to_string())))
     );
 }
 
@@ -401,7 +401,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("hello".to_string()))
+        Ok(interp::Value::String(Arc::new("hello".to_string())))
     );
 }
 

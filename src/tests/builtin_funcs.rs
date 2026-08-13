@@ -41,7 +41,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("42".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("42".to_string())));
 }
 
 #[test]
@@ -52,7 +52,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("true".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("true".to_string())));
 }
 
 #[test]
@@ -252,7 +252,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("a,b,c".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("a,b,c".to_string())));
 }
 
 #[test]
@@ -263,7 +263,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
 }
 
 #[test]
@@ -296,7 +296,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello mimi".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello mimi".to_string())));
 }
 
 #[test]
@@ -307,7 +307,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("HELLO".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("HELLO".to_string())));
 }
 
 #[test]
@@ -318,7 +318,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
 }
 
 #[test]
@@ -329,7 +329,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("ababab".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("ababab".to_string())));
 }
 
 #[test]
@@ -617,7 +617,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String("i32".into()),
+        interp::Value::String(Arc::new("i32".into())),
         "type_name(42) should return i32"
     );
 }
@@ -632,7 +632,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String("string".into()),
+        interp::Value::String(Arc::new("string".into())),
         "type_name(\"hello\") should return string"
     );
 }
@@ -647,7 +647,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String("bool".into()),
+        interp::Value::String(Arc::new("bool".into())),
         "type_name(true) should return bool"
     );
 }

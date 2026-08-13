@@ -8,7 +8,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String("hello world".to_string())
+        interp::Value::String(Arc::new("hello world".to_string()))
     );
 }
 

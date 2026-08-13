@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // JSON
@@ -368,7 +369,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::String(s) => serde_json::Value::String(s.as_str().to_string()),
         Value::Unit => serde_json::Value::Null,
         Value::List(l) => serde_json::Value::Array(l.iter().map(value_to_json).collect()),
         Value::Record(_, fields) => {
@@ -423,8 +424,10 @@ fn json_to_value(j: &serde_json::Value) -> Value {
                 Value::Unit
             }
         }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => Value::List(arr.iter().map(json_to_value).collect()),
+        serde_json::Value::String(s) => Value::String(Arc::new(s.clone())),
+        serde_json::Value::Array(arr) => {
+            Value::List(Arc::new(arr.iter().map(json_to_value).collect()))
+        }
         serde_json::Value::Object(map) => {
             let fields: std::collections::HashMap<String, Value> = map
                 .iter()
@@ -437,7 +440,7 @@ fn json_to_value(j: &serde_json::Value) -> Value {
 
 fn builtin_to_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let json = value_to_json(&args[0]);
-    Ok(Value::String(json.to_string()))
+    Ok(Value::String(Arc::new(json.to_string())))
 }
 
 fn builtin_from_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -514,10 +517,11 @@ fn coerce_json_to_type(
                 match val {
                     Value::List(items) => {
                         let converted: Result<Vec<Value>, _> = items
-                            .into_iter()
+                            .iter()
+                            .cloned()
                             .map(|item| coerce_json_to_type(item, inner, record_fields))
                             .collect();
-                        Ok(Value::List(converted?))
+                        Ok(Value::List(Arc::new(converted?)))
                     }
                     _ => Err(InterpError::new(format!("expected list, got {}", val))),
                 }
@@ -602,9 +606,22 @@ fn coerce_json_to_type(
                 .and_then(|s| s.strip_suffix('>'))
             {
                 match val {
-                    Value::List(items) | Value::Set(items) => {
+                    Value::List(items) => {
                         let mut out = Vec::new();
-                        for item in items {
+                        for item in items.iter().cloned() {
+                            let v = coerce_json_to_type(item, inner, record_fields)?;
+                            if !out
+                                .iter()
+                                .any(|e: &Value| crate::interp::value::values_equal(e, &v))
+                            {
+                                out.push(v);
+                            }
+                        }
+                        Ok(Value::Set(out))
+                    }
+                    Value::Set(items) => {
+                        let mut out = Vec::new();
+                        for item in items.iter().cloned() {
                             let v = coerce_json_to_type(item, inner, record_fields)?;
                             if !out
                                 .iter()
@@ -627,7 +644,8 @@ fn coerce_json_to_type(
                 match val {
                     Value::List(items) if items.len() == parts.len() => {
                         let converted: Result<Vec<Value>, _> = items
-                            .into_iter()
+                            .iter()
+                            .cloned()
                             .zip(parts.iter())
                             .map(|(item, ty)| coerce_json_to_type(item, ty, record_fields))
                             .collect();
@@ -665,7 +683,7 @@ fn coerce_json_to_type(
                         Ok(Value::Record(Some(type_str.to_string()), fields))
                     }
                     // Enum unit variant: JSON string → Variant(tag, []).
-                    Value::String(s) => Ok(Value::Variant(s, vec![])),
+                    Value::String(s) => Ok(Value::Variant(s.as_str().to_string(), vec![])),
                     _ => Ok(val),
                 }
             }
@@ -707,17 +725,17 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
         (Value::String(json_str), Value::String(key)) => {
             let jv: serde_json::Value = serde_json::from_str(json_str)
                 .map_err(|e| InterpError::new(format!("json_get_string parse error: {}", e)))?;
-            match jv.get(key) {
-                Some(serde_json::Value::String(s)) => Ok(Value::String(s.clone())),
-                Some(serde_json::Value::Bool(b)) => Ok(Value::String(if *b {
+            match jv.get(key.as_str()) {
+                Some(serde_json::Value::String(s)) => Ok(Value::String(Arc::new(s.clone()))),
+                Some(serde_json::Value::Bool(b)) => Ok(Value::String(Arc::new(if *b {
                     "true".into()
                 } else {
                     "false".into()
-                })),
-                Some(serde_json::Value::Number(n)) => Ok(Value::String(n.to_string())),
-                Some(serde_json::Value::Null) => Ok(Value::String("null".into())),
-                Some(val) => Ok(Value::String(val.to_string())),
-                None => Ok(Value::String(String::new())),
+                }))),
+                Some(serde_json::Value::Number(n)) => Ok(Value::String(Arc::new(n.to_string()))),
+                Some(serde_json::Value::Null) => Ok(Value::String(Arc::new("null".into()))),
+                Some(val) => Ok(Value::String(Arc::new(val.to_string()))),
+                None => Ok(Value::String(Arc::new(String::new()))),
             }
         }
         _ => Err(InterpError::new("json_get_string expects (string, string)")),
@@ -729,7 +747,7 @@ fn builtin_json_get_int(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         (Value::String(json_str), Value::String(key)) => {
             let jv: serde_json::Value = serde_json::from_str(json_str)
                 .map_err(|e| InterpError::new(format!("json_get_int parse error: {}", e)))?;
-            match jv.get(key) {
+            match jv.get(key.as_str()) {
                 Some(serde_json::Value::Number(n)) => n.as_i64().map(Value::Int).ok_or_else(|| {
                     InterpError::new(format!(
                         "json_get_int: value for key '{}' is not an integer",
@@ -766,7 +784,7 @@ fn builtin_sha256(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
         Value::String(data) => {
             let hash = crate::runtime::sha256_bytes(data.as_bytes());
             let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-            Ok(Value::String(hex))
+            Ok(Value::String(Arc::new(hex)))
         }
         _ => Err(InterpError::new("sha256 expects a string")),
     }
@@ -776,7 +794,7 @@ fn builtin_base64_encode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
     match &args[0] {
         Value::String(data) => {
             let encoded = crate::runtime::base64_encode_bytes(data.as_bytes());
-            Ok(Value::String(encoded))
+            Ok(Value::String(Arc::new(encoded)))
         }
         _ => Err(InterpError::new("base64_encode expects a string")),
     }
@@ -785,10 +803,13 @@ fn builtin_base64_encode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
 fn builtin_base64_decode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(data) => match crate::runtime::base64_decode_str(data) {
-            Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
+            Ok(decoded) => Ok(Value::Variant(
+                "Ok".into(),
+                vec![Value::String(Arc::new(decoded))],
+            )),
             Err(_) => Ok(Value::Variant(
                 "Err".into(),
-                vec![Value::String("invalid base64".to_string())],
+                vec![Value::String(Arc::new("invalid base64".to_string()))],
             )),
         },
         _ => Err(InterpError::new("base64_decode expects a string")),
@@ -871,8 +892,8 @@ fn builtin_input(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpE
     // on EOF (variant vs string compare) and input_line always returned Err.
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
-        Ok(_) => Ok(Value::String(input.trim_end().to_string())),
-        Err(_) => Ok(Value::String(String::new())),
+        Ok(_) => Ok(Value::String(Arc::new(input.trim_end().to_string()))),
+        Err(_) => Ok(Value::String(Arc::new(String::new()))),
     }
 }
 
@@ -918,7 +939,7 @@ fn builtin_json_get_element(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Valu
         (Value::String(json_str), Value::Int(idx)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(json) => match json.get(*idx as usize) {
-                    Some(v) => Ok(Value::String(v.to_string())),
+                    Some(v) => Ok(Value::String(Arc::new(v.to_string()))),
                     None => Err(InterpError::new(format!(
                         "json_get_element: index {} out of bounds",
                         idx
@@ -997,7 +1018,7 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
                         + &format!("\"{}\"", escape_json_string(m))
                 })
                 .collect::<String>();
-            Ok(Value::String(format!("[{}]", json)))
+            Ok(Value::String(Arc::new(format!("[{}]", json))))
         }
         _ => Err(InterpError::new("regex_find_all expects (string, string)")),
     }
@@ -1031,10 +1052,13 @@ fn builtin_inner(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
 fn builtin_fields(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
-            let keys: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
-            Ok(Value::List(keys))
+            let keys: Vec<Value> = fields
+                .keys()
+                .map(|k| Value::String(Arc::new(k.clone())))
+                .collect();
+            Ok(Value::List(Arc::new(keys)))
         }
-        _ => Ok(Value::List(vec![])),
+        _ => Ok(Value::List(Arc::new(vec![]))),
     }
 }
 
@@ -1063,15 +1087,15 @@ fn builtin_type_fields(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
     let names: Vec<Value> = match kind {
         crate::ast::TypeDefKind::Record(fields) => fields
             .iter()
-            .map(|f| Value::String(f.name.clone()))
+            .map(|f| Value::String(Arc::new(f.name.clone())))
             .collect(),
         crate::ast::TypeDefKind::Enum(variants) => variants
             .iter()
-            .map(|v| Value::String(v.name.clone()))
+            .map(|v| Value::String(Arc::new(v.name.clone())))
             .collect(),
         _ => vec![],
     };
-    Ok(Value::List(names))
+    Ok(Value::List(Arc::new(names)))
 }
 
 fn builtin_type_variants(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -1089,11 +1113,11 @@ fn builtin_type_variants(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let names: Vec<Value> = match kind {
         crate::ast::TypeDefKind::Enum(variants) => variants
             .iter()
-            .map(|v| Value::String(v.name.clone()))
+            .map(|v| Value::String(Arc::new(v.name.clone())))
             .collect(),
         _ => vec![],
     };
-    Ok(Value::List(names))
+    Ok(Value::List(Arc::new(names)))
 }
 
 // ── C string ────────────────────────────────────────────
@@ -1124,15 +1148,15 @@ fn builtin_exec(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
             // per stream and keeps draining (child can never block), and is
             // the same code path the codegen backend uses (L1 by construction).
             let (stdout_bytes, stderr_bytes, code) = crate::runtime::fs::run_exec_capped(
-                std::process::Command::new("sh").arg("-c").arg(cmd),
+                std::process::Command::new("sh").arg("-c").arg(cmd.as_str()),
             );
             let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
             let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
             let exit_code = code.unwrap_or(-1);
             let mut fields = std::collections::HashMap::new();
             fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
-            fields.insert("stdout".to_string(), Value::String(stdout));
-            fields.insert("stderr".to_string(), Value::String(stderr));
+            fields.insert("stdout".to_string(), Value::String(Arc::new(stdout)));
+            fields.insert("stderr".to_string(), Value::String(Arc::new(stderr)));
             Ok(Value::Record(Some("ExecResult".to_string()), fields))
         }
         _ => Err(InterpError::new("exec expects a string command")),
@@ -1151,10 +1175,10 @@ fn builtin_exec_pipe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
             // H12: this was the worst of the family — NO cap at all.
             // Shared capped executor (10 MB, keep draining) like exec/exec_safe.
             let (stdout_bytes, _stderr, _code) = crate::runtime::fs::run_exec_capped(
-                std::process::Command::new("sh").arg("-c").arg(cmd),
+                std::process::Command::new("sh").arg("-c").arg(cmd.as_str()),
             );
             let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-            Ok(Value::String(stdout))
+            Ok(Value::String(Arc::new(stdout)))
         }
         _ => Err(InterpError::new("exec_pipe expects a string command")),
     }
@@ -1174,11 +1198,11 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
             ))
         }
     };
-    let mut cmd = std::process::Command::new(&prog);
+    let mut cmd = std::process::Command::new(prog.as_str());
     for arg in args.iter().skip(1) {
         match arg {
             Value::String(s) => {
-                cmd.arg(s);
+                cmd.arg(s.as_str());
             }
             _ => return Err(InterpError::new("exec_safe: all arguments must be strings")),
         }
@@ -1191,8 +1215,8 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     let exit_code = code.unwrap_or(-1);
     let mut fields = std::collections::HashMap::new();
     fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
-    fields.insert("stdout".to_string(), Value::String(stdout));
-    fields.insert("stderr".to_string(), Value::String(stderr));
+    fields.insert("stdout".to_string(), Value::String(Arc::new(stdout)));
+    fields.insert("stderr".to_string(), Value::String(Arc::new(stderr)));
     Ok(Value::Record(Some("ExecResult".to_string()), fields))
 }
 
@@ -1202,7 +1226,7 @@ fn builtin_file_stat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     match &args[0] {
         Value::String(path) => {
             let mut fields = std::collections::HashMap::new();
-            match std::fs::metadata(path) {
+            match std::fs::metadata(path.as_str()) {
                 Ok(meta) => {
                     fields.insert("size".to_string(), Value::Int(meta.len() as i64));
                     let modified = meta
@@ -1230,10 +1254,10 @@ fn builtin_file_stat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
 
 fn builtin_read_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(path) => match std::fs::read(path) {
+        Value::String(path) => match std::fs::read(path.as_str()) {
             Ok(bytes) => {
                 let s = String::from_utf8_lossy(&bytes).to_string();
-                Ok(Value::String(s))
+                Ok(Value::String(Arc::new(s)))
             }
             Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
         },
@@ -1243,10 +1267,12 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
 
 fn builtin_write_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::String(path), Value::String(data)) => match std::fs::write(path, data.as_bytes()) {
-            Ok(()) => Ok(Value::Bool(true)),
-            Err(e) => Err(InterpError::new(format!("write_file_bytes: {}", e))),
-        },
+        (Value::String(path), Value::String(data)) => {
+            match std::fs::write(path.as_str(), data.as_bytes()) {
+                Ok(()) => Ok(Value::Bool(true)),
+                Err(e) => Err(InterpError::new(format!("write_file_bytes: {}", e))),
+            }
+        }
         _ => Err(InterpError::new(
             "write_file_bytes expects (string, string)",
         )),
@@ -1276,7 +1302,7 @@ fn builtin_close_fd(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
 fn builtin_read_file_partial(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     // Match tree-walker: read_file_partial(path, max_bytes) → String
     match (&args[0], &args[1]) {
-        (Value::String(path), Value::Int(max)) => match std::fs::read(path) {
+        (Value::String(path), Value::Int(max)) => match std::fs::read(path.as_str()) {
             Ok(bytes) => {
                 let limit = (*max).max(0) as usize;
                 let slice = if limit > 0 && bytes.len() > limit {
@@ -1285,7 +1311,7 @@ fn builtin_read_file_partial(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Val
                     &bytes
                 };
                 let s = String::from_utf8_lossy(slice).to_string();
-                Ok(Value::String(s))
+                Ok(Value::String(Arc::new(s)))
             }
             Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
         },
@@ -1305,7 +1331,7 @@ fn builtin_read_lines_each(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
     };
     let callback = &args[1];
     use std::io::BufRead;
-    let file = std::fs::File::open(path)
+    let file = std::fs::File::open(path.as_str())
         .map_err(|e| InterpError::new(format!("read_lines_each: {}", e)))?;
     let reader = std::io::BufReader::new(file);
     let mut count: i64 = 0;
@@ -1313,7 +1339,7 @@ fn builtin_read_lines_each(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
         let line = line_result.map_err(|e| {
             InterpError::new(format!("read_lines_each: failed to read line: {}", e))
         })?;
-        vm.call_closure(callback, &[Value::String(line)])?;
+        vm.call_closure(callback, &[Value::String(Arc::new(line))])?;
         count += 1;
     }
     Ok(Value::Int(count))
@@ -1325,7 +1351,7 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
         _ => return Err(InterpError::new("read_lines_json expects a string path")),
     };
     use std::io::BufRead;
-    let file = std::fs::File::open(path)
+    let file = std::fs::File::open(path.as_str())
         .map_err(|e| InterpError::new(format!("read_lines_json: {}", e)))?;
     let reader = std::io::BufReader::new(file);
     let mut result = String::from("[");
@@ -1340,7 +1366,7 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
         result.push('"');
     }
     result.push(']');
-    Ok(Value::String(result))
+    Ok(Value::String(Arc::new(result)))
 }
 
 fn builtin_regex_capture_groups(
@@ -1367,9 +1393,9 @@ fn builtin_regex_capture_groups(
                                 + &format!("\"{}\"", escape_json_string(g))
                         })
                         .collect::<String>();
-                    Ok(Value::String(format!("[{}]", json)))
+                    Ok(Value::String(Arc::new(format!("[{}]", json))))
                 }
-                None => Ok(Value::String("[]".to_string())),
+                None => Ok(Value::String(Arc::new("[]".to_string()))),
             }
         }
         _ => Err(InterpError::new(
@@ -1393,7 +1419,7 @@ fn builtin_shadow_alloc(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         Value::String(s) => s.clone(),
         _ => return Err(InterpError::new("shadow_alloc: label must be string")),
     };
-    let c_label = std::ffi::CString::new(label).unwrap_or_default();
+    let c_label = std::ffi::CString::new(label.as_str()).unwrap_or_default();
     let ptr = crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr());
     Ok(Value::Int(ptr as i64))
 }
@@ -1476,13 +1502,13 @@ fn builtin_lexer(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
         .map_err(|_| InterpError::new("lexer: source contains null bytes"))?;
     let result_ptr = crate::runtime::mimi_lexer_tokenize(c_source.as_ptr());
     if result_ptr.is_null() {
-        return Ok(Value::String("[]".to_string()));
+        return Ok(Value::String(Arc::new("[]".to_string())));
     }
     let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) } // SAFETY: result_ptr 非空（上方检查），为 C 侧 NUL 结尾字符串；CStr 借用不释放。
         .to_string_lossy()
         .into_owned();
     unsafe { libc::free(result_ptr as *mut libc::c_void) }; // SAFETY: result_ptr 为 C 侧分配指针，与上方 CStr 读取配对，释放一次。
-    Ok(Value::String(result))
+    Ok(Value::String(Arc::new(result)))
 }
 
 fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -1493,15 +1519,15 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         .map_err(|_| InterpError::new("parse: source contains null bytes"))?;
     let result_ptr = crate::runtime::mimi_parse_source(c_source.as_ptr());
     if result_ptr.is_null() {
-        return Ok(Value::String(
+        return Ok(Value::String(Arc::new(
             r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string(),
-        ));
+        )));
     }
     let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) } // SAFETY: result_ptr 非空（上方检查），为 C 侧 NUL 结尾字符串；CStr 借用不释放。
         .to_string_lossy()
         .into_owned();
     unsafe { libc::free(result_ptr as *mut libc::c_void) }; // SAFETY: result_ptr 为 C 侧分配指针，与上方 CStr 读取配对，释放一次。
-    Ok(Value::String(result))
+    Ok(Value::String(Arc::new(result)))
 }
 
 fn builtin_ast_dump(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -1511,8 +1537,11 @@ fn builtin_ast_dump(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         ));
     }
     match &args[0] {
-        Value::QuoteAst(q) => Ok(Value::String(format!("{:?}", q))),
-        other => Ok(Value::String(format!("Not a QuoteAst: {}", other))),
+        Value::QuoteAst(q) => Ok(Value::String(Arc::new(format!("{:?}", q)))),
+        other => Ok(Value::String(Arc::new(format!(
+            "Not a QuoteAst: {}",
+            other
+        )))),
     }
 }
 
