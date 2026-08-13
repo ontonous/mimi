@@ -224,6 +224,15 @@ pub const E0813: &str = "E0813"; // floating-point error (NaN, infinity)
 pub const E0814: &str = "E0814"; // slice out of bounds at runtime
 pub const E0820: &str = "E0820"; // let binding requires an initializer
 
+/// Arithmetic-trap message templates (U2, 0.35.44 — SD-7/8/9).
+///
+/// Shared with the standalone native runtime via `include!` (see
+/// `trap_msgs.rs`). The E-code strings are the `E08xx` constants above; these
+/// are the human-readable fragments that surround them.
+pub mod trap {
+    include!("trap_msgs.rs");
+}
+
 /// Resolved-body lowering error codes (E083x) — full audit 2026-08-05 wave-1.
 pub const E0830: &str = "E0830"; // resolved body lowering lacks a canonical fact (fail-closed; never infer)
 

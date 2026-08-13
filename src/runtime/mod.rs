@@ -20001,35 +20001,79 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
 // Trap = synchronous arithmetic failure (E08xx). These are NOT Faults
 // (Flow state machine invariant violations). Different channels.
 
+// U2 (0.35.44): shared trap wording, `include!`d so the standalone runtime
+// (compiled with rustc, no `crate::diagnostic`) and the VM share one source.
+mod trap {
+    include!("../diagnostic/trap_msgs.rs");
+}
+// E-code strings matching `diagnostic::codes::E08xx` (standalone runtime can't
+// reach the crate module, so they are mirrored here; the VM side reads the
+// codes.rs constants directly). Keep in sync — see docs/error-codes.md.
+const E0801: &str = "E0801";
+const E0802: &str = "E0802";
+const E0813: &str = "E0813";
+
+/// Write a static byte slice to stderr (async-signal-safe; no allocation).
+#[inline]
+fn trap_write_static(bytes: &'static [u8]) {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    // SAFETY: writing a static byte buffer to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, bytes.as_ptr() as *const std::ffi::c_void, bytes.len());
+    }
+}
+
+/// Write `len` bytes from a raw pointer to stderr (async-signal-safe).
+#[inline]
+fn trap_write_raw(bytes: *const u8, len: usize) {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    // SAFETY: caller guarantees `bytes` points to `len` readable bytes; write
+    // to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, bytes as *const std::ffi::c_void, len);
+    }
+}
+
+/// Write `[<code>] ` (bracketed E-code prefix).
+#[inline]
+fn trap_write_code(code: &'static str) {
+    trap_write_static(b"[");
+    trap_write_static(code.as_bytes());
+    trap_write_static(b"] ");
+}
+
 /// SD-7: Integer overflow trap. Called when checked arithmetic detects
 /// overflow in add/sub/mul. Prints diagnostic and aborts.
 #[no_mangle]
 pub extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
-    extern "C" {
-        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
-    }
     // M1 (audit-codegen 2026-08-03): integer overflow is E0802 per
     // docs/error-codes.md (E0801 is reserved for division by zero); the
     // bytecode VM's IntegerOverflow also maps to E0802.
-    const PREFIX: &[u8] = b"[E0802] integer overflow in ";
+    const PREFIX: &[u8] = trap::INT_OVERFLOW_PREFIX.as_bytes();
     // 0.34.34 (docs/diagnostics.md §2): hints ride the single dense line as
     // the `| hint:` field — no separate "Hint:" line.
     const SUFFIX: &[u8] =
         b" | hint: use wrapping_add/wrapping_sub/wrapping_mul for wrap-around semantics\n";
-    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
-    unsafe {
-        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
-        if !op.is_null() {
-            let mut len = 0usize;
-            let base = op as *const u8;
-            const MAX_MSG: usize = 64;
+    trap_write_code(E0802);
+    trap_write_static(PREFIX);
+    if !op.is_null() {
+        let mut len = 0usize;
+        let base = op as *const u8;
+        const MAX_MSG: usize = 64;
+        // SAFETY: op points to a NUL-terminated static C string in the program
+        // image; bounded read up to MAX_MSG before the NUL terminator.
+        unsafe {
             while len < MAX_MSG && *base.add(len) != 0 {
                 len += 1;
             }
-            let _ = write(2, op as *const std::ffi::c_void, len);
         }
-        let _ = write(2, SUFFIX.as_ptr() as *const std::ffi::c_void, SUFFIX.len());
+        trap_write_raw(op as *const u8, len);
     }
+    trap_write_static(SUFFIX);
     std::process::abort();
 }
 
@@ -20037,14 +20081,10 @@ pub extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
 /// has a zero divisor. Prints diagnostic and aborts.
 #[no_mangle]
 pub extern "C" fn mimi_trap_div_by_zero() -> ! {
-    extern "C" {
-        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
-    }
-    const MSG: &[u8] = b"[E0801] integer division by zero\n";
-    // SAFETY: writing static byte buffer to stderr (fd 2) is async-signal-safe.
-    unsafe {
-        let _ = write(2, MSG.as_ptr() as *const std::ffi::c_void, MSG.len());
-    }
+    const MSG: &[u8] = trap::INT_DIV_BY_ZERO.as_bytes();
+    trap_write_code(E0801);
+    trap_write_static(MSG);
+    trap_write_static(b"\n");
     std::process::abort();
 }
 
@@ -20052,15 +20092,11 @@ pub extern "C" fn mimi_trap_div_by_zero() -> ! {
 /// is attempted (result overflows the signed range).
 #[no_mangle]
 pub extern "C" fn mimi_trap_div_overflow() -> ! {
-    extern "C" {
-        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
-    }
     // M1: MIN/-1 division overflow is E0802 (integer overflow), not E0801.
-    const MSG: &[u8] = b"[E0802] integer division overflow (MIN / -1)\n";
-    // SAFETY: writing static byte buffer to stderr (fd 2) is async-signal-safe.
-    unsafe {
-        let _ = write(2, MSG.as_ptr() as *const std::ffi::c_void, MSG.len());
-    }
+    const MSG: &[u8] = trap::INT_DIV_OVERFLOW.as_bytes();
+    trap_write_code(E0802);
+    trap_write_static(MSG);
+    trap_write_static(b"\n");
     std::process::abort();
 }
 
@@ -20068,28 +20104,27 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
 /// produces NaN or Infinity. Prints diagnostic and aborts.
 #[no_mangle]
 pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
-    extern "C" {
-        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
-    }
-    const PREFIX: &[u8] = b"[E0813] float operation produced NaN/Inf in ";
+    const PREFIX: &[u8] = trap::FLOAT_NOT_FINITE_PREFIX.as_bytes();
     // 0.34.34 (docs/diagnostics.md §2): hints ride the single dense line as
     // the `| hint:` field — no separate "Hint:" line.
     const SUFFIX: &[u8] =
         b" | hint: use ieee_float { } block for IEEE 754 semantics (post-0.31.51b)\n";
-    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
-    unsafe {
-        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
-        if !op.is_null() {
-            let mut len = 0usize;
-            let base = op as *const u8;
-            const MAX_MSG: usize = 64;
+    trap_write_code(E0813);
+    trap_write_static(PREFIX);
+    if !op.is_null() {
+        let mut len = 0usize;
+        let base = op as *const u8;
+        const MAX_MSG: usize = 64;
+        // SAFETY: op points to a NUL-terminated static C string in the program
+        // image; bounded read up to MAX_MSG before the NUL terminator.
+        unsafe {
             while len < MAX_MSG && *base.add(len) != 0 {
                 len += 1;
             }
-            let _ = write(2, op as *const std::ffi::c_void, len);
         }
-        let _ = write(2, SUFFIX.as_ptr() as *const std::ffi::c_void, SUFFIX.len());
+        trap_write_raw(op as *const u8, len);
     }
+    trap_write_static(SUFFIX);
     std::process::abort();
 }
 

@@ -7,7 +7,7 @@
 //! - Arithmetic is typed (AddInt vs AddFloat) — zero runtime type dispatch
 
 use super::instr::*;
-use super::registry::{self, BuiltinRegistry};
+use super::registry::{self, BuiltinFastPath, BuiltinRegistry};
 use crate::ast::Lit;
 use crate::ffi::FfiContract;
 use crate::interp::error::InterpError;
@@ -1450,21 +1450,35 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
-                    let args: Vec<Value> = (0..argc)
-                        .map(|i| self.get_reg(args_base + i).clone())
-                        .collect();
-                    match self.call_builtin(builtin, &args) {
-                        Ok(v) => self.set_reg(rd, v),
-                        Err(e) => {
-                            // Audit fix #1: stash the error BEFORE jumping to the
-                            // handler — the old code jumped without saving it, so
-                            // FaultRetEarly died with "no fault_reg set" and the
-                            // original E08xx was lost. Audit fix #2: pop the TOP
-                            // handler from the per-frame stack (nested scopes).
-                            // (Wave-2 H-14 note: the initiating frame is back on
-                            // top here — call_builtin's nested closure exec_loops
-                            // clean up their residual frames on error.)
-                            self.route_fault(e)?;
+                    // R4 fast path: pure numeric builtins inlined without the
+                    // Vec<Value> args allocation + indirect call. Falls back to
+                    // the general path for unexpected arg types / overflow so
+                    // error text stays identical.
+                    let fp = self.registry.fast_path(builtin);
+                    let mut handled = false;
+                    if let Some(kind) = fp {
+                        if let Some(v) = self.exec_builtin_fast(kind, args_base, argc) {
+                            self.set_reg(rd, v);
+                            handled = true;
+                        }
+                    }
+                    if !handled {
+                        let args: Vec<Value> = (0..argc)
+                            .map(|i| self.get_reg(args_base + i).clone())
+                            .collect();
+                        match self.call_builtin(builtin, &args) {
+                            Ok(v) => self.set_reg(rd, v),
+                            Err(e) => {
+                                // Audit fix #1: stash the error BEFORE jumping to the
+                                // handler — the old code jumped without saving it, so
+                                // FaultRetEarly died with "no fault_reg set" and the
+                                // original E08xx was lost. Audit fix #2: pop the TOP
+                                // handler from the per-frame stack (nested scopes).
+                                // (Wave-2 H-14 note: the initiating frame is back on
+                                // top here — call_builtin's nested closure exec_loops
+                                // clean up their residual frames on error.)
+                                self.route_fault(e)?;
+                            }
                         }
                     }
                 }
@@ -3664,6 +3678,78 @@ impl BytecodeVM {
             )));
         }
         func(self, args)
+    }
+
+    /// R4 inline fast path for hot pure-numeric builtins. Reads args straight
+    /// from the frame registers (no `Vec<Value>`), computes, returns `Some`.
+    /// Returns `None` (fall back to `call_builtin`) when the arg types are not
+    /// the expected numeric ones or an edge case (e.g. `abs(i64::MIN)`) needs
+    /// the general path's identical error text. Semantics mirror the
+    /// corresponding `builtin_*` functions exactly.
+    fn exec_builtin_fast(&self, kind: BuiltinFastPath, args_base: Reg, argc: u16) -> Option<Value> {
+        let regs = &self.cur_frame().regs;
+        match kind {
+            BuiltinFastPath::Abs => {
+                if argc != 1 {
+                    return None;
+                }
+                match &regs[args_base as usize] {
+                    Value::Int(v) => Some(Value::Int(v.checked_abs()?)),
+                    Value::Float(v) => Some(Value::Float(v.abs())),
+                    _ => None,
+                }
+            }
+            BuiltinFastPath::Min => {
+                if argc != 2 {
+                    return None;
+                }
+                match (&regs[args_base as usize], &regs[args_base as usize + 1]) {
+                    (Value::Int(a), Value::Int(b)) => Some(Value::Int((*a).min(*b))),
+                    (Value::Float(a), Value::Float(b)) => Some(Value::Float(a.min(*b))),
+                    _ => None,
+                }
+            }
+            BuiltinFastPath::Max => {
+                if argc != 2 {
+                    return None;
+                }
+                match (&regs[args_base as usize], &regs[args_base as usize + 1]) {
+                    (Value::Int(a), Value::Int(b)) => Some(Value::Int((*a).max(*b))),
+                    (Value::Float(a), Value::Float(b)) => Some(Value::Float(a.max(*b))),
+                    _ => None,
+                }
+            }
+            BuiltinFastPath::Floor => {
+                if argc != 1 {
+                    return None;
+                }
+                match &regs[args_base as usize] {
+                    Value::Int(v) => Some(Value::Int(*v)),
+                    Value::Float(v) => Some(Value::Float(v.floor())),
+                    _ => None,
+                }
+            }
+            BuiltinFastPath::Ceil => {
+                if argc != 1 {
+                    return None;
+                }
+                match &regs[args_base as usize] {
+                    Value::Int(v) => Some(Value::Int(*v)),
+                    Value::Float(v) => Some(Value::Float(v.ceil())),
+                    _ => None,
+                }
+            }
+            BuiltinFastPath::Round => {
+                if argc != 1 {
+                    return None;
+                }
+                match &regs[args_base as usize] {
+                    Value::Int(v) => Some(Value::Int(*v)),
+                    Value::Float(v) => Some(Value::Float(v.round())),
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Append to captured stdout (used by builtin io functions).
