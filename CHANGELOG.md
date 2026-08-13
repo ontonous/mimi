@@ -7,6 +7,22 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.3 — Phase A 锚定：Fault nominal 重设计裁决
+
+- **spec 裁决落地**：`devdocs/v0.36/phase-a-fault-nominal-verdict.md` 锚定 Phase A
+  五条裁决——(1) `StateId`/`EventId` 名义化（`last_state: string`/`unexpected_event:
+  string` → per-Flow 名义 enum，`snapshot` 保留为人类可读摘要；`"panic:<code>"` →
+  `EventId::Panic { code }`）；(2) recover 用穷尽 match 而非字符串比较（缺失分支=
+  编译错误）；(3) Fault ≠ Result、跨 FFI = Fault（FFI 契约违反→Fault，FFI 预期错误→
+  Result）；(4) 二次 Fault 升级（recover 体内再 fault → escalate + trap，非静默循环）；
+  (5) Recover/Reset 物理语义对齐修正案条款 4（in-place reuse）；
+- **DoD 定义**：Fault payload 零字符串编码状态 + `if last_state == "..."` 全仓归零 +
+  recover 穷尽 match 负测试 + 错误 trace 双后端等价 + 二次 Fault 升级负测试；
+- **现状核查**：字符串编码现状分布在 `src/flow_matrix.rs`（`ensure_fault_state`/
+  `SystemTrace`）、`src/codegen/expr/fault.rs`、`src/interp/bytecode/` 及
+  `src/tests/flow_features.rs`（`last_state == "..."` 反模式实证），为 0.36.4+ 重设计
+  划定改造面。
+
 ### 0.36.0–2 — Phase 0：理念与治理重锚
 
 - **哲学锚落地**（0.36.0）：`devdocs/v0.36/philosophy-anchor.md` 成为 0.1.6 哲学
