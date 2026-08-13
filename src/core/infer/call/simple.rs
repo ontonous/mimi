@@ -53,6 +53,24 @@ impl<'a> Checker<'a> {
             if shadowed {
                 break 'builtin_dispatch;
             }
+            // U3 (0.35.45): contract-derived arity enforcement — a single
+            // generic check driven by the canonical core::builtins::builtin_arity
+            // table, so a newly-registered fixed-arity builtin is arity-checked
+            // without a bespoke per-arm check. Variadic (usize::MAX) builtins
+            // and special-cased arms (e.g. `log` 1–2 args) skip this and keep
+            // their own precise rules below.
+            if let Some(arity) = crate::core::builtins::builtin_arity(name) {
+                if arity != usize::MAX && args.len() != arity {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{name} expects {arity} argument(s)"),
+                    );
+                    return Type::TyErr;
+                }
+            }
             match name {
                 "unsafe_cast_protocol" => {
                     // 条款 11 escape hatch — typed at the call site by the

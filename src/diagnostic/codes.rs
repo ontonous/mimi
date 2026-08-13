@@ -444,6 +444,9 @@ pub fn describe(code: &str) -> &'static str {
         W011 => "progressive Typestate migration (script mode → explicit flow)",
         W012 => "type escape hatch (`_` or `Any`) bypasses static checks",
         W013 => "newtype used interchangeably with its inner type (transparent newtype is intentional; opt-in strict mode at 1.1)",
+        W0400 => "flow state is unreachable (no transition targets it)",
+        W0401 => "flow state is terminal (no outgoing transitions)",
+        W0402 => "flow-state unqualified name shadows another flow (qualified name required)",
 
         _ => "unknown error",
     }
@@ -684,6 +687,20 @@ mod tests {
             duplicates.is_empty(),
             "Duplicate error codes detected: {:?}. Error codes must never be reused once allocated.",
             duplicates
+        );
+
+        // U5 (0.35.45): every allocated E/W code must have a human-readable
+        // description in `describe` (single shared dictionary — the fallback
+        // "unknown error" is a drift signal, not a valid description).
+        let missing: Vec<&str> = codes
+            .iter()
+            .filter(|c| describe(c) == "unknown error")
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "allocated codes missing from describe(): {:?}",
+            missing
         );
     }
 }
