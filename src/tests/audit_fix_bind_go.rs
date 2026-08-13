@@ -51,15 +51,6 @@ fn bool_ty() -> Type {
 fn string_ty() -> Type {
     Type::Name("string".into(), vec![])
 }
-fn unit_ty() -> Type {
-    Type::Name("unit".into(), vec![])
-}
-fn raw_string_ty() -> Type {
-    Type::RawString
-}
-fn list_ty() -> Type {
-    Type::Name("List".into(), vec![i32_ty()])
-}
 
 /// #[repr(C)] Flags { on: bool, n: i32 }
 fn flags_type_defs() -> HashMap<String, TypeDef> {
@@ -108,42 +99,6 @@ fn go_string_return_borrowed_not_freed_and_null_checked() {
     assert!(out.contains("\treturn C.GoString(result)"));
     // Borrowed return: never freed.
     assert!(!out.contains("C.mimi_string_free(result)"));
-}
-
-#[test]
-fn go_owned_and_json_string_returns_freed_after_copy() {
-    let gen = GoBindGenerator::new(HashMap::new(), "audit");
-    let out = gen
-        .generate(&[
-            extern_fn("owned_str", vec![], Some(raw_string_ty())),
-            extern_fn("list_json", vec![], Some(list_ty())),
-        ])
-        .unwrap();
-
-    // Both owned contracts free exactly once, after the NULL check.
-    assert_eq!(out.matches("\tdefer C.mimi_string_free(result)").count(), 2);
-    assert!(out.contains("\t// Owned (StringOwned/Json): free the C buffer after copying."));
-    assert!(out.contains("extern char* owned_str();"));
-    assert!(out.contains("extern char* list_json();"));
-}
-
-/// Fix 7 (go_bind.rs:415-421): StringTransfer args move ownership to C — the
-/// post-call C.free was a double-free/UAF. Borrow/Json args still free.
-#[test]
-fn go_string_transfer_arg_not_freed_post_call() {
-    let gen = GoBindGenerator::new(HashMap::new(), "audit");
-    let out = gen
-        .generate(&[
-            extern_fn("take", vec![("s", raw_string_ty())], Some(unit_ty())),
-            extern_fn("greet", vec![("name", string_ty())], Some(unit_ty())),
-        ])
-        .unwrap();
-
-    assert!(out.contains("s_c := C.CString(s)"));
-    assert!(out.contains("\t// StringTransfer: ownership of s_c moves to C — do NOT free."));
-    assert!(!out.contains("C.free(unsafe.Pointer(s_c))"));
-    // Control: borrowed string args still free the temporary CString.
-    assert!(out.contains("defer C.free(unsafe.Pointer(name_c))"));
 }
 
 /// Fix 5 (go_bind.rs:607): repr(C) bool fields were declared `int` (4 bytes)
@@ -235,11 +190,7 @@ fn go_scalar_returns_explicitly_converted() {
             extern_fn("counter", vec![], Some(i64_ty())),
             extern_fn("ratio", vec![], Some(f64_ty())),
             extern_fn("ok", vec![], Some(bool_ty())),
-            extern_fn(
-                "handle_get",
-                vec![],
-                Some(Type::CShared(Box::new(i32_ty()))),
-            ),
+            extern_fn("handle_get", vec![], Some(i64_ty())),
         ])
         .unwrap();
 

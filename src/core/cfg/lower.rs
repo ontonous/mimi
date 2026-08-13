@@ -446,9 +446,6 @@ impl<'a> Lowerer<'a> {
             | Stmt::Defer(block) => {
                 self.lower_block(block, Some(current), &format!("{role}.block"))
             }
-            Stmt::Alloc { body, .. } => {
-                self.lower_block(body, Some(current), &format!("{role}.alloc"))
-            }
             Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) | Stmt::Invariant(expr, _) => {
                 self.lower_expr(expr, current, &format!("{role}.contract"))
             }
@@ -898,7 +895,6 @@ fn collect_nested(
             | Stmt::WhileLet { body, .. }
             | Stmt::For { body, .. }
             | Stmt::Pinned { body, .. }
-            | Stmt::Alloc { body, .. }
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)

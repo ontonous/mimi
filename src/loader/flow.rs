@@ -553,7 +553,6 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             remap_block_spans(body, remap)
         }
         Stmt::Func(function) => remap_func_spans(function, remap),
-        Stmt::Alloc { body, .. } => remap_block_spans(body, remap),
     }
 }
 
@@ -778,17 +777,12 @@ fn remap_type_spans(ty: &mut Type, remap: &SourceIdRemap) -> Result<(), String> 
         | Type::Option(inner)
         | Type::CBuffer(inner)
         | Type::Shared(inner)
-        | Type::LocalShared(inner)
         | Type::Weak(inner)
-        | Type::WeakLocal(inner)
         | Type::Newtype(_, inner)
         | Type::Array(inner, _)
         | Type::Slice(inner)
         | Type::RawPtr(inner)
         | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
         | Type::ForAll(_, inner) => remap_type_spans(inner, remap),
         Type::Result(ok, err) => {
             remap_type_spans(ok, remap)?;
@@ -803,10 +797,8 @@ fn remap_type_spans(ty: &mut Type, remap: &SourceIdRemap) -> Result<(), String> 
         Type::Cap(_)
         | Type::CapAtom(_)
         | Type::Nothing
-        | Type::Allocator
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
-        | Type::RawString
         | Type::Infer
         | Type::TyErr
         | Type::TypeVar(_) => Ok(()),
@@ -1466,17 +1458,12 @@ mod tests {
             | Type::Option(inner)
             | Type::CBuffer(inner)
             | Type::Shared(inner)
-            | Type::LocalShared(inner)
             | Type::Weak(inner)
-            | Type::WeakLocal(inner)
             | Type::Newtype(_, inner)
             | Type::Array(inner, _)
             | Type::Slice(inner)
             | Type::RawPtr(inner)
             | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner)
             | Type::ForAll(_, inner) => collect_type_source_ids(inner, source_ids),
             Type::Result(ok, err) => {
                 collect_type_source_ids(ok, source_ids);
@@ -1491,10 +1478,8 @@ mod tests {
             Type::Cap(_)
             | Type::CapAtom(_)
             | Type::Nothing
-            | Type::Allocator
             | Type::ImplTrait(_)
             | Type::DynTrait(_)
-            | Type::RawString
             | Type::Infer
             | Type::TyErr
             | Type::TypeVar(_) => {}

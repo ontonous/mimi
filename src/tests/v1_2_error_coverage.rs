@@ -286,26 +286,6 @@ func main() -> i32 {
     }
 }
 
-// ── E0305: local_shared in parasteps ─────────────────────────────────
-
-#[test]
-fn error_e0305_local_shared_in_parasteps() {
-    let src = r#"
-func main() -> i32 {
-    local_shared x = 42
-    parasteps {
-        requires: *x > 0
-        0
-    }
-}
-"#;
-    let errors = check_source(src).unwrap_err();
-    let has_code = errors
-        .iter()
-        .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0305));
-    assert!(has_code, "expected E0305, got: {errors:?}");
-}
-
 // ── E0306: arena escape ──────────────────────────────────────────────
 
 #[test]

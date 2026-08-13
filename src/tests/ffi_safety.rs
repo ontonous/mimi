@@ -78,7 +78,9 @@ func main() -> i32 {
 }
 
 #[test]
-fn local_shared_not_allowed_in_ffi() {
+fn local_shared_keyword_removed() {
+    // 0.35.39: `local_shared` was culled. The program is now a parse error
+    // (plain identifier, not a keyword).
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: local_shared i32) -> i32;
@@ -89,7 +91,10 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    expect_ffi_safety_error(src, "shared");
+    assert!(
+        run_source_bytecode_result(src).is_err(),
+        "local_shared is no longer a keyword and must be rejected"
+    );
 }
 
 #[test]
@@ -237,9 +242,8 @@ func main() -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1: FFI passport types (*T, *mut T, c_shared T, c_borrow T,
-// c_borrow_mut T) are allowed in extern "C" signatures but rejected everywhere
-// else.
+// Stage 1: FFI passport types (*T, *mut T) are allowed in extern "C"
+// signatures but rejected everywhere else.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -277,101 +281,10 @@ func main() -> i32 {
 }
 
 #[test]
-fn c_shared_allowed_in_extern_signature() {
-    let src = r#"
-extern "C" {
-    func __mimi_test_no_such_function_12345(x: c_shared i32) -> i32;
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "c_shared should be allowed in extern signature"
-    );
-}
-
-#[test]
-fn c_borrow_allowed_in_extern_signature() {
-    let src = r#"
-extern "C" {
-    func __mimi_test_no_such_function_12345(x: c_borrow i32) -> i32;
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "c_borrow should be allowed in extern signature"
-    );
-}
-
-#[test]
-fn c_borrow_mut_allowed_in_extern_signature() {
-    let src = r#"
-extern "C" {
-    func __mimi_test_no_such_function_12345(x: c_borrow_mut i32) -> i32;
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    assert!(
-        check_source(src).is_ok(),
-        "c_borrow_mut should be allowed in extern signature"
-    );
-}
-
-#[test]
 fn raw_ptr_rejected_in_function_signature() {
     let src = r#"
 func bad(x: *i32) -> i32 {
     0
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
-fn c_borrow_rejected_in_function_return() {
-    let src = r#"
-func bad() -> c_borrow i32 {
-    0
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
-fn c_shared_rejected_in_type_alias() {
-    let src = r#"
-type CSharedInt = c_shared i32;
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
-fn c_borrow_mut_rejected_in_record_field() {
-    let src = r#"
-type Wrapper {
-    ptr: c_borrow_mut i32
 }
 
 func main() -> i32 {
@@ -394,74 +307,10 @@ func main() -> i32 {
 }
 
 #[test]
-fn c_shared_rejected_in_actor_field() {
-    let src = r#"
-actor BadActor {
-    ptr: c_shared i32
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
 fn passport_type_rejected_in_trait_signature() {
     let src = r#"
 trait PtrTrait {
     func get(x: *i32) -> i32;
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
-fn passport_type_rejected_in_impl_signature() {
-    let src = r#"
-trait PtrTrait {
-    func get(x: i32) -> i32;
-}
-
-type MyType {}
-
-impl PtrTrait for MyType {
-    func get(x: c_borrow i32) -> i32 {
-        x
-    }
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
-fn raw_string_rejected_in_function_signature() {
-    let src = r#"
-func bad(s: raw_string) -> i32 {
-    0
-}
-
-func main() -> i32 {
-    0
-}
-"#;
-    expect_type_error(src, "FFI passport type");
-}
-
-#[test]
-fn raw_string_rejected_in_function_return() {
-    let src = r#"
-func bad() -> raw_string {
-    "hello"
 }
 
 func main() -> i32 {

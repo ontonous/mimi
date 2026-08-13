@@ -94,7 +94,7 @@ pub const E0301: &str = "E0301"; // cannot borrow as mutable because already mut
 pub const E0302: &str = "E0302"; // cannot borrow as immutable because already mutably borrowed
 pub const E0303: &str = "E0303"; // capability must be consumed before end of scope
 pub const E0304: &str = "E0304"; // capability already consumed
-pub const E0305: &str = "E0305"; // cannot capture local_shared in parasteps
+pub const E0305: &str = "E0305"; // RETIRED (0.35.39): cannot capture local_shared in parasteps — local_shared removed (four-state shared → two-state). Code preserved (never reused).
 pub const E0306: &str = "E0306"; // arena escape: ref to arena memory assigned to outer scope
 
 /// Semantic error codes (E04xx)
@@ -336,7 +336,7 @@ pub fn describe(code: &str) -> &'static str {
         E0302 => "cannot borrow as immutable because already mutably borrowed",
         E0303 => "capability must be consumed before end of scope",
         E0304 => "capability already consumed",
-        E0305 => "cannot capture local_shared in parasteps",
+        E0305 => "cannot capture local_shared in parasteps (retired: local_shared removed in 0.35.39)",
         E0306 => "arena escape: reference to arena memory cannot outlive the arena block",
 
         E0400 => "undefined variable",

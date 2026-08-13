@@ -64,16 +64,9 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> T
             Type::RefMut(lt.clone(), Box::new(subst_with_depth(inner, subst, next)))
         }
         Type::Shared(inner) => Type::Shared(Box::new(subst_with_depth(inner, subst, next))),
-        Type::LocalShared(inner) => {
-            Type::LocalShared(Box::new(subst_with_depth(inner, subst, next)))
-        }
         Type::Weak(inner) => Type::Weak(Box::new(subst_with_depth(inner, subst, next))),
-        Type::WeakLocal(inner) => Type::WeakLocal(Box::new(subst_with_depth(inner, subst, next))),
         Type::RawPtr(inner) => Type::RawPtr(Box::new(subst_with_depth(inner, subst, next))),
         Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(subst_with_depth(inner, subst, next))),
-        Type::CShared(inner) => Type::CShared(Box::new(subst_with_depth(inner, subst, next))),
-        Type::CBorrow(inner) => Type::CBorrow(Box::new(subst_with_depth(inner, subst, next))),
-        Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(subst_with_depth(inner, subst, next))),
         Type::CBuffer(inner) => Type::CBuffer(Box::new(subst_with_depth(inner, subst, next))),
         Type::Array(inner, n) => Type::Array(Box::new(subst_with_depth(inner, subst, next)), *n),
         Type::Slice(inner) => Type::Slice(Box::new(subst_with_depth(inner, subst, next))),
@@ -90,11 +83,9 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> T
         }
         // Leaf / inference placeholders — no parameters inside.
         Type::Infer
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString
         | Type::Cap(_)
         | Type::CapAtom(_)
+        | Type::Nothing
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => {

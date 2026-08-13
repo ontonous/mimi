@@ -80,24 +80,6 @@ fn audit_cpp_borrowed_string_return_is_not_freed() {
 }
 
 #[test]
-fn audit_cpp_owned_string_return_still_freed() {
-    // raw_string return -> FfiRetContract::StringOwned: ownership transfers to
-    // the Mimi side, ~MimiString() must free it.
-    let out = gen(&[func("clone_label", vec![], Some(Type::RawString))]);
-    assert!(
-        out.contains("MimiString mimi_ret(::clone_label());"),
-        "StringOwned return must use the owning (single-arg) constructor:\n{}",
-        out
-    );
-    assert!(!out.contains("::clone_label(), false"));
-}
-
-// ---------------------------------------------------------------------------
-// [HIGH] Fix 1a (cont.): Json returns are owned per contract — the old
-// generic arm copied the char* into std::string and leaked it.
-// ---------------------------------------------------------------------------
-
-#[test]
 fn audit_cpp_json_return_is_freed_after_copy() {
     let out = gen(&[func(
         "fetch_json",
@@ -114,35 +96,9 @@ fn audit_cpp_json_return_is_freed_after_copy() {
 }
 
 // ---------------------------------------------------------------------------
-// [HIGH] Fix 1b: StringTransfer args transfer ownership to C. The old code
-// passed the std::string's temporary buffer (dies at wrapper exit -> C-side
-// UAF). Emit a malloc'd copy and never free it post-call.
+// [HIGH] Fix 1a (cont.): Json returns are owned per contract — the old
+// generic arm copied the char* into std::string and leaked it.
 // ---------------------------------------------------------------------------
-
-#[test]
-fn audit_cpp_string_transfer_arg_moves_ownership() {
-    let out = gen(&[func("sink_string", vec![param("s", Type::RawString)], None)]);
-    // A malloc'd copy is handed to C ...
-    assert!(
-        out.contains("char* s_cstr = static_cast<char*>(std::malloc(s.size() + 1));"),
-        "StringTransfer must hand over a malloc'd buffer:\n{}",
-        out
-    );
-    assert!(out.contains("std::memcpy(s_cstr, s.c_str(), s.size());"));
-    // Malloc failure raises instead of handing NULL to C (mirrors the
-    // interpreter wrapper's error path).
-    assert!(out.contains(
-        "if (!s_cstr) throw std::runtime_error(\"mimi FFI: malloc failed for StringTransfer argument 's'\");"
-    ));
-    // ... and the call receives it.
-    assert!(out.contains("::sink_string(s_cstr);"));
-    // No post-call free of the transferred buffer anywhere in the wrapper.
-    assert!(!out.contains("mimi_string_free(s_cstr)"));
-    assert!(!out.contains("std::free(s_cstr)"));
-    assert!(!out.contains("free(s_cstr)"));
-    // <cstdlib> is included so std::malloc resolves.
-    assert!(out.contains("#include <cstdlib>"));
-}
 
 #[test]
 fn audit_cpp_json_arg_still_borrowed_for_call() {

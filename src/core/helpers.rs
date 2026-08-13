@@ -90,14 +90,9 @@ fn occurs_check(name: &str, ty: &Type, _generics: &[GenericParam]) -> bool {
                 || occurs_check(name, ret, _generics)
         }
         Type::Shared(inner) => occurs_check(name, inner, _generics),
-        Type::LocalShared(inner) => occurs_check(name, inner, _generics),
         Type::Weak(inner) => occurs_check(name, inner, _generics),
-        Type::WeakLocal(inner) => occurs_check(name, inner, _generics),
         Type::RawPtr(inner) => occurs_check(name, inner, _generics),
         Type::RawPtrMut(inner) => occurs_check(name, inner, _generics),
-        Type::CShared(inner) => occurs_check(name, inner, _generics),
-        Type::CBorrow(inner) => occurs_check(name, inner, _generics),
-        Type::CBorrowMut(inner) => occurs_check(name, inner, _generics),
         Type::Newtype(_, inner) => occurs_check(name, inner, _generics),
         Type::ExternFunc(args, ret) => {
             args.iter().any(|a| occurs_check(name, a, _generics))
@@ -109,8 +104,6 @@ fn occurs_check(name: &str, ty: &Type, _generics: &[GenericParam]) -> bool {
         Type::Cap(_)
         | Type::CapAtom(_)
         | Type::Nothing
-        | Type::RawString
-        | Type::Allocator
         | Type::Infer
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
@@ -177,37 +170,16 @@ pub fn subst_type_params(
             Box::new(subst_type_params(ret, generics, type_map)),
         ),
         Type::Shared(inner) => Type::Shared(Box::new(subst_type_params(inner, generics, type_map))),
-        Type::LocalShared(inner) => {
-            Type::LocalShared(Box::new(subst_type_params(inner, generics, type_map)))
-        }
         Type::Weak(inner) => Type::Weak(Box::new(subst_type_params(inner, generics, type_map))),
-        Type::WeakLocal(inner) => {
-            Type::WeakLocal(Box::new(subst_type_params(inner, generics, type_map)))
-        }
         Type::RawPtr(inner) => Type::RawPtr(Box::new(subst_type_params(inner, generics, type_map))),
         Type::RawPtrMut(inner) => {
             Type::RawPtrMut(Box::new(subst_type_params(inner, generics, type_map)))
-        }
-        Type::CShared(inner) => {
-            Type::CShared(Box::new(subst_type_params(inner, generics, type_map)))
-        }
-        Type::CBorrow(inner) => {
-            Type::CBorrow(Box::new(subst_type_params(inner, generics, type_map)))
-        }
-        Type::CBorrowMut(inner) => {
-            Type::CBorrowMut(Box::new(subst_type_params(inner, generics, type_map)))
         }
         Type::Newtype(name, inner) => Type::Newtype(
             name.clone(),
             Box::new(subst_type_params(inner, generics, type_map)),
         ),
-        Type::Cap(_)
-        | Type::CapAtom(_)
-        | Type::Nothing
-        | Type::RawString
-        | Type::Allocator
-        | Type::Infer
-        | Type::TyErr => ty.clone(),
+        Type::Cap(_) | Type::CapAtom(_) | Type::Nothing | Type::Infer | Type::TyErr => ty.clone(),
         Type::ExternFunc(args, ret) => Type::ExternFunc(
             args.iter()
                 .map(|a| subst_type_params(a, generics, type_map))
@@ -289,9 +261,7 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::Cap(a), Type::Cap(b)) => a == b,
         (Type::CapAtom(a), Type::CapAtom(b)) => a == b,
         (Type::Shared(a), Type::Shared(b)) => same_type(a, b),
-        (Type::LocalShared(a), Type::LocalShared(b)) => same_type(a, b),
         (Type::Weak(a), Type::Weak(b)) => same_type(a, b),
-        (Type::WeakLocal(a), Type::WeakLocal(b)) => same_type(a, b),
         // A4: Newtypes with same name and same inner type are equal.
         // Different-name newtypes do NOT match (consistent with unify).
         // Previous code fell through to inner-type comparison via the
@@ -318,7 +288,6 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (other, Type::Newtype(_, inner)) if !matches!(other, Type::Newtype(..)) => {
             same_type(inner, other)
         }
-        (Type::Allocator, Type::Allocator) => true,
         (Type::Infer, Type::Infer) => true,
         (Type::Array(a_inner, a_size), Type::Array(b_inner, b_size)) => {
             a_size == b_size && same_type(a_inner, b_inner)
@@ -326,8 +295,6 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::Slice(a), Type::Slice(b)) => same_type(a, b),
         (Type::ImplTrait(a), Type::ImplTrait(b)) => a == b,
         (Type::DynTrait(a), Type::DynTrait(b)) => a == b,
-        (Type::Nothing, Type::Nothing) => true,
-        (Type::RawString, Type::RawString) => true,
         (Type::ExternFunc(a_args, a_ret), Type::ExternFunc(b_args, b_ret)) => {
             a_args.len() == b_args.len()
                 && a_args
@@ -339,9 +306,6 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::CBuffer(a), Type::CBuffer(b)) => same_type(a, b),
         (Type::RawPtr(a), Type::RawPtr(b)) => same_type(a, b),
         (Type::RawPtrMut(a), Type::RawPtrMut(b)) => same_type(a, b),
-        (Type::CShared(a), Type::CShared(b)) => same_type(a, b),
-        (Type::CBorrow(a), Type::CBorrow(b)) => same_type(a, b),
-        (Type::CBorrowMut(a), Type::CBorrowMut(b)) => same_type(a, b),
         (Type::TypeVar(a), Type::TypeVar(b)) => a == b,
         (Type::ForAll(p1, b1), Type::ForAll(p2, b2)) => p1 == p2 && same_type(b1, b2),
         _ => false,
@@ -559,9 +523,7 @@ pub fn fmt_type(t: &Type) -> String {
         Type::Cap(name) => format!("cap {}", name),
         Type::CapAtom(name) => format!("cap {}", name),
         Type::Shared(inner) => format!("shared {}", fmt_type(inner)),
-        Type::LocalShared(inner) => format!("local_shared {}", fmt_type(inner)),
         Type::Weak(inner) => format!("weak {}", fmt_type(inner)),
-        Type::WeakLocal(inner) => format!("weak_local {}", fmt_type(inner)),
         // Newtype is transparent when wrapping a non-Newtype inner type.
         // This aligns fmt_type with same_type: if same_type(Newtype(x, A), B) is true,
         // then fmt_type(Newtype(x, A)) == fmt_type(B).
@@ -574,17 +536,12 @@ pub fn fmt_type(t: &Type) -> String {
         }
         Type::Nothing => "nothing".to_string(),
         Type::TyErr => "«error»".to_string(),
-        Type::Allocator => "Allocator".to_string(),
         Type::Array(inner, size) => format!("[{}; {}]", fmt_type(inner), size),
         Type::Slice(inner) => format!("[{}]", fmt_type(inner)),
         Type::ImplTrait(traits) => format!("impl {}", traits.join(" + ")),
         Type::DynTrait(traits) => format!("dyn {}", traits.join(" + ")),
         Type::RawPtr(inner) => format!("*{}", fmt_type(inner)),
         Type::RawPtrMut(inner) => format!("*mut {}", fmt_type(inner)),
-        Type::CShared(inner) => format!("c_shared {}", fmt_type(inner)),
-        Type::CBorrow(inner) => format!("c_borrow {}", fmt_type(inner)),
-        Type::CBorrowMut(inner) => format!("c_borrow_mut {}", fmt_type(inner)),
-        Type::RawString => "raw_string".to_string(),
         Type::Infer => "infer".to_string(),
         Type::ExternFunc(args, ret) => {
             let args_str: Vec<String> = args.iter().map(fmt_type).collect();

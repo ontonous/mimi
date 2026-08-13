@@ -562,13 +562,7 @@ impl PyBindGenerator {
                 let inner = self.mimi_type_to_cpp(inner);
                 format!("{}*", inner)
             }
-            Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => "MimiHandle".to_string(),
             Type::Cap(_) | Type::CapAtom(_) => "MimiCap".to_string(),
-            Type::RawString => "char*".to_string(),
-            Type::Shared(inner) | Type::LocalShared(inner) => {
-                let inner = self.mimi_type_to_cpp(inner);
-                format!("MimiHandle /* shared {} */", inner)
-            }
             Type::Ref(_, inner) | Type::RefMut(_, inner) => {
                 let inner = self.mimi_type_to_cpp(inner);
                 format!("{}*", inner)

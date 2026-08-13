@@ -3281,8 +3281,7 @@ fn collect_nested_function_records(
             | Stmt::IeeeFloat(body)
             | Stmt::OnFailure(body)
             | Stmt::Parasteps(body)
-            | Stmt::Defer(body)
-            | Stmt::Alloc { body, .. } => collect_nested_function_records(
+            | Stmt::Defer(body) => collect_nested_function_records(
                 body,
                 owner,
                 parent_qualified,
@@ -4171,23 +4170,16 @@ pub(crate) fn type_kind(ty: &Type) -> &'static str {
         Type::CBuffer(_) => "type.c_buffer",
         Type::Cap(_) | Type::CapAtom(_) => "type.capability",
         Type::Shared(_) => "type.shared",
-        Type::LocalShared(_) => "type.local_shared",
         Type::Weak(_) => "type.weak",
-        Type::WeakLocal(_) => "type.weak_local",
         Type::Newtype(_, _) => "type.newtype",
         Type::Nothing => "type.nothing",
         Type::TyErr => "type.error",
-        Type::Allocator => "type.allocator",
         Type::Array(_, _) => "type.array",
         Type::Slice(_) => "type.slice",
         Type::ImplTrait(_) => "type.impl_trait",
         Type::DynTrait(_) => "type.dyn_trait",
         Type::RawPtr(_) => "type.raw_ptr",
         Type::RawPtrMut(_) => "type.raw_ptr_mut",
-        Type::CShared(_) => "type.c_shared",
-        Type::CBorrow(_) => "type.c_borrow",
-        Type::CBorrowMut(_) => "type.c_borrow_mut",
-        Type::RawString => "type.raw_string",
         Type::Infer => "type.infer",
         Type::TypeVar(_) => "type.variable",
         Type::ForAll(_, _) => "type.for_all",
@@ -4257,16 +4249,11 @@ fn collect_type_meta(
         | Type::Option(inner)
         | Type::CBuffer(inner)
         | Type::Shared(inner)
-        | Type::LocalShared(inner)
         | Type::Weak(inner)
-        | Type::WeakLocal(inner)
         | Type::Newtype(_, inner)
         | Type::Slice(inner)
         | Type::RawPtr(inner)
         | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
         | Type::Array(inner, _)
         | Type::ForAll(_, inner) => collect_type_meta(
             inner,
@@ -4337,10 +4324,8 @@ fn collect_type_meta(
         Type::Cap(_)
         | Type::CapAtom(_)
         | Type::Nothing
-        | Type::Allocator
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
-        | Type::RawString
         | Type::Infer
         | Type::TyErr
         | Type::TypeVar(_) => {}
@@ -5287,7 +5272,6 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::Pinned { var, .. } => format!("pinned:{}", var.as_deref().unwrap_or("_")),
         Stmt::Parasteps(_) => "parasteps".into(),
         Stmt::Func(function) => format!("function:{}", function.name),
-        Stmt::Alloc { kind, .. } => format!("alloc:{kind:?}"),
         Stmt::Ellipsis => "ellipsis".into(),
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
@@ -5322,7 +5306,6 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::Pinned { .. } => "stmt.pinned",
         Stmt::Parasteps(_) => "stmt.parasteps",
         Stmt::Func(_) => "stmt.function",
-        Stmt::Alloc { .. } => "stmt.alloc",
         Stmt::Ellipsis => "stmt.ellipsis",
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
@@ -5759,15 +5742,6 @@ fn collect_stmt_meta(
                 errors,
             );
         }
-        Stmt::Alloc { body, .. } => collect_block_meta(
-            body,
-            owner,
-            &format!("{role}.body"),
-            fallback,
-            ids,
-            out,
-            errors,
-        ),
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
 }
@@ -7527,20 +7501,6 @@ fn collect_stmt_call_sites(
                 errors,
             );
         }
-        Stmt::Alloc { body, .. } => {
-            collect_block_call_sites(
-                body,
-                owner,
-                &format!("{role}.body"),
-                fallback,
-                ids,
-                functions,
-                externs,
-                methods,
-                out,
-                errors,
-            );
-        }
         Stmt::Math(exprs) => {
             for index in 0..exprs.len() {
                 let child_role = expr_sibling_role(&format!("{role}.math"), exprs, index);
@@ -8153,23 +8113,11 @@ fn canonical_shared_binding_type(
 ) -> Result<ZonkedTy, String> {
     let ty = match kind {
         crate::ast::SharedKind::Shared => Type::Shared(Box::new(initializer.as_type().clone())),
-        crate::ast::SharedKind::LocalShared => {
-            Type::LocalShared(Box::new(initializer.as_type().clone()))
-        }
         crate::ast::SharedKind::Weak => match initializer.as_type().unlocated() {
             Type::Shared(target) => Type::Weak(target.clone()),
             other => {
                 return Err(format!(
                     "weak binding initializer is not shared: {}",
-                    crate::core::fmt_type(other)
-                ))
-            }
-        },
-        crate::ast::SharedKind::WeakLocal => match initializer.as_type().unlocated() {
-            Type::LocalShared(target) => Type::WeakLocal(target.clone()),
-            other => {
-                return Err(format!(
-                    "weak_local binding initializer is not local_shared: {}",
                     crate::core::fmt_type(other)
                 ))
             }

@@ -80,9 +80,6 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
             | Stmt::IeeeFloat(inner) => {
                 return extract_body_return(inner);
             }
-            Stmt::Alloc { body, .. } => {
-                return extract_body_return(body);
-            }
             Stmt::Requires(_, _)
             | Stmt::Ensures(_, _)
             | Stmt::Invariant(_, _)
@@ -130,11 +127,6 @@ fn extract_forward_return(block: &[Stmt]) -> Option<Expr> {
             | Stmt::OnFailure(inner)
             | Stmt::Parasteps(inner) => {
                 if let Some(expr) = extract_forward_return(inner) {
-                    return Some(expr);
-                }
-            }
-            Stmt::Alloc { body, .. } => {
-                if let Some(expr) = extract_forward_return(body) {
                     return Some(expr);
                 }
             }
@@ -380,11 +372,6 @@ pub(crate) fn collect_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<String>) {
         | Stmt::Parasteps(block)
         | Stmt::Unsafe(block) => {
             for s in block {
-                collect_idents_in_stmt(s, idents);
-            }
-        }
-        Stmt::Alloc { body, .. } => {
-            for s in body {
                 collect_idents_in_stmt(s, idents);
             }
         }

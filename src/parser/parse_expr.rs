@@ -380,18 +380,6 @@ impl Parser {
                 let literal = self.parsed_expr_from(start_pos, Expr::Literal(Lit::Unit));
                 return self.parse_postfix(literal, start_pos);
             }
-            TokenKind::Alloc => {
-                self.advance();
-                let mut e = self.parsed_expr_from(start_pos, Expr::Ident("alloc".to_string()));
-                if self.at(&TokenKind::LParen) {
-                    self.advance();
-                    let args = self.parse_args()?;
-                    self.expect(TokenKind::RParen, "`)`")?;
-                    let call = e.call(args);
-                    e = self.parsed_expr_from(start_pos, call);
-                }
-                return self.parse_postfix(e, start_pos);
-            }
             TokenKind::Ident(name) => self.parse_ident_primary(name)?,
             TokenKind::LParen => {
                 self.advance();
@@ -1199,7 +1187,6 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Unsafe
             | TokenKind::Spawn
             | TokenKind::Await
-            | TokenKind::Alloc
             | TokenKind::Drop
             | TokenKind::Parasteps
             | TokenKind::Failure
@@ -1207,8 +1194,6 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Ensures
             | TokenKind::Math
             | TokenKind::Invariant
-            | TokenKind::Desc
-            | TokenKind::Rule
             | TokenKind::Loop
             | TokenKind::Pinned
             | TokenKind::Shared
@@ -1504,7 +1489,6 @@ mod tests {
             TokenKind::Unsafe,
             TokenKind::Spawn,
             TokenKind::Await,
-            TokenKind::Alloc,
             TokenKind::Drop,
             TokenKind::Parasteps,
             TokenKind::Failure,
@@ -1512,8 +1496,6 @@ mod tests {
             TokenKind::Ensures,
             TokenKind::Math,
             TokenKind::Invariant,
-            TokenKind::Desc,
-            TokenKind::Rule,
         ] {
             assert!(
                 is_stmt_start_keyword(&kind),

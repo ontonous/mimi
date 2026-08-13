@@ -877,9 +877,7 @@ impl BytecodeCompiler {
             Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(self.resolve_type(inner))),
             Type::RefMut(lt, inner) => Type::RefMut(lt.clone(), Box::new(self.resolve_type(inner))),
             Type::Shared(inner) => Type::Shared(Box::new(self.resolve_type(inner))),
-            Type::LocalShared(inner) => Type::LocalShared(Box::new(self.resolve_type(inner))),
             Type::Weak(inner) => Type::Weak(Box::new(self.resolve_type(inner))),
-            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.resolve_type(inner))),
             other => other.clone(),
         }
     }
@@ -1699,17 +1697,6 @@ impl BytecodeCompiler {
                     self.compile_expr(fc, expr)?;
                 }
 
-                Stmt::Alloc { body, .. } => {
-                    // Allocator block — just compile the body (region memory is
-                    // a tree-walker-only feature; the block value flows through).
-                    fc.push_scope();
-                    let result = self.compile_block(fc, body)?;
-                    fc.pop_scope();
-                    if is_last {
-                        last_reg = result;
-                    }
-                }
-
                 Stmt::Defer(block) => {
                     // Record the deferred block for scope-exit execution (LIFO).
                     fc.defer_scopes_mut().push(block.clone());
@@ -1723,10 +1710,10 @@ impl BytecodeCompiler {
                     let r = self.compile_expr(fc, init)?;
                     let r_var = fc.bind_var(name);
                     match kind {
-                        SharedKind::Shared | SharedKind::LocalShared => {
+                        SharedKind::Shared => {
                             fc.emit(Op::SharedNew { rd: r_var, ra: r });
                         }
-                        SharedKind::Weak | SharedKind::WeakLocal => {
+                        SharedKind::Weak => {
                             fc.emit(Op::WeakNew { rd: r_var, ra: r });
                         }
                     }
@@ -6606,10 +6593,6 @@ fn quoted_ast_to_stmt(
         QuotedAst::Parasteps(body) => {
             Stmt::Parasteps(quoted_ast_to_block(body, interp_counter, interp_values))
         }
-        QuotedAst::Alloc { kind, body } => Stmt::Alloc {
-            kind: *kind,
-            body: quoted_ast_to_block(body, interp_counter, interp_values),
-        },
         QuotedAst::Block(stmts) => Stmt::Block(
             stmts
                 .iter()
@@ -6789,8 +6772,7 @@ fn quoted_ast_to_expr(
         | QuotedAst::Defer(_)
         | QuotedAst::SharedLet { .. }
         | QuotedAst::OnFailure(_)
-        | QuotedAst::Parasteps(_)
-        | QuotedAst::Alloc { .. } => {
+        | QuotedAst::Parasteps(_) => {
             let block = quoted_ast_to_block(qa, interp_counter, interp_values);
             Expr::Block(block)
         }

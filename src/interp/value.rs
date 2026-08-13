@@ -192,10 +192,6 @@ pub enum QuotedAst {
     },
     OnFailure(Box<QuotedAst>),
     Parasteps(Box<QuotedAst>),
-    Alloc {
-        kind: AllocKind,
-        body: Box<QuotedAst>,
-    },
     /// C1: preserve lambda params and return type during quote.
     Lambda {
         params: Vec<Param>,

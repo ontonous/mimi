@@ -254,14 +254,9 @@ fn contains_dynamic_type(ty: &Type) -> bool {
         | Type::RefMut(_, inner)
         | Type::Option(inner)
         | Type::Shared(inner)
-        | Type::LocalShared(inner)
         | Type::Weak(inner)
-        | Type::WeakLocal(inner)
         | Type::RawPtr(inner)
         | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
         | Type::CBuffer(inner)
         | Type::Array(inner, _)
         | Type::Slice(inner)
@@ -269,11 +264,9 @@ fn contains_dynamic_type(ty: &Type) -> bool {
         | Type::ForAll(_, inner) => contains_dynamic_type(inner),
         Type::Infer
         | Type::TypeVar(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString
         | Type::Cap(_)
         | Type::CapAtom(_)
+        | Type::Nothing
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TyErr => false,

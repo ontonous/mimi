@@ -61,15 +61,9 @@ impl<'a> Checker<'a> {
             // type aliases inside wrappers are resolved (e.g. Shared<MyAlias>).
             Type::Cap(_) | Type::CapAtom(_) => ty.clone(),
             Type::Shared(inner) => Type::Shared(Box::new(self.resolve_type(inner))),
-            Type::LocalShared(inner) => Type::LocalShared(Box::new(self.resolve_type(inner))),
             Type::Weak(inner) => Type::Weak(Box::new(self.resolve_type(inner))),
-            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.resolve_type(inner))),
-            Type::CShared(inner) => Type::CShared(Box::new(self.resolve_type(inner))),
-            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.resolve_type(inner))),
-            Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(self.resolve_type(inner))),
             Type::RawPtr(inner) => Type::RawPtr(Box::new(self.resolve_type(inner))),
             Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(self.resolve_type(inner))),
-            Type::RawString | Type::Allocator => ty.clone(),
             Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve_type(inner))),
             Type::Newtype(name, inner) => {
                 Type::Newtype(name.clone(), Box::new(self.resolve_type(inner)))
@@ -119,13 +113,7 @@ impl<'a> Checker<'a> {
             // Capabilities
             Type::Cap(_) | Type::CapAtom(_) => true,
             // Raw pointers and FFI passport types
-            Type::RawPtr(_)
-            | Type::RawPtrMut(_)
-            | Type::CShared(_)
-            | Type::CBorrow(_)
-            | Type::CBorrowMut(_) => true,
-            // Raw string ownership transfer
-            Type::RawString => true,
+            Type::RawPtr(_) | Type::RawPtrMut(_) => true,
             // C function pointers
             Type::ExternFunc(_, _) => true,
             // C buffer with automatic memory management
@@ -133,7 +121,7 @@ impl<'a> Checker<'a> {
             // References are not allowed directly; must use c_borrow / c_borrow_mut
             Type::Ref(_, _) | Type::RefMut(_, _) => false,
             // Shared ownership is not allowed directly; must use c_shared
-            Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) | Type::WeakLocal(_) => false,
+            Type::Shared(_) | Type::Weak(_) => false,
             // Composite Mimi types
             // Tuple is allowed — serialized as JSON over FFI boundary
             Type::Tuple(_) => true,
@@ -151,7 +139,7 @@ impl<'a> Checker<'a> {
             }
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
-            Type::Nothing | Type::Allocator | Type::Infer | Type::TyErr => false,
+            Type::Nothing | Type::Infer | Type::TyErr => false,
             Type::TypeVar(_) | Type::ForAll(_, _) => false,
         }
     }
@@ -297,17 +285,11 @@ impl<'a> Checker<'a> {
             | Type::RefMut(_, inner)
             | Type::Option(inner)
             | Type::Shared(inner)
-            | Type::LocalShared(inner)
             | Type::Weak(inner)
-            | Type::WeakLocal(inner)
             | Type::RawPtr(inner)
-            | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner) => {
+            | Type::RawPtrMut(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
-            Type::RawString => { /* no inner type to check */ }
             Type::Result(ok, err) => {
                 self.check_type_well_formed_inner(ok, context, allow_passport);
                 self.check_type_well_formed_inner(err, context, allow_passport);
@@ -341,12 +323,7 @@ impl<'a> Checker<'a> {
                 }
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
-            Type::Cap(_)
-            | Type::CapAtom(_)
-            | Type::Nothing
-            | Type::Allocator
-            | Type::Infer
-            | Type::TyErr => {}
+            Type::Cap(_) | Type::CapAtom(_) | Type::Nothing | Type::Infer | Type::TyErr => {}
             Type::Array(inner, _) | Type::Slice(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
@@ -388,20 +365,13 @@ impl<'a> Checker<'a> {
     pub(crate) fn type_contains_passport(ty: &Type) -> bool {
         match ty {
             Type::Located { ty, .. } => Self::type_contains_passport(ty),
-            Type::RawPtr(_)
-            | Type::RawPtrMut(_)
-            | Type::CShared(_)
-            | Type::CBorrow(_)
-            | Type::CBorrowMut(_)
-            | Type::RawString => true,
+            Type::RawPtr(_) | Type::RawPtrMut(_) => true,
             Type::Name(_, args) => args.iter().any(Self::type_contains_passport),
             Type::Ref(_, inner)
             | Type::RefMut(_, inner)
             | Type::Option(inner)
             | Type::Shared(inner)
-            | Type::LocalShared(inner)
             | Type::Weak(inner)
-            | Type::WeakLocal(inner)
             | Type::Array(inner, _)
             | Type::Slice(inner) => Self::type_contains_passport(inner),
             Type::Result(ok, err) => {
@@ -416,12 +386,7 @@ impl<'a> Checker<'a> {
             }
             Type::CBuffer(inner) => Self::type_contains_passport(inner),
             Type::Newtype(_, inner) => Self::type_contains_passport(inner),
-            Type::Cap(_)
-            | Type::CapAtom(_)
-            | Type::Nothing
-            | Type::Allocator
-            | Type::Infer
-            | Type::TyErr => false,
+            Type::Cap(_) | Type::CapAtom(_) | Type::Nothing | Type::Infer | Type::TyErr => false,
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
             Type::TypeVar(_) => false,

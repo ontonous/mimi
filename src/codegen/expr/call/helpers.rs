@@ -411,14 +411,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     || Self::type_references_generic(ret, generic_name)
             }
             Type::Shared(inner)
-            | Type::LocalShared(inner)
             | Type::Weak(inner)
-            | Type::WeakLocal(inner)
             | Type::RawPtr(inner)
             | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner)
             | Type::Slice(inner)
             | Type::CBuffer(inner)
             | Type::Array(inner, _) => Self::type_references_generic(inner, generic_name),
@@ -431,11 +426,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Cap(_)
             | Type::CapAtom(_)
             | Type::Nothing
-            | Type::Allocator
             | Type::Infer
             | Type::ImplTrait(_)
             | Type::DynTrait(_)
-            | Type::RawString
             | Type::TyErr
             | Type::TypeVar(_)
             | Type::ForAll(_, _) => false,
@@ -2142,18 +2135,8 @@ pub(crate) fn infer_generic_args(
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
-        Type::LocalShared(p_inner) => {
-            if let Type::LocalShared(a_inner) = arg.unlocated() {
-                infer_generic_args(p_inner, a_inner, generics, map);
-            }
-        }
         Type::Weak(p_inner) => {
             if let Type::Weak(a_inner) = arg.unlocated() {
-                infer_generic_args(p_inner, a_inner, generics, map);
-            }
-        }
-        Type::WeakLocal(p_inner) => {
-            if let Type::WeakLocal(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }

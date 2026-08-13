@@ -173,9 +173,7 @@ pub enum FunctionTypeAbi {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OwnershipTypeKind {
     Shared,
-    LocalShared,
     Weak,
-    WeakLocal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -265,8 +263,6 @@ pub enum ResolvedType {
         item: NominalTypeId,
         inner: ResolvedTypeId,
     },
-    Nothing,
-    Allocator,
     Array {
         element: ResolvedTypeId,
         length: usize,
@@ -280,12 +276,6 @@ pub enum ResolvedType {
         mutable: bool,
         target: ResolvedTypeId,
     },
-    CShared(ResolvedTypeId),
-    CBorrow {
-        mutable: bool,
-        target: ResolvedTypeId,
-    },
-    RawString,
     DynamicAny {
         capability: String,
     },
@@ -301,8 +291,6 @@ impl ResolvedType {
             | Self::Newtype { inner: target, .. }
             | Self::Slice(target)
             | Self::RawPointer { target, .. }
-            | Self::CShared(target)
-            | Self::CBorrow { target, .. }
             | Self::Option(target) => vec![target],
             Self::Result { ok, error } => vec![ok, error],
             Self::Function {
@@ -313,10 +301,7 @@ impl ResolvedType {
             | Self::GenericParameter(_)
             | Self::Capability(_)
             | Self::FlowStateSet { .. }
-            | Self::Nothing
-            | Self::Allocator
             | Self::Trait { .. }
-            | Self::RawString
             | Self::DynamicAny { .. } => Vec::new(),
         }
     }
@@ -393,9 +378,7 @@ impl ResolvedType {
                     "ownership",
                     match kind {
                         OwnershipTypeKind::Shared => "shared",
-                        OwnershipTypeKind::LocalShared => "local-shared",
                         OwnershipTypeKind::Weak => "weak",
-                        OwnershipTypeKind::WeakLocal => "weak-local",
                     },
                 );
                 id(&mut output, target);
@@ -404,8 +387,6 @@ impl ResolvedType {
                 atom(&mut output, "newtype", item.as_str());
                 id(&mut output, inner);
             }
-            Self::Nothing => atom(&mut output, "nothing", ""),
-            Self::Allocator => atom(&mut output, "allocator", ""),
             Self::Array { element, length } => {
                 atom(&mut output, "array", &length.to_string());
                 id(&mut output, element);
@@ -433,16 +414,6 @@ impl ResolvedType {
                 );
                 id(&mut output, target);
             }
-            Self::CShared(inner) => unary(&mut output, "c-shared", inner),
-            Self::CBorrow { mutable, target } => {
-                atom(
-                    &mut output,
-                    "c-borrow",
-                    if *mutable { "mut" } else { "shared" },
-                );
-                id(&mut output, target);
-            }
-            Self::RawString => atom(&mut output, "raw-string", ""),
             Self::DynamicAny { capability } => atom(&mut output, "dynamic-any", capability),
         }
         output
@@ -755,18 +726,11 @@ impl ResolvedTypeTable {
             }
             Type::Cap(name) => ResolvedType::Capability(resolve_nominal(name, resolve_name)?),
             Type::CapAtom(name) => ResolvedType::Capability(resolve_nominal(name, resolve_name)?),
-            Type::Shared(inner)
-            | Type::LocalShared(inner)
-            | Type::Weak(inner)
-            | Type::WeakLocal(inner) => ResolvedType::Ownership {
+            Type::Shared(inner) | Type::Weak(inner) => ResolvedType::Ownership {
                 kind: match ty.unlocated() {
                     Type::Shared(_) => OwnershipTypeKind::Shared,
-                    Type::LocalShared(_) => OwnershipTypeKind::LocalShared,
                     Type::Weak(_) => OwnershipTypeKind::Weak,
-                    Type::WeakLocal(_) => OwnershipTypeKind::WeakLocal,
-                    _ => unreachable!(
-                        "ownership_kind: only Shared/LocalShared/Weak/WeakLocal reach this arm"
-                    ),
+                    _ => unreachable!("ownership_kind: only Shared/Weak reach this arm"),
                 },
                 target: self.intern_type(inner, capabilities, resolve_name)?,
             },
@@ -774,8 +738,6 @@ impl ResolvedTypeTable {
                 item: resolve_nominal(name, resolve_name)?,
                 inner: self.intern_type(inner, capabilities, resolve_name)?,
             },
-            Type::Nothing => ResolvedType::Nothing,
-            Type::Allocator => ResolvedType::Allocator,
             Type::Array(element, length) => ResolvedType::Array {
                 element: self.intern_type(element, capabilities, resolve_name)?,
                 length: *length,
@@ -801,14 +763,7 @@ impl ResolvedTypeTable {
                 mutable: matches!(ty.unlocated(), Type::RawPtrMut(_)),
                 target: self.intern_type(inner, capabilities, resolve_name)?,
             },
-            Type::CShared(inner) => {
-                ResolvedType::CShared(self.intern_type(inner, capabilities, resolve_name)?)
-            }
-            Type::CBorrow(inner) | Type::CBorrowMut(inner) => ResolvedType::CBorrow {
-                mutable: matches!(ty.unlocated(), Type::CBorrowMut(_)),
-                target: self.intern_type(inner, capabilities, resolve_name)?,
-            },
-            Type::RawString => ResolvedType::RawString,
+            Type::Nothing => ResolvedType::Primitive(PrimitiveType::Unit),
         };
         self.intern_resolved(resolved)
     }

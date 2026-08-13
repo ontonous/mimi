@@ -108,20 +108,10 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
                 ctx.struct_type(&llvm_elems, false),
             ))
         }
-        Type::Shared(_)
-        | Type::LocalShared(_)
-        | Type::Weak(_)
-        | Type::WeakLocal(_)
-        | Type::CShared(_)
-        | Type::CBorrow(_)
-        | Type::CBorrowMut(_)
-        | Type::RawPtr(_)
-        | Type::RawPtrMut(_) => Some(BasicTypeEnum::PointerType(
-            ctx.ptr_type(AddressSpace::default()),
-        )),
-        Type::RawString => Some(BasicTypeEnum::PointerType(
-            ctx.ptr_type(AddressSpace::default()),
-        )),
+        Type::Shared(_) | Type::Weak(_) | Type::RawPtr(_) | Type::RawPtrMut(_) => Some(
+            BasicTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
+        ),
+        Type::Nothing => None,
         Type::Infer => None,
         Type::ExternFunc(_, _) => {
             // Function pointer - represented as void* in LLVM
@@ -137,7 +127,6 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         }
         Type::Cap(_) | Type::CapAtom(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::Newtype(_, inner) => mimi_type_to_llvm(ctx, inner),
-        Type::Allocator => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::Array(inner, size) => {
             let elem = mimi_type_to_llvm(ctx, inner)?;
             match elem {
@@ -215,7 +204,6 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
                 ctx.struct_type(&[ptr_ty, len], false),
             ))
         }
-        Type::Nothing => None,
         Type::TyErr => None,
         Type::TypeVar(_) | Type::ForAll(_, _) => None,
         Type::ImplTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
@@ -329,17 +317,9 @@ pub fn mimi_type_to_llvm_extern<'ctx>(
             };
             Some(ptr)
         }
-        Type::Shared(_)
-        | Type::LocalShared(_)
-        | Type::Weak(_)
-        | Type::WeakLocal(_)
-        | Type::CShared(_)
-        | Type::CBorrow(_)
-        | Type::CBorrowMut(_)
-        | Type::RawPtr(_)
-        | Type::RawPtrMut(_) => Some(BasicTypeEnum::PointerType(
-            ctx.ptr_type(AddressSpace::default()),
-        )),
+        Type::Shared(_) | Type::Weak(_) | Type::RawPtr(_) | Type::RawPtrMut(_) => Some(
+            BasicTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
+        ),
         _ => mimi_type_to_llvm(ctx, ty),
     }
 }

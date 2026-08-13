@@ -83,14 +83,6 @@ impl Parser {
                 self.advance();
                 Ok(Type::Name(name, Vec::new()))
             }
-            TokenKind::Alloc => {
-                self.advance();
-                Ok(Type::Allocator)
-            }
-            TokenKind::Nothing => {
-                self.advance();
-                Ok(Type::Nothing)
-            }
             TokenKind::BitAnd => {
                 self.advance();
                 // v0.34.4 (ADR-004): explicit lifetime annotations `&'a T`
@@ -143,39 +135,10 @@ impl Parser {
                 let inner = self.parse_type()?;
                 Ok(Type::Shared(Box::new(inner)))
             }
-            TokenKind::LocalShared => {
-                self.advance();
-                let inner = self.parse_type()?;
-                Ok(Type::LocalShared(Box::new(inner)))
-            }
             TokenKind::Weak => {
                 self.advance();
                 let inner = self.parse_type()?;
                 Ok(Type::Weak(Box::new(inner)))
-            }
-            TokenKind::WeakLocal => {
-                self.advance();
-                let inner = self.parse_type()?;
-                Ok(Type::WeakLocal(Box::new(inner)))
-            }
-            TokenKind::CShared => {
-                self.advance();
-                let inner = self.parse_type()?;
-                Ok(Type::CShared(Box::new(inner)))
-            }
-            TokenKind::CBorrow => {
-                self.advance();
-                let inner = self.parse_type()?;
-                Ok(Type::CBorrow(Box::new(inner)))
-            }
-            TokenKind::CBorrowMut => {
-                self.advance();
-                let inner = self.parse_type()?;
-                Ok(Type::CBorrowMut(Box::new(inner)))
-            }
-            TokenKind::RawString => {
-                self.advance();
-                Ok(Type::RawString)
             }
             TokenKind::Star => {
                 self.advance();

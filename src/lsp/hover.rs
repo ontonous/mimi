@@ -592,9 +592,6 @@ impl LspServer {
             }
             Type::RawPtr(inner) => format!("*{}", Self::type_display(inner)),
             Type::RawPtrMut(inner) => format!("*mut {}", Self::type_display(inner)),
-            Type::CShared(inner) => format!("c_shared {}", Self::type_display(inner)),
-            Type::CBorrow(inner) => format!("c_borrow {}", Self::type_display(inner)),
-            Type::CBorrowMut(inner) => format!("c_borrow_mut {}", Self::type_display(inner)),
             Type::Option(inner) => format!("Option<{}>", Self::type_display(inner)),
             Type::Result(ok, err) => format!(
                 "Result<{}, {}>",
@@ -602,9 +599,7 @@ impl LspServer {
                 Self::type_display(err)
             ),
             Type::Shared(inner) => format!("shared {}", Self::type_display(inner)),
-            Type::LocalShared(inner) => format!("local_shared {}", Self::type_display(inner)),
             Type::Weak(inner) => format!("weak {}", Self::type_display(inner)),
-            Type::WeakLocal(inner) => format!("weak_local {}", Self::type_display(inner)),
             Type::Newtype(name, inner) => {
                 format!("{} (newtype over {})", name, Self::type_display(inner))
             }
@@ -612,13 +607,11 @@ impl LspServer {
             Type::Slice(inner) => format!("[{}]", Self::type_display(inner)),
             Type::ImplTrait(ts) => format!("impl {}", ts.join(" + ")),
             Type::DynTrait(ts) => format!("dyn {}", ts.join(" + ")),
-            Type::RawString => "RawString".to_string(),
             Type::Cap(name) => format!("cap {}", name),
             Type::CapAtom(name) => format!("cap {}", name),
             Type::CBuffer(inner) => format!("CBuffer<{}>", Self::type_display(inner)),
             Type::Nothing => "!".to_string(),
             Type::TyErr => "«error»".to_string(),
-            Type::Allocator => "Allocator".to_string(),
             Type::Infer => "_".to_string(),
             Type::TypeVar(id) => format!("?T{}", id),
             Type::ForAll(params, body) => {

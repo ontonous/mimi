@@ -56,7 +56,6 @@ impl LspServer {
                             lexer::TokenKind::Trait => 5,
                             lexer::TokenKind::Impl => 4,
                             lexer::TokenKind::Cap => 3,
-                            lexer::TokenKind::Async => 5,
                             lexer::TokenKind::True => 4,
                             lexer::TokenKind::False => 5,
                             _ => 1,
@@ -84,7 +83,6 @@ impl LspServer {
                     | lexer::TokenKind::Await
                     | lexer::TokenKind::Extern
                     | lexer::TokenKind::Cap
-                    | lexer::TokenKind::Async
                     | lexer::TokenKind::True
                     | lexer::TokenKind::False
                     | lexer::TokenKind::In

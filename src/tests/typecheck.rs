@@ -546,22 +546,6 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn typecheck_contract_with_local_shared_param_is_error() {
-    let src = r#"
-func bad_local(x: local_shared i32) -> i32 {
-    requires: x > 0
-    x
-}
-func main() -> i32 { 0 }
-"#;
-    let result = check_source(src);
-    assert!(
-        result.is_err(),
-        "expected error for contract on local_shared param function"
-    );
-}
-
-#[test]
 fn typecheck_shared_param_no_contract_ok() {
     let src = r#"
 func ok_shared(x: shared i32) -> i32 {
@@ -692,7 +676,9 @@ func main() -> i32 {
 
 #[test]
 fn typecheck_parasteps_requires_local_shared_rejected() {
-    // requires inside parasteps referencing local_shared → E0305
+    // `local_shared` was removed in 0.35.39 (four-state shared → two-state);
+    // the source below no longer parses. E0305 (local_shared capture in
+    // parasteps) is retired — see docs/error-codes.md.
     let src = r#"
 func main() -> i32 {
     local_shared x = 42
@@ -703,15 +689,12 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(
-        result.is_err(),
-        "expected E0305 for local_shared in parasteps requires"
-    );
+    assert!(result.is_err(), "local_shared is no longer a keyword");
 }
 
 #[test]
 fn typecheck_parasteps_ensures_local_shared_rejected() {
-    // ensures inside parasteps referencing local_shared → E0305
+    // Same as above: `local_shared` no longer parses.
     let src = r#"
 func main() -> i32 {
     local_shared x = 42
@@ -722,10 +705,7 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(
-        result.is_err(),
-        "expected E0305 for local_shared in parasteps ensures"
-    );
+    assert!(result.is_err(), "local_shared is no longer a keyword");
 }
 
 #[test]

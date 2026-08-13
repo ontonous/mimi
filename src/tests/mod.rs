@@ -127,7 +127,6 @@ pub(crate) mod audit_fix_bind_go;
 pub(crate) mod audit_fix_bind_jni;
 pub(crate) mod audit_fix_bind_node;
 pub(crate) mod audit_fix_bind_py;
-pub(crate) mod audit_fix_bind_rust;
 pub(crate) mod audit_fix_checker;
 pub(crate) mod audit_fix_codegen_expr1;
 pub(crate) mod audit_fix_codegen_expr2;

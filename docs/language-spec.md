@@ -1096,8 +1096,8 @@ func take(x: T)          // by-value consume
 ### 6.3 Ownership: Flow payload and shared/weak `[stable]`
 
 - Flow payload defaults to exclusive, linearly transferred by transition;
-- `shared`/`local_shared` indicates explicit shared object graph;
-- `weak`/`weak_local` indicates non-owning reference to shared object;
+- `shared` indicates explicit shared object graph;
+- `weak` indicates non-owning reference to shared object;
 - On Fault/drop Flow payload, only drop shared handle; do not assume destroying shared object.
 
 #### Convergence `[removed]`

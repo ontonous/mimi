@@ -133,7 +133,7 @@
 | E0302 | cannot borrow as immutable because already mutably borrowed |
 | E0303 | capability must be consumed before end of scope |
 | E0304 | capability already consumed |
-| E0305 | cannot capture local_shared in parasteps |
+| E0305 | retired | cannot capture local_shared in parasteps — local_shared removed (0.35.39, four-state shared → two-state); code never reused |
 | E0306 | arena escape: reference to arena memory cannot outlive the arena block |
 | E0400 | undefined variable |
 | E0401 | undefined function |

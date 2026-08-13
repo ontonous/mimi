@@ -883,21 +883,6 @@ func main() -> i32 {
 }
 
 #[test]
-fn async_func_basic() {
-    let src = r#"
-async func add_one(x: i32) -> i32 {
-    return x + 1;
-}
-
-func main() -> i32 {
-    let f = add_one(5);
-    return await f;
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(6));
-}
-
-#[test]
 fn impl_trait_return_type() {
     let src = r#"
 type Point {

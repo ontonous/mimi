@@ -409,12 +409,8 @@ pub enum PatternKind {
 pub enum SharedKind {
     /// Thread-safe atomic refcount (`Arc<RwLock<T>>`)
     Shared,
-    /// Single-thread non-atomic (`Rc<RefCell<T>>`)
-    LocalShared,
     /// Weak reference (weak upgrade to Shared)
     Weak,
-    /// Weak reference (weak upgrade to LocalShared)
-    WeakLocal,
 }
 
 pub type Block = Vec<Stmt>;
@@ -529,11 +525,6 @@ pub enum Stmt {
     // toolchain; in .mimi they were always inert super-comments).
     /// Nested function definition inside a block
     Func(FuncDef),
-    /// alloc(Kind) { ... } block using a specific allocator
-    Alloc {
-        kind: AllocKind,
-        body: Block,
-    },
     Ellipsis,
 }
 
@@ -848,18 +839,10 @@ pub enum Type {
     CapAtom(String),
     /// Shared ownership (atomic refcount, thread-safe)
     Shared(Box<Type>),
-    /// Local shared ownership (non-atomic, single-thread)
-    LocalShared(Box<Type>),
     /// Weak reference from shared
     Weak(Box<Type>),
-    /// Weak reference from local_shared
-    WeakLocal(Box<Type>),
     /// Newtype wrapper for strong type isolation (name, inner type)
     Newtype(String, Box<Type>),
-    /// Nothing type (unreachable / error type)
-    Nothing,
-    /// Allocator type for custom memory allocation
-    Allocator,
     /// Fixed-size array type: `[T; n]`
     Array(Box<Type>, usize),
     /// Slice type: `&[T]`
@@ -872,14 +855,10 @@ pub enum Type {
     RawPtr(Box<Type>),
     /// Raw mutable C pointer: *mut T
     RawPtrMut(Box<Type>),
-    /// C-compatible shared ownership handle: c_shared T
-    CShared(Box<Type>),
-    /// C-compatible immutable borrow: c_borrow T
-    CBorrow(Box<Type>),
-    /// C-compatible mutable borrow: c_borrow_mut T
-    CBorrowMut(Box<Type>),
-    /// Raw string ownership transfer: raw string (C must free via mimi_string_free_raw)
-    RawString,
+    /// Nothing type (unreachable / error residual). Never writable from source
+    /// (the `nothing` keyword was culled in 0.35.39); produced internally as
+    /// the canonical residual for uninhabited payloads.
+    Nothing,
     /// Inferred type: `_` — let the compiler determine the type
     Infer,
     /// Type inference variable (for unification engine)
@@ -965,25 +944,18 @@ impl Type {
             Type::Cap(name) => Type::Cap(name),
             Type::CapAtom(name) => Type::CapAtom(name),
             Type::Shared(inner) => Type::Shared(Box::new((*inner).deep_reorigin(meta))),
-            Type::LocalShared(inner) => Type::LocalShared(Box::new((*inner).deep_reorigin(meta))),
             Type::Weak(inner) => Type::Weak(Box::new((*inner).deep_reorigin(meta))),
-            Type::WeakLocal(inner) => Type::WeakLocal(Box::new((*inner).deep_reorigin(meta))),
             Type::Newtype(name, inner) => {
                 Type::Newtype(name, Box::new((*inner).deep_reorigin(meta)))
             }
             Type::Nothing => Type::Nothing,
             Type::TyErr => Type::TyErr,
-            Type::Allocator => Type::Allocator,
             Type::Array(inner, size) => Type::Array(Box::new((*inner).deep_reorigin(meta)), size),
             Type::Slice(inner) => Type::Slice(Box::new((*inner).deep_reorigin(meta))),
             Type::ImplTrait(traits) => Type::ImplTrait(traits),
             Type::DynTrait(traits) => Type::DynTrait(traits),
             Type::RawPtr(inner) => Type::RawPtr(Box::new((*inner).deep_reorigin(meta))),
             Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new((*inner).deep_reorigin(meta))),
-            Type::CShared(inner) => Type::CShared(Box::new((*inner).deep_reorigin(meta))),
-            Type::CBorrow(inner) => Type::CBorrow(Box::new((*inner).deep_reorigin(meta))),
-            Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new((*inner).deep_reorigin(meta))),
-            Type::RawString => Type::RawString,
             Type::Infer => Type::Infer,
             Type::TypeVar(id) => Type::TypeVar(id),
             Type::ForAll(params, body) => {
@@ -1040,15 +1012,10 @@ impl PartialEq for Type {
             (Option(a), Option(b))
             | (CBuffer(a), CBuffer(b))
             | (Shared(a), Shared(b))
-            | (LocalShared(a), LocalShared(b))
             | (Weak(a), Weak(b))
-            | (WeakLocal(a), WeakLocal(b))
             | (Slice(a), Slice(b))
             | (RawPtr(a), RawPtr(b))
-            | (RawPtrMut(a), RawPtrMut(b))
-            | (CShared(a), CShared(b))
-            | (CBorrow(a), CBorrow(b))
-            | (CBorrowMut(a), CBorrowMut(b)) => a == b,
+            | (RawPtrMut(a), RawPtrMut(b)) => a == b,
             (Result(a_ok, a_err), Result(b_ok, b_err)) => a_ok == b_ok && a_err == b_err,
             (Tuple(a), Tuple(b)) => a == b,
             (Func(a_args, a_ret), Func(b_args, b_ret))
@@ -1058,11 +1025,7 @@ impl PartialEq for Type {
             (Cap(a), Cap(b)) => a == b,
             (CapAtom(a), CapAtom(b)) => a == b,
             (Newtype(a_name, a), Newtype(b_name, b)) => a_name == b_name && a == b,
-            (Nothing, Nothing)
-            | (Allocator, Allocator)
-            | (RawString, RawString)
-            | (Infer, Infer)
-            | (TyErr, TyErr) => true,
+            (Nothing, Nothing) | (Infer, Infer) | (TyErr, TyErr) => true,
             (Array(a, a_len), Array(b, b_len)) => a_len == b_len && a == b,
             (ImplTrait(a), ImplTrait(b)) | (DynTrait(a), DynTrait(b)) => a == b,
             (TypeVar(a), TypeVar(b)) => a == b,
@@ -1285,14 +1248,4 @@ pub struct ProtocolTransitionDef {
     pub name: String,
     pub from_state: String,
     pub to_state: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AllocKind {
-    /// System default allocator (malloc/free)
-    System,
-    /// Arena region allocator (bulk free)
-    Arena,
-    /// Bump allocator (monotonic, fast)
-    Bump,
 }

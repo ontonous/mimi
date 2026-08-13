@@ -544,8 +544,9 @@ fn collect_nested_function_syntax<'a>(
             // through Defer blocks; the syntax map must collect the same
             // nested callables, otherwise a nested func inside `defer { }`
             // has a signature but no syntax and body lowering fails.
-            | Stmt::Defer(body)
-            | Stmt::Alloc { body, .. } => collect_nested_function_syntax(body, owner, out),
+            | Stmt::Defer(body) => {
+                collect_nested_function_syntax(body, owner, out);
+            }
             Stmt::Pinned { expr, body, .. } => {
                 collect_nested_function_syntax_in_expr(expr, owner, out);
                 collect_nested_function_syntax(body, owner, out);
@@ -902,7 +903,6 @@ impl BodyLowerer<'_> {
         let body: &[Stmt] = match tail.unlocated() {
             Stmt::Block(body) => body,
             Stmt::Unsafe(body) | Stmt::IeeeFloat(body) | Stmt::Arena(body) => body,
-            Stmt::Alloc { body, .. } => body,
             _ => return false,
         };
         match body.last().map(|s| s.unlocated()) {
@@ -938,11 +938,7 @@ impl BodyLowerer<'_> {
                 matches!(tail, Stmt::Expr(_) | Stmt::If { else_: Some(_), .. })
                     || (matches!(
                         tail,
-                        Stmt::Block(_)
-                            | Stmt::Unsafe(_)
-                            | Stmt::IeeeFloat(_)
-                            | Stmt::Arena(_)
-                            | Stmt::Alloc { .. }
+                        Stmt::Block(_) | Stmt::Unsafe(_) | Stmt::IeeeFloat(_) | Stmt::Arena(_)
                     ) && Self::tail_wrapper_has_implicit_value(tail))
             });
         let mut statements = Vec::with_capacity(block.len());
@@ -1010,20 +1006,6 @@ impl BodyLowerer<'_> {
                         body,
                         super::ResolvedScopeKind::Arena,
                     )?,
-                    Stmt::Alloc { kind, body } => {
-                        let scope_kind = super::ResolvedScopeKind::Allocator(match kind {
-                            crate::ast::AllocKind::System => super::AllocatorKind::System,
-                            crate::ast::AllocKind::Arena => super::AllocatorKind::Arena,
-                            crate::ast::AllocKind::Bump => super::AllocatorKind::Bump,
-                        });
-                        self.lower_tail_wrapper_block(
-                            &block[index],
-                            &stmt_role,
-                            block_ty.clone(),
-                            body,
-                            scope_kind,
-                        )?
-                    }
                     _ => {
                         self.scopes.pop();
                         return Err(vec![ResolvedBodyError::new(
@@ -1359,14 +1341,6 @@ impl BodyLowerer<'_> {
                 kind: super::ResolvedScopeKind::Parallel,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
-            Stmt::Alloc { kind, body } => ResolvedStmtKind::Scope {
-                kind: super::ResolvedScopeKind::Allocator(match kind {
-                    crate::ast::AllocKind::System => super::AllocatorKind::System,
-                    crate::ast::AllocKind::Arena => super::AllocatorKind::Arena,
-                    crate::ast::AllocKind::Bump => super::AllocatorKind::Bump,
-                }),
-                body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
-            },
             Stmt::Func(function) => {
                 let nested = nested_function_owner(&self.owner, function);
                 let mut environment = BTreeMap::new();
@@ -1459,12 +1433,8 @@ impl BodyLowerer<'_> {
                 let value = self.lower_expr(init, &format!("{role}.initializer"))?;
                 let local_ty = self.shared_binding_type(&node_id, *kind, &value.ty)?;
                 let conversion_kind = match kind {
-                    crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
-                        CheckedConversionKind::OwnershipDowngrade
-                    }
-                    crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared => {
-                        CheckedConversionKind::OwnershipWrap
-                    }
+                    crate::ast::SharedKind::Weak => CheckedConversionKind::OwnershipDowngrade,
+                    crate::ast::SharedKind::Shared => CheckedConversionKind::OwnershipWrap,
                 };
                 let pattern_id = NodeId(format!("{}/shared-pattern", node_id.0));
                 let local_id = ResolvedLocalId(NodeId(format!("{}/local", pattern_id.0)));
@@ -4924,18 +4894,10 @@ impl BodyLowerer<'_> {
                 mutable: *mutable,
                 target: substitute(target)?,
             },
-            ResolvedType::CShared(inner) => ResolvedType::CShared(substitute(inner)?),
-            ResolvedType::CBorrow { mutable, target } => ResolvedType::CBorrow {
-                mutable: *mutable,
-                target: substitute(target)?,
-            },
             ResolvedType::Primitive(_)
             | ResolvedType::Capability(_)
             | ResolvedType::FlowStateSet { .. }
-            | ResolvedType::Nothing
-            | ResolvedType::Allocator
             | ResolvedType::Trait { .. }
-            | ResolvedType::RawString
             | ResolvedType::DynamicAny { .. } => return Ok(declaration_ty.clone()),
         };
         if &resolved == declaration {
@@ -5067,8 +5029,7 @@ impl BodyLowerer<'_> {
             }
             (ResolvedType::Option(left), ResolvedType::Option(right))
             | (ResolvedType::CBuffer(left), ResolvedType::CBuffer(right))
-            | (ResolvedType::Slice(left), ResolvedType::Slice(right))
-            | (ResolvedType::CShared(left), ResolvedType::CShared(right)) => {
+            | (ResolvedType::Slice(left), ResolvedType::Slice(right)) => {
                 self.collect_instantiation(left, right, substitutions)
             }
             (
@@ -5169,16 +5130,6 @@ impl BodyLowerer<'_> {
                     mutable: right_mutable,
                     target: right,
                 },
-            )
-            | (
-                ResolvedType::CBorrow {
-                    mutable: left_mutable,
-                    target: left,
-                },
-                ResolvedType::CBorrow {
-                    mutable: right_mutable,
-                    target: right,
-                },
             ) => {
                 left_mutable == right_mutable
                     && self.collect_instantiation(left, right, substitutions)
@@ -5238,9 +5189,7 @@ impl BodyLowerer<'_> {
                 }
                 self.bind_identity_generic_parameters(result, substitutions);
             }
-            ResolvedType::CBuffer(inner)
-            | ResolvedType::Slice(inner)
-            | ResolvedType::CShared(inner) => {
+            ResolvedType::CBuffer(inner) | ResolvedType::Slice(inner) => {
                 self.bind_identity_generic_parameters(inner, substitutions);
             }
             ResolvedType::Ownership { target, .. } => {
@@ -5252,16 +5201,13 @@ impl BodyLowerer<'_> {
             ResolvedType::Array { element, .. } => {
                 self.bind_identity_generic_parameters(element, substitutions);
             }
-            ResolvedType::RawPointer { target, .. } | ResolvedType::CBorrow { target, .. } => {
+            ResolvedType::RawPointer { target, .. } => {
                 self.bind_identity_generic_parameters(target, substitutions);
             }
             ResolvedType::Primitive(_)
             | ResolvedType::Capability(_)
             | ResolvedType::FlowStateSet { .. }
-            | ResolvedType::Nothing
-            | ResolvedType::Allocator
             | ResolvedType::Trait { .. }
-            | ResolvedType::RawString
             | ResolvedType::DynamicAny { .. } => {}
         }
     }
@@ -5305,9 +5251,7 @@ impl BodyLowerer<'_> {
     ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
         let expected = match kind {
             crate::ast::SharedKind::Shared => super::OwnershipTypeKind::Shared,
-            crate::ast::SharedKind::LocalShared => super::OwnershipTypeKind::LocalShared,
             crate::ast::SharedKind::Weak => super::OwnershipTypeKind::Weak,
-            crate::ast::SharedKind::WeakLocal => super::OwnershipTypeKind::WeakLocal,
         };
         let desired_target = match (kind, self.types.get(initializer)) {
             (
@@ -5316,23 +5260,14 @@ impl BodyLowerer<'_> {
                     kind: super::OwnershipTypeKind::Shared,
                     target,
                 }),
-            )
-            | (
-                crate::ast::SharedKind::WeakLocal,
-                Some(ResolvedType::Ownership {
-                    kind: super::OwnershipTypeKind::LocalShared,
-                    target,
-                }),
             ) => target,
-            (crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal, _) => {
+            (crate::ast::SharedKind::Weak, _) => {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     "weak binding initializer has no compatible canonical strong ownership type",
                 )])
             }
-            (crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared, _) => {
-                initializer
-            }
+            (crate::ast::SharedKind::Shared, _) => initializer,
         };
         let Some(ty) = self.node_types.get(node_id) else {
             return Err(vec![ResolvedBodyError::new(
@@ -5543,7 +5478,6 @@ impl BodyLowerer<'_> {
                 }
             }
             Some(ResolvedType::Newtype { item, .. }) => nominal_display(item.as_str()),
-            Some(ResolvedType::Nothing) => "Nothing".to_string(),
             _ => id.as_str().to_string(),
         }
     }
@@ -5794,8 +5728,7 @@ impl BodyLowerer<'_> {
         if matches!(
             self.types.get(from),
             Some(ResolvedType::Ownership {
-                kind: super::OwnershipTypeKind::Shared
-                    | super::OwnershipTypeKind::LocalShared,
+                kind: super::OwnershipTypeKind::Shared,
                 target,
             }) if target == to
         ) {
