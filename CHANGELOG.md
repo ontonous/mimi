@@ -5,6 +5,17 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.46 — 收口基建：性能门禁入 CI + AGENTS 模块表补 Semantic IR
+
+- **性能门禁入 CI**（C2 教训闭环）：`scripts/perf-gate.sh` 以 release 构建 +
+  **宽松阈值**只拦截灾难性回退（native dsp ≤3× C -O2、VM dsp ≤20s、构建/运行
+  不得失败），不拦截共享 runner 噪声；挂入 CI test job 末步。细粒度复测仍用
+  本地 `benchmarks/quadrant.sh`；
+- **AGENTS 模块表补 `src/core/ir/`**（Semantic IR）：body/callable/types/lower
+  职责 + 11.2k LOC 记录（此前模块表缺失该 canonical 语义 IR 目录）；
+- **验证**：本地 `perf-gate.sh` PASS（native 1.34×、VM 5.9s）；ci.yml YAML 解析
+  通过。
+
 ### 0.35.45 — U3 契约派生 arity 断言 + U5 E 码描述字典单点
 
 - **U3 契约派生 arity 强制**：checker 的 builtin 分发前新增**单一通用 arity 检查**，
@@ -120,6 +131,20 @@
   失去 producer）；保留全部 `shared`/`weak` 活跃测试；
 - **验证**：5316 lib + 15 main + 31 real_world + 1 real_world_cli 全绿；
   clippy/fmt/language-docs/unsafe/roadmap 门禁全绿；golden 无受影响。
+
+### 0.35.38 — M4 callee ensures 公理编码失败 fail-closed
+
+- **#M4 callee ensures 公理编码失败静默丢弃（违反红线 #2）**：callee 的 ensures
+  公理在实参代入后无法编码（如把 `arr[0]` 传入已验证 callee）时，编码失败被
+  静默丢弃——caller 在弱化的上下文上证明，翻 Disproven 不可追踪。修复：
+  `assert_callee_ensures_in_expr` 携带 caller_name + errors 向量，`expr_to_z3_bool`
+  返回 None 时 push "postcondition cannot be encoded — not verified"（对齐 H1
+  requires fail-closed 模式）；block/stmt walker 与两处调用点统一共享
+  call_site_errors；
+- **回归锁** `verify_callee_unencodable_ensures_is_fail_closed`：callee 无
+  requires（H1 无法遮蔽），caller 传 `arr[0]`——无修复时反例不可追踪，有修复
+  时点名 postcondition；
+- **验证**：5385 lib + 15 real_world + 31 real_world_cli + 1 main 全绿。
 
 ### 0.35.37 — 审查 MEDIUM 批量 + H 系列收尾（audit-triage-0.35.25.md）
 
@@ -764,6 +789,18 @@
 - **回归锁**：`src/tests/error_co_h2.rs` ×4（E0214 精确 span / diverging
   豁免 / 数值强制 / 无内部 ID 泄漏）；全量 **5311 lib** + 15 main + 31
   real_world + cli 绿；clippy 零警告；fmt 干净；dispatch 无静默回退。
+
+### 收口状态：已知排期外项（登记 0.2 / 1.x）
+
+> 0.1.5 收口时按 §6 条件 4/5/9 明确登记、不放松语义的性能/架构项。
+
+| 项 | 现状 | 根因 / 排期 |
+|----|------|------------|
+| native dsp O1 ≤1.15× C -O2 | 1.31–1.38× | LLVM 18 LoopUnroll IPC 差距（IPC 0.72 vs 1.00），C1b/C1c 已证不可经自引用 unroll 元数据根治；0.2/1.x 评估 LLVM 升级或 nsw 放宽（需语义裁决） |
+| RUN dsp ≤1s | 5.8s（R1+R3+R4 合计 1.54×） | 余量在 156-Op 单 match 分发（V2），safe-Rust superinstruction 已到顶；1.x 评估 direct-threading/JIT |
+| fib Z3 证明消除（O1 性能） | 未做 | 需 verifier 输出 no_overflow 事实喂 codegen 消除 checked 检查；0.2 |
+| generics 单态化 | 未做 | 泛型 emit 需单态化，resolved slice 覆盖受阻；1.x |
+| `--test-threads=16` 偶发失败 | 未根治 | 已知测试并发偶发（AGENTS §4.2 注记），CI 用 2 线程不触发；1.x |
 
 ## [0.1.4] — 2026-08-08
 
