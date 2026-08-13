@@ -193,6 +193,37 @@ def check_philosophy_anchor(errors: list[str]) -> None:
             )
 
 
+def check_fault_nominal_gate(errors: list[str]) -> None:
+    """DoD gate (Phase A, 0.36.5): Fault failure attribution must be nominal.
+
+    The anti-pattern `last_state == "..."` / `unexpected_event == "..."` encodes
+    flow-state identity as a string comparison, which the checker cannot prove
+    exhaustive (a renamed state silently falls through). The 0.36.4 nominal
+    redesign replaces it with `StateId`/`EventId` + exhaustive `match`; this gate
+    pins that the string-escape surface stays zero across the tracked source tree.
+    (devdocs/ verdict notes may still cite the historical anti-pattern.)
+    """
+    forbidden = (
+        (re.compile(r"last_state\s*==\s*[\"']"), "last_state == \"...\""),
+        (re.compile(r"unexpected_event\s*==\s*[\"']"), "unexpected_event == \"...\""),
+    )
+    src_root = ROOT / "src"
+    for path in sorted(src_root.rglob("*.rs")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for pattern, label in forbidden:
+                if pattern.search(line):
+                    fail(
+                        errors,
+                        f"{path.relative_to(ROOT)}:{lineno}: string-encoded Fault "
+                        f"attribution `{label}` — nominalized to StateId/EventId in "
+                        "0.36.4; use an exhaustive match instead",
+                    )
+
+
 def main() -> int:
     errors: list[str] = []
     spec_text = SPEC.read_text(encoding="utf-8")
@@ -308,6 +339,7 @@ def main() -> int:
 
     check_semantic_freshness(errors)
     check_philosophy_anchor(errors)
+    check_fault_nominal_gate(errors)
 
     if errors:
         for error in errors:

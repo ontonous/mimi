@@ -7,6 +7,17 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.5 — Fault nominal 穷尽 match 负测试 + DoD grep 门禁（裁决 2 收官）
+
+- **穷尽 match 负测试**（裁决 2, DoD #3）：`fault_recover_exhaustive_match_missing_arm_rejected`
+  ——recover 内对 `self.last_state`（StateId）做非穷尽 match（缺 `Fault` 臂）→
+  E0215 编译错误锁定；`fault_recover_exhaustive_match_full_arms_ok` 锁定全臂
+  match 通过。字符串比较时代的"重命名状态即静默漏判"从此不可能；
+- **DoD grep 门禁**（DoD #2）：`scripts/check_language_docs.py` 增
+  `check_fault_nominal_gate`——扫 `src/**/*.rs`，`last_state == "…"` /
+  `unexpected_event == "…"` 字符串逃逸面归零（0 残留，违规即 lint job 硬错误）；
+- **验证**：2 新测试绿 + 门禁脚本绿 + `if last_state == "` 全仓 grep 0 残留。
+
 ### 0.36.4 — Fault nominal 实现落地（四层打通，挣绿）
 
 - **核心变更**：`Fault.last_state`/`Fault.unexpected_event` 由 `string` 名义化为

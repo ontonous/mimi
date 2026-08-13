@@ -6484,6 +6484,101 @@ func main() -> i32 {
     );
 }
 
+// ── 0.36.5 Fault nominal: recover 穷尽 match (裁决 2, DoD #3) ──────────
+
+#[test]
+fn fault_recover_exhaustive_match_full_arms_ok() {
+    // 0.36.5 (裁决 2): recover reads the failure attribution via an exhaustive
+    // `match` over the nominal StateId (Active + Fault). All arms → check passes.
+    let src = r#"
+flow Svc {
+    state Active { n: i32 }
+    transition crash(Active) -> Fault {
+        return Fault {
+            last_state: Active,
+            unexpected_event: crash,
+            snapshot: "boom",
+            trace: SystemTrace {
+                last_state_name: "Active",
+                unexpected_event: "crash",
+                snapshot: "boom",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "boom" }
+            }
+        }
+    }
+    transition recover(Fault) -> Active {
+        let n = match self.last_state {
+            Active => 1
+            Fault => 2
+        }
+        return Active { n: n }
+    }
+}
+
+func main() -> i32 {
+    let f = Svc::crash(Active { n: 0 })
+    let r = Svc::recover(f)
+    r.n
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "exhaustive StateId match should check: {:?}",
+        check_source(src)
+    );
+}
+
+#[test]
+fn fault_recover_exhaustive_match_missing_arm_rejected() {
+    // 0.36.5 (裁决 2, DoD #3): a recover match over StateId that omits an arm
+    // (here `Fault`) is a compile error (E0215) — the checker enforces
+    // exhaustiveness, so a renamed state cannot silently fall through.
+    let src = r#"
+flow Svc {
+    state Active { n: i32 }
+    transition crash(Active) -> Fault {
+        return Fault {
+            last_state: Active,
+            unexpected_event: crash,
+            snapshot: "boom",
+            trace: SystemTrace {
+                last_state_name: "Active",
+                unexpected_event: "crash",
+                snapshot: "boom",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "boom" }
+            }
+        }
+    }
+    transition recover(Fault) -> Active {
+        let n = match self.last_state {
+            Active => 1
+            // missing `Fault` arm → non-exhaustive (E0215)
+        }
+        return Active { n: n }
+    }
+}
+
+func main() -> i32 {
+    let f = Svc::crash(Active { n: 0 })
+    let r = Svc::recover(f)
+    r.n
+}
+"#;
+    let errors = check_source(src).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0215)),
+        "missing StateId arm must be E0215, got: {:?}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// 追加 B: `?` after linear resource consumption is rejected (E0429).
 /// Architecture amendment clause 9: linear resources consumed before
 /// fallible operations cannot be rolled back on Rejected.
