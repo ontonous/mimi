@@ -738,6 +738,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             if !self.block_has_terminator() {
                 after_body(self, vars)?;
                 self.build_br(loop_header)?;
+                // C1c (0.35.41): disable LLVM's aggressive unrolling of hot
+                // loops with serial dependency chains (dsp-style). Compact
+                // single-iteration bodies keep I-cache pressure low.
+                self.cap_loop_unroll()?;
             }
             Ok(())
         })();

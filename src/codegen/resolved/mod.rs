@@ -5580,6 +5580,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.loop_stack.pop();
         if !self.current_block_terminated() {
             self.generator.build_br(header)?;
+            // C1c (0.35.41): disable aggressive unrolling of serial-chain hot
+            // loops (dsp-style) — see CodeGenerator::cap_loop_unroll.
+            self.generator.cap_loop_unroll()?;
         }
 
         // Exit
@@ -5612,6 +5615,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.loop_stack.pop();
         if !self.current_block_terminated() {
             self.generator.build_br(header)?;
+            self.generator.cap_loop_unroll()?;
         }
 
         // Exit (only reachable via break)
@@ -7558,6 +7562,43 @@ func main() -> i32 { sum_to(5) }
         assert!(ir.contains("while_header"), "{ir}");
         assert!(ir.contains("while_body"), "{ir}");
         assert!(ir.contains("while_exit"), "{ir}");
+    }
+
+    #[test]
+    fn loop_unroll_cap_emits_self_referential_metadata() {
+        // C1c (0.35.41): `MIMI_LOOP_UNROLL_CAP` emits `llvm.loop.unroll.count`
+        // metadata on the loop latch. LLVM requires the loop metadata node to
+        // be self-referential AND distinct (`!N = distinct !{!N, !M}`); a plain
+        // uniqued `!{!M}` is silently ignored (0.35.30 audit).
+        std::env::set_var("MIMI_LOOP_UNROLL_CAP", "4");
+        let program = checked(
+            r#"
+func sum_to(n: i32) -> i32 {
+    let mut i = 0
+    let mut sum = 0
+    while i < n {
+        sum = sum + i
+        i = i + 1
+    }
+    sum
+}
+func main() -> i32 { sum_to(5) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_loop_cap");
+        generator
+            .compile_resolved_native(&program)
+            .expect("while loop is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        std::env::remove_var("MIMI_LOOP_UNROLL_CAP");
+        assert!(ir.contains("llvm.loop.unroll.count"), "{ir}");
+        // Self-referential distinct node: `!N = distinct !{!N, !M}`.
+        assert!(
+            ir.contains("distinct !{!") || ir.contains("= distinct !{"),
+            "loop metadata must be distinct: {ir}"
+        );
     }
 
     #[test]

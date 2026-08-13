@@ -5,6 +5,23 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.41 — C1b/C1c 循环 unroll 调查（dsp 对齐回归，audit-triage-0.35.25.md）
+
+- **结论：dsp ≤1.15× 不可经 unroll 控制达成，登记为 LLVM 18 已知差距。**
+  0.35.30 调查的"IPC 0.72 vs 1.00（80× unroll 前端开销）"经实测复核：
+  用 `llvm.loop.unroll.count`/`unroll.disable` 抑制 unroll 反而回退（count=4
+  → 1.54×，disable → 1.99×，基线 1.38×）——unroll 摊薄了 per-op finiteness
+  检查（SD-9）与 `let mut` 局部变量的栈往返（mem2reg 无法跨 80× unroll 提升），
+  收紧 unroll 把它们逐迭代暴露。C1b（局部 SSA）/C1a（参数 SSA）已由 LLVM
+  mem2reg 在 O1 达成；
+- **新增能力（默认关闭）**：`MIMI_LOOP_UNROLL_CAP=N` 环境变量在 while/loop
+  回边附加 `llvm.loop.unroll.count` 元数据。关键实现：LLVM 要求 loop 元数据为
+  **自引用 + distinct** 节点（`!N = distinct !{!N, !M}`），C API 无
+  `MDNode::getDistinct`——用 `LLVMReplaceMDNodeOperandWith` 把占位 operand 0
+  替换为节点自身达成自引用，**推翻 0.35.30"metadata 不可行"结论**；
+- **验证**：5320 lib 全绿；四象限 dsp/fib/mandelbrot 无回退（fib/mandelbrot
+  路径不受 while/loop 改动影响）。
+
 ### 0.35.40 — M5 Flow typestate 公理填充（audit-triage-0.35.25.md）
 
 - **`lower_transition_to_vir` 转正**：原为无调用方的死代码（空 TypestateAxioms），
