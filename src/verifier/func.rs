@@ -2134,6 +2134,228 @@ impl VerifierCtx {
         }
     }
 
+    /// M5 (0.35.40): verify a Flow transition's typestate context.
+    ///
+    /// The transition's executable body (record construction, `self` field
+    /// access) is out of the Z3 trusted subset and is verified by the checker.
+    /// This path proves the contract-level obligation only:
+    ///
+    /// `(source_invariants ∧ transition_guards) ⊢ target_invariants`
+    ///
+    /// where the three fields are populated by `lower_transition_to_vir` from
+    /// the transition body's own `invariant:`/`requires:`/`ensures:` clauses
+    /// (all checker-verified before the verifier runs).
+    ///
+    /// Returns `None` when the transition is not VIR-eligible (params out of
+    /// the trusted subset, no contracts, or contracts cannot be lowered) — the
+    /// caller then falls back to the AST path.
+    pub(crate) fn verify_transition_vir(
+        &self,
+        session: &mut SolverSession,
+        flow_name: &str,
+        transition: &TransitionDef,
+    ) -> Option<VerificationResult> {
+        use crate::verifier::vir::{self, VType, VirZ3Ctx};
+
+        let start = Instant::now();
+        let name = format!("{}::{}", flow_name, transition.name);
+
+        // Gate: parameters must be in the trusted subset (the executable body
+        // is not encoded, so only param/ret types are gated).
+        let gate_func = vir::synthesize_transition_func(flow_name, transition, vec![]);
+        if vir::check_trusted_subset(&gate_func).is_err() {
+            return None;
+        }
+
+        // No contracts → nothing to prove at the typestate level; let the AST
+        // path handle the (executable) body.
+        let has_contracts = transition.body.as_ref().is_some_and(|b| {
+            b.iter().any(|s| {
+                matches!(
+                    s.unlocated(),
+                    Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..)
+                )
+            })
+        });
+        if !has_contracts {
+            return None;
+        }
+
+        // Lower to VIR with the typestate context populated.
+        let (vfunc, _span_table) = match vir::lower_transition_to_vir(flow_name, transition) {
+            Ok(result) => result,
+            Err(_) => return None, // contract not lowerable → AST fallback
+        };
+
+        let vir_hash = crate::verifier::ctx::compute_semantic_hash(&vfunc.normalized_repr());
+        let artifact = Some(crate::verifier::ctx::ProofArtifact {
+            semantics_version: crate::verifier::ctx::ProofArtifact::SEMANTICS_VERSION,
+            integer_model: "checked_i32".to_string(),
+            float_model: "opaque".to_string(),
+            solver_version: format!("z3 {}", z3::full_version()),
+            source_hash: self.source_hash.clone(),
+            resolved_ir_hash: self.resolved_ir_hash.clone(),
+            vir_hash,
+            engine: crate::verifier::ctx::ProofArtifact::ENGINE_FLOW_AST.to_string(),
+        });
+
+        let z3ctx = VirZ3Ctx::new(&vfunc);
+        let mut constraint_count = 0usize;
+
+        // Soundness axioms: old(param) == param and machine-range constraints
+        // for integer params (mirrors verify_func_vir). Transitions do not
+        // mutate parameters, so old(param) is always param.
+        for &(var, vty, _) in &vfunc.params {
+            if let Some(param_z3) = z3ctx.int_vars.get(&var) {
+                if let Some(old_z3) = z3ctx.old_int_vars.get(&var) {
+                    session.assert(param_z3.eq(old_z3));
+                    constraint_count += 1;
+                }
+                let (lo, hi) = match vty {
+                    VType::I32 => (i32::MIN as i64, i32::MAX as i64),
+                    VType::I64 => (i64::MIN, i64::MAX),
+                    _ => continue,
+                };
+                let lo = z3::ast::Int::from_i64(lo);
+                let hi = z3::ast::Int::from_i64(hi);
+                session.assert(z3::ast::Bool::and(&[&param_z3.ge(&lo), &param_z3.le(&hi)]));
+                constraint_count += 1;
+            }
+            if let (Some(b), Some(ob)) = (z3ctx.bool_vars.get(&var), z3ctx.old_bool_vars.get(&var))
+            {
+                session.assert(b.eq(ob));
+                constraint_count += 1;
+            }
+        }
+
+        let ts = vfunc
+            .typestate_context
+            .as_ref()
+            .expect("transition VIR carries typestate context");
+
+        // Assert source invariants (axioms) and transition guards (preconditions).
+        for inv in ts
+            .source_invariants
+            .iter()
+            .chain(ts.transition_guards.iter())
+        {
+            match z3ctx.encode_bool(inv) {
+                Some(z3_bool) => {
+                    session.assert(&z3_bool);
+                    constraint_count += 1;
+                }
+                None => {
+                    return Some(VerificationResult {
+                        func_name: name,
+                        status: VerifStatus::NotInTrustedSubset,
+                        message: "cannot encode transition invariant/guard in VIR".into(),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
+                        artifact,
+                        trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                    });
+                }
+            }
+        }
+
+        // Prove target invariants.
+        let mut found_unknown = false;
+        for (idx, target) in ts.target_invariants.iter().enumerate() {
+            match z3ctx.encode_bool(target) {
+                Some(z3_bool) => {
+                    let (result, _model) = session.check_scope(z3_bool.not());
+                    match result {
+                        SatResult::Sat => {
+                            return Some(VerificationResult {
+                                func_name: name,
+                                status: VerifStatus::Disproven,
+                                message: format!(
+                                    "transition target invariant {} not implied by source invariants and guards (VIR)",
+                                    idx
+                                ),
+                                diagnostic: Some(Diagnostic::error(
+                                    format!(
+                                        "target invariant violated in transition '{}'",
+                                        transition.name
+                                    ),
+                                    transition.meta.span,
+                                )),
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                                artifact,
+                                trusted_subset_domain: None,
+                            });
+                        }
+                        SatResult::Unknown => {
+                            found_unknown = true;
+                        }
+                        SatResult::Unsat => {}
+                    }
+                }
+                None => {
+                    return Some(VerificationResult {
+                        func_name: name,
+                        status: VerifStatus::NotInTrustedSubset,
+                        message: format!(
+                            "cannot encode transition target invariant {} in VIR",
+                            idx
+                        ),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
+                        artifact,
+                        trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                    });
+                }
+            }
+        }
+
+        if found_unknown {
+            Some(VerificationResult {
+                func_name: name,
+                status: session.unknown_status(),
+                message: "transition typestate verification inconclusive (VIR)".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+                artifact,
+                trusted_subset_domain: None,
+            })
+        } else {
+            Some(VerificationResult {
+                func_name: name,
+                status: VerifStatus::Proven,
+                message: "transition typestate context verified (VIR)".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+                artifact,
+                trusted_subset_domain: None,
+            })
+        }
+    }
+
+    /// Verify a Flow transition: typestate-context VIR proof first, falling
+    /// back to the AST path (which verifies the executable body and its call
+    /// sites) when the transition is not VIR-eligible.
+    pub(crate) fn verify_transition(
+        &mut self,
+        session: &mut SolverSession,
+        flow_name: &str,
+        transition: &TransitionDef,
+    ) -> VerificationResult {
+        if let Some(result) = self.verify_transition_vir(session, flow_name, transition) {
+            return result;
+        }
+        let func = crate::verifier::vir::synthesize_transition_func(
+            flow_name,
+            transition,
+            transition.body.clone().unwrap_or_default(),
+        );
+        self.verify_func(session, &func)
+    }
+
     /// C-5 (full-audit-2026-08-05-0656 §1): shared definedness checker for
     /// the VIR path. Every `VStmt` whose expression can trap at runtime
     /// (checked div/mod/overflow/neg on machine integers) must discharge its
