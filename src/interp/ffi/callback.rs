@@ -404,13 +404,13 @@ unsafe fn callback_trampoline_inner(
             CallbackArgKind::CString => {
                 let cptr = *(arg_ptr as *const *const std::ffi::c_char);
                 if cptr.is_null() {
-                    Value::String(String::new())
+                    Value::String(Arc::new(String::new()))
                 } else {
                     // SAFETY: free_mask decides ownership; for borrow, C keeps it.
                     let s = unsafe { std::ffi::CStr::from_ptr(cptr) }
                         .to_string_lossy()
                         .into_owned();
-                    Value::String(s)
+                    Value::String(Arc::new(s))
                 }
             }
             CallbackArgKind::Int => {

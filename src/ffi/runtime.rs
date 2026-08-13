@@ -779,7 +779,7 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
                 match std::ffi::CString::new(s.as_str()) {
                     Ok(c_str) => {
                         let ptr = c_str.into_raw();
-                        s.clear();
+                        Arc::make_mut(s).clear();
                         ptr
                     }
                     Err(_) => {
@@ -815,7 +815,7 @@ pub unsafe extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *
     unsafe {
         let c_str = std::ffi::CString::from_raw(c_str);
         let s = c_str.to_string_lossy().into_owned();
-        let value = Box::new(Value::String(s));
+        let value = Box::new(Value::String(Arc::new(s)));
         Box::into_raw(value)
     }
 }
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn string_c_api_len_and_borrow() {
-        let value = Box::new(Value::String("hello".to_string()));
+        let value = Box::new(Value::String(Arc::new("hello".to_string())));
         let raw = Box::into_raw(value);
 
         // SAFETY: raw is a freshly created valid Mimi string value.
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn string_c_api_free_all_clears_pending() {
-        let value = Box::new(Value::String("bulk".to_string()));
+        let value = Box::new(Value::String(Arc::new("bulk".to_string())));
         let raw = Box::into_raw(value);
 
         // SAFETY: raw is a freshly created valid Mimi string value.
@@ -1277,7 +1277,7 @@ mod tests {
 
         // SAFETY: fresh heap Value wrapping a String.
         let make_value = || {
-            let v = Box::new(Value::String("0123456789abcdef".to_string()));
+            let v = Box::new(Value::String(Arc::new("0123456789abcdef".to_string())));
             Box::into_raw(v)
         };
 

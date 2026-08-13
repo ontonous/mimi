@@ -154,7 +154,10 @@ func main() -> string {
     m.get_msg()
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("hello".into()));
+    assert_eq!(
+        run_source(src),
+        interp::Value::String(Arc::new("hello".into()))
+    );
 }
 
 #[test]
@@ -270,7 +273,10 @@ func main() -> string {
     await m.format()
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("user:alice".into()));
+    assert_eq!(
+        run_source(src),
+        interp::Value::String(Arc::new("user:alice".into()))
+    );
 }
 
 #[test]

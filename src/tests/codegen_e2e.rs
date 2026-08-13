@@ -3667,7 +3667,10 @@ fn e2e_datetime_format_duration_secs() {
         func main() -> string { format_duration_secs(90061) }
     "#,
     );
-    assert_eq!(val, interp::Value::String("1d 1h 1m 1s".to_string()));
+    assert_eq!(
+        val,
+        interp::Value::String(Arc::new("1d 1h 1m 1s".to_string()))
+    );
 }
 
 #[test]
@@ -3698,7 +3701,7 @@ fn e2e_env_get_var() {
         }
     "#,
     );
-    assert_eq!(val, interp::Value::String("hello".to_string()));
+    assert_eq!(val, interp::Value::String(Arc::new("hello".to_string())));
     std::env::remove_var("MIMI_TEST_ENV_VAR");
 }
 
@@ -3743,7 +3746,7 @@ fn e2e_env_get_var_or() {
         func main() -> string { get_var_or("MIMI_TEST_OR_VAR", "fallback") }
     "#,
     );
-    assert_eq!(val, interp::Value::String("fallback".to_string()));
+    assert_eq!(val, interp::Value::String(Arc::new("fallback".to_string())));
 }
 
 // ===================== Stdlib: text (interpreter) =====================
@@ -3799,7 +3802,10 @@ fn e2e_text_slugify() {
         func main() -> string { slugify("Hello World Test") }
     "#,
     );
-    assert_eq!(val, interp::Value::String("hello-world-test".to_string()));
+    assert_eq!(
+        val,
+        interp::Value::String(Arc::new("hello-world-test".to_string()))
+    );
 }
 
 #[test]
@@ -3828,7 +3834,7 @@ fn e2e_text_indent() {
         func main() -> string { indent_text("a\nb", 2) }
     "#,
     );
-    assert_eq!(val, interp::Value::String("  a\n  b".to_string()));
+    assert_eq!(val, interp::Value::String(Arc::new("  a\n  b".to_string())));
 }
 
 // ===================== Stdlib: result (interpreter) =====================
@@ -3901,7 +3907,10 @@ fn e2e_datetime_format_duration_ms() {
         func main() -> string { format_duration_ms(90061123) }
     "#,
     );
-    assert_eq!(val, interp::Value::String("1d 1h 1m 1s.123ms".to_string()));
+    assert_eq!(
+        val,
+        interp::Value::String(Arc::new("1d 1h 1m 1s.123ms".to_string()))
+    );
 }
 
 #[test]

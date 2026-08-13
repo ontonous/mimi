@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // Core list
@@ -243,7 +244,7 @@ fn builtin_push(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
     match &args[0] {
         Value::List(l) => {
             let mut new_list = l.clone();
-            new_list.push(args[1].clone());
+            Arc::make_mut(&mut new_list).push(args[1].clone());
             Ok(Value::List(new_list))
         }
         other => Err(InterpError::new(format!(
@@ -257,7 +258,7 @@ fn builtin_pop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErro
     match &args[0] {
         Value::List(l) => {
             let mut new_list = l.clone();
-            new_list
+            Arc::make_mut(&mut new_list)
                 .pop()
                 .ok_or_else(|| InterpError::new("pop from empty list"))
         }
@@ -277,7 +278,9 @@ fn builtin_range(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
         Value::Int(v) => *v,
         _ => return Err(InterpError::new("range end must be integer")),
     };
-    Ok(Value::List((start..end).map(Value::Int).collect()))
+    Ok(Value::List(Arc::new(
+        (start..end).map(Value::Int).collect(),
+    )))
 }
 
 fn builtin_is_empty(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -313,7 +316,7 @@ fn builtin_sort_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("sort: expected list")),
     };
-    list.sort_by(|a, b| match (a, b) {
+    Arc::make_mut(&mut list).sort_by(|a, b| match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Float(x), Value::Float(y)) => {
             // NaN sorts as Greater (matches tree-walker semantics).
@@ -336,10 +339,10 @@ fn builtin_reverse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
     match &args[0] {
         Value::List(l) => {
             let mut reversed = l.clone();
-            reversed.reverse();
+            Arc::make_mut(&mut reversed).reverse();
             Ok(Value::List(reversed))
         }
-        Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+        Value::String(s) => Ok(Value::String(Arc::new(s.chars().rev().collect()))),
         _ => Err(InterpError::new("reverse: expected list or string")),
     }
 }
@@ -348,13 +351,13 @@ fn builtin_flatten(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
     match &args[0] {
         Value::List(l) => {
             let mut result = Vec::new();
-            for elem in l {
+            for elem in l.iter() {
                 match elem {
                     Value::List(inner) => result.extend(inner.iter().cloned()),
                     other => result.push(other.clone()),
                 }
             }
-            Ok(Value::List(result))
+            Ok(Value::List(Arc::new(result)))
         }
         _ => Err(InterpError::new("flatten: expected list")),
     }
@@ -368,7 +371,7 @@ fn builtin_enumerate(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
                 .enumerate()
                 .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()]))
                 .collect();
-            Ok(Value::List(result))
+            Ok(Value::List(Arc::new(result)))
         }
         _ => Err(InterpError::new("enumerate: expected list")),
     }
@@ -382,7 +385,7 @@ fn builtin_zip(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErro
                 .zip(b.iter())
                 .map(|(x, y)| Value::Tuple(vec![x.clone(), y.clone()]))
                 .collect();
-            Ok(Value::List(result))
+            Ok(Value::List(Arc::new(result)))
         }
         _ => Err(InterpError::new("zip: expected two lists")),
     }
@@ -394,7 +397,7 @@ fn builtin_sum(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErro
             let mut int_sum: i64 = 0;
             let mut float_sum: f64 = 0.0;
             let mut has_float = false;
-            for elem in l {
+            for elem in l.iter() {
                 match elem {
                     Value::Int(v) => {
                         int_sum = int_sum
@@ -421,12 +424,14 @@ fn builtin_sum(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErro
 fn builtin_to_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(_) => Ok(args[0].clone()),
-        Value::Tuple(t) => Ok(Value::List(t.clone())),
-        Value::String(s) => Ok(Value::List(
-            s.chars().map(|c| Value::String(c.to_string())).collect(),
-        )),
-        Value::Set(s) => Ok(Value::List(s.clone())),
-        other => Ok(Value::List(vec![other.clone()])),
+        Value::Tuple(t) => Ok(Value::List(Arc::new(t.clone()))),
+        Value::String(s) => Ok(Value::List(Arc::new(
+            s.chars()
+                .map(|c| Value::String(Arc::new(c.to_string())))
+                .collect(),
+        ))),
+        Value::Set(s) => Ok(Value::List(Arc::new(s.clone()))),
+        other => Ok(Value::List(Arc::new(vec![other.clone()]))),
     }
 }
 
@@ -442,7 +447,7 @@ fn builtin_map_new(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, Inter
 
 fn builtin_map_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::Record(_, fields), Value::String(key)) => match fields.get(key) {
+        (Value::Record(_, fields), Value::String(key)) => match fields.get(key.as_str()) {
             Some(v) => Ok(Value::Tuple(vec![Value::Bool(true), v.clone()])),
             // Match codegen/tree-walker: missing key → (false, 0), not Unit.
             None => Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(0)])),
@@ -455,7 +460,7 @@ fn builtin_map_set(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
     match (&args[0], &args[1]) {
         (Value::Record(ty, fields), Value::String(key)) => {
             let mut new_fields = fields.clone();
-            new_fields.insert(key.clone(), args[2].clone());
+            new_fields.insert(key.as_str().to_string(), args[2].clone());
             Ok(Value::Record(ty.clone(), new_fields))
         }
         _ => Err(InterpError::new(
@@ -468,7 +473,7 @@ fn builtin_map_remove(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
     match (&args[0], &args[1]) {
         (Value::Record(ty, fields), Value::String(key)) => {
             let mut new_fields = fields.clone();
-            new_fields.remove(key);
+            new_fields.remove(key.as_str());
             Ok(Value::Record(ty.clone(), new_fields))
         }
         // Set remove: remove(set, value) → new set without value.
@@ -521,11 +526,11 @@ fn builtin_map_from_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
     match &args[0] {
         Value::List(pairs) => {
             let mut fields = std::collections::HashMap::new();
-            for pair in pairs {
+            for pair in pairs.iter() {
                 match pair {
                     Value::Tuple(kv) if kv.len() == 2 => {
                         if let Value::String(k) = &kv[0] {
-                            fields.insert(k.clone(), kv[1].clone());
+                            fields.insert(k.as_str().to_string(), kv[1].clone());
                         }
                     }
                     _ => {
@@ -543,7 +548,9 @@ fn builtin_map_from_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
 
 fn builtin_has_key(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::Record(_, fields), Value::String(key)) => Ok(Value::Bool(fields.contains_key(key))),
+        (Value::Record(_, fields), Value::String(key)) => {
+            Ok(Value::Bool(fields.contains_key(key.as_str())))
+        }
         _ => Err(InterpError::new("has_key: expected (map, string key)")),
     }
 }
@@ -551,8 +558,11 @@ fn builtin_has_key(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
 fn builtin_keys(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
-            let keys: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
-            Ok(Value::List(keys))
+            let keys: Vec<Value> = fields
+                .keys()
+                .map(|k| Value::String(Arc::new(k.clone())))
+                .collect();
+            Ok(Value::List(Arc::new(keys)))
         }
         _ => Err(InterpError::new("keys: expected map")),
     }
@@ -562,7 +572,7 @@ fn builtin_values(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
     match &args[0] {
         Value::Record(_, fields) => {
             let values: Vec<Value> = fields.values().cloned().collect();
-            Ok(Value::List(values))
+            Ok(Value::List(Arc::new(values)))
         }
         _ => Err(InterpError::new("values: expected map")),
     }
@@ -620,9 +630,9 @@ fn builtin_slice(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
                 return Err(InterpError::slice_error("slice start > end"));
             }
             if start == end {
-                return Ok(Value::List(Vec::new()));
+                return Ok(Value::List(Arc::new(Vec::new())));
             }
-            Ok(Value::List(l[start..end].to_vec()))
+            Ok(Value::List(Arc::new(l[start..end].to_vec())))
         }
         Value::String(s) => {
             let chars: Vec<char> = s.chars().collect();
@@ -647,9 +657,9 @@ fn builtin_slice(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
                 return Err(InterpError::slice_error("slice start > end"));
             }
             if start == end {
-                return Ok(Value::String(String::new()));
+                return Ok(Value::String(Arc::new(String::new())));
             }
-            Ok(Value::String(chars[start..end].iter().collect()))
+            Ok(Value::String(Arc::new(chars[start..end].iter().collect())))
         }
         other => Err(InterpError::new(format!(
             "__slice: expected List or String, got {}",
@@ -672,12 +682,12 @@ fn builtin_type_name(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         Value::Set(_) => "set",
         Value::Array(_) => "array",
         Value::Tuple(_) => "tuple",
-        Value::Variant(tag, _) => return Ok(Value::String(tag.clone())),
-        Value::Record(Some(name), _) => return Ok(Value::String(name.clone())),
+        Value::Variant(tag, _) => return Ok(Value::String(Arc::new(tag.clone()))),
+        Value::Record(Some(name), _) => return Ok(Value::String(Arc::new(name.clone()))),
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",
-        Value::Newtype(name, _) => return Ok(Value::String(name.clone())),
-        Value::Type(name) => return Ok(Value::String(name.clone())),
+        Value::Newtype(name, _) => return Ok(Value::String(Arc::new(name.clone()))),
+        Value::Type(name) => return Ok(Value::String(Arc::new(name.clone()))),
         Value::Closure { .. } | Value::BytecodeClosure { .. } => "closure",
         Value::Shared(_) => "shared",
         Value::LocalShared(_) => "local_shared",
@@ -689,5 +699,5 @@ fn builtin_type_name(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         Value::DynTrait { .. } => "dyn_trait",
         _ => "unknown",
     };
-    Ok(Value::String(name.to_string()))
+    Ok(Value::String(Arc::new(name.to_string())))
 }

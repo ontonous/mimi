@@ -5,6 +5,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // Atomic i32
@@ -489,7 +490,7 @@ fn builtin_session_pair(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, 
     let packed = crate::runtime::mimi_session_pair();
     let lo = crate::runtime::mimi_session_lo(packed);
     let hi = crate::runtime::mimi_session_hi(packed);
-    Ok(Value::List(vec![Value::Int(lo), Value::Int(hi)]))
+    Ok(Value::List(Arc::new(vec![Value::Int(lo), Value::Int(hi)])))
 }
 
 fn builtin_session_send(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -591,7 +592,7 @@ fn builtin_broadcast(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         }
     };
     let method = match &args[1] {
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.as_str().to_string(),
         _ => {
             return Err(InterpError::new(
                 "broadcast: second argument must be a method name string",
@@ -599,7 +600,7 @@ fn builtin_broadcast(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         }
     };
     let mut results = Vec::with_capacity(targets.len());
-    for target in targets {
+    for target in targets.iter() {
         match target {
             Value::Actor(handle) => {
                 if handle.is_faulted() {
@@ -624,7 +625,7 @@ fn builtin_broadcast(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
             _ => results.push(Value::Int(-1)),
         }
     }
-    Ok(Value::List(results))
+    Ok(Value::List(Arc::new(results)))
 }
 
 // ── Flow test utilities ────────────────────────────────
@@ -636,7 +637,7 @@ fn builtin_assert_state(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         other => format!("{}", other),
     };
     let expected_state = match &args[1] {
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.as_str().to_string(),
         _ => {
             return Err(InterpError::new(
                 "assert_state: state_name must be a string",
@@ -659,26 +660,35 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     };
     // Construct a Fault record matching tree-walker semantics.
     let mut fault_fields = std::collections::HashMap::new();
-    fault_fields.insert("last_state".to_string(), Value::String(state_name.clone()));
+    fault_fields.insert(
+        "last_state".to_string(),
+        Value::String(Arc::new(state_name.clone())),
+    );
     fault_fields.insert(
         "unexpected_event".to_string(),
-        Value::String("inject_fault".to_string()),
+        Value::String(Arc::new("inject_fault".to_string())),
     );
     fault_fields.insert("snapshot".to_string(), args[0].clone());
 
     // SystemTrace sub-record (v0.29.39 expanded).
     let mut trace_fields = std::collections::HashMap::new();
-    trace_fields.insert("last_state_name".to_string(), Value::String(state_name));
+    trace_fields.insert(
+        "last_state_name".to_string(),
+        Value::String(Arc::new(state_name)),
+    );
     trace_fields.insert(
         "unexpected_event".to_string(),
-        Value::String("inject_fault".to_string()),
+        Value::String(Arc::new("inject_fault".to_string())),
     );
-    trace_fields.insert("snapshot".to_string(), Value::String(String::new()));
+    trace_fields.insert(
+        "snapshot".to_string(),
+        Value::String(Arc::new(String::new())),
+    );
 
     // MemoryDump: empty dump.
     let mut dump_fields = std::collections::HashMap::new();
     dump_fields.insert("count".to_string(), Value::Int(0));
-    dump_fields.insert("regions".to_string(), Value::List(Vec::new()));
+    dump_fields.insert("regions".to_string(), Value::List(Arc::new(Vec::new())));
     trace_fields.insert(
         "memory_dump".to_string(),
         Value::Record(Some("MemoryDump".to_string()), dump_fields),
@@ -688,11 +698,14 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut panic_fields = std::collections::HashMap::new();
     panic_fields.insert(
         "error_type".to_string(),
-        Value::String("InjectFault".to_string()),
+        Value::String(Arc::new("InjectFault".to_string())),
     );
-    panic_fields.insert("file".to_string(), Value::String(String::new()));
+    panic_fields.insert("file".to_string(), Value::String(Arc::new(String::new())));
     panic_fields.insert("line".to_string(), Value::Int(0));
-    panic_fields.insert("stack_snapshot".to_string(), Value::String(String::new()));
+    panic_fields.insert(
+        "stack_snapshot".to_string(),
+        Value::String(Arc::new(String::new())),
+    );
     trace_fields.insert(
         "panic_payload".to_string(),
         Value::Record(Some("PanicPayload".to_string()), panic_fields),
@@ -717,17 +730,19 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
     let mut results = Vec::new();
     if let Value::Record(_, fields) = config {
         if let Some(Value::List(actor_names)) = fields.get("actors") {
-            for actor_val in actor_names {
+            for actor_val in actor_names.iter() {
                 if let Value::String(name) = actor_val {
                     match vm.spawn_actor(name, false) {
-                        Ok(_) => results.push(Value::String(format!("spawned:{}", name))),
-                        Err(e) => results.push(Value::String(format!("failed:{}:{}", name, e))),
+                        Ok(_) => results.push(Value::String(Arc::new(format!("spawned:{}", name)))),
+                        Err(e) => {
+                            results.push(Value::String(Arc::new(format!("failed:{}:{}", name, e))))
+                        }
                     }
                 }
             }
         }
         if let Some(Value::List(calls)) = fields.get("calls") {
-            for call in calls {
+            for call in calls.iter() {
                 if let Value::Record(_, cf) = call {
                     let method = cf
                         .get("method")
@@ -739,12 +754,12 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
                             }
                         })
                         .unwrap_or_default();
-                    results.push(Value::String(format!("called:{}", method)));
+                    results.push(Value::String(Arc::new(format!("called:{}", method))));
                 }
             }
         }
         if let Some(Value::List(faults)) = fields.get("faults") {
-            for fault in faults {
+            for fault in faults.iter() {
                 if let Value::Record(_, ff) = fault {
                     let ftype = ff
                         .get("fault_type")
@@ -756,10 +771,10 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
                             }
                         })
                         .unwrap_or_default();
-                    results.push(Value::String(format!("injected:{}", ftype)));
+                    results.push(Value::String(Arc::new(format!("injected:{}", ftype))));
                 }
             }
         }
     }
-    Ok(Value::List(results))
+    Ok(Value::List(Arc::new(results)))
 }

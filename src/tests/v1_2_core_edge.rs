@@ -230,7 +230,7 @@ func main() -> string {
     let result = run_source_bytecode_result(src);
     assert!(result.is_ok(), "negative index should wrap: {:?}", result);
     if let Ok(interp::Value::String(s)) = result {
-        assert_eq!(s, "c", "negative index -1 should give last char");
+        assert_eq!(s.as_str(), "c", "negative index -1 should give last char");
     }
 }
 
@@ -656,7 +656,7 @@ func main() -> List<i32> {
     let result = run_source_bytecode_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:534 unwrap failed"),
-        interp::Value::List(vec![])
+        interp::Value::List(Arc::new(vec![]))
     );
 }
 
@@ -670,7 +670,7 @@ func main() -> List<i32> {
     let result = run_source_bytecode_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:545 unwrap failed"),
-        interp::Value::List(vec![])
+        interp::Value::List(Arc::new(vec![]))
     );
 }
 

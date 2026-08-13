@@ -22,7 +22,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("b".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("b".to_string())));
 }
 
 #[test]

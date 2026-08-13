@@ -190,7 +190,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_with_stdlib("strings.mimi", src),
-        interp::Value::String("hello \t|\t hello|a b |a b".to_string())
+        interp::Value::String(Arc::new("hello \t|\t hello|a b |a b".to_string()))
     );
 }
 

@@ -5,6 +5,21 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.42 — R1 VM 载荷 Arc 化（String/List 先行）
+
+- **`Value::String(String)` → `Value::String(Arc<String>)`、`Value::List(Vec<Value>)`
+  → `Value::List(Arc<Vec<Value>>)`**：真浅拷贝——`Op::Mov`/算术读取仅 O(1) 原子
+  引用计数，突变点显式写时分离（9 处 `Arc::make_mut`：StrAppend/ListPush/
+  ListPop/index-set/sort/reverse/push/pop/clear）；克隆不再深拷贝 String/List
+  载荷；
+- **实测 VM dsp（release）**：8.9s → 8.4s（~6%），**未达 ≥3× 目标**——dsp 是
+  Int/Float 热循环，V1（Value 大枚举搬运）被高估：枚举尺寸仍由未 Arc 化的
+  Record(HashMap) 主导，真正的 dsp 瓶颈是 V2（156 Op 单 match 分发）+ V4
+  （checked 算术），由 R2/R3（寄存器池 + superinstruction）与完整 R1
+  （Record/Set/Tuple Arc）承接；
+- **验证**：5320 lib + 15 main + 31 real_world + 1 cli 全绿；dual_ 882 绿；
+  clippy/fmt 全绿（COW 语义由 L1 dual_ 等价门禁锁住）。
+
 ### 0.35.41 — C1b/C1c 循环 unroll 调查（dsp 对齐回归，audit-triage-0.35.25.md）
 
 - **结论：dsp ≤1.15× 不可经 unroll 控制达成，登记为 LLVM 18 已知差距。**

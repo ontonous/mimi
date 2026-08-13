@@ -1504,7 +1504,7 @@ impl FfiRuntime {
             FfiRetContract::Float => Ok(Value::Float(f64::from_bits(result as u64))),
             FfiRetContract::String => {
                 if result == 0 {
-                    Ok(Value::String(String::new()))
+                    Ok(Value::String(Arc::new(String::new())))
                 } else {
                     // SAFETY: result is a non-null pointer returned by the FFI call.
                     // The FfiRetContract::String contract asserts the C function returns
@@ -1527,12 +1527,12 @@ impl FfiRuntime {
                              return type to 'raw_string' and free via mimi_string_free_raw."
                         );
                     }
-                    Ok(Value::String(c_str.to_string_lossy().into_owned()))
+                    Ok(Value::String(Arc::new(c_str.to_string_lossy().into_owned())))
                 }
             }
             FfiRetContract::StringOwned => {
                 if result == 0 {
-                    Ok(Value::String(String::new()))
+                    Ok(Value::String(Arc::new(String::new())))
                 } else {
                     // Read the C string (Mimi takes ownership, must free)
                     // SAFETY: The StringOwned contract requires the C function to return
@@ -1547,7 +1547,7 @@ impl FfiRuntime {
                     // SAFETY: result is a non-null pointer returned under the StringOwned
                     // contract; Mimi takes ownership and must free it with libc::free.
                     unsafe { libc::free(result as *mut libc::c_void); }
-                    Ok(Value::String(s))
+                    Ok(Value::String(Arc::new(s)))
                 }
             }
             FfiRetContract::Json => {
@@ -1647,7 +1647,7 @@ impl FfiRuntime {
                 Ok(serde_json::Value::Number(n))
             }
             Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
-            Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+            Value::String(s) => Ok(serde_json::Value::String(s.as_str().to_string())),
             Value::Unit => Ok(serde_json::Value::Null),
             Value::List(items) => {
                 let arr: Result<Vec<_>, _> = items.iter().map(|i| self.value_to_json(i)).collect();
@@ -1663,7 +1663,7 @@ impl FfiRuntime {
                 for i in items {
                     match i {
                         Value::Int(n) => ints.push(*n),
-                        Value::String(s) => strs.push(s.clone()),
+                        Value::String(s) => strs.push(s.as_str().to_string()),
                         Value::Bool(b) => bools.push(*b),
                         Value::Float(f) => floats.push(*f),
                         other_v => other.push(self.value_to_json(other_v)?),
@@ -1733,10 +1733,10 @@ impl FfiRuntime {
                     Value::Unit
                 }
             }
-            serde_json::Value::String(s) => Value::String(s.clone()),
-            serde_json::Value::Array(arr) => {
-                Value::List(arr.iter().map(|v| self.json_to_value(v)).collect())
-            }
+            serde_json::Value::String(s) => Value::String(Arc::new(s.clone())),
+            serde_json::Value::Array(arr) => Value::List(Arc::new(
+                arr.iter().map(|v| self.json_to_value(v)).collect(),
+            )),
             serde_json::Value::Object(map) => {
                 let fields: HashMap<String, Value> = map
                     .iter()

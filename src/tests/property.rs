@@ -592,7 +592,7 @@ func main() -> i64 {{
     fn eval_type_name_int(n in 1i64..100) {
         let src = format!("func main() -> string {{ type_name({}) }}", n);
         if let crate::interp::Value::String(result) = run_source(&src) {
-            prop_assert!(result == "i64" || result == "i32", "unexpected type_name: {}", result);
+            prop_assert!(result.as_str() == "i64" || result.as_str() == "i32", "unexpected type_name: {}", result);
         }
     }
 

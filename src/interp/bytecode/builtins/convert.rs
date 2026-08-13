@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc {
@@ -82,5 +83,5 @@ fn builtin_to_float(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
 }
 
 fn builtin_to_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
-    Ok(Value::String(args[0].to_string()))
+    Ok(Value::String(Arc::new(args[0].to_string())))
 }

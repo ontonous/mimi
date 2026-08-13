@@ -6342,7 +6342,7 @@ fn value_to_const_expr(value: &crate::interp::Value) -> Expr {
         Value::Int(n) => Expr::Literal(Lit::Int(*n)),
         Value::Float(f) => Expr::Literal(Lit::Float(*f)),
         Value::Bool(b) => Expr::Literal(Lit::Bool(*b)),
-        Value::String(s) => Expr::Literal(Lit::String(s.clone())),
+        Value::String(s) => Expr::Literal(Lit::String(s.as_str().to_string())),
         Value::Unit => Expr::Literal(Lit::Unit),
         // Enum/newtype variant: reconstruct via constructor call, e.g.
         // `Some(42)` → Some(42). Zero-arity variants fall back to a bare

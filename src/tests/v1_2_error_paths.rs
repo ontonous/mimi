@@ -301,7 +301,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String("hello".to_string()))
+        Ok(interp::Value::String(Arc::new("hello".to_string())))
     );
 }
 

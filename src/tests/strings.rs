@@ -9,7 +9,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello world".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("hello world".to_string()))
+    );
 }
 
 #[test]
@@ -21,7 +24,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("abc".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("abc".to_string())));
 }
 
 #[test]
@@ -80,7 +83,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hi".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hi".to_string())));
 }
 
 #[test]
@@ -95,7 +98,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("HELLO".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("HELLO".to_string())));
 }
 
 #[test]
@@ -110,7 +113,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
 }
 
 #[test]
@@ -140,7 +143,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("e".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("e".to_string())));
 }
 
 #[test]
@@ -155,7 +158,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
 }
 
 #[test]
@@ -170,7 +173,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello there".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("hello there".to_string()))
+    );
 }
 
 #[test]
@@ -217,7 +223,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("Hello, World!".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("Hello, World!".to_string()))
+    );
 }
 
 #[test]
@@ -230,7 +239,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("1 + 2 = 3".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("1 + 2 = 3".to_string())));
 }
 
 #[test]
@@ -241,7 +250,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("just text".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("just text".to_string())));
 }
 
 #[test]
@@ -253,7 +262,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("double is 20".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("double is 20".to_string()))
+    );
 }
 
 #[test]
@@ -268,7 +280,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("Hi, Alice!".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("Hi, Alice!".to_string())));
 }
 
 #[test]
@@ -299,7 +311,10 @@ func main() -> string {
     s
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("abcde".to_string()));
+    assert_eq!(
+        run_source(src),
+        interp::Value::String(Arc::new("abcde".to_string()))
+    );
 }
 
 #[test]
@@ -313,7 +328,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String("sum = 30".to_string())
+        interp::Value::String(Arc::new("sum = 30".to_string()))
     );
 }
 
@@ -328,7 +343,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("ok".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("ok".to_string())));
 }
 
 #[test]
@@ -340,7 +355,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("flag is true".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("flag is true".to_string()))
+    );
 }
 
 #[test]
@@ -356,7 +374,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String("hello world".to_string())
+        interp::Value::String(Arc::new("hello world".to_string()))
     );
 }
 
@@ -369,7 +387,10 @@ func main() -> string {
     prefix + suffix
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("prefix".to_string()));
+    assert_eq!(
+        run_source(src),
+        interp::Value::String(Arc::new("prefix".to_string()))
+    );
 }
 
 // === Regex builtin tests ===
@@ -433,7 +454,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("42".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("42".to_string())));
 }
 
 #[test]
@@ -444,7 +465,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("".to_string()));
+    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
 }
 
 #[test]
@@ -455,7 +476,10 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello X world X end".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("hello X world X end".to_string()))
+    );
 }
 
 #[test]
@@ -466,5 +490,8 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String("hello world".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(Arc::new("hello world".to_string()))
+    );
 }

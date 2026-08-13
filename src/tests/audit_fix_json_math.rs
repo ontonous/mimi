@@ -569,7 +569,7 @@ fn audit_json_get_string_missing_key_vm_empty_string() {
     let v = run_source(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
     assert_eq!(
         v,
-        interp::Value::String("".into()),
+        interp::Value::String(Arc::new("".into())),
         "VM json_get_string missing key must return empty string"
     );
 }
