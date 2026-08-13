@@ -5,6 +5,26 @@
 > 0.1.5 开发进行中：主线 = 性能优化（trap 成本消减 + O1 推进），质量次线见
 > `devdocs/v0.35/README.md` 与 `devdocs/v0.34/dx-backlog-0.1.5.md`。
 
+### 0.35.44 — R4 builtin 快路径 + U1 登记表单点 + U2 trap 常量单点
+
+- **R4 builtin 内联快路径**：`BuiltinRegistry::fast_path` 表 + VM `CallBuiltin`
+  分发臂对 `abs`/`min`/`max`/`floor`/`ceil`/`round` 直接读寄存器内联计算，
+  跳过 `Vec<Value>` 分配 + 间接函数指针 + 每 builtin 的 Value match；意外
+  类型/`abs(i64::MIN)` 溢出回退通用路径（错误文案逐字节一致）；
+  **实测 VM abs 密集循环 5.3s → 4.6s（~1.1×）**——未达 ≥1.5× 目标，主因是
+  每指令 156-Op 单 match 分发（V2）仍占主导，builtin 开销仅占 ~15%；
+- **U1 登记表单点**：`core::builtins::builtin_arity(name)` 成为 257 项 builtin
+  arity 的**唯一权威表**；`create_registry` 逐项校验 VM registry 与核心表
+  一致（debug fail-closed）+ `arity_consistency_with_core` 测试锁定——新增
+  builtin 必须先登记 arity 到 core；
+- **U2 trap 常量单点**：`diagnostic/trap_msgs.rs` 承载 SD-7/8/9 四个消息模板，
+  经 `include!` 同时进入 `diagnostic::codes::trap`（VM 侧）与 `runtime/mod.rs`
+  （standalone 原生 runtime 侧）；E 码串在 runtime 侧以本地 const 镜像
+  `codes::E08xx` 并加注释锁定；四 trap 函数重构为 `trap_write_static`/
+  `trap_write_raw` helper，输出逐字节不变；
+- **验证**：5324 lib + 15 main + 31 real_world + 1 cli 全绿；dual_ 882 绿；
+  clippy/fmt/unsafe 门禁绿；standalone runtime（rustc 直编）冒烟通过。
+
 ### 0.35.43 — R3 VM 字节码 peephole（MOV 传播 + 冗余 CHECK_I32 消除）
 
 - **peephole 优化 pass**（`peephole_optimize`，compile_func 末尾）：
