@@ -1194,6 +1194,72 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Attach `llvm.loop.unroll.count` metadata to the current block's
+    /// terminator (the loop latch back-edge), capping LLVM's LoopUnroll pass at
+    /// a moderate factor.
+    ///
+    /// dsp-style hot loops (0.35.30 audit) have a serial floating-point chain:
+    /// LLVM's default aggressive unrolling (80×) bloats the I-cache and drops
+    /// IPC to ~0.72 vs the C baseline's 1.00 at identical instruction count.
+    /// The serial chain exposes no ILP, so a small unroll (amortize the branch
+    /// + let the convergence pass hoist the per-op finiteness checks) is enough;
+    /// 80× only inflates I-cache pressure. Disabling unroll entirely regressed
+    /// to ~2× (the per-op trap branches are no longer hoisted), so the cap is
+    /// the balance point. Only the O1 path is affected — O0 runs no loop passes.
+    ///
+    /// LLVM requires the loop metadata to be a self-referential distinct node:
+    /// `!N = distinct !{!N, !M}` with `!M = !{!"llvm.loop.unroll.count", i32 K}`.
+    /// The C API has no `MDNode::getDistinct`; we build the node with a
+    /// placeholder first operand and then make it self-referential via
+    /// `LLVMReplaceMDNodeOperandWith`.
+    const LOOP_UNROLL_CAP: u64 = 4;
+
+    pub(super) fn cap_loop_unroll(&self) -> Result<(), CompileError> {
+        // Opt-in tuning knob: default OFF. The 0.35.30 audit found LLVM 18's
+        // aggressive 80× unroll of the dsp loop was a net win (455M instrs vs
+        // 800M without unroll) — capping it regresses wall time. Keep the
+        // mechanism behind MIMI_LOOP_UNROLL_CAP for experimentation only.
+        let Ok(cap) = std::env::var("MIMI_LOOP_UNROLL_CAP") else {
+            return Ok(());
+        };
+        if !self.optimize {
+            return Ok(());
+        }
+        let cap: u64 = cap.parse().unwrap_or(Self::LOOP_UNROLL_CAP);
+        let Some(block) = self.builder.get_insert_block() else {
+            return Ok(());
+        };
+        let Some(terminator) = block.get_terminator() else {
+            return Ok(());
+        };
+
+        // !M = !{!"llvm.loop.unroll.count", i32 K}
+        let md_string = self.context.metadata_string("llvm.loop.unroll.count");
+        let count = self.context.i32_type().const_int(cap, false);
+        let prop_node = self
+            .context
+            .metadata_node(&[md_string.into(), count.into()]);
+
+        // !N = !{placeholder, !M}, then replace operand 0 with !N itself so the
+        // node becomes self-referential (and therefore distinct).
+        let placeholder = self.context.metadata_node(&[]);
+        let loop_id = self
+            .context
+            .metadata_node(&[placeholder.into(), prop_node.into()]);
+        unsafe {
+            use inkwell::llvm_sys::core::{LLVMReplaceMDNodeOperandWith, LLVMValueAsMetadata};
+            let loop_id_val = inkwell::values::AsValueRef::as_value_ref(&loop_id);
+            let loop_id_md = LLVMValueAsMetadata(loop_id_val);
+            LLVMReplaceMDNodeOperandWith(loop_id_val, 0, loop_id_md);
+        }
+
+        let kind_id = self.context.get_kind_id("llvm.loop");
+        terminator
+            .set_metadata(loop_id, kind_id)
+            .map_err(|e| CompileError::LlvmError(format!("loop metadata: {}", e)))?;
+        Ok(())
+    }
+
     /// Look up a runtime/external function by name.
     ///
     /// 0.31.30: when Component IR is available (debug builds), validates
