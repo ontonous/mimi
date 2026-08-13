@@ -21,7 +21,14 @@
   复用同机制：match 侧按 scrutinee 锚定、构造侧按 `current_flow_name` 锚定，
   enum 类型名 flow-qualified（`flow::<name>::StateId`），变体名保留裸名靠 scoping
   消歧——与 `__MultiTarget` 完全同构；
-- **结论**：原子核心变更（0.36.4 主体）改造面与消歧机制均已锁定，可执行。
+- **首次实现尝试回执**（已回退保持基线绿）：实证两条架构结论——(1) checker
+  生成的类型不传播到 resolved IR（`from_flow_acc` → `from_checked_file_base(file)`
+  从 file AST 派生 type_defs，明言"Raw checker types are not a backend input"），
+  故 `StateId`/`EventId` 必须在 **flow_matrix 展开 file AST** 时生成为顶层
+  TypeDef，而非 checker `self.types`，否则报 `no resolved nominal identity`；
+  (2) 裸变体名经 `self.funcs` 全局注册跨 flow 歧义（`expected flow::A::StateId,
+  found flow::B::StateId`），构造侧须用 flow-scoped 变体引用；
+- **结论**：0.36.4 主体按"file AST 注入 enum + flow-scoped 变体构造"重排后执行。
 
 ### 0.36.3 — Phase A 锚定：Fault nominal 重设计裁决
 
