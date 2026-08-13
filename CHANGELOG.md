@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] — 0.1.6-dev
+
+> 0.1.6 开发进行中：核心深度闭环（Deep over Broad）——失败归属（Fault nominal）、
+> 状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session
+> lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
+> `devdocs/v0.36/README.md`。
+
 ## [0.1.5] — 2026-08-13
 
 > **性能主线 + 审查收口 + 质量次线（Phase A–I）**。
