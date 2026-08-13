@@ -770,8 +770,15 @@ impl VerifierCtx {
         // obligation can be discharged. The old order asserted ensures only
         // after this check, leaving await results in arithmetic position
         // unconstrained → spurious "integer overflow is not excluded".
+        let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
         if let Some(ref return_expr) = body_return {
-            self.assert_callee_ensures_in_expr(session, return_expr, &mut vars);
+            self.assert_callee_ensures_in_expr(
+                session,
+                return_expr,
+                &mut vars,
+                func.name.as_str(),
+                &mut call_site_errors,
+            );
         }
 
         if let Some(ref return_expr) = body_return {
@@ -916,7 +923,13 @@ impl VerifierCtx {
             .iter()
             .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
             .collect();
-        self.assert_callee_ensures_in_block(session, &expanded_body, &mut vars);
+        self.assert_callee_ensures_in_block(
+            session,
+            &expanded_body,
+            &mut vars,
+            func.name.as_str(),
+            &mut call_site_errors,
+        );
 
         // Model length-preserving builtins (sort, reverse) so that
         // postconditions like len(result) == len(xs) can be verified.
@@ -925,7 +938,6 @@ impl VerifierCtx {
         // P1-18: check call-site requires satisfaction. For each function
         // call in the body, verify that the callee's requires (preconditions)
         // are satisfiable given the current symbolic state.
-        let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
         self.check_callee_requires_in_block(
             session,
             &expanded_body,
@@ -2828,11 +2840,20 @@ impl VerifierCtx {
     /// and, for each call to a known function, assert the callee's ensures
     /// as Z3 constraints. This enables cross-module contract reasoning
     /// (e.g., caller can rely on callee's postconditions).
+    ///
+    /// M4 (audit-triage-0.35.25): a callee postcondition that `expr_to_z3_bool`
+    /// cannot encode was silently dropped — the caller then proved against a
+    /// weaker context, and a flip to Disproven was untraceable (red line #2).
+    /// Thread a `caller_name` + `errors` vec (same contract as the H1
+    /// callee-requires walker) and fail closed: the caller is reported
+    /// "not verified" naming the unencodable postcondition.
     fn assert_callee_ensures_in_expr(
         &mut self,
         session: &mut SolverSession,
         expr: &Expr,
         vars: &mut Z3VarMap,
+        caller_name: &str,
+        errors: &mut Vec<(String, String, Span)>,
     ) {
         match expr.unlocated() {
             Expr::Call(callee, call_args) => {
@@ -2879,6 +2900,28 @@ impl VerifierCtx {
                                 );
                                 if let Some(z3_bool) = expr::expr_to_z3_bool(&substituted, vars) {
                                     session.assert(z3_bool);
+                                } else {
+                                    // M4 (audit-triage-0.35.25): the axiom could
+                                    // not be encoded — previously dropped
+                                    // silently, so the caller's proof ran
+                                    // against a weaker context with no trace.
+                                    // Fail closed with an explicit "not verified"
+                                    // (mirrors H1 for preconditions).
+                                    errors.push((
+                                        caller_name.to_string(),
+                                        format!(
+                                            "call to '{}' has a postcondition that cannot be encoded for verification — not verified",
+                                            name
+                                        ),
+                                        expr.meta()
+                                            .map(|meta| meta.span)
+                                            .or_else(|| {
+                                                self.func_defs
+                                                    .get(caller_name)
+                                                    .map(|caller| caller.meta.span)
+                                            })
+                                            .unwrap_or(Span::UNKNOWN),
+                                    ));
                                 }
                             }
                         }
@@ -2886,41 +2929,53 @@ impl VerifierCtx {
                 }
                 // Recurse into call arguments
                 for arg in call_args {
-                    self.assert_callee_ensures_in_expr(session, arg, vars);
+                    self.assert_callee_ensures_in_expr(session, arg, vars, caller_name, errors);
                 }
             }
             Expr::Binary(_, lhs, rhs) => {
-                self.assert_callee_ensures_in_expr(session, lhs, vars);
-                self.assert_callee_ensures_in_expr(session, rhs, vars);
+                self.assert_callee_ensures_in_expr(session, lhs, vars, caller_name, errors);
+                self.assert_callee_ensures_in_expr(session, rhs, vars, caller_name, errors);
             }
-            Expr::Unary(_, inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
-            Expr::Field(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
-            Expr::TupleIndex(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
-            Expr::Old(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
+            Expr::Unary(_, inner) => {
+                self.assert_callee_ensures_in_expr(session, inner, vars, caller_name, errors);
+            }
+            Expr::Field(obj, _) => {
+                self.assert_callee_ensures_in_expr(session, obj, vars, caller_name, errors);
+            }
+            Expr::TupleIndex(obj, _) => {
+                self.assert_callee_ensures_in_expr(session, obj, vars, caller_name, errors);
+            }
+            Expr::Old(inner) => {
+                self.assert_callee_ensures_in_expr(session, inner, vars, caller_name, errors);
+            }
             Expr::If {
                 cond,
                 then_: _,
                 else_: _,
             } => {
                 // V-C5: path-conditional arms — only condition is unconditional.
-                self.assert_callee_ensures_in_expr(session, cond, vars);
+                self.assert_callee_ensures_in_expr(session, cond, vars, caller_name, errors);
             }
             Expr::Match(scrutinee, _arms) => {
                 // V-C5: match arms are path-conditional; only scrutinee is always run.
-                self.assert_callee_ensures_in_expr(session, scrutinee, vars);
+                self.assert_callee_ensures_in_expr(session, scrutinee, vars, caller_name, errors);
             }
             Expr::Block(stmts) => {
                 for stmt in stmts {
                     if let Stmt::Expr(e) = stmt.unlocated() {
-                        self.assert_callee_ensures_in_expr(session, e, vars);
+                        self.assert_callee_ensures_in_expr(session, e, vars, caller_name, errors);
                     }
                 }
             }
-            Expr::Spawn(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
-            Expr::Await(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
+            Expr::Spawn(inner) => {
+                self.assert_callee_ensures_in_expr(session, inner, vars, caller_name, errors);
+            }
+            Expr::Await(inner) => {
+                self.assert_callee_ensures_in_expr(session, inner, vars, caller_name, errors);
+            }
             Expr::Lambda { body, .. } => {
                 for s in body {
-                    self.assert_callee_ensures_in_stmt(session, s, vars);
+                    self.assert_callee_ensures_in_stmt(session, s, vars, caller_name, errors);
                 }
             }
             _ => {}
@@ -3039,9 +3094,11 @@ impl VerifierCtx {
         session: &mut SolverSession,
         stmts: &[Stmt],
         vars: &mut Z3VarMap,
+        caller_name: &str,
+        errors: &mut Vec<(String, String, Span)>,
     ) {
         for stmt in stmts {
-            self.assert_callee_ensures_in_stmt(session, stmt, vars);
+            self.assert_callee_ensures_in_stmt(session, stmt, vars, caller_name, errors);
         }
     }
 
@@ -3050,19 +3107,21 @@ impl VerifierCtx {
         session: &mut SolverSession,
         stmt: &Stmt,
         vars: &mut Z3VarMap,
+        caller_name: &str,
+        errors: &mut Vec<(String, String, Span)>,
     ) {
         match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
-                self.assert_callee_ensures_in_expr(session, e, vars);
+                self.assert_callee_ensures_in_expr(session, e, vars, caller_name, errors);
             }
             Stmt::Let {
                 init: Some(init), ..
             }
             | Stmt::Assign { value: init, .. } => {
-                self.assert_callee_ensures_in_expr(session, init, vars);
+                self.assert_callee_ensures_in_expr(session, init, vars, caller_name, errors);
             }
             Stmt::SharedLet { init, .. } => {
-                self.assert_callee_ensures_in_expr(session, init, vars);
+                self.assert_callee_ensures_in_expr(session, init, vars, caller_name, errors);
             }
             Stmt::If {
                 cond,
@@ -3073,7 +3132,7 @@ impl VerifierCtx {
                 // inside then/else are path-conditional; admitting them as
                 // unconditional axioms is unsound. Skip branch bodies until
                 // path-condition implication is implemented.
-                self.assert_callee_ensures_in_expr(session, cond, vars);
+                self.assert_callee_ensures_in_expr(session, cond, vars, caller_name, errors);
             }
             Stmt::While { cond, body: _, .. }
             | Stmt::For {
@@ -3083,17 +3142,17 @@ impl VerifierCtx {
             } => {
                 // V-C5: loop bodies may execute zero times — do not assert
                 // callee ensures from body as axioms.
-                self.assert_callee_ensures_in_expr(session, cond, vars);
+                self.assert_callee_ensures_in_expr(session, cond, vars, caller_name, errors);
             }
             Stmt::Loop(_body) => {
                 // V-C5: skip unconditional body ensures (zero-iteration possible
                 // only via break, but still path-sensitive).
             }
             Stmt::Block(body) | Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Parasteps(body) => {
-                self.assert_callee_ensures_in_block(session, body, vars);
+                self.assert_callee_ensures_in_block(session, body, vars, caller_name, errors);
             }
             Stmt::Alloc { body, .. } => {
-                self.assert_callee_ensures_in_block(session, body, vars);
+                self.assert_callee_ensures_in_block(session, body, vars, caller_name, errors);
             }
             _ => {}
         }
