@@ -18,6 +18,13 @@ SUPPORT = ROOT / "docs/language-support.toml"
 PRE_0_1 = ROOT / "devdocs/pre-0.1"
 GOLDEN_SYNTAX = ROOT / "devdocs/v0.34/golden/syntax-reference.golden.md"
 SYNTAX_REFERENCE = ROOT / "docs/syntax-reference.md"
+# 0.36.0 Phase 0：哲学锚（"冻结=锚定 / breaking 自由 / 真实资产=设计+套件"）挂载点。
+PHILOSOPHY_ANCHOR = ROOT / "devdocs/v0.36/philosophy-anchor.md"
+PHILOSOPHY_MOUNT_DOCS = [
+    ROOT / "AGENTS.md",
+    ROOT / "devdocs/v0.31/architecture-amendment-1.0.md",
+    ROOT / "devdocs/README.md",
+]
 
 TARGETS = {"stable", "experimental", "reserved", "removed"}
 MATURITY = {"unsupported", "partial", "complete", "not_applicable"}
@@ -160,6 +167,32 @@ def check_semantic_freshness(errors: list[str]) -> None:
             fail(errors, f"FLOW-MULTI-001 target must be stable, got {item.get('target')!r}")
 
 
+def check_philosophy_anchor(errors: list[str]) -> None:
+    """Positive pins for the 0.1.6 philosophy anchor (Phase 0, 0.36.0).
+
+    Drift signal: if someone rewrites an authoritative doc to re-assert a
+    "锁定 / 不可逆承诺" without the anchor, one of these pins breaks.
+    """
+    if not PHILOSOPHY_ANCHOR.is_file():
+        fail(errors, "devdocs/v0.36/philosophy-anchor.md is missing (0.36.0 Phase 0 anchor)")
+        return
+    anchor = PHILOSOPHY_ANCHOR.read_text(encoding="utf-8")
+    for keyword in ("真实资产", "锚定", "节奏", "唯一锚点"):
+        if keyword not in anchor:
+            fail(errors, f"philosophy-anchor.md is missing the anchor keyword {keyword!r}")
+
+    for doc in PHILOSOPHY_MOUNT_DOCS:
+        if not doc.is_file():
+            fail(errors, f"philosophy mount doc missing: {doc.relative_to(ROOT)}")
+            continue
+        if "philosophy-anchor.md" not in doc.read_text(encoding="utf-8"):
+            fail(
+                errors,
+                f"{doc.relative_to(ROOT)} does not reference philosophy-anchor.md "
+                "(三文档清单挂载点 must point at the anchor)",
+            )
+
+
 def main() -> int:
     errors: list[str] = []
     spec_text = SPEC.read_text(encoding="utf-8")
@@ -274,6 +307,7 @@ def main() -> int:
         fail(errors, "ast-appendix.md contains target-status vocabulary in a table cell")
 
     check_semantic_freshness(errors)
+    check_philosophy_anchor(errors)
 
     if errors:
         for error in errors:
