@@ -5,7 +5,29 @@
 > 0.1.6 开发进行中：核心深度闭环（Deep over Broad）——失败归属（Fault nominal）、
 > 状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
-> `devdocs/v0.36/README.md`。
+> `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
+
+### 0.36.0–2 — Phase 0：理念与治理重锚
+
+- **哲学锚落地**（0.36.0）：`devdocs/v0.36/philosophy-anchor.md` 成为 0.1.6 哲学
+  唯一权威——三条铁律（真实资产=设计思想+不变量套件 / "冻结"=锚定非锁定 /
+  节奏=激进重设计→锚定→止血挣绿→下一支柱）+ 治理（不变量套件=唯一锚点、break
+  纪律、DoD 纪律、边缘解耦纪律、预算纪律）+ 取向/表面边界判读规则；
+- **三文档清单挂载**（0.36.0）：`AGENTS.md` §0（战略裁决 + 治理升级）、
+  `devdocs/v0.31/architecture-amendment-1.0.md` 序言（"不可逆"语义澄清指向哲学锚）、
+  `devdocs/README.md` §1（权威层级顶部挂哲学锚）三处头部统一指向 philosophy-anchor.md；
+  白皮书头部"定位澄清"保持指向；AGENTS §13 版本表 0.1.5→✅已发布、0.1.6→⬅当前；
+- **边缘解耦清单**（0.36.1）：`devdocs/v0.36/edge-inventory.toml` 注册 6 个边缘项
+  （EDGE-01~06：Effect lattice / Protocol dyn / 高级 Session / rich fault / Component
+  IR 扩张 / comptime-quote），每项独立 gate 标记（`EDGE-GATE:<marker>`）、解耦后义务
+  （只保安全修复，无特性开发）、`core_dep=false` 硬约束；roadmap §4 表加 gate 标记列；
+- **门禁机制落地**（0.36.2）：`scripts/check_edge_isolation.py`（4 项检查：manifest
+  健全性 / ci.yml 核心门禁路径零边缘 marker 引用 / 标记注册 / 边缘测试必须 `#[ignore]`）
+  挂 ci.yml lint job；`scripts/check_language_docs.py` 增 `check_philosophy_anchor()`
+  正向引脚（三文档必须指向哲学锚 + 哲学锚含四关键词）；本地实测两新门禁 + 既有
+  unsafe/v031 门禁全绿，ci.yml YAML 解析通过；
+- **验收**：Phase 0 DoD 达成——文档哲学一致（三文档挂载 + 哲学锚正向引脚门禁）、
+  核心门禁零边缘依赖（edge-isolation 门禁入 CI）。
 
 ## [0.1.5] — 2026-08-13
 

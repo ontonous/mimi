@@ -35,6 +35,10 @@ jobs:
       - name: v0.31 roadmap consistency check
         run: python3 scripts/check_v031_roadmap.py
 
+      # 0.36.0 Phase 0：边缘解耦门禁——核心门禁路径零边缘依赖（philosophy-anchor §2）。
+      - name: Edge isolation gate (core gate path zero edge deps)
+        run: python3 scripts/check_edge_isolation.py
+
       # ── Rust 质量门禁 ──────────────────────────────────────────────
       - name: Check Format
         run: cargo fmt -- --check
