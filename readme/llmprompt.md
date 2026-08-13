@@ -61,28 +61,27 @@ func add(a: i32, b: i32) -> i32:
 
 ### 2.4 关键字不可用作标识符
 
-> 0.34.33 刷新：0.1.4 冻结实况，共 80 个 `=> TokenKind` 映射（实测 keywords.rs:92-177）。
-> 已删除：`do`/`become`/`stay`/`subflow`/`steps`/`consume`（现 tokenize 为标识符）。
+> 0.35.39 刷新：0.1.5 实况，共 67 个 `=> TokenKind` 映射（实测 keywords.rs `keyword_or_ident`）。
+> 已删除：`do`/`become`/`stay`/`subflow`/`steps`/`consume`（现 tokenize 为标识符）；
+> 0.35.39 裁撤 `c_shared`/`c_borrow`/`c_borrow_mut`/`local_shared`/`weak_local`/`raw_string`/
+> `nothing`/`alloc`/`async`/`with`/`desc`/`rule`/`mms`（共享收敛为 `shared`/`weak` 二态）。
 
 ```
 module     type       func       fn         actor      newtype
 trait      impl       cap        extern     use        pub
 dyn        where
-let        mut        ref        const      shared     local_shared
-weak       weak_local c_shared   c_borrow   c_borrow_mut
-raw_string arena      alloc      drop
+let        mut        ref        const      shared     weak
+arena      drop
 if         else       for        in         while      loop
 return     break      continue   match      defer      unsafe
 flow       state      transition fault      fails      persistent
 pinned     protocol   session    dual       end        view
 mutate
-spawn      await      async      parasteps  failure    reset
-recover
-requires   ensures    invariant  math       desc       rule
-old        mms        with
+spawn      await      parasteps  failure    reset      recover
+requires   ensures    invariant  math       old
 comptime   quote
 and        or         not        (软关键字：绑定位置可作标识符)
-true       false      unit       nothing
+true       false      unit
 as
 ```
 

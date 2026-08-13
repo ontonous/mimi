@@ -8,8 +8,8 @@
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
 > See `docs/language-support.toml` for 9-dimension capability matrix.
 >
-> Version: v0.1.4-dev (2026-08-04, regenerated from golden — 0.34.33 文档同步收尾)
-> Implementation: v0.1.4-dev (internal sprint 0.34.X)
+> Version: v0.1.5-dev (2026-08-13, synced from golden — 0.35.39 僵尸关键字裁撤)
+> Implementation: v0.1.5-dev (internal sprint 0.35.X)
 > Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
 > 渲染例外（与 golden 的有意差异）：golden 的标题/引言元块与 §7 差异台账不进入本副本；
 > §7 台账见 golden 原文（0.34.33 起差异归零）。

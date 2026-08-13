@@ -298,6 +298,23 @@
   mimi-make / mimi-stat / mimichat MATCH；devdocs/v0.35/
   deep-eval-projects-0.35.23.md 遗留观察 1 标记已修。
 
+### 0.35.23 — deep-eval projects 战役（mimi-make 三层修复 + mutate 参数 claim 守卫）
+
+- **mimi-make 三层修复**：K1 嵌套 else-if value 模式坏——`let x = if/else` 类型
+  登记三路径 fallback（block.rs compile_block / compile_block_last_val + func.rs
+  compile_func_body 顶层），infer_object_type 新增 `Expr::If` 分支，mkr 最小复现
+  E0707 消除；递归依赖 E0407；无参数 target 空转；
+- **mutate 参数 claim 守卫**：K2 claim_string_return_value 聚合字符串字段 claim
+  （tuple/record 返回的 {ptr,i64} 字段走 B9 值精确守卫，所有权转移调用方，
+  消除 parse_variable UAF）；K3 borrow_param_names 守卫集（view/mutate 参数
+  跳过 claim_returned_lists null-out，修复 mutate_list_push_allowed 存量 SIGSEGV）；
+- **引入性能回归（登记）**：main 签名 (argc, argv) + mimi_args_init 使热循环
+  偏移 9 字节（op-cache/代码对齐冲突）——dsp O1 1.06×→1.36×，bisect 定位
+  2026-08-10，修复排期 Phase I（0.35.30 dsp 对齐回归）；
+- **验证**：5325 lib + 15 main + 31 real_world 全绿；examples 22 MATCH；
+  projects 五件套（mimi-log/mimi-lint/mimi-stat/v02817_acceptance/mimi-make）
+  全 MATCH；golden 再生成；clippy/fmt 全绿。
+
 ### 0.35.22 — 可用性修复收官：E0439 提示 + 文档语法 + 错误消息 + test 参数（Phase H）
 
 - **#5 E0439 帮助文本**：`codes.rs` 与 `docs/error-codes.md` 同步——算术属性
@@ -354,369 +371,49 @@
   partition、chunks、用户函数返回 List tuple）；5317 lib 全绿；demos 差分
   14/15 MATCH（除 14_ffi 环境差）。
 
-### 0.35.1 — 性能基线套件 + 四象限矩阵（0.1.5 首 sprint，Phase A）
+### 0.35.19 — 错误消息 CO-H2 精确 span（dx-backlog #7，Phase G）
 
-> 0.1.5 性能主线的第一步：建立可复现基线，锁定 trap 成本分解的第一个靶子。
-> 纯增量基建，零行为变更。基线报告 `devdocs/v0.35/perf-baseline-0.35.1.md`。
+> 消灭一条内部 `TOOL-RESOLUTION-001` 泄漏路径：tail if/else 分支类型不匹配
+> 从“无 E 码 + 无 span + 泄漏 rt:<hash> 类型 ID”变为 E0214 + 精确 if 语句
+> 定位 + 语言类型名。报告 `devdocs/v0.35/error-coh2-0.35.19.md`。
 
-- **基准套件扩展**：`benchmarks/` 新增 dsp 热循环（一阶低通 5×10^7，dogfood
-  M-014 同构场景）+ `dsp_ieee`/`mandelbrot_ieee` 变体（ieee_float 包裹悬浮
-  SD-9 finiteness trap）+ `dsp.c`（gcc -O2 对照）/ `dsp.py`（CPython 对照）；
-- **quadrant.sh**：四象限矩阵脚本——MIMI_OPT ∈ {0,1} × {默认, ieee_float}
-  对 fib/mandelbrot/dsp 计时（纳秒括弧，RUNS=3 中位数）+ MIMI_DUMP_MODULE
-  IR dump 静态 trap 调用点计数（trap 发射与优化档无关）；
-- **基线矩阵（2026-08-08，32 核机）**：dsp O1 默认 402.1ms（3.97× C -O2）→
-  O1+ieee 106.4ms（**1.06× 追平**）；mandelbrot O1 3.64× → ieee 1.88×；
-  fib O1 2.88×（O0 3.68×）；
-- **关键发现**：SD-9 float finiteness trap 占 dsp O1 默认耗时 **73.5%**
-  （295.7ms，每 f64 binop 发射 NaN/Inf 检查）；整数 trap（SD-7）在 O1 下被
-  LLVM 循环分析消除（ieee 版整数计数器仍 checked add 却追平 C）——整数
-  trap 不是主要靶子；trap 静态计数与动态成本定性吻合（dsp 28→24 /
-  mandelbrot 38→30）；
-- **0.35.2 输入**：SD-9 链式末端检查假设（f64 代数链中间非有限必传播到
-  末端，逐点检查可收敛为末端检查，语义保持）列入验证。
+- **checker/lowering 对齐**：`check_block_with_implicit_return` 尾部
+  `Stmt::If`（带 else）改双向检查（锚定 if 语句 span；双分支 diverging 时
+  不触发隐式返回检查）——此前 checker 放行、resolved lowering 用内部码拦截；
+- **类型名渲染**：`PrimitiveType::language_name()` + `BodyLowerer::type_display`
+  （Primitive/Nominal/Tuple/Result/Option/Reference/Newtype 递归渲染，深度上限
+  4；`builtin:type:` 前缀剥离）——`implicit_conversion` 错误消息不再泄漏
+  `rt:<hash>` 内部 ID；
+- **span 回退链**（resolved/mod.rs）：generated NodeId 查 node_meta 失败时提取
+  `function:<owner>` 锚点，不再静默 `Span::UNKNOWN`；
+- **统一 if 分支检查**：`Checker::check_if_branch_types` 共享方法（cond bool
+  E0205 + 双向分支检查 + unify E0214），接线 `check_expr_inner` 的 `Expr::If`
+  / `check_block_expr` 尾部 If / tail-if 三处——**diverging 分支豁免**（尾部
+  return/break/continue 不参与 unify，flow `-> A|B` 双状态 return 合法）+
+  **数值强制豁免**（i32/i64、int/float 混合分支合法）；
+- **消灭合成临时 Expr 隐患**：`check_block_expr` 尾部 If 分支不再合成
+  `Expr::If` 调 check_expr（合成节点无 AST meta → 无 stable NodeId →
+  `stabilize_expression_types` abort；该路径首次被真实触发后暴露）；
+- **回归锁**：`src/tests/error_co_h2.rs` ×4（E0214 精确 span / diverging
+  豁免 / 数值强制 / 无内部 ID 泄漏）；全量 **5311 lib** + 15 main + 31
+  real_world + cli 绿；clippy 零警告；fmt 干净；dispatch 无静默回退。
 
-### 0.35.2 — trap 成本分解（perf 数据驱动，Phase A）
+### 0.35.18 — fmt 评估收尾（dx-backlog #4，Phase G）
 
-> 0.1.5 性能主线的第二步：perf 级分解锁定 SD-9 检查的真实成本结构，
-> 完成 trap 语义分级表裁决。纯分析 sprint，零代码变更。
-> 报告：`devdocs/v0.35/trap-decomposition-0.35.2.md`。
+> 全语料 round-trip 幂等 + 语义保持双维度评估，确认 `mimi fmt` 语义安全；
+> 语料级回归锁入仓。报告 `devdocs/v0.35/fmt-eval-0.35.18.md`。
 
-- **perf 分解（dsp 5×10^7）**：O1 默认 408.7ms vs O1+ieee 106.8ms
-  （−73.9%）；指令 38.5→9.1/迭代，分支 4.05→0.015/迭代——**SD-9 检查的
-  隐性成本 = 破坏 LLVM 向量化窗口**（每个 f64 binop 后的 finiteness 检查 +
-  两路分支横插链中），向量化恢复是主要杠杆（ieee 版分支几近归零）；
-- **链式末端检查假设验证成立**：IEEE 754 NaN/Inf 传播性论证——中间结果
-  非有限必传播至链末端（NaN ⊛ x = NaN；Inf 参与结果 ∈ {NaN, ±Inf}），
-  逆否等价；适用四条件：纯 binop 链 / 中间值未被比较·分支·内存写·调用消费 /
-  非 fallible 上下文 / 非 ieee_float 块内；
-- **trap 语义分级表裁决**：L1 链式末端检查（resolved+legacy+VM 三面对等）
-  0.35.3 实施；L2 trap 分支 cold weight 顺带；L3 常量折叠先行；L4 整数 trap
-  维持现状（0.35.1 实证 O1 已消除循环内 checked add）；**L5 nsw/nuw 放宽否决**
-  （E0802 是语言承诺，改变可观测 trap 行为违反 L1 不变量）；L6 跨函数链
-  识别 0.35.4 评估不承诺。
-
-### 0.35.3 — SD-9 链式末端检查收敛（trap 成本消减 L1，Phase B）
-
-> 0.1.5 性能主线的第一个实现 sprint：链收敛 pass 落地，dsp 追平 C -O2。
-> 语义保持——trap 是语言承诺（SD-7/8/9），收敛只移动检查位置不改变可观测行为。
-
-- **float_chain pass**（`src/codegen/float_chain.rs`，O1 管线前 LLVM IR 层）：
-  收集全部 SD-9 检查点（`fcmp uno x,x` 特征指令）→ 被检值的所有用户（排除检查
-  部件）都是受检 f64/f32 代数 op → 链中继点删除检查；末端/观察点（比较/存储/
-  函数参数/返回/phi/不受检 op）保留；无逃逸 alloca store→load 转发入链（其他
-  store 仅允许常量初始化）；[零真实消费（dead 结果）保留检查——防止 DCE 丢失
-  trap 语义]；fallible 上下文（Fault 吸收）不收敛；
-- **性能（四象限复测）**：dsp O1 默认 402.1→108.9ms（**3.7×，1.07× 追平
-  C -O2**，较基线 3.97× 下降 73%）；mandelbrot O1 3.64×→1.80×（40.0→19.8ms）；
-  fib 持平（无 float 链）；O0 档不变（收敛仅 O1 路径）；dsp 默认档与 ieee 档
-  持平（108.9 vs 106.9）——链收敛达成 ieee_float 的全部收益且保留 trap 语义；
-- **修复回归**：`ieee_depth_does_not_leak_across_function_boundary`——dead 结果
-  的 fmul 检查被误删导致 Inf 偷偷通过（检查分支使 fmul 保持 live，删除后 LLVM
-  DCE 掉表达式丢失 trap 语义）；修复为零真实消费 → 保留检查；
-- **测试**：`src/tests/float_chain.rs` 探针 ×5（链中非有限末端 trap / dead 结果
-  保留检查 / 比较观察点保留 / 有限链双端对等 / ieee 块消费边界）+ 既有
-  ieee_depth 回归；全量 **5292 lib** 绿 / 15 real_world / 28 cli / clippy 零警告 /
-  fmt 干净；诊断钩子 MIMI_DUMP_MODULE_CONVERGED（pass 后 dump）。
-
-### 0.35.4 — trap 分支 cold 权重（trap 成本消减 L2，Phase B）
-
-> 0.1.5 性能主线的收尾项：为全部 trap/Fault 分支附加 branch_weights cold
-> metadata，让 LLVM 分支布局优化把 trap 代码移出热路径。检查合并/循环提升
-> 经链收敛后无剩余空间（热循环已压到 1 检查/迭代），裁剪登记；CVP pass
-> 实测无收益（fib 2.96× vs 2.98× 噪声内）不引入风险面，撤销。
-
-- **mark_cold_trap_branch**（float_chain.rs）：`branch_weights {0,1}` cold 权重
-  附加 helper（LLVMGetMDKindIDInContext + metadata_node）；5 处 trap 分支统一
-  标记：SD-8 div-zero / MIN÷−1、SD-7 checked add/sub/mul、SD-9 float finiteness
-  （legacy check_float_finite + resolved enforce_float_finite 两路）；
-- **golden IR 更新 ×14**：branch_weights metadata 入 golden 快照（`!0 =
-  !{!"branch_weights", i32 0, i32 1}`）；
-- **CVP 评估**：pass 串实验 `default<O1>,correlated-propagation`——fib 的
-  checked intrinsic 未被消除（alloca/load 模型下 range 分析不propagate），
-  矩阵无收益（fib 47.3 vs 47.4ms 噪声内），按"无收益不引入风险"撤销；
-- **检查合并/循环提升裁剪**：L1 链收敛后 dsp/mandelbrot 热循环均为 1 检查/
-  迭代（环守卫/比较观察点，语义必需），无合并空间；环守卫不能提升出循环
-  （非有限传播需实时捕获）；登记无剩余工作项；
-- **验证**：全量 5292 lib 绿 / 15 real_world / 28 cli / clippy 零警告 / fmt 干净；
-  矩阵终测 dsp 1.04× / mandelbrot 1.78× / fib 2.90×（O1）。
-
-### 0.35.5 — nsw/nuw 语义分级评估（裁剪登记，Phase B）
-
-> Phase B 可选工作项评估后裁剪：SD-7/8/9 trap 是语言承诺（E0802/E0801/E0813），
-> nsw/nuw 放宽会改变可观测 trap 行为，违反 L1 不变量（0.35.2 已否决）。
-> 无代码变更，仅为路线图/预算完整性登记。
-
-### 0.35.6 — 四象限矩阵终测 + 曲线报告（Phase B 收官）
-
-> Phase B（trap 成本消减）终测：链收敛 + cold 权重双項落地后的完整矩阵复测
-> 与收敛曲线报告。
-
-- **终测矩阵（O1，2026-08-08）**：dsp 402.1→104.5ms（**1.04× 追平 C -O2，降 74%**）；
-  mandelbrot 40.0→19.8ms（1.78×，降 50%）；fib 持平 2.90×（递归调用 + checked
-  intrinsic 组合开销，登记 0.1.5 范围外——需 emitter 架构级优化）；O0 全程不变
-  （收敛/cold 权重仅 O1 路径）；
-- **曲线**：trap 主导项（dsp）成本降 74% ≥ 30% 验收达成；dsp 默认档与 ieee 档
-  持平（104.5 vs 103.9ms）——链收敛 + cold 权重达成 ieee_float 全部收益且完整
-  保留 trap 语义；**Phase B 关闭**。
-
-### 0.35.7 — strings/collections 模块体进 resolved slice（Phase C）
-
-> dx-backlog #19：strings/collections 模块体（含 trait impl 方法体）进 resolved
-> slice。根因是 str_* builtin 的 {ptr,i64} 值 → runtime-direct ptr 的 coercion 失败
-> 拖垮所有调用它们的 stdlib 函数体。顺带修复了三个被真实程序暴露的既有 bug。
-
-- **STRING_ABI_BUILTINS**（resolved/mod.rs）：16 个 str_* builtin 跳过
-  runtime-direct 快捷路径，强制走 string emitters（compile_builtin_call）——
-  `str_char_at` 等 runtime helper 收 raw C-string ptr，而 resolved 传 Mimi
-  string 值 {ptr,i64}，coercion 失败导致每个调用它的 stdlib 函数体 resolved
-  编译失败落 legacy（0.34.38 只修了 str_substring 单点）；
-- **默认白名单扩展**（eligibility.rs `module_bodies_lifted`）：
-  prelude,mymath → +strings,collections。A/B 语料五程序（std_strings /
-  std_collections / 06_strings / 05_lists / json_parser）编译 + 运行全过，
-  dispatch 统计 eligible 34/45、零 module skip（legacy 11 全为
-  generics/qualified）；
-- **修复 1 — mimi_runtime_assert 缺失**（runtime/mod.rs）：legacy pattern
-  binder（func/pattern.rs `PatternKind::Literal`）早就在调用 `mimi_runtime_assert`
-  (bool, ptr)，但 runtime 从未定义该符号——任何带 literal 子模式
-  （`Bool(true) =>`）的程序链接失败。补实现（E0801 家族：失败打印 + abort）；
-- **修复 2 — 泛型参数名遮蔽用户类型**（func.rs `legacy_param_llvm_type`）：
-  `type T` + prelude `eq<T>` 时，legacy 编译泛型骨架把参数 T 解析成用户 enum
-  的 struct 布局，`a == b` 报 "eq requires same types"（E0700）。declare_func /
-  bind_func_params 统一走新 helper：泛型参数名 → i64 占位（骨架仅满足 legacy
-  声明 pass，真实调用走 monomorphize）；
-- **修复 3 — literal 子模式 fall-through**（expr/match.rs）：Constructor arm
-  只在 tag 匹配时进入，payload literal 比较被推迟到 pattern binding——
-  `B(false)` 值落到 `B(true)` arm 时 assert abort 而非落入下一 arm。修复：
-  literal 字段比较并入 arm 条件（tag AND payload）；
-- **回归测试**：real_world_literal_pattern_fallthrough（双后端，覆盖修复 2/3）；
-- **验证**：全量 5292 lib 绿 / 16 real_world / 29 cli / clippy 零警告 / fmt 干净。
-
-### 0.35.8 — fails transition Result 布局对齐（Phase C）
-
-> dx-backlog #20：flow_order_system native SIGSEGV（`puts(0x1)` 整数当字符串
-> 指针，gdb 实证）。fails transition 返回 Result<Target,(Source,E)> 中 string
-> 字段布局错位——0.34.25a 只修了 Err 臂（Q1），Ok 臂 + 事件参数路径未修。
-> 两个独立根因，双双修复。
-
-- **修复 1 — Ok payload coach load**（func.rs `coerce_field_to_type`）：
-  `compile_ok_constructor` 打包 `{i1, ptr, i64}`（payload 槽存目标地址），
-  coerce 到声明布局 `{i1, T, E}` 时把裸指针 store 进 T 槽位——struct payload
-  （含 string 字段的 Flow state）地址位被当字段读。新增 ptr→struct 分支：
-  build_load 解引用（mimi-string wrap 分支在前保持 C-string 指针语义）；
-- **修复 2 — flow transition 字符串字面量参数**（method.rs
-  `compile_flow_transition_call`）：字符串字面量参数编译为 raw global-string
-  指针，旧代码按参数类型 `{ptr,i64}` 直接 load——把字符串自身字节读成
-  {data_ptr, len}（"TXN-42" → data_ptr=0x32342D4E5854）。改为 wrap_c_string
-  （非 string struct 参数仍 load）；
-- **回归**：flow_order_system + flow_system_trace 从 dual-backend
-  known_limitations 移除（两个 SIGSEGV 均修复），纳入双后端套件；
-- **验证**：flow_ 365 测试全过；全量 5292 lib 绿 / 15 real_world / 29 cli /
-  clippy 零警告 / fmt 干净；flow_order_system native 输出与 VM 逐行一致
-  （TXN-42/TRK-001/book/invalid price/0）。
-
-### 0.35.9 — contracts 守卫发射性能切片（Phase C）
-
-> 0.34.41 第二档（resolved 运行时守卫发射）第一个性能回访。结论：
-> **守卫成本 < 噪声，零优化空间**。
-
-- **基准**：`benchmarks/contracts.mimi`——`validated_sum(n, lo)` 带双合约
-  （requires n>=lo + ensures result>=0），300 万次调用（参数 k%20 防
-  LICM 提升、lo 来自 argv[1] 防常量折叠）；`plain_sum` 同构无合约对照；
-- **数据（O1，3 次中位数）**：擦除 0.02s vs `--verify-contracts` 0.02s——
-  守卫被内联 + 分支预测近全命中，双向无差异；
-- **IR 验证**：requires/ensures 的 icmp + contract_pass/fail 双块 +
-  mimi_runtime_abort（E0808）完整存活，与 0.34.41 设计一致；循环内 checked
-  add 的 trap_overflow + branch_weights（0.35.4）与守卫共存；
-- **登记**：无优化空间（重守卫 = 用户表达式成本，非机制开销，不预优化）；
-  报告 `devdocs/v0.35/contracts-slice-0.35.9.md`；
-- **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
-
-### 0.35.10 — dispatch 门禁复测 + 覆盖率曲线（Phase C 收官）
-
-> Phase C 收官：全语料 113 程序（demos + examples + tests/real_world）
-> dispatch 复测与覆盖率曲线。报告 `devdocs/v0.35/dispatch-coverage-0.35.10.md`。
-
-- **曲线**：0.9609（0.34.40 门禁建立）→ 0.3027（0.34.42 slice 放开）→
-  **0.2735**（0.35.7 strings/collections 模块体进 slice，−0.0292）；
-  eligible 202 → 3783 → **3974**（72.65%）；
-- **复测**：113 程序全部编译成功（0 emit_failed）；门禁 check 无静默回退
-  （0.2735 < 0.3027）；新增程序 json_parser 自动纳入（0.2667）；
-- **基线更新**：dispatch-baseline.json 更新至 3974/5470（0.2735）；
-- **剩余拆解**：legacy 1496 中 generics/qualified 1331（**89%**）——泛型函数
-  进 resolved slice 需单态化/泛型 emit（架构级），**登记 1.x 评估**；
-  module file 81（io/fs/net 未 lift 模块，登记 0.35.x 后续）；unsupported
-  type/expr 62；actor/nominal 15；
-- **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
-
-### 0.35.11 — O1 正确性切片：O1/O0 双档对等三连修（Phase D）
-
-> O1 默认化后的 dual 对等扫描发现 `demos/05_lists.mimi` 双档分歧：O0
-> tcache double free abort、O1 静默输出错。三连根因各自独立，修复后
-> 05_lists O0/O1 与 bytecode 逐行对等（除 zip 行，见已知限制）。
-
-- **修复 1：resolved slice trap 块缺 terminator**（`src/codegen/resolved/mod.rs`
-  `emit_bounds_trap`）：slice OOB trap 块以 noreturn call 结尾但无 terminator
-  → LLVM verify 拒绝整个函数 → **静默降级 legacy emitter**（连带 print
-  dispatch 错乱）。补 `build_unreachable`；`sort(data)` + `data[1..4]` 同函数
-  复现；
-- **修复 2：legacy print dispatch 对 list 返回内建的类型推断缺口**
-  （`src/codegen/expr.rs` + `func.rs` + `block.rs`）：`map`/`filter`（编译期
-  内建）与 `reverse`/`sort`/`range`（无 func_defs 条目的运行时 builtin）的
-  调用结果被推断为 **被调名**（"map"、"reverse"…）或空 → `{i64 len, ptr data}`
-  list struct 误入字符串快速路径（printf 对结构体字节 strlen，输出
-  空/垃圾，O0 下可触发 double free）。新增共享 helper
-  `infer_list_builtin_return_type`（从源参数推导 List<T>；map 优先取 lambda
-  声明返回型），接入 `infer_object_type` Call 分支 + 两处 let 绑定追踪；
-  另补 `SliceExpr` arm（`xs[1..5]` 同源类型）；**zip 不入 helper**：其裸
-  {i64,i64} pair 布局与 product-tuple formatter 的 heap-pack 假设不符，
-  强类型化会 segfault（已知限制：legacy 下 zip 显示为空，O1 不 crash）；
-- **修复 3：list 字面量绑定 local 后 realloc 所有权陈旧**（resolved，
-  `src/codegen/resolved/mod.rs`）：`let mut ys = [1,2,3]; push(ys, 4)` 先在
-  构造临时 alloca 建表并注册为 buffer 所有者，再值拷贝进 local；push/pop
-  的 realloc 更新的是 **local** 槽，注册槽残留 realloc 前旧指针 → scope
-  退出 free 旧指针（realloc 搬移时已内部释放）→ tcache double free。
-  O1 仅因 SROA 合并两 alloca 侥幸不炸。新增 `emit_list_literal(target)`
-  直接构造模式 + Bind 快速路径：字面量直接绑定简单 local 时就地构造，
-  注册所有者 = 被 mutator 更新的槽；
-- **诊断钩子**：`MIMI_DUMP_MODULE` 提升到 optimize gate 之外（O0 构建
-  也可 dump IR，此前 O1-only 位置使默认 debug opt-out 构建不可见）；
-- **回归锁**：`real_world_list_intrinsic_display_and_realloc`（sort/slice/
-  reverse/map/filter 内联+绑定显示 + push/pop realloc 所有权，run/build
-  双后端对等）；临时复现文件 dblfree_min.mimi 已转正删除；
-- **验证**：05_lists O0/O1 与 bytecode 输出逐行对等（zip 行除外）；全量
-  5292 lib + 29 real_world + cli 套件绿。
-
-### 0.35.12 — resolve→zonk 全量迁移 + parser panic 审计第一批（Phase D）
-
-> dx-backlog #1 关闭 + #2 第一批（parse_expr/parse_stmt）审计落地。
-> 两半各自独立提交（0.35.12a 迁移 / 0.35.12b 审计）。
-
-- **#1 resolve()→zonk_or_unknown() 全量迁移（31 处生产调用点清零）**：
-  infer_expr×2 / check_stmt×4 / checker·func×1 / checker·vars×6 /
-  checker·items×2 / checker×1 / infer·lambda×1 / infer·call·helpers×5 /
-  infer·call·simple×5 / infer·helpers×1 / infer·record×3。**语义裁决**：
-  迁移点均为推断内部（非定稿边界），游离 TypeVar（let 多态占位）/ForAll/
-  逃逸哨兵在迁移前 resolve 中原样透传——首版直接套 scan_residual 严格化
-  在 flow checker unknown 哨兵与 let 多态游离变量两类合法路径上触发
-  debug 断言（实证后回退）；`zonk_or_unknown` 最终对齐 pre-migration
-  resolve 语义（resolve_infer + unknown 兜底 + 可见 debug 断言），严格
-  定稿仍由真边界处的 `zonk` 承担；`resolve()` 降为 #[deprecated] 转发，
-  仅 unification.rs 模块测试消费；
-- **#2 parser panic 审计第一批（parse_expr/parse_stmt）**：审计结论矫正
-  登记口径——**51 处 `panic!` 全部位于 #[cfg(test)] 测试区**（原登记未
-  分离测试代码）；`unwrap()/expect(` 计数含 parser 自身的 Result 返回
-  `self.expect()` 辅助方法（非 Option::expect）。生产区真实残留仅 3 处
-  结构性不变量 unwrap（if-chain 首链 ×2 + token 索引 ×1），全部降级为
-  `ParseError` 诊断（用户输入永不 abort 编译器）；
-- **验证**：5292 lib 全绿（含 parser 92 / property 44）；clippy 零警告；
-  fmt 干净。
-
-### 0.35.13 — trivia 化：desc/rule/mms{} 降注释，Stmt 33→30（Phase D）
-
-> dx-backlog #10（0.34.5a 推迟项）落地：`desc`/`rule`/`mms{}` 从 AST 降为
-> trivia——parser 消费即弃（验证括号结构但不产出语句），表面语法兼容
-> （旧源码继续可解析）。`math:` 保留 verifier 通道（P1 裁决）。#13（actor
-> runs_flow 三层集成）从本 sprint 拆出单独排期（曾有“超单 sprint 范围”
-> 回滚史）。
-
-- **parser**：`parse_stmt_kind` 删除 Desc/Rule/Mms 产出臂（块外出现报
-  trivia 诊断）；两个 block 循环（terminator/recovery）改为消费即弃；
-  `parse_mms_block` 改返回 `()`，删除文本重建逻辑（仅保留括号平衡消费）；
-- **AST**：`Stmt::Desc`/`Stmt::Rule`/`Stmt::MmsBlock` 三 variant 删除
-  （Stmt 33→30）；
-- **消费面清理（82 处 / 22 文件）**：resolved（语义键/节点标签/span 抽取
-  7 臂）/ checker（check_stmt×3、func 合约探测、borrow）/ codegen（block/
-  func/actors skip 臂）/ bytecode VM / CFG lower / resolved IR lower /
-  loader span remap / lint / verifier×4 文件 skip 臂；
-- **真实依赖处置**：`doc_core` desc/rule 文档提取循环删除（降注释后无
-  结构化意图文本可提取，属裁决内行为）；`core::verify_rules` 降为恒净
-  no-op（保留 CLI `--verify-rules` 接口）；LSP `has_contracts` 探测去
-  MmsBlock；
-- **测试重写**：`mms_integration.rs` 8 项全重写为 trivia 契约（解析无错 +
-  零 AST 语句 + 运行时语义不变，新增独立 desc/rule trivia 锁）；
-  parser/flow.rs mms 嵌套括号测试改为“消费后仅余 return”；语料实测
-  desc/rule/mms{} 使用量为零（demos/examples/tests/std/projects 全扫），
-  且新测试发现登记口径误差：真实语法为 `desc "text"` 无冒号；
-- **验证**：全量 5292 lib + 30 real_world + cli 绿；clippy 零警告；fmt 干净。
-
-### 0.35.14 — DX backlog 三项：#13 runs_flow 三层集成 + #16 C stdio 混流 + #18 tuple fn 取出（Phase D）
-
-> 质量次线三项落地。头条是 #13（0.34.29 曾有"超单 sprint 范围"回滚史）：
-> actor `runs` Flow 的 transition 方法调用（`a.inc()`）此前被 checker
-> 误报 E0221 "has no method"（合法程序被拒 = L2 假阳性），本次实测逐层
-> 推进完成类型检查层三层集成；`mimi check` 全通，bytecode dispatch 运行时
-> 行为不变。#3（LSP Span/Origin 迁移）顺延下个 sprint。
-
-- **#13 层①（checker + infer 方法注册）**：`collect_item_decls` 将 runs_flow
-  actor 的每个 transition 注册为合成方法（签名 `(self, event params…) ->
-  ToState`；`fails E` 时返回 `Result<ToState, (FromState, E)>`——与
-  codegen/VM dispatch 消费的形状一致）；显式同名方法优先。infer 新增
-  `runs_flow_transition` 辅助 + `is_actor_method` 扩展：调用点按 actor 方法
-  dispatch（E0221/E0257 误报消除），参数类型/元数照常 E0211/E0257，typo
-  建议含 transition 名；
-- **#13 层②（zonked 签名）**：无需额外注册——`finalize_zonked_func_types`
-  遍历 checker `funcs` 目录，自动覆盖合成条目；
-- **#13 层③（resolved callable identity）**：resolved 目录为每个 transition
-  注册 `function:{Actor}::{transition}` 的 `ResolvedFunction`（含 implicit
-  self + 参数 NodeMeta）与 `ResolvedActorMethod`（call-site KIND 事实因此
-  归类为 Method 而非 Unknown）；typed body lowering 对合成 callable 豁免
-  （无语义体，转移表由 VM/codegen 运行时 dispatch）。**边界**：`mimi build`
-  codegen 仍报 E0700（runs_flow codegen 维持 0.2 登记，spec §6.12）；
-- **#16（C stdio 混流乱序）**：VM `print`/`println`/`print_err` 每次 Rust
-  侧写前 `fflush(nullptr)` 抽干 C stdio 块缓冲——比"退出前单次 flush"更强，
-  在每个交错点保持程序序；无 FFI 场景空缓冲 flush 为廉价 no-op；
-- **#18（tuple fn 元素取出调用）**：tuple 字面量中的具名函数元素在绑定处
-  登记（`record_tuple_fn_elems`/`register_tuple_index_fn_binding`，Stmt::Let
-  双路径），`let f = t.0` 取出绑定走间接调用路径（i64 ptrtoint 槽 inttoptr
-  还原指针）——此前 codegen 报 E0700 "undefined function 'f'"（VM 可执行，
-  双后端分歧）；
-- **回归**：actors.rs 新增 3 项（dispatch typed check + 参数类型 E0211 +
-  fails Result 形状），real_world 新增 `real_world_tuple_fn_element_call`
-  双后端锁；全量 5294 lib + 31 real_world + cli 绿；clippy 零警告；fmt 干净。
-
-### 0.35.15 — LSP 文本搜索 → Span/Origin 迁移（dx-backlog #3，Phase D 顺延项）
-
-> A6 基础设施（Span/Origin/AstNodeMeta + PositionMap）的消费端收尾：LSP
-> 内全部“文本扫描定位 AST 位置”的调用点迁移到 AST span（探针测试锁定锚点
-> 契约后逐文件迁移）。顺带修掉一批潜伏假阳性：`contains("impl")` 落在
-> 首个 impl、`func {name}` 落在注释/调用点、let 绑定落在同名先行绑定、
-> 括号计数被 `let s = "}"` 截断。
-
-- **探针测试**（`src/tests/lsp.rs` +2 项）：锁定迁移依赖的 span 锚点契约
-  ——FuncDef/TypeDef/ModuleDef/ImplDef 锚定关键字、let pattern 锚定绑定名、
-  Call 表达式锚定 callee、FuncDef.end_line 到闭括号行；
-- **references.rs**：goto-definition/references/highlight 的 Type/Module/
-  let 绑定定位全部 span 化（删除死文本回退）；impl 跳转位置精确到块行；
-  `enclosing_func_line_range` 改 AST 包含（rename 作用域不再依赖
-  `starts_with("func ")` 启发式）；
-- **util.rs**：`find_func_end_line` 删除（SourceScanner 括号计数被
-  `span.end_line` 平替），`find_enclosing_func_in_items`/`hash_func_body`
-  span 化（签名去 text 参数）；
-- **symbols.rs / lens.rs / hierarchy.rs / inlay.rs**：文档符号/工作区符号/
-  code lens/调用层级/inlay 提示的 def-line 与 call-line 全部 span 化；
-  inlay 参数提示的 call-line 不再落在首次提及，括号扫描从 callee 名尾开始；
-- **测试更新**：audit_fix_lsp 括号计数测试重写为 span 包含测试（字符串/
-  注释内括号假目标结构性免疫）；全量 5296 lib + 31 real_world + cli 绿；
-  clippy 零警告；fmt 干净。
-
-### 0.35.16 — 全门禁复跑 + 四象限矩阵终测 + 0.1.5 RC 复核（Phase E）
-
-> RC 前全门禁复跑，零代码变更（仅治理文档）。终测报告
-> `devdocs/v0.35/quad-final-0.35.16.md`。
-
-- **门禁全绿**：全量 5296 lib + 15 main + 31 real_world + cli 绿；clippy
-  零警告；fmt 干净；language docs（31 requirements/support）有效；unsafe
-  SAFETY 门禁 OK；dispatch 门禁 fallback_rate 0.2735 = 基线（零静默回退）；
-- **四象限终测**：dsp O1 默认 112.7ms（1.06× C -O2，基线 402.1ms/3.97×——
-  0.35.3 链式末端检查收敛跨 13 个 sprint 稳定保持）；dsp O1+ieee 1.04×；
-  mandelbrot O1 1.81×；无象限回退超仪器方差——DX/质量次线 sprint
-  （0.35.12–15）零性能污染；
-- **RC 复核裁决**：#21（zip raw-pair 显示）/#22（resolved map builtin，
-  closure 桥接）经风险评估改登记 **0.2**——两者都需触碰 0.35.11 的 fragile
-  面（product formatter heap-pack 假设 / resolved 高阶内建 emit），RC 窗口
-  内引入 segfault 风险不对称；当前状态无 crash、输出语义正确（zip legacy
-  显示空行、map 函数体 fallback legacy），不阻断 RC。
+- **幂等性**：153 文件（demos/examples/std/libraries/projects 全量）
+  `fmt(fmt(x)) == fmt(x)` **100% 通过**；
+- **语义保持**：50 个有格式变化文件——token 流等价（lexer 序列对比，忽略
+  Newline/Indent/Dedent）+ 同目录 `mimi check` **0 破坏**；
+- **方法论教训**：stdlib 上下文文件必须同目录验证——`std/maps.mimi` 拷到
+  /tmp 的 `unknown type 'Any'` 是路径假阳性（`Any` 仅 std/ 目录内可见），
+  格式化输出放回 std/ 目录即通过；
+- **语料级回归锁**：`src/tests/fmt_corpus_eval.rs`（幂等 + token 流保持，
+  demos/examples 全量 + std/maps.mimi round-trip 锁）；
+- **登记 0.2**：类型位置泛型尖括号插空格（`List<string>` → `List < string >`，
+  风格非 bug——token 流不变、parser 正常接受）；golden 快照可选。
 
 ### 0.35.17 — 深度可用性评估 + 全面查缺补漏（Phase F：demos 双后端差分）
 
@@ -761,49 +458,369 @@
   clippy --all-targets 零警告；fmt 干净；新增 7 回归锁
   （src/tests/deep_eval_20260809.rs，check+VM+codegen 三方断言）。
 
-### 0.35.18 — fmt 评估收尾（dx-backlog #4，Phase G）
+### 0.35.16 — 全门禁复跑 + 四象限矩阵终测 + 0.1.5 RC 复核（Phase E）
 
-> 全语料 round-trip 幂等 + 语义保持双维度评估，确认 `mimi fmt` 语义安全；
-> 语料级回归锁入仓。报告 `devdocs/v0.35/fmt-eval-0.35.18.md`。
+> RC 前全门禁复跑，零代码变更（仅治理文档）。终测报告
+> `devdocs/v0.35/quad-final-0.35.16.md`。
 
-- **幂等性**：153 文件（demos/examples/std/libraries/projects 全量）
-  `fmt(fmt(x)) == fmt(x)` **100% 通过**；
-- **语义保持**：50 个有格式变化文件——token 流等价（lexer 序列对比，忽略
-  Newline/Indent/Dedent）+ 同目录 `mimi check` **0 破坏**；
-- **方法论教训**：stdlib 上下文文件必须同目录验证——`std/maps.mimi` 拷到
-  /tmp 的 `unknown type 'Any'` 是路径假阳性（`Any` 仅 std/ 目录内可见），
-  格式化输出放回 std/ 目录即通过；
-- **语料级回归锁**：`src/tests/fmt_corpus_eval.rs`（幂等 + token 流保持，
-  demos/examples 全量 + std/maps.mimi round-trip 锁）；
-- **登记 0.2**：类型位置泛型尖括号插空格（`List<string>` → `List < string >`，
-  风格非 bug——token 流不变、parser 正常接受）；golden 快照可选。
+- **门禁全绿**：全量 5296 lib + 15 main + 31 real_world + cli 绿；clippy
+  零警告；fmt 干净；language docs（31 requirements/support）有效；unsafe
+  SAFETY 门禁 OK；dispatch 门禁 fallback_rate 0.2735 = 基线（零静默回退）；
+- **四象限终测**：dsp O1 默认 112.7ms（1.06× C -O2，基线 402.1ms/3.97×——
+  0.35.3 链式末端检查收敛跨 13 个 sprint 稳定保持）；dsp O1+ieee 1.04×；
+  mandelbrot O1 1.81×；无象限回退超仪器方差——DX/质量次线 sprint
+  （0.35.12–15）零性能污染；
+- **RC 复核裁决**：#21（zip raw-pair 显示）/#22（resolved map builtin，
+  closure 桥接）经风险评估改登记 **0.2**——两者都需触碰 0.35.11 的 fragile
+  面（product formatter heap-pack 假设 / resolved 高阶内建 emit），RC 窗口
+  内引入 segfault 风险不对称；当前状态无 crash、输出语义正确（zip legacy
+  显示空行、map 函数体 fallback legacy），不阻断 RC。
 
-### 0.35.19 — 错误消息 CO-H2 精确 span（dx-backlog #7，Phase G）
+### 0.35.15 — LSP 文本搜索 → Span/Origin 迁移（dx-backlog #3，Phase D 顺延项）
 
-> 消灭一条内部 `TOOL-RESOLUTION-001` 泄漏路径：tail if/else 分支类型不匹配
-> 从“无 E 码 + 无 span + 泄漏 rt:<hash> 类型 ID”变为 E0214 + 精确 if 语句
-> 定位 + 语言类型名。报告 `devdocs/v0.35/error-coh2-0.35.19.md`。
+> A6 基础设施（Span/Origin/AstNodeMeta + PositionMap）的消费端收尾：LSP
+> 内全部“文本扫描定位 AST 位置”的调用点迁移到 AST span（探针测试锁定锚点
+> 契约后逐文件迁移）。顺带修掉一批潜伏假阳性：`contains("impl")` 落在
+> 首个 impl、`func {name}` 落在注释/调用点、let 绑定落在同名先行绑定、
+> 括号计数被 `let s = "}"` 截断。
 
-- **checker/lowering 对齐**：`check_block_with_implicit_return` 尾部
-  `Stmt::If`（带 else）改双向检查（锚定 if 语句 span；双分支 diverging 时
-  不触发隐式返回检查）——此前 checker 放行、resolved lowering 用内部码拦截；
-- **类型名渲染**：`PrimitiveType::language_name()` + `BodyLowerer::type_display`
-  （Primitive/Nominal/Tuple/Result/Option/Reference/Newtype 递归渲染，深度上限
-  4；`builtin:type:` 前缀剥离）——`implicit_conversion` 错误消息不再泄漏
-  `rt:<hash>` 内部 ID；
-- **span 回退链**（resolved/mod.rs）：generated NodeId 查 node_meta 失败时提取
-  `function:<owner>` 锚点，不再静默 `Span::UNKNOWN`；
-- **统一 if 分支检查**：`Checker::check_if_branch_types` 共享方法（cond bool
-  E0205 + 双向分支检查 + unify E0214），接线 `check_expr_inner` 的 `Expr::If`
-  / `check_block_expr` 尾部 If / tail-if 三处——**diverging 分支豁免**（尾部
-  return/break/continue 不参与 unify，flow `-> A|B` 双状态 return 合法）+
-  **数值强制豁免**（i32/i64、int/float 混合分支合法）；
-- **消灭合成临时 Expr 隐患**：`check_block_expr` 尾部 If 分支不再合成
-  `Expr::If` 调 check_expr（合成节点无 AST meta → 无 stable NodeId →
-  `stabilize_expression_types` abort；该路径首次被真实触发后暴露）；
-- **回归锁**：`src/tests/error_co_h2.rs` ×4（E0214 精确 span / diverging
-  豁免 / 数值强制 / 无内部 ID 泄漏）；全量 **5311 lib** + 15 main + 31
-  real_world + cli 绿；clippy 零警告；fmt 干净；dispatch 无静默回退。
+- **探针测试**（`src/tests/lsp.rs` +2 项）：锁定迁移依赖的 span 锚点契约
+  ——FuncDef/TypeDef/ModuleDef/ImplDef 锚定关键字、let pattern 锚定绑定名、
+  Call 表达式锚定 callee、FuncDef.end_line 到闭括号行；
+- **references.rs**：goto-definition/references/highlight 的 Type/Module/
+  let 绑定定位全部 span 化（删除死文本回退）；impl 跳转位置精确到块行；
+  `enclosing_func_line_range` 改 AST 包含（rename 作用域不再依赖
+  `starts_with("func ")` 启发式）；
+- **util.rs**：`find_func_end_line` 删除（SourceScanner 括号计数被
+  `span.end_line` 平替），`find_enclosing_func_in_items`/`hash_func_body`
+  span 化（签名去 text 参数）；
+- **symbols.rs / lens.rs / hierarchy.rs / inlay.rs**：文档符号/工作区符号/
+  code lens/调用层级/inlay 提示的 def-line 与 call-line 全部 span 化；
+  inlay 参数提示的 call-line 不再落在首次提及，括号扫描从 callee 名尾开始；
+- **测试更新**：audit_fix_lsp 括号计数测试重写为 span 包含测试（字符串/
+  注释内括号假目标结构性免疫）；全量 5296 lib + 31 real_world + cli 绿；
+  clippy 零警告；fmt 干净。
+
+### 0.35.14 — DX backlog 三项：#13 runs_flow 三层集成 + #16 C stdio 混流 + #18 tuple fn 取出（Phase D）
+
+> 质量次线三项落地。头条是 #13（0.34.29 曾有"超单 sprint 范围"回滚史）：
+> actor `runs` Flow 的 transition 方法调用（`a.inc()`）此前被 checker
+> 误报 E0221 "has no method"（合法程序被拒 = L2 假阳性），本次实测逐层
+> 推进完成类型检查层三层集成；`mimi check` 全通，bytecode dispatch 运行时
+> 行为不变。#3（LSP Span/Origin 迁移）顺延下个 sprint。
+
+- **#13 层①（checker + infer 方法注册）**：`collect_item_decls` 将 runs_flow
+  actor 的每个 transition 注册为合成方法（签名 `(self, event params…) ->
+  ToState`；`fails E` 时返回 `Result<ToState, (FromState, E)>`——与
+  codegen/VM dispatch 消费的形状一致）；显式同名方法优先。infer 新增
+  `runs_flow_transition` 辅助 + `is_actor_method` 扩展：调用点按 actor 方法
+  dispatch（E0221/E0257 误报消除），参数类型/元数照常 E0211/E0257，typo
+  建议含 transition 名；
+- **#13 层②（zonked 签名）**：无需额外注册——`finalize_zonked_func_types`
+  遍历 checker `funcs` 目录，自动覆盖合成条目；
+- **#13 层③（resolved callable identity）**：resolved 目录为每个 transition
+  注册 `function:{Actor}::{transition}` 的 `ResolvedFunction`（含 implicit
+  self + 参数 NodeMeta）与 `ResolvedActorMethod`（call-site KIND 事实因此
+  归类为 Method 而非 Unknown）；typed body lowering 对合成 callable 豁免
+  （无语义体，转移表由 VM/codegen 运行时 dispatch）。**边界**：`mimi build`
+  codegen 仍报 E0700（runs_flow codegen 维持 0.2 登记，spec §6.12）；
+- **#16（C stdio 混流乱序）**：VM `print`/`println`/`print_err` 每次 Rust
+  侧写前 `fflush(nullptr)` 抽干 C stdio 块缓冲——比"退出前单次 flush"更强，
+  在每个交错点保持程序序；无 FFI 场景空缓冲 flush 为廉价 no-op；
+- **#18（tuple fn 元素取出调用）**：tuple 字面量中的具名函数元素在绑定处
+  登记（`record_tuple_fn_elems`/`register_tuple_index_fn_binding`，Stmt::Let
+  双路径），`let f = t.0` 取出绑定走间接调用路径（i64 ptrtoint 槽 inttoptr
+  还原指针）——此前 codegen 报 E0700 "undefined function 'f'"（VM 可执行，
+  双后端分歧）；
+- **回归**：actors.rs 新增 3 项（dispatch typed check + 参数类型 E0211 +
+  fails Result 形状），real_world 新增 `real_world_tuple_fn_element_call`
+  双后端锁；全量 5294 lib + 31 real_world + cli 绿；clippy 零警告；fmt 干净。
+
+### 0.35.13 — trivia 化：desc/rule/mms{} 降注释，Stmt 33→30（Phase D）
+
+> dx-backlog #10（0.34.5a 推迟项）落地：`desc`/`rule`/`mms{}` 从 AST 降为
+> trivia——parser 消费即弃（验证括号结构但不产出语句），表面语法兼容
+> （旧源码继续可解析）。`math:` 保留 verifier 通道（P1 裁决）。#13（actor
+> runs_flow 三层集成）从本 sprint 拆出单独排期（曾有“超单 sprint 范围”
+> 回滚史）。
+
+- **parser**：`parse_stmt_kind` 删除 Desc/Rule/Mms 产出臂（块外出现报
+  trivia 诊断）；两个 block 循环（terminator/recovery）改为消费即弃；
+  `parse_mms_block` 改返回 `()`，删除文本重建逻辑（仅保留括号平衡消费）；
+- **AST**：`Stmt::Desc`/`Stmt::Rule`/`Stmt::MmsBlock` 三 variant 删除
+  （Stmt 33→30）；
+- **消费面清理（82 处 / 22 文件）**：resolved（语义键/节点标签/span 抽取
+  7 臂）/ checker（check_stmt×3、func 合约探测、borrow）/ codegen（block/
+  func/actors skip 臂）/ bytecode VM / CFG lower / resolved IR lower /
+  loader span remap / lint / verifier×4 文件 skip 臂；
+- **真实依赖处置**：`doc_core` desc/rule 文档提取循环删除（降注释后无
+  结构化意图文本可提取，属裁决内行为）；`core::verify_rules` 降为恒净
+  no-op（保留 CLI `--verify-rules` 接口）；LSP `has_contracts` 探测去
+  MmsBlock；
+- **测试重写**：`mms_integration.rs` 8 项全重写为 trivia 契约（解析无错 +
+  零 AST 语句 + 运行时语义不变，新增独立 desc/rule trivia 锁）；
+  parser/flow.rs mms 嵌套括号测试改为“消费后仅余 return”；语料实测
+  desc/rule/mms{} 使用量为零（demos/examples/tests/std/projects 全扫），
+  且新测试发现登记口径误差：真实语法为 `desc "text"` 无冒号；
+- **验证**：全量 5292 lib + 30 real_world + cli 绿；clippy 零警告；fmt 干净。
+
+### 0.35.12 — resolve→zonk 全量迁移 + parser panic 审计第一批（Phase D）
+
+> dx-backlog #1 关闭 + #2 第一批（parse_expr/parse_stmt）审计落地。
+> 两半各自独立提交（0.35.12a 迁移 / 0.35.12b 审计）。
+
+- **#1 resolve()→zonk_or_unknown() 全量迁移（31 处生产调用点清零）**：
+  infer_expr×2 / check_stmt×4 / checker·func×1 / checker·vars×6 /
+  checker·items×2 / checker×1 / infer·lambda×1 / infer·call·helpers×5 /
+  infer·call·simple×5 / infer·helpers×1 / infer·record×3。**语义裁决**：
+  迁移点均为推断内部（非定稿边界），游离 TypeVar（let 多态占位）/ForAll/
+  逃逸哨兵在迁移前 resolve 中原样透传——首版直接套 scan_residual 严格化
+  在 flow checker unknown 哨兵与 let 多态游离变量两类合法路径上触发
+  debug 断言（实证后回退）；`zonk_or_unknown` 最终对齐 pre-migration
+  resolve 语义（resolve_infer + unknown 兜底 + 可见 debug 断言），严格
+  定稿仍由真边界处的 `zonk` 承担；`resolve()` 降为 #[deprecated] 转发，
+  仅 unification.rs 模块测试消费；
+- **#2 parser panic 审计第一批（parse_expr/parse_stmt）**：审计结论矫正
+  登记口径——**51 处 `panic!` 全部位于 #[cfg(test)] 测试区**（原登记未
+  分离测试代码）；`unwrap()/expect(` 计数含 parser 自身的 Result 返回
+  `self.expect()` 辅助方法（非 Option::expect）。生产区真实残留仅 3 处
+  结构性不变量 unwrap（if-chain 首链 ×2 + token 索引 ×1），全部降级为
+  `ParseError` 诊断（用户输入永不 abort 编译器）；
+- **验证**：5292 lib 全绿（含 parser 92 / property 44）；clippy 零警告；
+  fmt 干净。
+
+### 0.35.11 — O1 正确性切片：O1/O0 双档对等三连修（Phase D）
+
+> O1 默认化后的 dual 对等扫描发现 `demos/05_lists.mimi` 双档分歧：O0
+> tcache double free abort、O1 静默输出错。三连根因各自独立，修复后
+> 05_lists O0/O1 与 bytecode 逐行对等（除 zip 行，见已知限制）。
+
+- **修复 1：resolved slice trap 块缺 terminator**（`src/codegen/resolved/mod.rs`
+  `emit_bounds_trap`）：slice OOB trap 块以 noreturn call 结尾但无 terminator
+  → LLVM verify 拒绝整个函数 → **静默降级 legacy emitter**（连带 print
+  dispatch 错乱）。补 `build_unreachable`；`sort(data)` + `data[1..4]` 同函数
+  复现；
+- **修复 2：legacy print dispatch 对 list 返回内建的类型推断缺口**
+  （`src/codegen/expr.rs` + `func.rs` + `block.rs`）：`map`/`filter`（编译期
+  内建）与 `reverse`/`sort`/`range`（无 func_defs 条目的运行时 builtin）的
+  调用结果被推断为 **被调名**（"map"、"reverse"…）或空 → `{i64 len, ptr data}`
+  list struct 误入字符串快速路径（printf 对结构体字节 strlen，输出
+  空/垃圾，O0 下可触发 double free）。新增共享 helper
+  `infer_list_builtin_return_type`（从源参数推导 List<T>；map 优先取 lambda
+  声明返回型），接入 `infer_object_type` Call 分支 + 两处 let 绑定追踪；
+  另补 `SliceExpr` arm（`xs[1..5]` 同源类型）；**zip 不入 helper**：其裸
+  {i64,i64} pair 布局与 product-tuple formatter 的 heap-pack 假设不符，
+  强类型化会 segfault（已知限制：legacy 下 zip 显示为空，O1 不 crash）；
+- **修复 3：list 字面量绑定 local 后 realloc 所有权陈旧**（resolved，
+  `src/codegen/resolved/mod.rs`）：`let mut ys = [1,2,3]; push(ys, 4)` 先在
+  构造临时 alloca 建表并注册为 buffer 所有者，再值拷贝进 local；push/pop
+  的 realloc 更新的是 **local** 槽，注册槽残留 realloc 前旧指针 → scope
+  退出 free 旧指针（realloc 搬移时已内部释放）→ tcache double free。
+  O1 仅因 SROA 合并两 alloca 侥幸不炸。新增 `emit_list_literal(target)`
+  直接构造模式 + Bind 快速路径：字面量直接绑定简单 local 时就地构造，
+  注册所有者 = 被 mutator 更新的槽；
+- **诊断钩子**：`MIMI_DUMP_MODULE` 提升到 optimize gate 之外（O0 构建
+  也可 dump IR，此前 O1-only 位置使默认 debug opt-out 构建不可见）；
+- **回归锁**：`real_world_list_intrinsic_display_and_realloc`（sort/slice/
+  reverse/map/filter 内联+绑定显示 + push/pop realloc 所有权，run/build
+  双后端对等）；临时复现文件 dblfree_min.mimi 已转正删除；
+- **验证**：05_lists O0/O1 与 bytecode 输出逐行对等（zip 行除外）；全量
+  5292 lib + 29 real_world + cli 套件绿。
+
+### 0.35.10 — dispatch 门禁复测 + 覆盖率曲线（Phase C 收官）
+
+> Phase C 收官：全语料 113 程序（demos + examples + tests/real_world）
+> dispatch 复测与覆盖率曲线。报告 `devdocs/v0.35/dispatch-coverage-0.35.10.md`。
+
+- **曲线**：0.9609（0.34.40 门禁建立）→ 0.3027（0.34.42 slice 放开）→
+  **0.2735**（0.35.7 strings/collections 模块体进 slice，−0.0292）；
+  eligible 202 → 3783 → **3974**（72.65%）；
+- **复测**：113 程序全部编译成功（0 emit_failed）；门禁 check 无静默回退
+  （0.2735 < 0.3027）；新增程序 json_parser 自动纳入（0.2667）；
+- **基线更新**：dispatch-baseline.json 更新至 3974/5470（0.2735）；
+- **剩余拆解**：legacy 1496 中 generics/qualified 1331（**89%**）——泛型函数
+  进 resolved slice 需单态化/泛型 emit（架构级），**登记 1.x 评估**；
+  module file 81（io/fs/net 未 lift 模块，登记 0.35.x 后续）；unsupported
+  type/expr 62；actor/nominal 15；
+- **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
+
+### 0.35.9 — contracts 守卫发射性能切片（Phase C）
+
+> 0.34.41 第二档（resolved 运行时守卫发射）第一个性能回访。结论：
+> **守卫成本 < 噪声，零优化空间**。
+
+- **基准**：`benchmarks/contracts.mimi`——`validated_sum(n, lo)` 带双合约
+  （requires n>=lo + ensures result>=0），300 万次调用（参数 k%20 防
+  LICM 提升、lo 来自 argv[1] 防常量折叠）；`plain_sum` 同构无合约对照；
+- **数据（O1，3 次中位数）**：擦除 0.02s vs `--verify-contracts` 0.02s——
+  守卫被内联 + 分支预测近全命中，双向无差异；
+- **IR 验证**：requires/ensures 的 icmp + contract_pass/fail 双块 +
+  mimi_runtime_abort（E0808）完整存活，与 0.34.41 设计一致；循环内 checked
+  add 的 trap_overflow + branch_weights（0.35.4）与守卫共存；
+- **登记**：无优化空间（重守卫 = 用户表达式成本，非机制开销，不预优化）；
+  报告 `devdocs/v0.35/contracts-slice-0.35.9.md`；
+- **验证**：全量 5292 lib 绿 / clippy 零警告 / fmt 干净。
+
+### 0.35.8 — fails transition Result 布局对齐（Phase C）
+
+> dx-backlog #20：flow_order_system native SIGSEGV（`puts(0x1)` 整数当字符串
+> 指针，gdb 实证）。fails transition 返回 Result<Target,(Source,E)> 中 string
+> 字段布局错位——0.34.25a 只修了 Err 臂（Q1），Ok 臂 + 事件参数路径未修。
+> 两个独立根因，双双修复。
+
+- **修复 1 — Ok payload coach load**（func.rs `coerce_field_to_type`）：
+  `compile_ok_constructor` 打包 `{i1, ptr, i64}`（payload 槽存目标地址），
+  coerce 到声明布局 `{i1, T, E}` 时把裸指针 store 进 T 槽位——struct payload
+  （含 string 字段的 Flow state）地址位被当字段读。新增 ptr→struct 分支：
+  build_load 解引用（mimi-string wrap 分支在前保持 C-string 指针语义）；
+- **修复 2 — flow transition 字符串字面量参数**（method.rs
+  `compile_flow_transition_call`）：字符串字面量参数编译为 raw global-string
+  指针，旧代码按参数类型 `{ptr,i64}` 直接 load——把字符串自身字节读成
+  {data_ptr, len}（"TXN-42" → data_ptr=0x32342D4E5854）。改为 wrap_c_string
+  （非 string struct 参数仍 load）；
+- **回归**：flow_order_system + flow_system_trace 从 dual-backend
+  known_limitations 移除（两个 SIGSEGV 均修复），纳入双后端套件；
+- **验证**：flow_ 365 测试全过；全量 5292 lib 绿 / 15 real_world / 29 cli /
+  clippy 零警告 / fmt 干净；flow_order_system native 输出与 VM 逐行一致
+  （TXN-42/TRK-001/book/invalid price/0）。
+
+### 0.35.7 — strings/collections 模块体进 resolved slice（Phase C）
+
+> dx-backlog #19：strings/collections 模块体（含 trait impl 方法体）进 resolved
+> slice。根因是 str_* builtin 的 {ptr,i64} 值 → runtime-direct ptr 的 coercion 失败
+> 拖垮所有调用它们的 stdlib 函数体。顺带修复了三个被真实程序暴露的既有 bug。
+
+- **STRING_ABI_BUILTINS**（resolved/mod.rs）：16 个 str_* builtin 跳过
+  runtime-direct 快捷路径，强制走 string emitters（compile_builtin_call）——
+  `str_char_at` 等 runtime helper 收 raw C-string ptr，而 resolved 传 Mimi
+  string 值 {ptr,i64}，coercion 失败导致每个调用它的 stdlib 函数体 resolved
+  编译失败落 legacy（0.34.38 只修了 str_substring 单点）；
+- **默认白名单扩展**（eligibility.rs `module_bodies_lifted`）：
+  prelude,mymath → +strings,collections。A/B 语料五程序（std_strings /
+  std_collections / 06_strings / 05_lists / json_parser）编译 + 运行全过，
+  dispatch 统计 eligible 34/45、零 module skip（legacy 11 全为
+  generics/qualified）；
+- **修复 1 — mimi_runtime_assert 缺失**（runtime/mod.rs）：legacy pattern
+  binder（func/pattern.rs `PatternKind::Literal`）早就在调用 `mimi_runtime_assert`
+  (bool, ptr)，但 runtime 从未定义该符号——任何带 literal 子模式
+  （`Bool(true) =>`）的程序链接失败。补实现（E0801 家族：失败打印 + abort）；
+- **修复 2 — 泛型参数名遮蔽用户类型**（func.rs `legacy_param_llvm_type`）：
+  `type T` + prelude `eq<T>` 时，legacy 编译泛型骨架把参数 T 解析成用户 enum
+  的 struct 布局，`a == b` 报 "eq requires same types"（E0700）。declare_func /
+  bind_func_params 统一走新 helper：泛型参数名 → i64 占位（骨架仅满足 legacy
+  声明 pass，真实调用走 monomorphize）；
+- **修复 3 — literal 子模式 fall-through**（expr/match.rs）：Constructor arm
+  只在 tag 匹配时进入，payload literal 比较被推迟到 pattern binding——
+  `B(false)` 值落到 `B(true)` arm 时 assert abort 而非落入下一 arm。修复：
+  literal 字段比较并入 arm 条件（tag AND payload）；
+- **回归测试**：real_world_literal_pattern_fallthrough（双后端，覆盖修复 2/3）；
+- **验证**：全量 5292 lib 绿 / 16 real_world / 29 cli / clippy 零警告 / fmt 干净。
+
+### 0.35.6 — 四象限矩阵终测 + 曲线报告（Phase B 收官）
+
+> Phase B（trap 成本消减）终测：链收敛 + cold 权重双項落地后的完整矩阵复测
+> 与收敛曲线报告。
+
+- **终测矩阵（O1，2026-08-08）**：dsp 402.1→104.5ms（**1.04× 追平 C -O2，降 74%**）；
+  mandelbrot 40.0→19.8ms（1.78×，降 50%）；fib 持平 2.90×（递归调用 + checked
+  intrinsic 组合开销，登记 0.1.5 范围外——需 emitter 架构级优化）；O0 全程不变
+  （收敛/cold 权重仅 O1 路径）；
+- **曲线**：trap 主导项（dsp）成本降 74% ≥ 30% 验收达成；dsp 默认档与 ieee 档
+  持平（104.5 vs 103.9ms）——链收敛 + cold 权重达成 ieee_float 全部收益且完整
+  保留 trap 语义；**Phase B 关闭**。
+
+### 0.35.5 — nsw/nuw 语义分级评估（裁剪登记，Phase B）
+
+> Phase B 可选工作项评估后裁剪：SD-7/8/9 trap 是语言承诺（E0802/E0801/E0813），
+> nsw/nuw 放宽会改变可观测 trap 行为，违反 L1 不变量（0.35.2 已否决）。
+> 无代码变更，仅为路线图/预算完整性登记。
+
+### 0.35.4 — trap 分支 cold 权重（trap 成本消减 L2，Phase B）
+
+> 0.1.5 性能主线的收尾项：为全部 trap/Fault 分支附加 branch_weights cold
+> metadata，让 LLVM 分支布局优化把 trap 代码移出热路径。检查合并/循环提升
+> 经链收敛后无剩余空间（热循环已压到 1 检查/迭代），裁剪登记；CVP pass
+> 实测无收益（fib 2.96× vs 2.98× 噪声内）不引入风险面，撤销。
+
+- **mark_cold_trap_branch**（float_chain.rs）：`branch_weights {0,1}` cold 权重
+  附加 helper（LLVMGetMDKindIDInContext + metadata_node）；5 处 trap 分支统一
+  标记：SD-8 div-zero / MIN÷−1、SD-7 checked add/sub/mul、SD-9 float finiteness
+  （legacy check_float_finite + resolved enforce_float_finite 两路）；
+- **golden IR 更新 ×14**：branch_weights metadata 入 golden 快照（`!0 =
+  !{!"branch_weights", i32 0, i32 1}`）；
+- **CVP 评估**：pass 串实验 `default<O1>,correlated-propagation`——fib 的
+  checked intrinsic 未被消除（alloca/load 模型下 range 分析不propagate），
+  矩阵无收益（fib 47.3 vs 47.4ms 噪声内），按"无收益不引入风险"撤销；
+- **检查合并/循环提升裁剪**：L1 链收敛后 dsp/mandelbrot 热循环均为 1 检查/
+  迭代（环守卫/比较观察点，语义必需），无合并空间；环守卫不能提升出循环
+  （非有限传播需实时捕获）；登记无剩余工作项；
+- **验证**：全量 5292 lib 绿 / 15 real_world / 28 cli / clippy 零警告 / fmt 干净；
+  矩阵终测 dsp 1.04× / mandelbrot 1.78× / fib 2.90×（O1）。
+
+### 0.35.3 — SD-9 链式末端检查收敛（trap 成本消减 L1，Phase B）
+
+> 0.1.5 性能主线的第一个实现 sprint：链收敛 pass 落地，dsp 追平 C -O2。
+> 语义保持——trap 是语言承诺（SD-7/8/9），收敛只移动检查位置不改变可观测行为。
+
+- **float_chain pass**（`src/codegen/float_chain.rs`，O1 管线前 LLVM IR 层）：
+  收集全部 SD-9 检查点（`fcmp uno x,x` 特征指令）→ 被检值的所有用户（排除检查
+  部件）都是受检 f64/f32 代数 op → 链中继点删除检查；末端/观察点（比较/存储/
+  函数参数/返回/phi/不受检 op）保留；无逃逸 alloca store→load 转发入链（其他
+  store 仅允许常量初始化）；[零真实消费（dead 结果）保留检查——防止 DCE 丢失
+  trap 语义]；fallible 上下文（Fault 吸收）不收敛；
+- **性能（四象限复测）**：dsp O1 默认 402.1→108.9ms（**3.7×，1.07× 追平
+  C -O2**，较基线 3.97× 下降 73%）；mandelbrot O1 3.64×→1.80×（40.0→19.8ms）；
+  fib 持平（无 float 链）；O0 档不变（收敛仅 O1 路径）；dsp 默认档与 ieee 档
+  持平（108.9 vs 106.9）——链收敛达成 ieee_float 的全部收益且保留 trap 语义；
+- **修复回归**：`ieee_depth_does_not_leak_across_function_boundary`——dead 结果
+  的 fmul 检查被误删导致 Inf 偷偷通过（检查分支使 fmul 保持 live，删除后 LLVM
+  DCE 掉表达式丢失 trap 语义）；修复为零真实消费 → 保留检查；
+- **测试**：`src/tests/float_chain.rs` 探针 ×5（链中非有限末端 trap / dead 结果
+  保留检查 / 比较观察点保留 / 有限链双端对等 / ieee 块消费边界）+ 既有
+  ieee_depth 回归；全量 **5292 lib** 绿 / 15 real_world / 28 cli / clippy 零警告 /
+  fmt 干净；诊断钩子 MIMI_DUMP_MODULE_CONVERGED（pass 后 dump）。
+
+### 0.35.2 — trap 成本分解（perf 数据驱动，Phase A）
+
+> 0.1.5 性能主线的第二步：perf 级分解锁定 SD-9 检查的真实成本结构，
+> 完成 trap 语义分级表裁决。纯分析 sprint，零代码变更。
+> 报告：`devdocs/v0.35/trap-decomposition-0.35.2.md`。
+
+- **perf 分解（dsp 5×10^7）**：O1 默认 408.7ms vs O1+ieee 106.8ms
+  （−73.9%）；指令 38.5→9.1/迭代，分支 4.05→0.015/迭代——**SD-9 检查的
+  隐性成本 = 破坏 LLVM 向量化窗口**（每个 f64 binop 后的 finiteness 检查 +
+  两路分支横插链中），向量化恢复是主要杠杆（ieee 版分支几近归零）；
+- **链式末端检查假设验证成立**：IEEE 754 NaN/Inf 传播性论证——中间结果
+  非有限必传播至链末端（NaN ⊛ x = NaN；Inf 参与结果 ∈ {NaN, ±Inf}），
+  逆否等价；适用四条件：纯 binop 链 / 中间值未被比较·分支·内存写·调用消费 /
+  非 fallible 上下文 / 非 ieee_float 块内；
+- **trap 语义分级表裁决**：L1 链式末端检查（resolved+legacy+VM 三面对等）
+  0.35.3 实施；L2 trap 分支 cold weight 顺带；L3 常量折叠先行；L4 整数 trap
+  维持现状（0.35.1 实证 O1 已消除循环内 checked add）；**L5 nsw/nuw 放宽否决**
+  （E0802 是语言承诺，改变可观测 trap 行为违反 L1 不变量）；L6 跨函数链
+  识别 0.35.4 评估不承诺。
+
+### 0.35.1 — 性能基线套件 + 四象限矩阵（0.1.5 首 sprint，Phase A）
+
+> 0.1.5 性能主线的第一步：建立可复现基线，锁定 trap 成本分解的第一个靶子。
+> 纯增量基建，零行为变更。基线报告 `devdocs/v0.35/perf-baseline-0.35.1.md`。
+
+- **基准套件扩展**：`benchmarks/` 新增 dsp 热循环（一阶低通 5×10^7，dogfood
+  M-014 同构场景）+ `dsp_ieee`/`mandelbrot_ieee` 变体（ieee_float 包裹悬浮
+  SD-9 finiteness trap）+ `dsp.c`（gcc -O2 对照）/ `dsp.py`（CPython 对照）；
+- **quadrant.sh**：四象限矩阵脚本——MIMI_OPT ∈ {0,1} × {默认, ieee_float}
+  对 fib/mandelbrot/dsp 计时（纳秒括弧，RUNS=3 中位数）+ MIMI_DUMP_MODULE
+  IR dump 静态 trap 调用点计数（trap 发射与优化档无关）；
+- **基线矩阵（2026-08-08，32 核机）**：dsp O1 默认 402.1ms（3.97× C -O2）→
+  O1+ieee 106.4ms（**1.06× 追平**）；mandelbrot O1 3.64× → ieee 1.88×；
+  fib O1 2.88×（O0 3.68×）；
+- **关键发现**：SD-9 float finiteness trap 占 dsp O1 默认耗时 **73.5%**
+  （295.7ms，每 f64 binop 发射 NaN/Inf 检查）；整数 trap（SD-7）在 O1 下被
+  LLVM 循环分析消除（ieee 版整数计数器仍 checked add 却追平 C）——整数
+  trap 不是主要靶子；trap 静态计数与动态成本定性吻合（dsp 28→24 /
+  mandelbrot 38→30）；
+- **0.35.2 输入**：SD-9 链式末端检查假设（f64 代数链中间非有限必传播到
+  末端，逐点检查可收敛为末端检查，语义保持）列入验证。
 
 ### 收口状态：已知排期外项（登记 0.2 / 1.x）
 
@@ -812,7 +829,7 @@
 | 项 | 现状 | 根因 / 排期 |
 |----|------|------------|
 | native dsp O1 ≤1.15× C -O2 | 1.31–1.38× | LLVM 18 LoopUnroll IPC 差距（IPC 0.72 vs 1.00），C1b/C1c 已证不可经自引用 unroll 元数据根治；0.2/1.x 评估 LLVM 升级或 nsw 放宽（需语义裁决） |
-| RUN dsp ≤1s | 5.8s（R1+R3+R4 合计 1.54×） | 余量在 156-Op 单 match 分发（V2），safe-Rust superinstruction 已到顶；1.x 评估 direct-threading/JIT |
+| RUN dsp ≤1s | 4.7s（R1 Arc + R3 peephole + R4 builtin 快路径 + R5 LICM 合计 ~1.9×） | 余量在 156-Op 单 match 分发（V2），safe-Rust superinstruction 已到顶；1.x 评估 direct-threading/JIT |
 | fib Z3 证明消除（O1 性能） | 未做 | 需 verifier 输出 no_overflow 事实喂 codegen 消除 checked 检查；0.2 |
 | generics 单态化 | 未做 | 泛型 emit 需单态化，resolved slice 覆盖受阻；1.x |
 | `--test-threads=16` 偶发失败 | 未根治 | 已知测试并发偶发（AGENTS §4.2 注记），CI 用 2 线程不触发；1.x |

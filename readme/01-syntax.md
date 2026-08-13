@@ -44,11 +44,14 @@ f-string 中 `{expr}` 会被求值并插入到字符串中。
 
 ## 2. 关键字
 
-> **0.34.33 刷新**：以下为 0.1.4 语法冻结后的实况关键字表（共 **80 个** `=> TokenKind`
-> 映射，实测 `src/lexer/keywords.rs:92-177`；其中 `and`/`or`/`not` 为软关键字）。
+> **0.35.39 刷新**：以下为 0.1.5 实况关键字表（共 **67 个** `=> TokenKind`
+> 映射，实测 `src/lexer/keywords.rs` `keyword_or_ident`；其中 `and`/`or`/`not` 为软关键字）。
 > 权威来源：`docs/syntax-reference.md`（golden EBNF 渲染副本）。
 > 已删除的关键字：`do`（0.34.27）、`become`/`stay`（0.34.11）、`subflow`/`steps`/`consume`
-> （0.34.2）——现均 tokenize 为普通标识符；`delegate` 软化为标识符（语句位置保留拒绝诊断）。
+> （0.34.2）——现均 tokenize 为普通标识符；`delegate` 软化为标识符（语句位置保留拒绝诊断）；
+> 僵尸关键字裁撤（0.35.39）：`c_shared`/`c_borrow`/`c_borrow_mut`/`local_shared`/`weak_local`/
+> `raw_string`/`nothing`/`alloc`/`async`(top-level)/`with`/`desc`/`rule`/`mms`——共享四态收敛为
+> `shared`/`weak` 二态，`Type::Nothing` 保留为语义残差类型（无关键字）。
 
 **声明与定义**
 ```
@@ -59,9 +62,8 @@ dyn        where
 
 **变量与内存**
 ```
-let        mut        ref        const      shared     local_shared
-weak       weak_local c_shared   c_borrow   c_borrow_mut
-raw_string arena      alloc      drop
+let        mut        ref        const      shared     weak
+arena      drop
 ```
 
 **控制流**
@@ -79,14 +81,12 @@ mutate
 
 **并发与恢复**
 ```
-spawn      await      async      parasteps  failure    reset
-recover
+spawn      await      parasteps  failure    reset      recover
 ```
 
-**契约与元数据**（`with` 仍为保留字，effect 子句已废止）
+**契约与元数据**
 ```
-requires   ensures    invariant  math       desc       rule
-old        mms        with
+requires   ensures    invariant  math       old
 ```
 
 **元编程**
@@ -99,9 +99,9 @@ comptime   quote
 and        or         not
 ```
 
-**字面量与类型名**
+**字面量**
 ```
-true       false      unit       nothing
+true       false      unit
 ```
 
 **其它**
