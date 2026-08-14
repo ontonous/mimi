@@ -145,13 +145,18 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
       | ('shared'|'weak') Ident [ ':' Type ] '=' Expr ';'                     (* :456-494 *)
       | '...' ';'                                                            (* sketch-only，:80-91 *)
       | 'drop' '(' Expr ')' ';'                                              (* :92-99 *)
-      | 'defer' '{' Block '}' ';'                                            (* :100-107 *)
+      | 'defer' '{' Block '}' ';'      (* :100-107；任意作用域出口 LIFO 执行，
+                                         0.36.15 与 on failure 一并由 resolved
+                                         发射器以登记+出口发射实现——无
+                                         'defer failure' 表面，见 language-spec
+                                         §4.6 0.36.15 修正 *)
       | 'parasteps' '{' Block '}' ';'                                        (* :108-115 *)
       | 'func' FuncDef ';'                                                   (* :116-120 *)
       | 'delegate' ... — **v0.34.1 已拒绝**（条款 2 诊断，parse_stmt.rs:139-160）
       | 'pinned' '(' Expr ')' [ '|' Ident '|' ] '{' Block '}'   (* :180-216；v0.34.3 timeout 字段删除 *)
       | 'if' 'let' Pattern '=' Expr '{' Block '}' [ 'else' ( 'if' ... | '{' Block '}' ) ]  (* v0.34.3 Stmt::IfLet *)
-      | 'on' 'failure' '{' Block '}'                                         (* :217-224 *)
+      | 'on' 'failure' '{' Block '}'   (* :217-224；失败出口补偿（Err/Fault/panic），
+                                         于语句执行点登记，0.34.36 无 block 预扫 *)
       | Target ('=' | '+=' | '-=' | '*=' | '/=' | '&=' | '|=' | '^=') Expr ';'  (* 复合赋值→desugar 为 Assign+Binary，:226-294 *)
       | Expr ';'                                                             (* :290-293 *)
 ```
