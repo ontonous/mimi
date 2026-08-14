@@ -3436,6 +3436,96 @@ func main() -> i32 {
     );
 }
 
+// 0.36.32-34: typed session endpoints — session_open::<S>() constructible,
+// residual engine live across all three paths. Roundtrip uses the pair form
+// (both ends inline); the open form pins the single-endpoint write protocol.
+#[test]
+fn dual_session_typed_endpoint_open() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Half = !i32 . end
+func main() -> i32 {
+    let ch: SessionChan<Half> = session_open::<Half>()
+    session_send(ch, 9)
+    session_close(ch)
+    println(42)
+    0
+}
+"#;
+    let expected = "42";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session open");
+    assert_eq!(checked.trim(), expected, "resolved(codegen)");
+
+    let unga = compile_and_run(src).expect("legacy codegen session open");
+    assert_eq!(unga.trim(), expected, "legacy(codegen)");
+
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm");
+}
+
+// Negative: the typed endpoint CARRIES the protocol — order violations and
+// unfinished residual must be rejected statically (the 0.36.23 dead face now
+// enforces what session_pair's raw i64 handles could not).
+#[test]
+fn dual_session_typed_endpoint_residual_enforced() {
+    let diags = check_source(
+        "session Hello = !i32 . ?i32 . end \
+         func main() -> i32 { \
+             let ch: SessionChan<Hello> = session_open::<Hello>() \
+             session_recv(ch) \
+             session_close(ch) \
+             0 }",
+    )
+    .expect_err("recv-before-send must be a static E0414");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0414"),
+        "expected E0414 order violation, got:\n{rendered}"
+    );
+
+    let diags = check_source(
+        "session Hello = !i32 . ?i32 . end \
+         func main() -> i32 { \
+             let ch: SessionChan<Hello> = session_open::<Hello>() \
+             session_send(ch, 1) \
+             0 }",
+    )
+    .expect_err("unfinished residual must be a static E0425");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0425"),
+        "expected E0425 unfinished residual, got:\n{rendered}"
+    );
+
+    // Unknown session name is rejected up front (E0413).
+    let diags = check_source(
+        "func main() -> i32 { \
+             let ch: SessionChan<Nope> = session_open::<Nope>() \
+             session_close(ch) \
+             0 }",
+    )
+    .expect_err("unknown session name must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0413"),
+        "expected E0413 unknown session, got:\n{rendered}"
+    );
+}
+
 #[test]
 fn dual_optional_chain_misuse_diagnostics_not_masked() {
     let diags = check_source("func main() -> i32 { let x = 5; let y = x?.to_string(); 0 }")

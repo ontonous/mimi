@@ -161,6 +161,12 @@ fn lower_resolved_type<'ctx>(
                     // Map/Set/Record are opaque handles (i64) at the LLVM level.
                     Ok(BasicTypeEnum::IntType(context.i64_type()))
                 }
+                // 0.36.32: SessionChan<T> endpoints are opaque i64 handles at
+                // the LLVM level (mirroring Map/Set) — the typed/residual
+                // surface is compile-time only (E0414/E0425/E0426).
+                _v if item.as_str().ends_with("SessionChan") => {
+                    Ok(BasicTypeEnum::IntType(context.i64_type()))
+                }
                 // 0.36.7 (裁决 3/DoD #4): the structured Fault crash-context
                 // records must lower in the resolved native slice, mirroring
                 // the legacy emitter layouts in codegen/compile.rs

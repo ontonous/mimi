@@ -597,13 +597,11 @@ fn assert_codegen_unsupported(src: &str, feature: &str) {
 
 #[test]
 fn adv_codegen_rejects_fake_builtin_results() {
-    for (feature, call) in [
-        ("test_sandbox", "test_sandbox([])"),
-        ("session_open", "session_open()"),
-    ] {
-        let src = format!("func main() -> i32 {{ let _ = {}; 0 }}", call);
-        assert_codegen_unsupported(&src, feature);
-    }
+    // 0.36.32-34: `session_open` became a REAL builtin (typed session
+    // endpoint construction) — no longer a fake-result rejection case;
+    // only test_sandbox remains unsupported.
+    let src = "func main() -> i32 { let _ = test_sandbox([]); 0 }";
+    assert_codegen_unsupported(src, "test_sandbox");
 }
 
 #[test]

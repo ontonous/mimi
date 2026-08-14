@@ -1063,6 +1063,40 @@ impl<'ctx> CodeGenerator<'ctx> {
         ))
     }
 
+    /// 0.36.32: session_open::<S>() — a single typed endpoint. Returns the
+    /// fresh pair's LO handle as an opaque i64 (a List would smuggle both
+    /// endpoints into one SessionChan value). Residual enforcement is
+    /// compile-time only; runtime is the same opaque channel handle.
+    pub(super) fn compile_session_open_endpoint(
+        &self,
+        _args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let f = self
+            .module
+            .get_function("mimi_session_pair")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_session_pair".into()))?;
+        let pair = self
+            .builder
+            .build_call(f, &[], "sp")
+            .map_err(|e| CompileError::LlvmError(format!("session_pair: {}", e)))?;
+        let packed = call_try_basic_value(&pair)
+            .ok_or_else(|| CompileError::LlvmError("session_pair returned void".into()))?
+            .into_int_value();
+        let lo_f = self
+            .module
+            .get_function("mimi_session_lo")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_session_lo".into()))?;
+        let lo = call_try_basic_value(
+            &self
+                .builder
+                .build_call(lo_f, &[packed.into()], "lo")
+                .map_err(|e| CompileError::LlvmError(format!("session_lo: {}", e)))?,
+        )
+        .ok_or_else(|| CompileError::LlvmError("session_lo returned void".into()))?
+        .into_int_value();
+        Ok(BasicValueEnum::IntValue(lo))
+    }
+
     pub(super) fn compile_session_open(
         &self,
         _args: &[BasicMetadataValueEnum<'ctx>],

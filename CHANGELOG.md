@@ -7,6 +7,41 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.32-34 — SessionChan 类型化端点构造面落地：session_open::<S>()（L1+L2）
+
+- **背景**：0.36.23 曾判定 Session 构造面"死面"——`session_pair()` 只给
+  `List<i64>` raw 句柄，协议违序退化为运行时死锁（VM timeout，checker 零诊断）。
+  0.36.29 §4f 证据链（E0414/E0425/E0426 在 typed 参数/注解全活）已将论断刷新为
+  "residual 引擎全活、构造面半实现"；本组封闭最后一公里。
+- **checker 侧（src/core/infer/call/method.rs、src/core/ir/lower.rs）**：
+  ①infer_turbofish 增加 `session_open::<S>()` 特例（此前 turbofish 只查用户
+  函数表 → 误报 E0401）：单实参 + `Type::Name(...)` + session_types 收录（未知
+  session 名 E0413）+ 空参校验 E0242 → 结果类型 `SessionChan<S>`；
+  ②resolved lower 的 builtin 泛型实参闸新增 session_open 豁免（镜像 from_json）：
+  校验 check-finalized 结果 `SessionChan<S>` 与显式实参 S 一致（不一致给
+  内部不变量错误），`session_open()` 无 turbofish 形态同样合法。
+- **codegen 侧**：`session_open` 从"Unsupported：does not yet lower to a typed
+  SessionChan endpoint"改为**单端点 i64 句柄**（compile_session_open_endpoint，
+  取 pair 的 lo 端；不再误复用 session_pair 的 List 返回——后者会把两个端点
+  塞进一个 SessionChan 值）；codegen turbofish 路径（compile_turbofish_expr）
+  增加 session_open 委派（与 from_json 特例并列，此前走 find_func_def →
+  E0700 "definition not available for monomorphization"）；resolved 片
+  eligibility 门接受 `SessionChan<T>` 名义（不透明 i64，镜像 Map/Set），
+  llvm_type_for_resolved 的 Nominal 臂补 ends_with("SessionChan") → i64。
+- **VM 侧（src/interp/bytecode/builtins/concurrency.rs）**：注册 `session_open`
+  builtin，返回 pair 的 lo 端 i64（与 codegen 同构；注意与 session_pair 的
+  List 返回语义不同）。
+- **端到端实证**：`let ch: SessionChan<Hello> = session_open::<Hello>()` 后
+  send/recv/close 全链 check ✓ + VM + native 双双输出一致；E0414（recv 先于
+  send/close 序违）、E0425（未完成残差出作用域）、E0413（未知 session 名）在
+  typed 端点上全静态拒绝——0.36.23"死面"正式刷新为"构造面闭环"。
+- **回归**：dual_session_typed_endpoint_open（三 harness：resolved/legacy/VM
+  同印）+ dual_session_typed_endpoint_residual_enforced（E0414/E0425/E0413
+  三负例）；adv_codegen_rejects_fake_builtin_results 中 session_open 的
+  "必须 unsupported"断言随功能落地删除（仅保留 test_sandbox）。
+- 全量 5363 passed / 0 failed / 8 ignored；fmt + clippy(-D warnings) +
+  docs(31/31) + edge(6/6) 全绿。
+
 ### 0.36.26 — M9 门禁再补全：字面量数组索引 + 元组字段访问（fail-open 收口，L2）
 
 - **补全（src/core/cfg/resource_lower.rs）**：M9 门禁的另两个漏网形态——

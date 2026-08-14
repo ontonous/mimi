@@ -549,13 +549,22 @@ fn require_scalar_type(
                         }
                         Ok(())
                     } else {
-                        Err(UnsupportedResolvedNode::new(
-                            owner,
-                            owner,
-                            format!(
-                                "nominal type '{item_str}' is not a record or enum in the resolved native slice"
-                            ),
-                        ))
+                        // 0.36.32: SessionChan<T> endpoints are opaque i64
+                        // handles at the LLVM level (mirroring Map/Set) — the
+                        // typed residual surface is compile-time only
+                        // (E0414/E0425/E0426), so no declaration catalog
+                        // entry is required for the native slice.
+                        if item_str.ends_with("SessionChan") {
+                            Ok(())
+                        } else {
+                            Err(UnsupportedResolvedNode::new(
+                                owner,
+                                owner,
+                                format!(
+                                    "nominal type '{item_str}' is not a record or enum in the resolved native slice"
+                                ),
+                            ))
+                        }
                     }
                 }
             }
