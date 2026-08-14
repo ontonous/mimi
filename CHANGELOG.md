@@ -7,6 +7,26 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.17 — `?` 三义复核：T? 别名零用例（Phase D 强输入）+ guard 失败出口矩阵实证
+
+- **`?` 三义分离复核（探针实证）**：try `?`（39 处 dual 用例）+ optional chain
+  `?.`（audit_round2 专组 + dual_backend 9 处）均活且双后端覆盖；**nullable 类型
+  后缀 `T?` = `Option<T>` 字面别名**——`let x: i32? = 5` 被 checker 报为
+  "pattern declared as Option<i32>"，且**全 src/tests 无 `T?` 类型位置用例**
+  （零语料）；无 null 字面量（Option 空为 None）。建议（Phase D 输入）：删 `T?`
+  别名产生式，`?` 三义收为双义——删除量零（无用例），直接收敛路线图"消除
+  `?` 三义"目标。E0429（`?` 前线性消费拒绝）复核 = 已强制 + 测试 ✓。
+- **guard 失败出口矩阵（三后端一致，实证）**：正常出口/早退 = defer 跑、补偿
+  不跑；陷阱（E0803/E0801 abort）= guards 均不跑（进程终止）；吸收
+  （panic→`Fault` 结果）= 作用域继续、补偿不跑（失败被包含，未出作用域——
+  语义自洽）；`exit(N)` = 均不跑。矩阵入
+  `devdocs/v0.36/phase-d-syntax-inventory.md` §3b。
+- **guard 统一机制设计草案**：双表面已共单轨登记/发射管线（0.36.15 对齐）；
+  方案 A 单关键字限定符 vs **B 保留双关键字（倾向，零迁移、双 harness 钉住）**
+  vs C 事件化（否决）；语法层收敛留 Phase D 窗口，若选 A 则机械迁移 + 双后端
+  挣绿为本 phase 挣绿项。
+- 无代码变更（预研文档轮）；门禁全绿（fmt + clippy + docs + edge）。
+
 ### 0.36.16 — Phase B Protocol 定案草案起草（0.36.21+ 前置评审）+ 语法参考 guard 注记同步
 
 - **Protocol 定案草案（devdocs/v0.36/phase-b-protocol-verdict-draft.md）**：按
