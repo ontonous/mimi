@@ -58,6 +58,18 @@ struct ActionEmitter<'a> {
     /// ALL build profiles (a previous #[cfg(debug_assertions)] gate broke
     /// `cargo build --release`: mimi_assert! is not compiled out in release).
     consumed_resources: BTreeSet<ResourceId>,
+    /// 0.36.43: E0304-rejected element extractions (`v[0]` / `v[1..]` /
+    /// `(a, b).0` on non-droppable linear containers). The rejection is
+    /// diagnostic-only by design, but the surrounding lowering kept pairing
+    /// the extracted place into binds/calls/drops — fabricating a transfer
+    /// for a value that never moved, so a later legitimate `drop(v)` hit the
+    /// RESOURCE-LINEAR-001 double-drop debug signal. Consumers skip places
+    /// in this set (error-path hygiene; the function is already invalid).
+    rejected_extraction_places: BTreeSet<Place>,
+    /// 0.36.43: set by reject_index_read_extraction whenever THIS visited
+    /// expression was rejected; the Bind arm uses it to skip pairing an
+    /// initializer whose extraction already failed (the E0304 stands alone).
+    last_visit_rejected: bool,
 }
 
 impl<'a> ActionEmitter<'a> {
@@ -95,6 +107,8 @@ impl<'a> ActionEmitter<'a> {
             errors: Vec::new(),
             pending_anonymous_loans: Vec::new(),
             consumed_resources: BTreeSet::new(),
+            rejected_extraction_places: BTreeSet::new(),
+            last_visit_rejected: false,
         }
     }
 
@@ -525,7 +539,30 @@ impl<'a> ActionEmitter<'a> {
             } => {
                 if let Some(initializer) = initializer {
                     let reference = self.single_binding(pattern);
+                    self.last_visit_rejected = false;
                     self.visit_expr(initializer, reference.as_ref());
+                    // 0.36.43: an E0304-rejected extraction (v[0] — index/slice/
+                    // tuple projection of a non-droppable linear container) must
+                    // not pair its place into the binding — the extracted value
+                    // never moved, and fabricating the Move made x own the
+                    // container's resource, so a later legitimate drop(v) hit
+                    // the RESOURCE-LINEAR-001 double-drop signal. The E0304 is
+                    // the whole story; skip the pairing entirely.
+                    if self.last_visit_rejected {
+                        // The binding was never established (the E0304 stands
+                        // alone); a preceding materialization already attached
+                        // the container's resource identity to the binding's
+                        // local, so without this a later `drop(x)` would
+                        // discharge the container's identity and the next
+                        // `drop(v)` would trip RESOURCE-LINEAR-001. Clear the
+                        // phantom ownership.
+                        let mut bindings = Vec::new();
+                        self.linear_bindings(pattern, &mut bindings);
+                        for binding in bindings {
+                            self.resources.remove(&binding);
+                        }
+                        return;
+                    }
                     // Audit 2026-08-05 (wave-2, C-2/G-2): If/Match are XOR —
                     // exactly one arm's value flows at runtime. Consuming a
                     // branch expression that carries SEVERAL distinct linear
@@ -978,10 +1015,48 @@ impl<'a> ActionEmitter<'a> {
                 self.visit_block(body, false);
             }
             ResolvedStmtKind::Drop(places) => {
+                // 0.36.43: `drop(v[0])` — the Drop arm carries resolved PLACES
+                // (no expression visit), so the M9 reject never ran for it.
+                // Dropping one element releases it and leaks every unextracted
+                // sibling — the same element-extraction hole, rejected
+                // identically (and neutered, so a later `drop(v)` cannot
+                // double-consume the container's identity).
+                for place in places.iter() {
+                    let has_element_projection = place.projections.iter().any(|projection| {
+                        matches!(
+                            projection,
+                            ResolvedProjection::Index { .. } | ResolvedProjection::Tuple { .. }
+                        )
+                    });
+                    if !has_element_projection {
+                        continue;
+                    }
+                    let Some(local) = self.body.locals.get(&place.base) else {
+                        continue;
+                    };
+                    if self.is_linear(&local.ty) && !self.is_droppable_type(&local.ty) {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0304,
+                                format!(
+                                    "'{}' cannot be dropped by index or slice: element-level                                      extraction from a linear container is not tracked and                                      leaks every unextracted element",
+                                    self.local_name(&place.base)
+                                ),
+                                statement.origin.user_span(),
+                            )
+                            .with_help(
+                                "move or drop the whole container (e.g. drop(v)) instead of                                  indexing or slicing into it",
+                            ),
+                        );
+                        self.rejected_extraction_places
+                            .insert(self.canonical_place(place));
+                    }
+                }
                 let places = places
                     .iter()
                     .filter(|place| self.place_is_linear(place))
                     .map(|place| self.canonical_place(place))
+                    .filter(|place| !self.rejected_extraction_places.contains(place))
                     .collect::<Vec<_>>();
                 for place in places {
                     // Audit 2026-08-05 (wave-2, G-1): dropping an aggregate
@@ -1680,6 +1755,7 @@ impl<'a> ActionEmitter<'a> {
         let non_droppable_linear_container = |local: &ResolvedLocal| -> bool {
             self.is_linear(&local.ty) && !self.is_droppable_type(&local.ty)
         };
+        let mut emitted = false;
         match &expression.kind {
             ResolvedExprKind::Load(place) => {
                 let has_index = place
@@ -1700,6 +1776,7 @@ impl<'a> ActionEmitter<'a> {
                             } else {
                                 self.push_element_leak_error(expression);
                             }
+                            emitted = true;
                         }
                     }
                 }
@@ -1713,6 +1790,7 @@ impl<'a> ActionEmitter<'a> {
                         if let Some(local) = self.body.locals.get(&place.base) {
                             if non_droppable_linear_container(local) {
                                 self.push_index_read_error(&place.base, expression);
+                                emitted = true;
                             }
                         }
                     }
@@ -1741,10 +1819,21 @@ impl<'a> ActionEmitter<'a> {
                     };
                     if !single_literal {
                         self.push_element_leak_error(expression);
+                        emitted = true;
                     }
                 }
             }
             _ => {}
+        }
+        // 0.36.43: neuter the rejected extraction's sources — later consumers
+        // (binds/calls/drops) must not fabricate transfers for a value that
+        // never moved (the E0304 already fails the function; the fabricated
+        // transfer used to double-drop the container on a later drop(v)).
+        if emitted {
+            self.last_visit_rejected = true;
+            for place in self.capability_places(expression) {
+                self.rejected_extraction_places.insert(place);
+            }
         }
     }
 
@@ -2036,7 +2125,10 @@ impl<'a> ActionEmitter<'a> {
     fn collect_capability_places(&self, expression: &ResolvedExpr, places: &mut Vec<Place>) {
         match &expression.kind {
             ResolvedExprKind::Load(place) if self.place_is_linear(place) => {
-                places.push(self.canonical_place(place));
+                let canonical = self.canonical_place(place);
+                if !self.rejected_extraction_places.contains(&canonical) {
+                    places.push(canonical);
+                }
             }
             ResolvedExprKind::Tuple(values)
             | ResolvedExprKind::List(values)

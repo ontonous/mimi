@@ -7,6 +7,28 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.43 — 元素析构记账修复：E0304 错误路径状态污染清零（L2）
+
+- **背景**：M9/0.36.25-26 索引析构拒绝（`v[0]` / `v[1..]` / `(a,b).0` 在非
+  droppable 线性容器上的 E0304）纯属诊断——但后续 lowering 仍把被拒投影的
+  place 配对进绑定/调用/drop：`let x = v[0]` 制造 v→x 伪转移（x 获得容器的
+  资源身份），`drop(v)` 随之撞 **RESOURCE-LINEAR-001 double-drop** 调试信号
+  （`drop(v[0]); drop(v)` 与元组 `(a,b).0` 同形）。诊断侧只报 E0304，另一条
+  CFG 路径还误报 "consumed more than once"。
+- **机制**（`src/core/cfg/resource_lower.rs`）：
+  - `rejected_extraction_places`：reject 时把被拒投影的 canonical place 记入
+    集合；消费漏斗 `collect_capability_places` 与 Drop 臂过滤（后续消费者不再
+    为从未移动的值制造转移/消费）；
+  - Bind 臂 `last_visit_rejected` 守卫：被拒初始化器整体跳过配对，并清除绑定
+    局部上由先前物化写入的幻影所有权（drop(x) 只释放 x 自身）；
+  - `drop(v[0])` 在 Drop 臂就地拒绝（Drop 携带 resolved place、不访问表达式，
+    此前完全绕过 reject 机制）。
+- **健全性**：被拒代码经 E0304 整体失败——本修复纯属错误路径卫生（过滤被拒
+  投影的配对），合法程序路径零影响（整体消费/正常析构回归测试确认）。
+- **挣绿**：全部探针从 assert 归零为干净单 E0304；合法整体 drop 双后端 1。
+- **回归**：正例 1 三 harness + 负例 4（let+drop / drop-by-index / 元组投影 /
+  单独提取）。全量 5415 绿；real_world 70/70（69 build+exec）。
+
 ### 0.36.42 — 泛型×线性单态化切片 4：if-let 容器义务消解的泛型镜像（L1/L2）
 
 - **背景**：0.36.40/41 记录的"if-let 非穷举面"——泛型体内 `if let Some(x) =
