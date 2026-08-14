@@ -7,6 +7,124 @@ use inkwell::IntPredicate;
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// 0.36.47: bind a concrete trait METHOD's method-level generic params
+    /// (`map<U>`) into the monomorphization type_map at the call site.
+    ///
+    /// The only known source of concrete values is the callback argument's
+    /// return type:
+    ///   - named top-level function -> its declared `ret`;
+    ///   - lambda with an explicit return annotation -> `ret`;
+    ///   - function-parameter ident in a nested generic body (`map_list`'s
+    ///     `xs.map(f)`) -> the enclosing FuncDef's parameter type substituted
+    ///     with the caller's current type_map instantiation.
+    ///   - anything else -> left unbound (fail-closed: the generic body keeps
+    ///     the name type, mirroring the pre-0.36.47 checker rejection).
+    ///
+    /// Without this the monomorphized impl body resolved U as an empty name
+    /// type -> invalid LLVM IR -> SelectionDAG SIGSEGV (FoldConstantArithmetic/
+    /// TRUNCATE). First reachable in 0.36.47, which lets the checker
+    /// instantiate method-level generics (previously E0211 rejected every
+    /// such call before codegen).
+    fn bind_method_generic_params(
+        &self,
+        type_map: &mut HashMap<String, Type>,
+        method_def: &FuncDef,
+        arguments: &[Expr],
+    ) {
+        if method_def.generics.len() != 1 || arguments.is_empty() {
+            return;
+        }
+        let callback = &arguments[0];
+        let func_ret: Option<Type> = match callback.unlocated() {
+            Expr::Ident(name) => {
+                if let Some(fd) = self.func_defs.get(name.as_str()) {
+                    fd.ret.clone()
+                } else if !self.type_map.is_empty() {
+                    // Generic-body function parameter (map_list's `xs.map(f)`):
+                    // resolve the enclosing definition's parameter type with the
+                    // current instantiation.
+                    let Some(raw) = self.func_defs.values().find_map(|fd| {
+                        fd.params
+                            .iter()
+                            .find(|p| p.name == *name)
+                            .map(|p| p.ty.clone())
+                    }) else {
+                        return;
+                    };
+                    let generics: Vec<GenericParam> = self
+                        .type_map
+                        .keys()
+                        .map(|k| GenericParam {
+                            meta: crate::ast::AstNodeMeta::synthetic(
+                                crate::ast::AstOrigin::RuntimeSystem("codegen.method_generic_bind"),
+                            ),
+                            name: k.clone(),
+                            bounds: vec![],
+                        })
+                        .collect();
+                    let substituted =
+                        crate::core::subst_type_params(&raw, &generics, &self.type_map);
+                    let Type::Func(_, ret) = substituted.unlocated() else {
+                        return;
+                    };
+                    Some(ret.unlocated().clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Lambda { ret: Some(ty), .. } => Some(ty.unlocated().clone()),
+            _ => None,
+        };
+        let Some(func_ret) = func_ret else {
+            return;
+        };
+        let generic = &method_def.generics[0];
+        if !type_map.contains_key(&generic.name) {
+            type_map.insert(generic.name.clone(), func_ret);
+        }
+    }
+
+    /// 0.36.47: wrap a bare named-function argument into the canonical closure
+    /// struct ({fn_ptr, env_ptr}) when the callee parameter expects
+    /// func(T) -> U (method callback). Shared logic with simple.rs's
+    /// maybe_wrap_named_fn_args_to_closures, inlined for the method path.
+    fn wrap_named_fn_arg_to_closure(
+        &mut self,
+        arg: &Expr,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let Expr::Ident(fn_name) = arg.unlocated() else {
+            return Ok(val);
+        };
+        let BasicValueEnum::PointerValue(_pv) = val else {
+            return Ok(val);
+        };
+        let wrapper = self.get_or_create_closure_wrapper(fn_name)?;
+        let closure_ty = crate::codegen::types::closure_struct_type(self.context);
+        let closure_alloca =
+            self.build_alloca(BasicTypeEnum::StructType(closure_ty), "closure_arg")?;
+        let fn_gep = self
+            .gep()
+            .build_struct_gep(closure_ty, closure_alloca, 0, "fn_gep")
+            .map_err(|e| CompileError::LlvmError(format!("fn gep: {}", e)))?;
+        self.build_store(fn_gep, BasicValueEnum::PointerValue(wrapper))?;
+        let env_gep = self
+            .gep()
+            .build_struct_gep(closure_ty, closure_alloca, 1, "env_gep")
+            .map_err(|e| CompileError::LlvmError(format!("env gep: {}", e)))?;
+        let null_i8 = self
+            .context
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null();
+        self.build_store(env_gep, BasicValueEnum::PointerValue(null_i8))?;
+        let loaded = self.build_load(
+            BasicTypeEnum::StructType(closure_ty),
+            closure_alloca,
+            "closure_loaded",
+        )?;
+        Ok(loaded)
+    }
+
     /// Handle method dispatch for obj.method(args) calls.
     pub(in crate::codegen) fn compile_method_call(
         &mut self,
@@ -288,21 +406,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(inner) = inner {
                     let concrete_types: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
                     if concrete_types.len() == impl_type_args.len() {
+                        // Clone the func def from type_impls (no borrow conflict) so
+                        // method-level generic params (map<U>) are visible while the
+                        // type_map is constructed below (0.36.47).
+                        let mut func = self.type_impls.get(base_obj_type).and_then(|trait_impls| {
+                            trait_impls.values().find_map(|methods| {
+                                methods.iter().find(|m| m.name == *method_name).cloned()
+                            })
+                        });
                         let mut type_map: HashMap<String, Type> = HashMap::new();
                         for (ta, ct) in impl_type_args.iter().zip(concrete_types.iter()) {
                             if let Type::Name(tn, _) = ta.unlocated() {
                                 type_map.insert(tn.clone(), Type::Name(ct.to_string(), vec![]));
                             }
                         }
+                        // 0.36.47: bind METHOD-level generic params (e.g. map<U>) from
+                        // the callback argument's return type. Previously U never
+                        // reached the monomorphized impl body — the checker rejected
+                        // every method-level-generic call (E0211) so codegen never
+                        // saw one; now that instantiation passes, leaving U unbound
+                        // produced an empty name type → invalid LLVM IR →
+                        // SelectionDAG SIGSEGV (FoldConstantArithmetic/TRUNCATE).
+                        if let Some(f) = &func {
+                            self.bind_method_generic_params(&mut type_map, f, args);
+                        }
                         let mangled = Self::mangle_name(&fn_name, &type_map);
                         if self.module.get_function(&mangled).is_none() {
-                            // Clone the func def from type_impls (no borrow conflict)
-                            let mut func =
-                                self.type_impls.get(base_obj_type).and_then(|trait_impls| {
-                                    trait_impls.values().find_map(|methods| {
-                                        methods.iter().find(|m| m.name == *method_name).cloned()
-                                    })
-                                });
                             // Prepend self parameter (was prepended during compile_impl_methods)
                             if let Some(ref mut f) = func {
                                 // Rename func to fn_name so compile_generic_func mangles
@@ -1174,6 +1303,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                     && self.expr_is_string(arg)
                 {
                     self.wrap_raw_string_ptr(val.into_pointer_value())?
+                } else {
+                    val
+                };
+                // 0.36.47: func(T)->U callback parameter — wrap a named-function
+                // argument into the canonical closure struct ({fn_ptr, env_ptr}).
+                // Mirrors the free-function call path
+                // (maybe_wrap_named_fn_args_to_closures in simple.rs), which the
+                // method path never needed because method-level generic calls
+                // (xs.map(f)) were rejected (E0211) before codegen. With the
+                // checker instantiating method generics, the monomorphized callee
+                // expects {ptr, ptr} but a bare function-name arg compiled to a
+                // raw function pointer → verifier mismatch + SelectionDAG SIGSEGV.
+                let val = if matches!(param_ty, BasicTypeEnum::StructType(_))
+                    && matches!(val, BasicValueEnum::PointerValue(_))
+                    && matches!(arg.unlocated(), Expr::Ident(_))
+                {
+                    self.wrap_named_fn_arg_to_closure(arg, val)?
                 } else {
                     val
                 };

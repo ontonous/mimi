@@ -105,6 +105,11 @@ pub(crate) struct Checker<'a> {
     pub(crate) type_methods: HashMap<String, Vec<(String, String)>>,
     /// Track trait method signatures: (trait_name, method_name) -> (param_types, return_type)
     pub(crate) trait_method_sigs: HashMap<(String, String), (Vec<Type>, Type)>,
+    /// 0.36.47: trait 方法级泛型名（`func map<U>` 的 U）——方法签名里的方法级
+    /// 参数在注册时仍以名字型存在（`Type::Name("U")`），调用侧必须实例化为
+    /// fresh TypeVar 才能 unify（此前 `xs.map(f)` 一律 E0211「expected fn(T) -> U,
+    /// found fn(T) -> T」——方法级 U 从不实例化）；此表提供实例化所需的名字。
+    pub(crate) trait_method_generics: HashMap<(String, String), Vec<String>>,
     /// Track imported module names (from `use` statements)
     pub(crate) use_imports: Vec<String>,
     /// Track current module path for qualified names
@@ -316,6 +321,7 @@ impl<'a> Checker<'a> {
             type_generics: HashMap::new(),
             type_methods: HashMap::new(),
             trait_method_sigs: HashMap::new(),
+            trait_method_generics: HashMap::new(),
             use_imports: Vec::new(),
             module_path: Vec::new(),
             loop_depth: 0,

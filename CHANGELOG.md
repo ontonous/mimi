@@ -7,6 +7,41 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.47 — 容器方法余面：trait 方法级泛型实例化 + 线性接收者变换面（L1/L2）
+
+- **修既有 bug（非线性也受影响）**：`map<U>` 等 ListExt 方法的方法级泛型名
+  （U）在 trait_method_sigs 注册时仍是名字型（Type::Name），调用侧从不实例化
+  → `xs.map(f)` 一律 E0211「expected fn(T) -> U, found fn(T) -> T」——连
+  List<i32>.map 都不可用（仓库语料此前零 `.map(` 成功用例，audit 面只测
+  builtin Result.map / 显式标注）。修：`trait_method_generics` 注册方法级泛型
+  名；`infer_method_call` 主 trait 分支与 `resolve_trait_method`（DynTrait/
+  ImplTrait 面）经 `instantiate_method_generics` 把名字型替换为 fresh 统一变量
+  （同一名字的参数/返回共享），arg 统一后 zonk 返回类型。
+- **开线性接收者变换面（Phase C「容器方法余面」）**：ListExt 变换方法（Mutate
+  借用标记；结果为 List/Map/Set/Tuple 且携带义务）降为消费语义——接收者容器
+  **整体转出**（Move，与 for 迭代同构：容器移入方法、义务移至结果），
+  `let ys = xs.reverse()` 中 ys 携带元素义务、`drop(ys)` 结算；此前 Mutate
+  借用不解体容器 → 用户被迫再 drop(xs) = 不可达语义（E0256 死锁）。
+  **读取/提取面不变**（len/is_empty/count/find/first/last/find_map——标量/
+  裸元素/Option 结果）：借用接收者，容器义务原处保留（`xs.len()` 后须
+  drop(xs)；`first()` 提取 + drop 余部 = 0.36.46 同构面）。
+  健全性：变换 = 容器整体移入、结果整体移出（1:1 义务守恒）；读 = 义务不动；
+  线性元素在变换回调内逐元素恰一次。
+- **codegen 承接（判型放行后首次触达的 Legacy 缺口，SIGSEGV 修复）**：
+  方法级泛型调用此前被判型全拒、codegen 从未见过，放行后暴露三处缺口并修复：
+  1) legacy 嵌套单态化（method.rs）type_map 只绑 impl 级 T——U 未绑 → 空名字
+  类型 → 坏 IR → SelectionDAG SIGSEGV；现从回调实参返回类型绑定 U（命名函数
+  ret / lambda 注解 / 嵌套泛型体函数参数经当前 type_map 替换）；
+  2) 方法调用路径缺命名函数实参的 closure 包装（simple.rs 自由函数路径已有）→
+  `ptr @double` vs callee 期望 `{ptr,ptr}` → verifier 不匹配 + 崩溃；补
+  `wrap_named_fn_arg_to_closure`；
+  3) resolved 发射器 PM 臂对方法级泛型调用按未实例化符号直查——加 eligibility
+  门（`call.type_arguments` 非空 → 归 legacy 单态化切片）。
+- **挣绿**：6 项新双后端测试（map 变换三后端等价 ×2 值/类型面、reverse 三后端、
+  方法级 U 实例化（List<i32> 双链 map = 36）、变换接收者双用 E0304、变换结果
+  泄漏 E0256、读面保持（len+drop 绿 / 不 drop E0256））。
+- **回归**：dual 1042/1042、lib 5443/0、clippy 0、fmt 净、四 python 门禁 0。
+
 ### 0.36.46 — 元素级投影定向分析：`xs[0]` 头提取面（L1/L2）
 
 - **开面（定向）**：M9/0.36.25-26 起全面 fail-closed 的索引析构，本切打开

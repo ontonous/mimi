@@ -834,6 +834,14 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    // 0.36.47: 方法级泛型名同注册（`func map<U>` → ["U"]）——调用侧
+                    // 据此把签名中残留的名字型实例化为 fresh TypeVar。
+                    let method_generic_names: Vec<String> =
+                        method.generics.iter().map(|g| g.name.clone()).collect();
+                    self.trait_method_generics.insert(
+                        (trait_def.name.clone(), method.name.clone()),
+                        method_generic_names.clone(),
+                    );
                     self.trait_method_sigs
                         .insert((trait_def.name.clone(), method.name.clone()), (params, ret));
                 }
