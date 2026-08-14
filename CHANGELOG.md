@@ -7,6 +7,22 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.17 — 线性系统支柱预研启动：泛型×线性强制矩阵（M1-M10 探针复核）+ 索引读取 fail-open 缺口
+
+- **现状强制矩阵（探针全实测，devdocs/v0.36/phase-c-linearity-study.md）**：
+  E0432 ×4（裸 cap / turbofish / SessionChan / List<cap> 泛型边界 H2）、E0256
+  （concrete List<cap> 未消费参数）、drop(容器) 满足义务双后端 ✓、for 迭代 /
+  match 解包 = fail-closed（E0304/E0256）——与 AGENTS 声明一致。
+- **新发现缺口（M9，fail-open）**：`let c = v[0]`（List<cap> 参数）**免检放行**
+  ——索引读取把容器整体记为已消费（E0256 不触发），但未提取元素静默泄漏；
+  match/for 同族缺口却 fail-closed → **不一致**。双 drop（l8）仍被 E0304 拦
+  （无双释放）。修复配方登记 Phase C 队列：dataflow 对线性元素容器的 Index
+  投影读取直接 E0304 拒绝（风险低：全库无合法用例）。
+- **泛型×线性定案输入**：维持 E0432 禁令（现状确认）+ 单态化评估登记 1.x；
+  元素级消费语义列入 1.x 评估。
+- **Session lowering**：0.36.14 复核保持（基础双端 10/11 一致 + E0425-27 强制）。
+- 无代码变更（预研探针轮）；门禁全绿（fmt + clippy + docs + edge）。
+
 ### 0.36.17 — `?` 三义复核：T? 别名零用例（Phase D 强输入）+ guard 失败出口矩阵实证
 
 - **`?` 三义分离复核（探针实证）**：try `?`（39 处 dual 用例）+ optional chain
