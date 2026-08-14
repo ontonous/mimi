@@ -873,12 +873,28 @@ impl<'a> ActionEmitter<'a> {
                 self.visit_block(body, false);
             }
             ResolvedStmtKind::IfLet {
+                pattern,
                 initializer,
                 then_block,
                 else_block,
                 ..
             } => {
                 self.visit_expr(initializer, None);
+                // 0.36.36: same container-obligation dissolve as the Match arm
+                // — `if let Some(x) = o` exhaustively handles o (bind or no
+                // payload); a stranding wildcard keeps fail-closed behavior.
+                if let Some(container_place) = self.linear_match_container(initializer, &[pattern])
+                {
+                    // resolved_lower hoists the initializer into the CFG
+                    // pre-header, so the STATEMENT node has no CFG point —
+                    // key the dissolve on the initializer expression itself.
+                    self.emit_consumes(
+                        CanonicalActionKind::Drop,
+                        vec![container_place],
+                        &initializer.node_id,
+                        &initializer.origin,
+                    );
+                }
                 self.visit_block(then_block, false);
                 if let Some(else_block) = else_block {
                     self.visit_block(else_block, false);
@@ -1137,6 +1153,24 @@ impl<'a> ActionEmitter<'a> {
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
                 self.visit_expr(scrutinee, None);
+                // 0.36.36 candidate (1): an EXHAUSTIVE match over a linear
+                // aggregate container (Option/Result) dissolves the CONTAINER
+                // obligation — every arm either binds the payload (its own
+                // resource chain continues) or has none. Fail-closed guards:
+                // single linear source, aggregate container type, and no
+                // wildcard anywhere in any arm pattern (a wildcard position
+                // could strand linear payload atoms).
+                let arm_patterns: Vec<&ResolvedPattern> =
+                    arms.iter().map(|arm| &arm.pattern).collect();
+                if let Some(container_place) = self.linear_match_container(scrutinee, &arm_patterns)
+                {
+                    self.emit_consumes(
+                        CanonicalActionKind::Drop,
+                        vec![container_place],
+                        &expression.node_id,
+                        &expression.origin,
+                    );
+                }
                 for arm in arms {
                     self.visit_arm(arm);
                 }
@@ -1165,6 +1199,63 @@ impl<'a> ActionEmitter<'a> {
             | ResolvedExprKind::Comptime(block)
             | ResolvedExprKind::Quote(block) => self.visit_block(block, false),
             _ => self.for_each_expr_child(expression, |this, child| this.visit_expr(child, None)),
+        }
+    }
+
+    /// 0.36.36 candidate (1): is this match professor an exhaustive
+    /// destructure of ONE linear aggregate container (Option/Result) with no
+    /// wildcard patterns? When yes, the container's obligation is discharged
+    /// at the match (payload bindings keep their own chains).
+    fn linear_match_container(
+        &self,
+        scrutinee: &ResolvedExpr,
+        patterns: &[&ResolvedPattern],
+    ) -> Option<Place> {
+        let ty = &scrutinee.ty;
+        if !self.is_linear(ty) || self.is_droppable_type(ty) {
+            return None;
+        }
+        let is_aggregate = matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Option(_)) | Some(ResolvedType::Result { .. })
+        );
+        if !is_aggregate {
+            return None;
+        }
+        if patterns.is_empty() || patterns.iter().any(|p| self.pattern_strands_linear(p)) {
+            return None;
+        }
+        let places = self.capability_places(scrutinee);
+        if places.len() != 1 {
+            return None;
+        }
+        if self.resources_for_place(&places[0]).len() != 1 {
+            return None;
+        }
+        Some(places[0].clone())
+    }
+
+    /// 0.36.36: a wildcard position strands a LINEAR atom when the covered
+    /// field/pattern slot is linear (Some(_) over Option<cap>); wildcards
+    /// over non-linear slots (Err(_) over a string payload) are harmless.
+    fn pattern_strands_linear(&self, pattern: &ResolvedPattern) -> bool {
+        match &pattern.kind {
+            ResolvedPatternKind::Wildcard => self.is_linear(&pattern.ty),
+            ResolvedPatternKind::Constructor { fields, .. } => fields
+                .iter()
+                .any(|(_, pattern)| self.pattern_strands_linear(pattern)),
+            ResolvedPatternKind::Tuple(patterns) | ResolvedPatternKind::Array(patterns) => patterns
+                .iter()
+                .any(|pattern| self.pattern_strands_linear(pattern)),
+            ResolvedPatternKind::Slice { prefix, rest } => {
+                prefix
+                    .iter()
+                    .any(|pattern| self.pattern_strands_linear(pattern))
+                    || rest
+                        .as_deref()
+                        .is_some_and(|pattern| self.pattern_strands_linear(pattern))
+            }
+            ResolvedPatternKind::Binding { .. } | ResolvedPatternKind::Literal(_) => false,
         }
     }
 

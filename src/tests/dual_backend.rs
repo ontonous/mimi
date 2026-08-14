@@ -3640,6 +3640,123 @@ func main() -> i32 {
     );
 }
 
+// 0.36.36 candidate (1) — element-level consumption satisfies the container
+// obligation for match/if-let over linear aggregates (Option/Result): an
+// exhaustive destructure dissolves the container; payload bindings keep their
+// own chain. Guard: wildcard positions over LINEAR slots still strand.
+#[test]
+fn dual_linear_option_match_consumes_container() {
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 42 }
+func main() -> i32 {
+    let o: Option<cap FileReadCap> = Some(FileReadCap)
+    let got = match o {
+        Some(x) => sink(x)
+        None => 0
+    }
+    println(got)
+    0
+}
+"#;
+    let expected = "42";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm option match");
+    if can_link() {
+        let checked = checked_codegen_compile_and_run(src).expect("resolved option match");
+        assert_eq!(checked.trim(), expected, "resolved option match");
+        let legacy = compile_and_run(src).expect("legacy option match");
+        assert_eq!(legacy.trim(), expected, "legacy option match");
+    }
+}
+
+#[test]
+fn dual_linear_result_match_nonlinear_wildcard_ok() {
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 7 }
+func main() -> i32 {
+    let r: Result<cap FileReadCap, string> = Ok(FileReadCap)
+    let got = match r {
+        Ok(x) => sink(x)
+        Err(_) => 0
+    }
+    println(got)
+    0
+}
+"#;
+    let expected = "7";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm result match");
+    if can_link() {
+        let checked = checked_codegen_compile_and_run(src).expect("resolved result match");
+        assert_eq!(checked.trim(), expected, "resolved result match");
+    }
+}
+
+#[test]
+fn dual_linear_iflet_option_consumes_container() {
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 11 }
+func main() -> i32 {
+    let o: Option<cap FileReadCap> = Some(FileReadCap)
+    if let Some(x) = o { println(sink(x)) } else { println(0) }
+    0
+}
+"#;
+    let expected = "11";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm if-let option");
+    if can_link() {
+        let checked = checked_codegen_compile_and_run(src).expect("resolved if-let option");
+        assert_eq!(checked.trim(), expected, "resolved if-let option");
+    }
+}
+
+// Fail-closed guards: a wildcard over a LINEAR payload slot strands it.
+#[test]
+fn dual_linear_match_wildcard_strand_still_rejected() {
+    let diags = check_source(
+        "cap FileReadCap; \
+         func main() -> i32 { \
+             let o: Option<cap FileReadCap> = Some(FileReadCap) \
+             match o { \
+                 Some(_) => 1 \
+                 None => 0 \
+             } \
+             0 }",
+    )
+    .expect_err("wildcard over linear payload must strand (fail-closed)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256"),
+        "expected E0256 strand rejection, got:\n{rendered}"
+    );
+
+    let diags = check_source(
+        "cap FileReadCap; \
+         func main() -> i32 { \
+             let o: Option<cap FileReadCap> = Some(FileReadCap) \
+             if let Some(_) = o { 1 } else { 0 } \
+             0 }",
+    )
+    .expect_err("if-let wildcard over linear payload must strand");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256"),
+        "expected E0256 if-let strand rejection, got:\n{rendered}"
+    );
+}
+
 #[test]
 fn dual_linear_container_index_read_rejected() {
     // Bind form — the demonstrated leak (`let c = v[0]; drop(c)` passed the
