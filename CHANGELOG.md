@@ -7,6 +7,22 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.26 — M9 门禁再补全：字面量数组索引 + 元组字段访问（fail-open 收口，L2）
+
+- **补全（src/core/cfg/resource_lower.rs）**：M9 门禁的另两个漏网形态——
+  ①字面量数组索引 `[a, b][0]`：collect 侧只选索引元素、pairing 平衡放行，
+  未提取线性元素静默泄漏（探针 .l9 check ✓）；②元组字段访问 `t.0`：抽取
+  线性元组一个原子、兄弟原子泄漏。reject_index_read_extraction 增加
+  **Project 臂**（Index/Tuple 投影 × 容器类型为线性且不可弃 → E0304，单元素
+  字面量提取 = 整体消费放行）。首个实现用元素 place 探测判据误判（cap 常数为
+  Constant 非 place），改以**容器类型**为判据。
+- **边界守恒**（探针矩阵）：单元素 `[c][0]` ✓、整体容器移动（sink/make-drop）
+  ✓、非线性索引/元组/切片 ✓ 均不受影响。
+- **回归扩展**：dual_linear_container_index_read_rejected 增加字面量数组 +
+  元组两种拒绝形态 + 单元素/非线性两个正例控制。全量 5358 passed / 0 failed /
+  8 ignored（含 0.36.24 gap 登记）；fmt + clippy + docs + edge 全绿。
+- 元素消费缺口（match/for/index/slice/字面量索引/元组字段）全 family fail-closed。
+
 ### 0.36.25 — M9 门禁补全：线性容器 slice 读取 fail-open → fail-closed（L2）
 
 - **补全（src/core/cfg/resource_lower.rs）**：M9 门禁（0.36.22 索引读取

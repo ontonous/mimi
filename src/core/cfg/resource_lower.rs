@@ -1337,10 +1337,20 @@ impl<'a> ActionEmitter<'a> {
                     .projections
                     .iter()
                     .any(|projection| matches!(projection, ResolvedProjection::Index { .. }));
-                if has_index {
+                // 0.36.26: tuple field access `t.0` — extracting one atom from
+                // a linear tuple leaks the sibling atoms (destructure instead).
+                let has_tuple = place
+                    .projections
+                    .iter()
+                    .any(|projection| matches!(projection, ResolvedProjection::Tuple { .. }));
+                if has_index || has_tuple {
                     if let Some(local) = self.body.locals.get(&place.base) {
                         if non_droppable_linear_container(local) {
-                            self.push_index_read_error(&place.base, expression);
+                            if has_index {
+                                self.push_index_read_error(&place.base, expression);
+                            } else {
+                                self.push_element_leak_error(expression);
+                            }
                         }
                     }
                 }
@@ -1359,8 +1369,50 @@ impl<'a> ActionEmitter<'a> {
                     }
                 }
             }
+            // 0.36.26: non-place element extraction `[a, b][0]` / `(a, b).0` — the
+            // collect side selects only the indexed element, so the pairing
+            // balances and the unextracted linear elements leak silently.
+            // Judged by the container's TYPE (list literals hold cap
+            // constants, not places — per-element probing misses them).
+            ResolvedExprKind::Project { value, projection } => {
+                let is_element_extraction = matches!(
+                    projection,
+                    ResolvedValueProjection::Index(_) | ResolvedValueProjection::Tuple(_)
+                );
+                if is_element_extraction
+                    && self.is_linear(&value.ty)
+                    && !self.is_droppable_type(&value.ty)
+                {
+                    // Extracting the ONLY literal element is a whole
+                    // consumption (no leak) — stay legal.
+                    let single_literal = match &value.kind {
+                        ResolvedExprKind::List(elements) => elements.len() == 1,
+                        ResolvedExprKind::Tuple(elements) => elements.len() == 1,
+                        _ => false,
+                    };
+                    if !single_literal {
+                        self.push_element_leak_error(expression);
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    fn push_element_leak_error(&mut self, expression: &ResolvedExpr) {
+        self.errors.push(
+            Diagnostic::error_code(
+                crate::diagnostic::codes::E0304,
+                "element-level extraction from a linear container is not tracked and \
+                     leaks every unextracted element"
+                    .to_string(),
+                expression.origin.user_span(),
+            )
+            .with_help(
+                "move or drop the whole container, or destructure it to bind every \
+                 element explicitly",
+            ),
+        );
     }
 
     fn push_index_read_error(&mut self, base: &ResolvedLocalId, expression: &ResolvedExpr) {
