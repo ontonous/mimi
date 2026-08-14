@@ -3364,6 +3364,40 @@ func main() -> i32 {
 // 2); ignored until Phase C unifies the state ABI across container/flat
 // contexts (monomorphization/state representation work, 0.36.36+).
 
+// 0.36.28: `x?.to_string()` where x is a plain i32 — the callee-shape error
+// must not mask the `?.` receiver validation (E0224 first, then E0223).
+#[test]
+fn dual_optional_chain_misuse_diagnostics_not_masked() {
+    let diags = check_source("func main() -> i32 { let x = 5; let y = x?.to_string(); 0 }")
+        .expect_err("non-Option receiver on ?. must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0224") && rendered.contains("requires Option or Result receiver"),
+        "expected E0224 receiver validation, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("E0223"),
+        "the call-shape error must still surface:\n{rendered}"
+    );
+    // Sanity: the plain non-function callee path still reports exactly the
+    // call-shape error without interference.
+    let diags = check_source("func main() -> i32 { let x = 5; let y = x(1); 0 }")
+        .expect_err("non-function callee must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0223") && !rendered.contains("E0224"),
+        "plain non-function callee: E0223 only, got:\n{rendered}"
+    );
+}
+
 #[test]
 #[ignore = "0.36.36 Phase C: flow-state-in-container native ABI 统一（Result/Option 槽位 ptr vs 平铺 i64）"]
 fn dual_flow_state_in_container_native_gap() {
