@@ -23,7 +23,7 @@
 //! 都活 → 仍活；都消名 → 已亡；仅一分支存活 → 路径依赖 → fail-closed），保证
 //! join 后的分析对两条运行时路径同时成立。
 
-use crate::ast::{Expr, FuncDef, Item, MatchArm, PatternKind, Stmt};
+use crate::ast::{Expr, FuncDef, Item, MatchArm, PatternKind, Stmt, Type};
 use crate::core::checker::Checker;
 
 // ─── 表达式 / 语句的"触及"查询（保守，用于 fail-closed 门）───────────
@@ -82,6 +82,20 @@ fn stmt_uses_name(s: &Stmt, names: &[String]) -> bool {
             cond, then_, else_, ..
         } => {
             expr_uses_name(cond, names)
+                || then_.iter().any(|s| stmt_uses_name(s, names))
+                || else_
+                    .as_ref()
+                    .is_some_and(|es| es.iter().any(|s| stmt_uses_name(s, names)))
+        }
+        Stmt::IfLet {
+            pat,
+            init,
+            then_,
+            else_,
+            ..
+        } => {
+            expr_uses_name(init, names)
+                || pattern_uses_name(pat, names)
                 || then_.iter().any(|s| stmt_uses_name(s, names))
                 || else_
                     .as_ref()
@@ -255,12 +269,23 @@ impl<'a> Checker<'a> {
             self.linear_blackbox_visiting.remove(&guard);
             return false;
         };
+        // 0.36.42: if-let 穷举消解只对 Option 中介面开（None 零负载 =
+        // 具体面 0.36.36 义务消解镜像）；List/Result/自定义枚举保持 fail-closed
+        // （concrete E0256 同款）。入口按参数表面类型设置，供 Stmt::IfLet 读。
+        let saved_scrutinee_option = self.blackbox_param_scrutinee_option;
+        let is_option_scrutinee = match param.ty.unlocated() {
+            Type::Name(n, _) => n == "Option",
+            Type::Option(_) => true,
+            _ => false,
+        };
+        self.blackbox_param_scrutinee_option = is_option_scrutinee;
         let ok = linear_blackbox_body(
             &func.body,
             std::slice::from_ref(&param.name),
             allow_drop,
             self,
         );
+        self.blackbox_param_scrutinee_option = saved_scrutinee_option;
         self.linear_blackbox_visiting.remove(&guard);
         let cache = if allow_drop {
             &mut self.linear_blackbox_cache
@@ -720,6 +745,83 @@ fn stmt_flow(
                     post.consume(n);
                 }
             }
+            Ok(post)
+        }
+        Stmt::IfLet {
+            pat,
+            init,
+            then_,
+            else_,
+        } => {
+            if !state.any_uses(init) {
+                return Ok(state);
+            }
+            if state
+                .consumed
+                .iter()
+                .any(|n| expr_uses_name(init, std::slice::from_ref(n)))
+            {
+                return Err(()); // 转移后复用
+            }
+            // scrutinee 必须整体包含恰一个 live 名（0.36.36 容器义务解消的
+            // 泛型镜像；`foo(o)`/`o.f` 等投影位置 → 非整体 → fail-closed）。
+            let candidates: Vec<String> = state
+                .live
+                .iter()
+                .filter(|n| expr_whole_contains(init, n, checker))
+                .cloned()
+                .collect();
+            if candidates.len() != 1 {
+                return Err(());
+            }
+            let v = candidates[0].clone();
+            if state
+                .live
+                .iter()
+                .any(|n| n != &v && expr_uses_name(init, std::slice::from_ref(n)))
+            {
+                return Err(());
+            }
+            let info = pattern_binding_info(&pat.kind)?;
+            // 容器经 if-let 消解后，then/else 块内不得再触容器名。
+            if then_
+                .iter()
+                .any(|st| stmt_uses_name(st, std::slice::from_ref(&v)))
+                || else_.as_ref().is_some_and(|es| {
+                    es.iter()
+                        .any(|st| stmt_uses_name(st, std::slice::from_ref(&v)))
+                })
+            {
+                return Err(());
+            }
+            // then 块：绑定名黑盒流动，必须完全处理（臂内弃置 = 具体面
+            // E0256 同款禁令；`if let Some(x) = o { sink_g(x) }` 恰一次）。
+            let mut then_state = FlowState::default();
+            for n in &info.names {
+                then_state.live.push(n.clone());
+            }
+            let then_post = stmts_flow(then_, then_state, allow_drop, checker)?;
+            if !then_post.live.is_empty() {
+                return Err(()); // 绑定名未完全处理 → 弃值
+            }
+            // 零绑定模式（`if let _ = o`）：整个容器弃置 → drop 门禁。
+            if info.names.is_empty() && !allow_drop {
+                return Err(());
+            }
+            // else（及 no-else 回退）：仅 Option 中介面开——None 变体零负载，
+            // 不匹配路径不涉及任何弃置 → 无 drop 门禁（transfer-only 的会话
+            // 也可 if-let 转移）；其余容器 fail-closed（concrete E0256）。
+            if !checker.blackbox_param_scrutinee_option {
+                return Err(());
+            }
+            if let Some(es) = else_ {
+                let else_post = stmts_flow(es, FlowState::default(), allow_drop, checker)?;
+                if !else_post.live.is_empty() {
+                    return Err(());
+                }
+            }
+            let mut post = state;
+            post.consume(&v);
             Ok(post)
         }
         Stmt::While { .. } | Stmt::WhileLet { .. } | Stmt::Loop(_) => {
