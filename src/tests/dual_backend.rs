@@ -3503,6 +3503,248 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.45 — 泛型×线性单态化切片 6：for + if-let 组合（元素级绑定面）──
+// 0.36.42 的 if-let 中介面与 0.36.40 的 for 穷举解构在本切合流：`for x in xs`
+// 内嵌 `if let Some(y) = x`——**元素级 if-let**（List 元素是 Option，逐迭代
+// 提取绑定）。三处修正共同撑起组合面：
+//   * concrete 面：if-let then 臂绑定 Introduce 键到 **then 块入口的最内层
+//     消费节点**（Expr/Bind/Assign/Return 值下钻；块体下钻首语句/尾部 result）。
+//     ——若键到头部分支前，fall-through 两路径都复位 → "consumed on only some
+//        reachable CFG paths" + E0256 双误报；键到语句节点会因 CFG 点序内层在
+//       前而落在首个消费之后（顺序翻转）→ E0256。块入口点 + 动作秩排序
+//       （Introduce=3 < Move=5）保证"每迭代先复位后消费"（循环背边携带上
+//       迭代 Consumed 事实 → 第二迭代 Move 撞 E0304 的根因即缺复位）；
+//   * concrete 面：match 臂模式绑定同款 per-iteration Introduce（for+match
+//     组合：臂绑定也是逐迭代临时资源，visit_arm 发射，键 = 臂体首消费点）；
+//   * 泛型面：`stmts_flow` live 清空后的剩余语句必须复查已消费名字的复用
+//     （`sink_g(y); sink_g(y)` 的第二条——此前 live 清空提前返回使尾部语句
+//     脱离检查，泛型 double-use 漏网；concrete 面由 dataflow Move-after-
+//     Consumed 拒绝，双后端对齐后同拒）。
+// 组合合法（双后端 L1 等价）：带/不带 else、带累加器槽位（0.36.40）；
+// 禁止（fail-closed）：then 弃置 y（E0256/E0432）、y 双用（E0304/E0432）、
+// 非 Option 元素 if-let（E0432）——健全性 = 切片 1 论证延续：Option-ness 是
+// 容器类型性质，任意具体线性实例化下组合行为 == 等价 concrete 副本。
+
+#[test]
+fn dual_linear_for_iflet_option_accumulator_ok() {
+    // L1+L2: concrete 要素级 if-let + 累加器槽位（`n = n + sink(y)`）——
+    // [None, Some, Some] → 2；Assign 归值形状（消费在二元右侧）验证
+    // then 头键的下钻路径。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 1 }
+func concrete(xs: List<Option<cap FileReadCap>>) -> i32 {
+    let mut n = 0
+    for x in xs {
+        if let Some(y) = x { n = n + sink(y) }
+    }
+    n
+}
+func main() -> i32 {
+    let l = [None, Some(FileReadCap), Some(FileReadCap)]
+    let r = concrete(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "2";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen for+if-let acc");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) for+if-let acc");
+    let unga = compile_and_run(src).expect("legacy codegen for+if-let acc");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) for+if-let acc");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm for+if-let acc");
+}
+
+#[test]
+fn dual_generic_linear_for_iflet_option_accumulator_ok() {
+    // L1+L2: 泛型镜像——`List<Option<T>>` 元素级 if-let + 累加器，期望 2；
+    // 泛型面经 stmts_flow 结算（元素链 Option-ness = [true] 开中介面）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func f<T>(xs: List<Option<T>>) -> i32 {
+    let mut n = 0
+    for x in xs {
+        if let Some(y) = x { n = n + sink_g(y) }
+    }
+    n
+}
+func main() -> i32 {
+    let l = [None, Some(FileReadCap), Some(FileReadCap)]
+    let r = f(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "2";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen generic for+if-let");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) generic for+if-let"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen generic for+if-let");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) generic for+if-let");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm generic for+if-let");
+}
+
+#[test]
+fn dual_linear_for_iflet_option_else_ok() {
+    // L1+L2: concrete 带 else 形态（else 走 None 零负载路径）——期望 2；
+    // 同时验证 t-形状（两臂都结算无弃置）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 1 }
+func concrete(xs: List<Option<cap FileReadCap>>) -> i32 {
+    let mut n = 0
+    for x in xs {
+        if let Some(y) = x { n = n + sink(y) } else { n = n + 0 }
+    }
+    n
+}
+func main() -> i32 {
+    let l = [None, Some(FileReadCap), Some(FileReadCap)]
+    let r = concrete(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "2";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen for+if-let else");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) for+if-let else"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen for+if-let else");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) for+if-let else");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm for+if-let else");
+}
+
+#[test]
+fn dual_linear_for_match_option_ok() {
+    // L1+L2: for+match 组合（0.36.41 臂残差 + 本切臂绑定 per-iteration
+    // Introduce）——match 提取 Option 元素，期望 2。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func f<T>(xs: List<Option<T>>) -> i32 {
+    let mut n = 0
+    for x in xs {
+        n = n + match x { Some(y) => sink_g(y), None => 0 }
+    }
+    n
+}
+func main() -> i32 {
+    let l = [None, Some(FileReadCap), Some(FileReadCap)]
+    let r = f(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "2";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen for+match");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) for+match");
+    let unga = compile_and_run(src).expect("legacy codegen for+match");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) for+match");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm for+match");
+}
+
+#[test]
+fn dual_linear_for_iflet_abandon_rejected() {
+    // L2: 循环内 then 块弃置 y（空 then `{ 0 }` 不触 y）——逐迭代泄漏 →
+    // concrete E0256（循环背边携带 Available → 返回/发散门禁），fail-closed。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 }          func f(xs: List<Option<cap FileReadCap>>) -> i32 {              for x in xs { if let Some(y) = x { 0 } } 0 }          func main() -> i32 { let l = [None, Some(FileReadCap)]; let r = f(l); 0 }",
+    )
+    .expect_err("for+if-let binding abandonment must be rejected (E0256)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256"),
+        "expected E0256 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_for_iflet_double_use_rejected() {
+    // L2: concrete 双用——then 块 `sink(y); sink(y);` → dataflow
+    // Move-after-Consumed E0304。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 }          func f(xs: List<Option<cap FileReadCap>>) -> i32 {              for x in xs { if let Some(y) = x { sink(y); sink(y) } } 0 }          func main() -> i32 { let l = [None, Some(FileReadCap)]; let r = f(l); 0 }",
+    )
+    .expect_err("concrete for+if-let double use must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_for_iflet_double_use_rejected() {
+    // L2: **泛型双用洞修复**——then 块 `sink_g(y); sink_g(y);`：首语句消费 y
+    // 后 live 清空，stmts_flow 提前返回使第二语句脱离检查（0.36.45 前漏网，
+    // concrete E0304 与泛型 E0432 双后端对齐）；现在剩余语句复扫已消费名 →
+    // E0432。
+    let diags = check_source(
+        "cap FileReadCap; func sink_g<T>(x: T) -> i32 { drop(x); 1 }          func f<T>(xs: List<Option<T>>) -> i32 {              for x in xs { if let Some(y) = x { sink_g(y); sink_g(y) } } 0 }          func main() -> i32 { let l = [None, Some(FileReadCap)]; let r = f(l); 0 }",
+    )
+    .expect_err("generic for+if-let double use must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_iflet_non_option_element_rejected() {
+    // L2: 非 Option 元素（`List<T>` 元素直接 if-let `[a]` 模式）——余部义务
+    // 不可静态表达 → E0432（concrete E0256/E0304 同款 fail-closed）。
+    let diags = check_source(
+        "cap FileReadCap; func sink_g<T>(x: T) -> i32 { drop(x); 1 }          func f<T>(xs: List<T>) -> i32 {              for x in xs { if let [a] = x { sink_g(a) } else { 0 } } 0 }          func main() -> i32 { let l = [FileReadCap]; let r = f(l); 0 }",
+    )
+    .expect_err("if-let on non-Option element must stay fail-closed (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.36.44 — 泛型×线性单态化切片 5：高阶直通（callable-值调用 + closure 臂）──
 // 开面：高阶调用携带线性容器——`foldT(xs, fn(x: T) -> i32 { sink_g(x) })`：
 //   * Lambda 字面量实参 = 匿名"臂"：参数名逐一 live 黑盒结算体（恰一次转移/

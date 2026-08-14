@@ -7,6 +7,34 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.45 — 泛型×线性单态化切片 6：for + if-let 组合（元素级绑定面，L1/L2）
+
+- **开面**：0.36.42 的 if-let 中介面与 0.36.40 的 for 穷举解构合流——
+  `for x in xs { if let Some(y) = x { ... } }`（List 元素 = Option，逐迭代
+  提取绑定）concrete + 泛型双后端挣绿；for+match 组合（臂内 `Some(y) =>`）
+  同步打通。
+- **concrete 面修复**（`src/core/cfg/resource_lower.rs`）：
+  - if-let then 臂绑定 **Introduce 键 = then 块入口的最内层消费节点**
+    （表达式/初始化器/归值下钻；块体下钻首语句或尾 result；调用实参链下钻；
+    Drop 语句锚定语句节点）——键到头部分支前 → 两路径都复位 → "consumed on
+    only some paths" + E0256 双误报；键到语句节点 → CFG 点序内层在前，Introduce
+    落在首个消费之后（顺序翻转）。块入口点 + 动作秩排序（Introduce=3 < Move=5）
+    保证"每迭代先复位后消费"（循环背边携带上迭代 Consumed 事实 → 第二迭代
+    Move 撞 E0304 的根因即缺复位）；
+  - match 臂模式绑定同款 per-iteration Introduce（`visit_arm` 发射）——臂绑定
+    也是逐迭代临时资源。
+- **泛型面修复**（`src/core/checker/linear_blackbox.rs`）：`stmts_flow` live
+  清空后**剩余语句复扫已消费名字**——`sink_g(y); sink_g(y)` 第二条此前因提前
+  返回脱离检查（泛型 double-use 漏网；concrete 由 dataflow Move-after-Consumed
+  拒绝，双后端对齐后同拒 E0432）。
+- **健全性**：组合行为与等价 concrete 副本一致（Option-ness 是容器类型性质，
+  固定于泛型签名、与 T 无关——切片 1 论证延续）。
+- **挣绿**：concrete/泛型 for+if-let 累加器（`[None, Some, Some]` → 2）、带
+  else 形态、for+match（= 2）三后端等价；循环内弃置 then（E0256）、y 双用
+  （concrete E0304 / 泛型 E0432）、非 Option 元素 if-let（E0432）fail-closed。
+- **回归**：正例 4 + 负例 3 入 dual_backend（0.36.45 段）；0.36.42-44 既有
+  dual 全绿（flip/consumes_container 探针形态复验）。
+
 ### 0.36.44 — 泛型×线性单态化切片 5：高阶直通——callable-值调用 + closure 臂（L1/L2）
 
 - **开面**：高阶调用携带线性容器——`foldT(xs, fn(x: T) -> i32 { sink_g(x) })`
