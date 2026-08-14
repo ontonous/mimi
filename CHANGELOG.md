@@ -7,6 +7,20 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.23 — 预研发现：SessionChan<T> 用户层不可构造（Phase C Session 重设计输入）
+
+- **探针实证（phase-c-linearity-study.md §4d）**：`session_pair()` 返回
+  `List<i64>` 句柄；类型标注 `let ch0: SessionChan<Echo> = pair[0]` = E0209、
+  `session_pair::<Echo>()` = E0401、typed 参数函数 `client(ch: SessionChan<Echo>)`
+  无法被用户 main 调用——pair[0] 为 i64，无任何构造途径。**typed 残差函数为
+  死面**：checker 对其强制 residual 顺序（E0414 实证），但协议通道以裸句柄流通，
+  证明无法跨函数边界贯穿。
+- **路线图映射**：= Phase C Session 项"消除 checker 权威 / codegen best-effort
+  分层割裂"的用户可见实例，入 0.36.36+ 正式窗口设计选项（(A) session_pair 返回
+  类型化端点——倾向，residual 证明跨边界贯穿；(B) 删除 typed 参数面——死面
+  消除）。
+- 门禁全绿；无代码变更（预研探针轮）。
+
 ### 0.36.22 — M9 修复：线性容器索引读取 fail-open → fail-closed（L2 挣绿）
 
 - **修复（src/core/cfg/resource_lower.rs）**：`ActionEmitter::visit_expr` 顶部
