@@ -7,6 +7,45 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.40 — 泛型×线性单态化切片 2：结构化整体消费（元素级贯通，L1/L2）
+
+- **背景**：切片 1（0.36.39）只放行"整体值转移 / 显式 drop"的黑盒调体——
+  任何结构性消费（for/match 解构、投影）仍 E0432。本切打开**穷举解构面**
+  （路线图"`List<cap>`/`Option<cap>` 元素级消费经泛型"）——调体可对参数做
+  结构化整体消费，条件逐条对齐具体面既有契约：
+  - `for` 穷举逐元素解构（0.36.37 周期语义）：容器作为 iterable 整体出现，
+    元素绑定在循环体内按黑盒规则处理（`n = n + sink_g(x)` 恰一次消费）；
+    `for (a, _) in v` 的元组通配弃置 = drop 门禁；
+  - `match` 穷举解构（0.36.36 容器义务消解）：scrutinee 整体出现，每臂绑定
+    名在臂体内黑盒处理（`Some(x) => sink_g(x)`；臂内弃置 = 具体面 E0256
+    同款禁令）；无绑定臂（`_` 等）静默弃置 = drop 门禁；`None` 零参构造在
+    模式面解析为裸标识符 → 无绑定无弃置；
+  - `Assign` 二元累加槽位（`n = n + sink_g(x)` / `n = n + match x { .. }`）
+    路由"转移表达式"（Call / Match）；
+  - **构造包装** `Some(x)` / `Ok(v)`（非函数非 builtin 的标识符调用 = 数据
+    构造器）按元组字面量同款整体值处理，实参内可嵌套转移链
+    （`Some(attach(x))`）——`flip<T>(o: Option<T>) -> Option<T>` 成为合法面。
+- **机制**（`src/core/checker/linear_blackbox.rs`）：`pattern_binding_info`
+  （模式绑定名 + 弃置标记，零参构造特判）；`match_flow`（臂/guard/body 三重
+  校验 + scrutinee 消解）；`expr_tail_flow`（统一尾表达式流：Call/Match/
+  Block/整体包含四分支）；`expr_uses_name` 补 Match 覆盖（根因：`n + match x`
+  的触碰检测此前漏 Match → 黑盒误判）；`expr_whole_contains` 改 checker-aware
+  并识别构造包装；`call_transfer` 构造包装回退路径（每 live 名恰一实参完整
+  反应，嵌套转移链递归）。**健全性 = 切片 1 论证的严格推广**：解构形态对 T
+  的线性性零依赖（穷举性由正常 checker 按具体类型保证），调用方义务仍由
+  call-site 具体类型追踪（`let o2 = flip(o)` 漏消费 → E0256）。
+- **会话 transfer-only 维护**：任何弃置形态（`_` 臂、臂内 drop）经 `dropit<T>`
+  等价路径 E0432；构造包装在 transfer-only 模式同步放行（flip 接受
+  SessionChan 实例化，调用方协议 E0425 职责不变）。
+- **未覆盖面（记录）**：匹配臂残差分支级复位（match 臂顺序分析共享残差——
+  第二臂看到第一臂推进后的残差，E0414 已实证）、closure 臂、`if let` 非穷举、
+  投影接口（`xs[0]` 元素析构保持切片 1 的 E0432）。
+- **回归**：正例 7 三 harness（List 元素消费 2 / Option 解构 1 / 嵌套
+  List<Option> 2 / flip cap 12 / let-sink 2 / wildcard 臂 1）+ 负例 4
+  （for-leak / match-abandon / wildcard-session / flip 漏消费 E0256-
+  no-E0432 + flip session E0425-no-E0432）。全量 5401 绿；real_world 70/70
+  （69 build+exec，flow_test_macros SKIP 为既有 VM-only 面）。
+
 ### 0.36.39 — 泛型×线性单态化切片 1：线性黑盒直通（E0432 边界首开，L1/L2）
 
 - **背景**：路线图 Phase C「泛型×线性单态化」首付。§2.3（0.34.21）以来线性值

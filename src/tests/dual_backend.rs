@@ -3503,6 +3503,331 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.40 — 泛型×线性单态化切片 2：结构化整体消费（元素级贯通）──────
+// 切片 1（0.36.39）只放行"整体值转移 / 显式 drop"的黑盒调体；任何结构性
+// 消费（for/match 解构、投影 `xs[0]`）仍 E0432。切片 2 打开**穷举解构面**：
+// 调体可对参数做结构化整体消费，条件逐条对应具体面的既有契约——
+//   - `for` 穷举逐元素解构（0.36.37 周期语义）：容器作为 iterable 整体出现，
+//     元素绑定在循环体内按黑盒规则处理（元素恰一次）；`for _ in v` 逐元素
+//     显式弃置 = drop 门禁（仅 drop-宽容线性类）；
+//   - `match` 穷举解构（0.36.36 容器义务消解）：scrutinee 整体出现，每臂绑定
+//     名在臂体内黑盒处理；无绑定臂（`_`/常量）静默弃置 = drop 门禁；
+//     `None` 等零参构造在模式面解析为裸标识符 → 无绑定无弃置；
+//   - Assign 二元累加槽位（`n = n + sink_g(x)` / `n = n + match x { .. }`）
+//     路由"转移表达式"（Call / Match）；
+//   - 构造包装 `Some(x)` / `Ok(v)`（非函数非 builtin 的标识符调用 = 数据
+//     构造器）按元组字面量同款整体值处理；实参内可嵌套转移链
+//     （`Some(attach(x))`）。
+// 健全性 = 切片 1 论证的严格推广：这些解构形态对 T 的线性性零依赖（穷举性
+// 由正常 checker 按具体类型保证），调用方义务仍由 call-site 具体类型追踪
+// （`let o2 = flip(o)` 漏消费 → E0256）。
+// 会话仍 transfer-only：任何弃置形态（`for _ in`、`_` 臂、臂内 drop）E0432。
+// 未覆盖面（后续切片）：匹配臂残差分支级复位、closure 臂、`if let` 非穷举、
+// 嵌套构造器任一侧的真实函数调用。
+
+#[test]
+fn dual_generic_linear_list_element_consumption_ok() {
+    // L1+L2: `List<cap>` 元素级消费经由泛型循环体（0.36.37 for 语义的泛型
+    // 面）——元素经泛型 sink 释放，双后端计数一致。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func count<T>(v: List<T>) -> i32 { let mut n = 0; for x in v { n = n + sink_g(x) } n }
+func main() -> i32 {
+    let l = [FileReadCap, FileReadCap]
+    let c = count(l)
+    println(c)
+    0
+}
+"#;
+    let expected = "2";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen list element consumption");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) list element consumption"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen list element consumption");
+    assert_eq!(
+        unga.trim(),
+        expected,
+        "legacy(codegen) list element consumption"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm list element consumption");
+}
+
+#[test]
+fn dual_generic_linear_option_destructure_ok() {
+    // L1+L2: `Option<cap>` 穷举解构进泛型体——Some 绑定经泛型 sink 消费，
+    // None 臂无绑定（零参构造 `None` 模式面为裸标识符）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func consume<T>(o: Option<T>) -> i32 {
+    match o { Some(x) => sink_g(x), None => 0 }
+}
+func main() -> i32 {
+    let o = Some(FileReadCap)
+    let r = consume(o)
+    println(r)
+    0
+}
+"#;
+    let expected = "1";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen option destructure");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) option destructure"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen option destructure");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) option destructure");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm option destructure");
+}
+
+#[test]
+fn dual_generic_linear_nested_option_list_ok() {
+    // L1+L2: 嵌套容器 `List<Option<cap>>`——for 元素 x: Option<T> 再经 match
+    // 穷举解构（Assign 二元累加槽位的 Match 边）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func nested<T>(v: List<Option<T>>) -> i32 {
+    let mut n = 0
+    for x in v { n = n + match x { Some(c) => sink_g(c), None => 0 } }
+    n
+}
+func main() -> i32 {
+    let l = [Some(FileReadCap), None, Some(FileReadCap)]
+    let r = nested(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "2";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen nested option list");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) nested option list"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen nested option list");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) nested option list");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm nested option list");
+}
+
+#[test]
+fn dual_generic_linear_option_flip_cap_ok() {
+    // L1+L2: 构造包装——`Some(attach(x))` 按整体值处理（实参内嵌套转移链）；
+    // flip 返回值 Option<cap> 由调用方具体追踪（Some 臂 drop / None 臂空）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func attach<T>(x: T) -> T { x }
+func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } }
+func main() -> i32 {
+    let o = Some(FileReadCap)
+    let o2 = flip(o)
+    match o2 { Some(c) => { drop(c) }, None => { } }
+    println(12)
+    0
+}
+"#;
+    let expected = "12";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen option flip");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) option flip");
+    let unga = compile_and_run(src).expect("legacy codegen option flip");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) option flip");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm option flip");
+}
+
+#[test]
+fn dual_generic_linear_let_sink_ok() {
+    // L1+L2: Let-调用初始化（`let k = take_g(x)`）——sink 返回值不携带线性值
+    // → k 不入 live；循环体流动闭合。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func take_g<T>(x: T) -> i32 { drop(x); 1 }
+func f<T>(v: List<T>) -> i32 { let mut n = 0; for x in v { let k = take_g(x); n = n + k } n }
+func main() -> i32 {
+    let l = [FileReadCap, FileReadCap]
+    let r = f(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "2";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen let-sink");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) let-sink");
+    let unga = compile_and_run(src).expect("legacy codegen let-sink");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) let-sink");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm let-sink");
+}
+
+#[test]
+fn dual_generic_linear_match_wildcard_cap_ok() {
+    // L1+L2: 无绑定 `_` 臂在 drop-宽容模式合法（cap 弃置 = 释放）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func f<T>(o: Option<T>) -> i32 { match o { Some(x) => sink_g(x), _ => 0 } }
+func main() -> i32 {
+    let o = Some(FileReadCap)
+    let r = f(o)
+    println(r)
+    0
+}
+"#;
+    let expected = "1";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen wildcard cap ok");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) wildcard cap ok"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen wildcard cap ok");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) wildcard cap ok");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm wildcard cap ok");
+}
+
+#[test]
+fn dual_generic_linear_for_leak_rejected() {
+    // L2: 循环体不处理元素绑定（只累加计数）→ 元素静默弃置 → E0432。
+    let diags = check_source(
+        "cap FileReadCap; func leak<T>(v: List<T>) -> i32 { let mut n = 0; for x in v { n = n + 1 } n } \
+         func main() -> i32 { let l = [FileReadCap]; let r = leak(l); println(r); 0 }",
+    )
+    .expect_err("for-body must handle its element bindings (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_match_abandon_rejected() {
+    // L2: 绑定名在臂体内被遗弃（`Some(x) => 0`）——与具体面 E0256 契约对齐
+    // → E0432（模板内名字级分析不可见）。
+    let diags = check_source(
+        "cap FileReadCap; func f<T>(o: Option<T>) -> i32 { match o { Some(x) => 0, None => 0 } } \
+         func main() -> i32 { let o = Some(FileReadCap); let r = f(o); println(r); 0 }",
+    )
+    .expect_err("match arm must handle its binding (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_match_wildcard_session_rejected() {
+    // L2: transfer-only 模式下 `_` 臂（以及 `for _ in`、臂内 drop）静默弃置
+    // SessionChan 值 = 协议弃置（concrete 面 E0425 同款）→ E0432。
+    let diags = check_source(
+        "session S = !i32 . ?i32 . end; func attach<T>(x: T) -> T { x } \
+         func f<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), _ => None } } \
+         func main() -> i32 { let (ch0, ch1) = session_pair::<S>(); let o = Some(ch0); \
+         let o2 = f(o); println(1); session_close(ch1); 0 }",
+    )
+    .expect_err("wildcard arm abandons SessionChan in transfer-only mode (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_option_flip_unconsumed_caller() {
+    // L2: 调用方义务不因切片 2 放松——`let o2 = flip(o)` 后漏消费 o2 → E0256
+    // （且不出现 E0432：flip 的构造包装面已放行）。
+    let diags = check_source(
+        "cap FileReadCap; func attach<T>(x: T) -> T { x } \
+         func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } } \
+         func main() -> i32 { let o = Some(FileReadCap); let o2 = flip(o); println(1); 0 }",
+    )
+    .expect_err("flip return binding must still be consumed (E0256)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256"),
+        "expected E0256 diagnostic, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("E0432"),
+        "flip (constructor wrap) must not be rejected as E0432:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_option_flip_session_transfer_only() {
+    // L2: transfer-only 模式同样放行构造包装（E0432 不应出现）；调用方未完成
+    // 协议/未按残差关闭 → 具体面 E0425（协议弃置）负责。
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end; func attach<T>(x: T) -> T { x } \
+         func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } } \
+         func main() -> i32 { let (ch0, ch1) = session_pair::<Echo>(); let o = Some(ch0); \
+         let o2 = flip(o); println(1); session_close(ch1); 0 }",
+    )
+    .expect_err("session flip pending protocol must fail on the concrete face (E0425), not E0432");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !rendered.contains("E0432"),
+        "flip (transfer-only constructor wrap) must not be rejected as E0432:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("E0425"),
+        "expected E0425 protocol abandonment diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.34.21 — 泛型 × 线性边界（§2.3 裁决）────────────────────
 // Generic parameters are not linearly tracked (GenericParameter
 // is_linear() = false). Linear capabilities (Cap/SessionChan/Flow state)
