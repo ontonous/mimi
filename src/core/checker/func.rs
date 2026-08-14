@@ -72,6 +72,18 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|t| self.resolve_type(t))
             .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+        // 0.36.7 (裁决 3, DoD #3): Fault 是状态不是值 — 禁止作为函数返回值。
+        // bare `Fault` 或 flow-qualified `flow::X::Fault` 都是同一系统 sink；
+        // 进入 Fault 后必须经 recover/reset 显式离开，预期失败走 Result 值。
+        if func.ret.is_some() && Self::is_fault_sink_type(&ret) {
+            self.emit_code(
+                crate::diagnostic::codes::E0441,
+                format!(
+                    "function '{}' returns the Fault sink: Fault 是状态不是值，禁止作为函数返回值；进入 Fault 后必须经 recover/reset 显式离开（预期失败用 Result<T, E> 值传播）",
+                    func.name
+                ),
+            );
+        }
         self.current_ret = Some(ret.clone());
         let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
         // Push function-level variable scope for shadowing detection

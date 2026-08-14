@@ -161,6 +161,54 @@ fn lower_resolved_type<'ctx>(
                     // Map/Set/Record are opaque handles (i64) at the LLVM level.
                     Ok(BasicTypeEnum::IntType(context.i64_type()))
                 }
+                // 0.36.7 (裁决 3/DoD #4): the structured Fault crash-context
+                // records must lower in the resolved native slice, mirroring
+                // the legacy emitter layouts in codegen/compile.rs
+                // (register_trace_records): MemoryDump { fields: string,
+                // count: i32 }; PanicPayload { error_type: string, file:
+                // string, line: i32, stack: string }; SystemTrace
+                // { last_state_name: string, unexpected_event: string,
+                // snapshot: string, memory_dump: MemoryDump,
+                // panic_payload: PanicPayload }. Per-function dispatch
+                // (cross-emitter ABI) requires the exact same layouts.
+                "builtin:type:SystemTrace"
+                | "builtin:type:MemoryDump"
+                | "builtin:type:PanicPayload" => {
+                    let pointer =
+                        BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()));
+                    let string_ty = BasicTypeEnum::StructType(context.struct_type(
+                        &[pointer, BasicTypeEnum::IntType(context.i64_type())],
+                        false,
+                    ));
+                    let i32_ty = BasicTypeEnum::IntType(context.i32_type());
+                    match item.as_str() {
+                        "builtin:type:MemoryDump" => Ok(BasicTypeEnum::StructType(
+                            context.struct_type(&[string_ty, i32_ty], false),
+                        )),
+                        "builtin:type:PanicPayload" => Ok(BasicTypeEnum::StructType(
+                            context.struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
+                        )),
+                        _ => {
+                            let memory_dump_ty = BasicTypeEnum::StructType(
+                                context.struct_type(&[string_ty, i32_ty], false),
+                            );
+                            let panic_payload_ty = BasicTypeEnum::StructType(
+                                context
+                                    .struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
+                            );
+                            Ok(BasicTypeEnum::StructType(context.struct_type(
+                                &[
+                                    string_ty,
+                                    string_ty,
+                                    string_ty,
+                                    memory_dump_ty,
+                                    panic_payload_ty,
+                                ],
+                                false,
+                            )))
+                        }
+                    }
+                }
                 other => Err(CompileError::Unsupported(format!(
                     "nominal type '{other}' is not in the resolved native slice"
                 ))),

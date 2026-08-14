@@ -139,6 +139,7 @@ pub const E0437: &str = "E0437"; // trait method call on a bounded generic param
 pub const E0438: &str = "E0438"; // generic type argument count mismatch (§3-诊断卫生: split from polysemous E0231)
 pub const E0439: &str = "E0439"; // verification engine divergence: resolved vs flow_ast disagree, fail-closed (ADR-008 §3, 0.34.44)
 pub const E0440: &str = "E0440"; // Fault is not a legal transition source (only recover/reset) — 二次 Fault 升级 (0.36.6)
+pub const E0441: &str = "E0441"; // Fault is a state, not a value — forbidden as a function return type (裁决 3, 0.36.7)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -390,6 +391,7 @@ pub fn describe(code: &str) -> &'static str {
         E0438 => "generic type argument count mismatch",
         E0439 => "verification engine divergence: resolved and flow_ast disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3). Arithmetic properties (e.g. `ensures: result == x * x`) commonly trigger this: the flow engine models integers as unbounded while the resolved engine applies i32/i64 checked semantics, so overflow-prone contracts may verify one engine and disprove the other. Add explicit bounds (e.g. `requires: x <= 46340`) to remove the divergence, or compare with bounded arithmetic (`requires: -2**31 <= x && x <= 2**31 - 1`)",
         E0440 => "Fault is not a legal transition source: a transition may only leave Fault via the system verbs `recover`/`reset` (二次 Fault 升级, phase A verdict 4). Any other event on Fault would silently loop Fault → Fault; fail-closed, trap instead",
+        E0441 => "Fault is a state, not a value: a function may not return the Fault sink (phase A verdict 3). Fault is entered by unexpected control-flow breakage (undeclared event / trap / panic / FFI crash) and may only be left via `recover`/`reset`; expected failures travel as `Result<T, E>` values instead",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -613,6 +615,7 @@ mod tests {
             super::E0438,
             super::E0439,
             super::E0440,
+            super::E0441,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,

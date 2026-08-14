@@ -148,6 +148,18 @@ impl<'a> Checker<'a> {
         Self::builtin_type_names().contains(&name.to_string())
     }
 
+    /// 0.36.7 (裁决 3): whether a resolved type denotes the per-flow Fault
+    /// sink — either the bare `Fault` name (re-anchored to the current flow)
+    /// or a flow-qualified `flow::<name>::Fault` form. The sink is a *state*,
+    /// not a value: functions must not return it (E0441); only recover/reset
+    /// may exit it.
+    pub(crate) fn is_fault_sink_type(ty: &Type) -> bool {
+        match ty.unlocated() {
+            Type::Name(n, _) => n == "Fault" || n.ends_with("::Fault"),
+            _ => false,
+        }
+    }
+
     pub(crate) fn builtin_type_names() -> Vec<String> {
         vec![
             "i32".into(),

@@ -3064,7 +3064,31 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// 0.36.4 Fault nominal: find the flow-scoped StateId/EventId enum whose
     /// variants include `name`. Unlike `find_variant_info` (which skips these
     /// enums for __MultiTarget disambiguation), this looks them up explicitly.
+    ///
+    /// 0.36.7 (跨 flow 补全, latent L1): the injected system verbs — peer_fault,
+    /// recover, reset, Panic, ffi_crash — are variants of EVERY flow's
+    /// StateId/EventId enum, so an unscoped first-match across type_defs is
+    /// nondeterministic across processes (HashMap RandomState) and mis-tags the
+    /// ordinal (enum Display then prints another flow's variant at that slot →
+    /// wrong state/event name in native output, flapping run-to-run). Scope to
+    /// the CURRENT flow's enums first (the transition body being compiled
+    /// belongs to it — same scoped-first discipline as `flow_state_llvm_type`,
+    /// 0.34.36 audit §6.9); fall back to the unscoped scan only for contexts
+    /// without an active flow (a scope miss can never trap — the fallback
+    /// keeps all previously-valid resolutions working).
     pub(in crate::codegen) fn nominal_variant_enum(&self, name: &str) -> Option<String> {
+        if !self.current_flow_name.is_empty() {
+            for suffix in ["StateId", "EventId"] {
+                let qualified = format!("flow::{}::{}", self.current_flow_name, suffix);
+                if let Some(td) = self.type_defs.get(&qualified) {
+                    if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                        if variants.iter().any(|v| v.name == name) {
+                            return Some(qualified);
+                        }
+                    }
+                }
+            }
+        }
         for td in self.type_defs.values() {
             if !(td.name.ends_with("::StateId") || td.name.ends_with("::EventId")) {
                 continue;
