@@ -33,7 +33,29 @@ impl Parser {
         }
     }
 
+    /// 0.36.50 (Phase D pre-roll): `parasteps` is no longer a lexer keyword.
+    /// It is recognized as a contextual statement keyword only when the
+    /// identifier is followed (after optional newlines) by a block.
+    fn parasteps_followed_by_block(&self) -> bool {
+        let mut i = self.pos + 1;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::Newline => i += 1,
+                TokenKind::LBrace => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn parse_stmt_kind(&mut self) -> Result<Stmt, ParseError> {
+        // 0.36.50: promote the contextual `parasteps` identifier to the
+        // internal statement token when it starts a parallel block. This keeps
+        // the existing `TokenKind::Parasteps` arm without reserving the word in
+        // the global keyword table.
+        if self.at_ident_name("parasteps") && self.parasteps_followed_by_block() {
+            self.tokens[self.pos].kind = TokenKind::Parasteps;
+        }
         match self.peek_kind() {
             TokenKind::Let | TokenKind::Const => self.parse_let(),
             TokenKind::Return => self.parse_return(),

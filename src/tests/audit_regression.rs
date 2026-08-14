@@ -1113,6 +1113,109 @@ func main() -> i32 {
 }
 
 #[test]
+fn all_soft_keywords_bindable_in_let() {
+    // 0.36.51 (Phase D soft-keyword policy lock): every word listed in the
+    // syntax-reference §1.4 soft-keyword set must remain legal in a binding
+    // position. These are the non-operator soft keywords that `expect_ident`
+    // accepts; structural keywords are intentionally excluded.
+    let names = [
+        "old",
+        "view",
+        "mutate",
+        "persistent",
+        "session",
+        "dual",
+        "end",
+        "parasteps",
+        "fault",
+        "reset",
+        "recover",
+        "and",
+        "or",
+        "not",
+    ];
+    for name in names {
+        let src = format!("func main() -> i32 {{ let {name} = 1; {name} + 1 }}");
+        assert!(
+            check_source(&src).is_ok(),
+            "soft keyword `{name}` must be legal as a let-bound identifier"
+        );
+        assert_eq!(
+            run_source(&src),
+            interp::Value::Int(2),
+            "soft keyword `{name}` binding must run"
+        );
+    }
+
+    // `not` also has a unary-operator reading; make sure the identifier
+    // reading supports a zero-argument function call, not just `not + 1`.
+    let not_fn = r#"
+func not() -> i32 { 42 }
+func main() -> i32 { not() }
+"#;
+    assert!(
+        check_source(not_fn).is_ok(),
+        "soft keyword `not` must be legal as a zero-arg function name"
+    );
+    assert_eq!(run_source(not_fn), interp::Value::Int(42));
+
+    // `not` must also work as a normal indexed identifier (`not[0]`), not only
+    // as a scalar variable. The unary-operator reading is reserved for actual
+    // operand starters (identifiers/literals/parentheses/etc.).
+    let not_index = r#"
+func main() -> i32 {
+    let not = [1, 2]
+    not[0]
+}
+"#;
+    assert!(
+        check_source(not_index).is_ok(),
+        "soft keyword `not` must be legal as an indexed identifier"
+    );
+    assert_eq!(run_source(not_index), interp::Value::Int(1));
+}
+
+#[test]
+fn parasteps_identifier_freed_parallel_block_kept() {
+    // 0.36.50 (Phase D pre-roll): `parasteps` is demoted from a lexer keyword
+    // to a contextual identifier. It must be legal as a function name or
+    // binding, while `parasteps { ... }` in statement position remains the
+    // parallel block.
+    let ok_call = r#"
+func parasteps() -> i32 { 42 }
+func main() -> i32 { parasteps() }
+"#;
+    assert!(
+        check_source(ok_call).is_ok(),
+        "func parasteps() must be legal"
+    );
+    assert_eq!(run_source(ok_call), interp::Value::Int(42));
+
+    let ok_let = r#"
+func main() -> i32 {
+    let parasteps = 7
+    parasteps + 1
+}
+"#;
+    assert!(check_source(ok_let).is_ok(), "let parasteps must be legal");
+    assert_eq!(run_source(ok_let), interp::Value::Int(8));
+
+    let block = r#"
+func main() -> i32 {
+    parasteps {
+        println("P")
+    }
+    3
+}
+"#;
+    assert!(
+        check_source(block).is_ok(),
+        "parasteps block must remain legal"
+    );
+    assert_eq!(run_source(block), interp::Value::Int(3));
+}
+
+#[test]
 fn m5_map_for_loop_rejected_without_internal_code_leak() {
     // M5 (audit-syntax 2026-08-03): `for (k, v) in map` used to pass the AST
     // checker (element typed (string, Any)) and then leak the internal

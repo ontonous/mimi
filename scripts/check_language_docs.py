@@ -193,6 +193,40 @@ def check_philosophy_anchor(errors: list[str]) -> None:
             )
 
 
+def check_phase_d_syntax_gate(errors: list[str]) -> None:
+    """Phase D (0.36.27/0.36.15) syntax-freshness pins.
+
+    The grammar authority must not reintroduce the removed T? alias as an
+    active production, and must not describe `defer failure` as a current
+    surface. Historical/verdict text is allowed to mention the removed form
+    as long as it carries a removal/migration marker.
+    """
+    postfix_type = re.compile(r"^\s*Type := PostfixType \{ '\?' \}", re.MULTILINE)
+    defer_failure_markers = re.compile(
+        r"0\.36\.15|0\.36\.29|无 .*表面|不存在|删除|removed|见 language-spec|super[sê]?d|修正|超售",
+        re.IGNORECASE,
+    )
+    for path in (SYNTAX_REFERENCE, GOLDEN_SYNTAX):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if postfix_type.search(text):
+            fail(
+                errors,
+                f"{path.relative_to(ROOT)}: active `Type := PostfixType {{ '?' }}` "
+                "production reintroduced (T? alias removed in 0.36.27; write Option<T>)",
+            )
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if re.search(r"defer\s+failure", line, re.IGNORECASE):
+                if defer_failure_markers.search(line):
+                    continue
+                fail(
+                    errors,
+                    f"{path.relative_to(ROOT)}:{lineno}: `defer failure` described as "
+                    "current surface without a 0.36.15/removal marker",
+                )
+
+
 def check_fault_nominal_gate(errors: list[str]) -> None:
     """DoD gate (Phase A, 0.36.5): Fault failure attribution must be nominal.
 
@@ -339,6 +373,7 @@ def main() -> int:
 
     check_semantic_freshness(errors)
     check_philosophy_anchor(errors)
+    check_phase_d_syntax_gate(errors)
     check_fault_nominal_gate(errors)
 
     if errors:

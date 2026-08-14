@@ -7,6 +7,137 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.55 — 0.1.6 四支柱里程碑核验：失败/状态/线性/语法全部“定案 + 挣绿”
+
+0.36.54 完成 Phase D 收官后，本 sprint 做一次跨 Phase A–D 的里程碑复核，把
+路线图 §3/§5 的四支柱验收结论固化：
+
+- **失败归属（Phase A，0.36.3–11）**：Fault payload 已名义化为 `StateId` /
+  `EventId`；`last_state == "..."` 字符串逃逸面归零；recover 走穷尽 `match`；
+  DoD 门禁 `check_fault_nominal_gate` 在线。
+- **状态语义（Phase B，0.36.13–21/29）**：Actor `mut` 定案为简单状态逃生舱 +
+  lint，spec 无双状态语义表述；Protocol 定案为 checker-only 静态投影 +
+  `unsafe_cast_protocol` 稳定逃生舱；`dyn Protocol` 判给宿主语言 trait
+  object。
+- **线性系统（Phase C，0.36.36–49）**：`List<cap>`/`Option<cap>` 元素级消费
+  （for/match/if-let/`xs[0]` 定向头提取/容器方法变换面）双后端等价；Session
+  typed 端点构造 + residual lowering 在 VM/native 全闭环；legacy 转移面
+  p13/p14 清零。
+- **语法重设计（Phase D，0.36.50–54）**：关键字清理、`?` 去歧义、作用域守卫
+  单机制、软关键字政策全部定案；语法权威已同步；`check_phase_d_syntax_gate`
+  在线。
+- **挣绿复核**：`cargo test --quiet --lib --tests` 全量 5450 lib + 15 dual +
+  31 integration + 1 real_world 全绿；`check_language_docs.py` /
+  `check_edge_isolation.py` / `cargo fmt --check` 全绿。
+
+**0.1.6 四支柱已全部达到“定案 + 挣绿” ✅。** 下一阶段进入 Phase E（加固与
+冻结，0.36.76–95）/ Phase F（复核与锚定，0.36.96+）。
+
+### 0.36.54 — Phase D 定案 + 挣绿收官：语法权威同步 + Phase D 门禁（语法重设计）
+
+承接 0.36.50–53 的最后四个落地点，本轮完成 Phase D 的正式收官核验与语法权威
+同步。语义/实现已在之前 sprint 挣绿，本轮把“定案”钉进可检查门禁：
+
+- **关键词句（路线图 DoD 对照）**：
+  - `?` 无三义 ✅：`T?` 别名产生式已删（0.36.27），当前只有 `try ?` 与
+    `?.` 两义；
+  - 作用域守卫单机制 ✅：0.36.15 修 resolved 发射器 + 0.36.29 定案方案 B，
+    保留 `defer { }` / `on failure { }` 双表面、共用同一条登记/出口发射单轨
+    机制；
+  - FFI 专用关键字退出全局保留字表 ✅：`c_shared/c_borrow/c_borrow_mut/
+    local_shared/weak_local/raw_string/parasteps/reset/recover/fault` 已全部
+    下沉（Ident/上下文标识符/flow 体内上下文），关键字表 63 词（60 硬 +
+    and/or/not 软）；
+  - 软关键字僵尸清零 ✅：66 词表锁定（0.36.51）、`not` 表达式起始歧义修复、
+    `all_soft_keywords_bindable_in_let` 覆盖 old/view/mutate/persistent/
+    session/dual/end/parasteps/fault/reset/recover/and/or/not。
+- **语法权威同步**：`devdocs/v0.34/golden/syntax-reference.golden.md` 与
+  `docs/syntax-reference.md` 补齐 0.36.15/0.36.27/0.36.50-53 的漂移——删除
+  残留的 `Type := PostfixType { '?' }` 活跃产生式，补 `defer`/`on failure`
+  的 0.36.15 注记，版本升级为 v0.1.6-dev（0.36.X）。
+- **门禁硬化**：`scripts/check_language_docs.py` 新增
+  `check_phase_d_syntax_gate`——禁止 `T?` 别名以活跃产生式回潮，禁止
+  `defer failure` 在无移除标记的当前表面描述中出现。
+- **挣绿**：`cargo test --quiet --lib --tests` 全量 5450 passed / 0 failed /
+  7 ignored（ASan 工具门禁）；dual_backend 15/15；real_world 1/1；
+  `python3 scripts/check_language_docs.py` 全绿；`cargo fmt --check` 净。
+
+**Phase D DoD 全部达成**：`?` 无三义；作用域守卫单机制；FFI 专用关键字退出
+全局保留字表；软关键字僵尸清零。语法重设计支柱“定案 + 挣绿” ✅。
+
+### 0.36.53 — Phase D 软关键字政策：`fault` 降为 flow 体内上下文标识符（语法重设计）
+
+继续关键字清理，最后一个仅因 flow 声明而保留的全局关键字 `fault` 也下沉：
+
+- **词法**：`src/lexer/keywords.rs` 移除 `"fault" => TokenKind::Fault` 映射并
+  从 `is_keyword_kind` 剔除；`fault` 现在 tokenize 为 `Ident`。
+- **解析**：`src/parser/top_level.rs` 在 flow body 解析循环中，遇到
+  `Ident("fault")` 时提升为内部 `TokenKind::Fault`，因此 `fault ErrorType`
+  声明路径不变；flow 外的 `fault` 是普通标识符，`let fault = 1` /
+  `func fault()` 合法。
+- **文档**：`docs/syntax-reference.md` 关键字表 64 → 63（60 硬 + and/or/not
+  软），golden 同步，语言文档门禁绿。
+- **挣绿**：`keyword_table_count_is_63_hard_is_60`、
+  `flow_words_tokenize_as_identifiers`（fault/reset/recover 均为 Ident）、
+  `all_soft_keywords_bindable_in_let` 扩展覆盖 fault；既有 60 个 fault 相关
+  flow/VM/codegen 测试与全量 lib 回归绿。
+
+### 0.36.52 — Phase D 软关键字政策：`reset`/`recover` 降为普通标识符（语法重设计）
+
+继续清理仅因历史/system 名称而保留的假关键字：
+
+- **词法**：`src/lexer/keywords.rs` 移除 `"reset" => TokenKind::Reset` 与
+  `"recover" => TokenKind::Recover` 映射，并从 `is_keyword_kind` 剔除——
+  `reset`/`recover` 现在 tokenize 为 `Ident`，不再是全局保留字。
+- **语义不变**：二者本来就是系统注入 transition 名（`Svc::reset(u)` /
+  `Svc::recover(u)`）与方法名，不是语法结构；降为普通标识符后 flow 调用、
+  checker、VM/native 路径全部不变。
+- **文档**：`docs/syntax-reference.md` 关键字表 66 → 64（61 硬 + and/or/not
+  软），golden 同步，语言文档门禁绿。
+- **挣绿**：关键字计数测试更新为 `keyword_table_count_is_64_hard_is_61`；
+  `fault_is_keyword_reset_recover_identifiers` 锁定 `fault` 仍为关键字、
+  `reset`/`recover` 为 Ident；现有 `all_soft_keywords_bindable_in_let` 与
+  全量 lib 回归绿。
+
+### 0.36.51 — Phase D 软关键字政策硬化：66 词表锁定 + `not` 标识符读法（语法重设计）
+
+继续 Phase D 软关键字政策，落实两个锁定：
+
+- **关键字表计数锁定**：`src/lexer/keywords.rs` 新增
+  `keyword_table_count_is_66_hard_is_63` 测试，硬编码 66 个词表并断言
+  `keyword_or_ident` 全部映射到非 `Ident` 的 TokenKind、`is_keyword_kind`
+  恰为 63（排除 and/or/not 三个软运算符）；`parasteps` 不在表中。
+- **`not` 僵尸读法修复**：`not` 既是布尔一元运算符，也是 `expect_ident`
+  允许的软关键字绑定名；但表达式起始处 `parse_unary_inner` 总是把 `not`
+  当一元运算符，导致 `let not = 1; not + 1` 报 `unexpected token +`——
+  正是“绑定位置合法 / 语句位置报错”的僵尸关键字。修复：在表达式起始处按
+  后随 token 前瞻——后随可作一元操作数（标识符/字面量/括号/`not`/`!` 等）
+  时保留运算符读法；后随二元运算符/分隔符/右括号/EOF 时走 `parse_primary`
+  的 ident-like 路径，`not` 作变量引用；并特判 `not()` 空参调用为函数调用。
+- **挣绿**：新增 `all_soft_keywords_bindable_in_let`——§1.4 全部 11 个软
+  关键字（old/view/mutate/persistent/session/dual/end/parasteps/and/or/not）
+  均可 `let` 绑定并运算，且 `func not() -> i32 { 42 }` + `not()` 合法；
+  关键字表计数测试通过；全量 lib 回归绿。
+
+### 0.36.50 — Phase D 预演：`parasteps` 从硬关键字降为上下文标识符（语法重设计）
+
+按 `devdocs/v0.36/phase-d-syntax-inventory.md` §1，关键字清理清单中仅剩
+`parasteps` 仍占全局保留字。本轮将其从词法硬关键字降为**上下文标识符**：
+
+- **词法**：`src/lexer/keywords.rs` 移除 `"parasteps" => TokenKind::Parasteps`
+  映射，并从 `is_keyword_kind` 剔除——`parasteps` 现在 tokenize 为 `Ident`，
+  不再是全局保留字；`func parasteps()` / `let parasteps = 7` / 字段名均合法。
+- **解析**：`src/parser/parse_stmt.rs` 新增 `parasteps_followed_by_block()`
+  前瞻（允许换行）；当语句起始的 `Ident("parasteps")` 后随 `{` 时提升为内部
+  `TokenKind::Parasteps`，复用既有并行块 AST/codegen 路径。非块场景（普通
+  标识符表达式）不受影响。
+- **文档**：`docs/syntax-reference.md` 关键字表 67 → 66（63 硬 + and/or/not
+  软）；`parasteps` 加入软关键字/上下文标识符说明，语句产生式保留并标注
+  contextual 语义。
+- **挣绿**：关键字 lexer 断言 + `parasteps_identifier_freed_parallel_block_kept`
+  （`func parasteps()` / `let parasteps` / `parasteps { ... }` 三种形态）；
+  既有 30 个 `parasteps` 双后端/typecheck/codegen 测试全绿。
+
 ### 0.36.49 — legacy 转移面补全：隐式尾返回 cap 转移 + 方法实参 cap 转移（L1/L2）
 
 承接 0.36.48 §4v.4 登记的两个 E0303 fail-closed 差距（p13/p14），本轮把这两处

@@ -151,6 +151,67 @@ impl Parser {
         result.map(|expr| self.parsed_expr_from(start_pos, expr))
     }
 
+    /// 0.36.51 (Phase D soft-keyword policy): `not` is both a unary boolean
+    /// operator and a legal binding identifier. At the start of a primary
+    /// expression, decide by lookahead: if the next token can begin a unary
+    /// operand, keep the operator reading; otherwise (`not + 1`, `println(not)`,
+    /// `not;`) treat it as an identifier reference.
+    fn not_is_unary_operator(&self) -> bool {
+        let Some(next) = self.tokens.get(self.pos + 1) else {
+            return false;
+        };
+        // `not()` is a function call with an empty argument list, not the
+        // unary operator applied to `()`; let the ident-like primary path
+        // build `Expr::Ident("not")` and the normal postfix call handle it.
+        if matches!(next.kind, TokenKind::LParen)
+            && self
+                .tokens
+                .get(self.pos + 2)
+                .is_some_and(|t| matches!(t.kind, TokenKind::RParen))
+        {
+            return false;
+        }
+        matches!(
+            &next.kind,
+            TokenKind::Int(_)
+                | TokenKind::Float(_)
+                | TokenKind::String(_)
+                | TokenKind::FString(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Unit
+                | TokenKind::Ident(_)
+                | TokenKind::Old
+                | TokenKind::View
+                | TokenKind::Mutate
+                | TokenKind::Persistent
+                | TokenKind::Session
+                | TokenKind::Dual
+                | TokenKind::End
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Not
+                | TokenKind::Bang
+                | TokenKind::NotOp
+                | TokenKind::Fault
+                | TokenKind::Reset
+                | TokenKind::Recover
+                | TokenKind::LParen
+                | TokenKind::If
+                | TokenKind::Match
+                | TokenKind::Spawn
+                | TokenKind::Await
+                | TokenKind::Arena
+                | TokenKind::Comptime
+                | TokenKind::Quote
+                | TokenKind::DollarParen
+                | TokenKind::Fn
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::BitAnd
+        )
+    }
+
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
         match self.peek_kind() {
             TokenKind::If => self.parse_if_expr(),
@@ -170,9 +231,17 @@ impl Parser {
                 }
                 Ok(self.parse_unary()?.unary(UnOp::Neg))
             }
-            TokenKind::Bang | TokenKind::NotOp | TokenKind::Not => {
+            TokenKind::Bang | TokenKind::NotOp => {
                 self.advance();
                 Ok(self.parse_unary()?.unary(UnOp::Not))
+            }
+            TokenKind::Not => {
+                if self.not_is_unary_operator() {
+                    self.advance();
+                    Ok(self.parse_unary()?.unary(UnOp::Not))
+                } else {
+                    self.parse_primary()
+                }
             }
             TokenKind::BitAnd => {
                 self.advance();
