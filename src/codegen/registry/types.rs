@@ -393,42 +393,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .i64_type()
                                         .const_int(std::cmp::max(payload_size, 1), false);
                                     // B4: NULL-checked malloc.
-                                    // TODO(L6): this Packed payload box is never freed → one leak
-                                    // per boxed-enum construction (struct / multi-arg variant
-                                    // payload). Multi-target boxes ARE fixed (compile_flow_
-                                    // transition_call registers in the caller; flow states can't be
-                                    // returned from wrappers, so no claim needed). Enum boxes are
-                                    // harder because a function CAN return them (`func f() -> Shape
-                                    // { Rect(..) }`).
-                                    //
-                                    // Naive fix (register at the ctor CALL site, simple.rs enum_ctor)
-                                    // is UNSOUND: the box would be freed at the enclosing function's
-                                    // return yet escape to the caller → double-free/UAF (verified
-                                    // empirically: "free(): double free detected").
-                                    //
-                                    // Sound fix = string-style ownership transfer (mirror
-                                    // claim_string_return_value / track_string_return_lifetime):
-                                    //   1. ctor call site: register the box (HeapEntry::Ptr) for
-                                    //      boxed variants (classify_variant_payload == Packed).
-                                    //   2. return path (block.rs Stmt::Return, before flush_heap_
-                                    //      scopes_to_boundary): if returning a custom enum, extract
-                                    //      field 1 (i64) → inttoptr → add to claimed_returned_envs
-                                    //      so the callee's guarded free skips it. Needs the current
-                                    //      fn's return-type AST (add a field set in compile_func_body,
-                                    //      save/restore for nested fns) to detect enum returns.
-                                    //   3. caller (emit_function_call, after the call): if the callee
-                                    //      returns a custom enum, register the returned box so the
-                                    //      caller frees it at scope exit.
-                                    //   POLYMORPHIC HAZARD: an enum's variants may be Single (inline
-                                    //   in i64, NO box) or Packed (box). field 1 is a box pointer
-                                    //   ONLY for Packed variants. So step 3's free must be CONDITIONAL
-                                    //   on the runtime tag (a new HeapEntry::EnumBox that checks
-                                    //   tag ∈ boxed-variant-ordinals before freeing) — otherwise a
-                                    //   returned Single variant frees inline bits → crash. Restricted
-                                    //   safe subset: enums where ALL variants are Packed (unconditional
-                                    //   free, like multi-target); mixed enums need the conditional
-                                    //   HeapEntry. Reuse claimed_returned_envs (pointer-compare guard,
-                                    //   same as closure env B9) for the return-claim.
+                                    // L6 (CLOSED): this Packed payload box has single-owner
+                                    // lifetime tracking since the 0.35.x L6 work:
+                                    //   - local consumption: enum_ctor in simple.rs registers
+                                    //     the box via register_heap_box → free_heap_allocs.
+                                    //   - escaping returns: claim_returned_enum_box skips the
+                                    //     callee-side free; the caller re-registers via
+                                    //     HeapEntry::EnumBox (tag-conditional free) through
+                                    //     register_enum_box_for_return.
+                                    // Regression coverage:
+                                    //   flow_features::enum_packed_payload_box_no_leak_no_double_free_dual_backend
+                                    //   and the lambda-returned boxed-enum dual test.
                                     let malloc_result =
                                         self.malloc_or_abort(size_val, "payload_malloc")?;
                                     let typed_ptr = self

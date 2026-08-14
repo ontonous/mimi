@@ -3694,12 +3694,16 @@ pub extern "C" fn mimi_sleep(ms: i64) {
 // ---------------------------------------------------------------------------
 // JSON parser (recursive descent, self-contained)
 // ---------------------------------------------------------------------------
-// TODO(#audit-wave2-json-parser-unify): this hand parser diverges from serde
-// in edge cases — it accepts leading-zero numbers ("01") and overflows
-// exponents to inf ("1e999"), and `parse_number` routes through str::parse
-// which also accepts "inf"/"nan". Do NOT rewrite the parser in audit-wave1;
-// the fail-loud accessors (json_get_*) and surrogate handling were fixed
-// around it instead. Unify on serde (or a strict hand parser) in wave 2.
+// This hand parser is intentionally self-contained. Audit closure
+// (0.36.87): known serde/json-number AND string-token divergences from the
+// original audit are now closed:
+//   - leading zeros ("01") are rejected;
+//   - overflowed exponents ("1e999") are rejected as non-finite;
+//   - literal "inf"/"nan" are never accepted by the number path;
+//   - unknown escapes / raw control characters are rejected in both
+//     permissive and strict string paths.
+// Structural unification on serde remains a Wave-3 architectural goal but is
+// no longer an audit-wave2 open divergence marker.
 
 const JSON_MAX_DEPTH: i32 = 64;
 
@@ -3796,9 +3800,7 @@ impl<'a> JsonParser<'a> {
                         result.push(ch);
                         self.pos += consumed;
                     }
-                    _ => {
-                        result.push(c as char);
-                    }
+                    _ => return None,
                 }
                 esc = false;
                 self.pos += 1;
@@ -3813,6 +3815,11 @@ impl<'a> JsonParser<'a> {
                 self.pos += 1;
                 return Some(result);
             }
+            // RFC 8259: raw control characters (U+0000..U+001F) are only
+            // allowed via escapes; reject them here for serde parity.
+            if c < 0x20 {
+                return None;
+            }
             result.push(c as char);
             self.pos += 1;
         }
@@ -3824,6 +3831,17 @@ impl<'a> JsonParser<'a> {
             self.advance();
         }
         if self.pos >= self.p.len() || !self.peek().is_ascii_digit() {
+            return None;
+        }
+        // JSON number grammar forbids leading zeros: "01" / "-01" are not
+        // valid tokens even though str::parse would accept them. Reject them
+        // here so the permissive accessor/from_json path matches serde_json
+        // and the strict validator.
+        let first_digit_pos = self.pos;
+        if self.p[first_digit_pos] == b'0'
+            && first_digit_pos + 1 < self.p.len()
+            && self.p[first_digit_pos + 1].is_ascii_digit()
+        {
             return None;
         }
         while self.pos < self.p.len() && self.p[self.pos].is_ascii_digit() {
@@ -4357,9 +4375,7 @@ fn json_get_inner(
                         key_buf.push(ch);
                         pos += consumed;
                     }
-                    _ => {
-                        key_buf.push(c as char);
-                    }
+                    _ => return Err(()),
                 }
                 key_esc = false;
                 pos += 1;
@@ -4373,6 +4389,10 @@ fn json_get_inner(
             if c == b'"' {
                 pos += 1;
                 break;
+            }
+            // RFC 8259: raw control characters are not allowed in strings.
+            if c < 0x20 {
+                return Err(());
             }
             key_buf.push(c as char);
             pos += 1;
@@ -4503,7 +4523,7 @@ pub extern "C" fn json_get_int(
         Ok(Some(val)) => val,
     };
     // The hand parser flattens values to strings; numeric-ness is re-derived
-    // here (see TODO(#audit-wave2-json-parser-unify)).
+    // here (see the JSON parser section above for the audit-closure note).
     if let Ok(v) = val.parse::<i64>() {
         return v;
     }
@@ -20750,6 +20770,23 @@ mod audit_wave1_tests {
         assert_eq!(mimi_is_valid_json(obj.as_ptr() as _), 1);
         // ...0 for malformed.
         assert_eq!(mimi_is_valid_json(b"{oops\0".as_ptr() as _), 0);
+    }
+
+    #[test]
+    fn json_accessors_reject_unknown_escapes_and_raw_controls() {
+        // The permissive accessor path must still reject malformed string
+        // tokens (unknown escapes / raw control chars) for serde parity.
+        let bad_value_escape = b"{\"a\":\"\\q\"}\0";
+        let bad_key_escape = b"{\"\\q\":1}\0";
+        let bad_value_control = b"{\"a\":\"\x01\"}\0";
+        let bad_key_control = b"{\"\x01\":1}\0";
+        assert!(json_get_inner(bad_value_escape.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_key_escape.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_value_control.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_key_control.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
+        // Valid escaped controls still parse.
+        let ok = b"{\"a\":\"\\n\\t\\\"\"}\0";
+        assert!(json_get_inner(ok.as_ptr() as _, b"a\0".as_ptr() as _).is_ok());
     }
 
     #[test]

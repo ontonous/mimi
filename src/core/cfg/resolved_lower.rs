@@ -779,6 +779,12 @@ impl<'a> ResolvedCfgLowerer<'a> {
             let mut arm_end = Some(arm_entry);
             if let Some(guard) = &arm.guard {
                 let block = self.ensure_current(arm_end, &guard.node_id, &guard.origin);
+                // G-3 (closed 0.36.85 by design): the CFG currently keeps the
+                // guard on the arm's linear path without splitting guard-true /
+                // guard-false edges. This over-approximates consumption on the
+                // false path and is deliberately fail-closed; precise guard
+                // branch modeling is a 1.x CFG enhancement, not a 0.1.6
+                // safety blocker.
                 arm_end = self.lower_expr(guard, block, CfgPointKind::Condition);
             }
             if let Some(block) = arm_end {

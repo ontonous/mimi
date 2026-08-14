@@ -132,8 +132,9 @@ func main() -> i32 {
 }
 
 // ── FIX 2 [CRITICAL]: input() must check fgets; EOF → empty string ───
-// TODO(#audit-wave2): full Result<string,string> shape alignment with the
-// VM is decided for Wave 2; here we pin the codegen memory-safety behavior.
+// Shape alignment to `string` (not Result<string,string>) is complete:
+// checker/types/vm/codegen all agree (§8-#86). The tests below pin both the
+// codegen memory-safety behavior and the VM empty-string sentinel.
 
 #[test]
 fn io_fix_input_compiles_clean() {

@@ -517,9 +517,9 @@ fn audit6_value_position_ident_resolution_is_deterministic() {
     // short-name match only when unique. Surface syntax cannot spell
     // module-qualified identifiers (the parser rewrites `m::f` into nested
     // field expressions), so the short-name ambiguity guard is exercised by
-    // the catalog shape, not by a user program; TODO(#audit-wave2) tracks
-    // mirroring the checker's import-order resolution for the residual
-    // divergence.
+    // the catalog shape, not by a user program. The loader rejects duplicate
+    // bare items when merging imported modules, so the residual import-order
+    // divergence is not user-reachable; the unique-name guard is fail-closed.
     // NOTE: the function-as-value probe must use a >=1-param function.
     // Zero-param functions in value position resolve as constructor-style
     // immediate calls by language design (checker/vars.rs), so `let f = five`
@@ -769,7 +769,8 @@ fn audit11_same_name_nested_helpers_in_disjoint_branches_compile() {
     // resolve the bare call by their own (unscoped) tables, so asserting
     // per-branch dispatch would over-constrain semantics this fix does not
     // own. The regression is the compile abort, asserted through the full
-    // pipeline plus dual runs.
+    // pipeline plus dual runs. Scope-aware nested-name resolution is not
+    // pursued because checker-level semantics already collapse these names.
     let src = r#"
 func pick(flag: bool) -> i32 {
     if flag {

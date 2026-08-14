@@ -254,10 +254,12 @@ func main() -> i32 {
 }
 
 // ===== strings.mimi — fix 5: trim_left/trim_right strip the whitespace set ==
-// Wave-2 (§1.6): the private is_ws_char helper was inlined into trim_left/
-// trim_right because the std module loader carries only pub items across
-// `use std::strings` — private helpers are invisible to consumers while the
-// pub bodies calling them are not (E0401). Dual-backend guard:
+// Wave-2 (§1.6, closed 0.36.79): the private is_ws_char helper was inlined
+// into trim_left/trim_right because the std module loader carries only pub
+// items across `use std::strings` — private helpers are invisible to
+// consumers while the pub bodies calling them are not (E0401). The same
+// mechanism was later applied to random.mimi's remove_at
+// (`random_remove_ith`, 0.36.65). Dual-backend guard:
 // audit2_std_trim_left_right_dual below.
 
 // VM-only companion of audit2_std_trim_left_right_dual (which carries the

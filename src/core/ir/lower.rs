@@ -1390,11 +1390,11 @@ impl BodyLowerer<'_> {
                             })?
                             .insert("result".into(), local_id.clone());
                     } else {
-                        // R-3 / §5-LOW: contract `result` is the *body* result,
-                        // not the caller-facing signature result. For async
-                        // functions the signature is `Future<T>` while the body
-                        // produces `T`; using the body result keeps ensures
-                        // contracts consistent with tail/return lowering.
+                        // R-3 / §5-LOW (closed 0.36.75): contract `result` is the
+                        // *body* result, not the caller-facing signature result.
+                        // For async functions the signature is `Future<T>` while
+                        // the body produces `T`; using the body result keeps
+                        // ensures contracts consistent with tail/return lowering.
                         self.insert_local(
                             "result".into(),
                             ResolvedLocal {
@@ -1606,16 +1606,16 @@ impl BodyLowerer<'_> {
                     // (lower_constructor_pattern) was already type-guarded.
                     ResolvedExprKind::Constant(NodeId("builtin:value:None".into()))
                 } else {
-                    // Full audit 2026-08-05 (#6): deterministic,
-                    // checker-aligned resolution. Prefer the exact
-                    // qualified-name match; short-name matches are admitted
-                    // only when unique (the fail-closed ambiguity error below
-                    // is kept). Residual divergence: the checker resolves bare
-                    // names by import order and scope walk, which this
-                    // catalog-based approximation cannot fully reproduce.
-                    // TODO(#audit-wave2): mirror checker import-order
-                    // resolution if bare-name collisions produce false
-                    // positives in practice.
+                    // Full audit 2026-08-05 (#6 / §5-#51, closed 0.36.80):
+                    // deterministic, checker-aligned resolution. Prefer the
+                    // exact qualified-name match; short-name matches are
+                    // admitted only when unique (the fail-closed ambiguity
+                    // error below is kept). The loader rejects duplicate bare
+                    // items when merging imported modules (verified with
+                    // std::text / std::strings overlapping names), so a
+                    // user-visible import-order collision cannot reach this
+                    // catalog-based approximation; keeping the unique-guard
+                    // is fail-closed and deterministic.
                     let exact_functions = self
                         .functions
                         .values()
@@ -2433,8 +2433,9 @@ impl BodyLowerer<'_> {
                 // deterministic. The checker itself conflates same-named
                 // nested callables in its bare-name table (check_stmt
                 // registers by bare name), so every candidate shares one
-                // checker signature; TODO(#audit-wave2) tracks scope-aware
-                // nested-name resolution.
+                // checker signature and there is no checker-level scope-aware
+                // dispatch to mirror; deterministic selection is faithful
+                // (regression: audit11_same_name_nested_helpers_in_disjoint_branches_compile).
                 let nested_scan = top_level_nested.or_else(|| {
                     let mut nested = BTreeMap::new();
                     collect_nested_function_syntax(&self.function.body, &self.owner, &mut nested);
@@ -3591,7 +3592,7 @@ impl BodyLowerer<'_> {
         let Expr::Field(receiver, _method_name) = callee.unlocated() else {
             return Ok(None);
         };
-        // R-5 / audit: pre-check the receiver type from the checked node type,
+        // R-5 / audit (closed 0.36.78): pre-check the receiver type from the checked node type,
         // not by lowering the receiver speculatively. Lowering it first and
         // then falling back to the real method path lowers the same AST twice
         // and can create duplicate semantic identities / locals.
@@ -3696,7 +3697,7 @@ impl BodyLowerer<'_> {
         if !arguments.is_empty() {
             return Ok(None);
         }
-        // R-5 / audit: pre-check the receiver type before lowering; otherwise
+        // R-5 / audit (closed 0.36.78): pre-check the receiver type before lowering; otherwise
         // a non-capability receiver is lowered speculatively and again by the
         // real method path below.
         let receiver_id = self.expr_id(receiver, &format!("{role}.callee.inner"))?;
@@ -4184,7 +4185,7 @@ impl BodyLowerer<'_> {
         let Expr::Field(receiver, method_name) = callee.unlocated() else {
             return Ok(None);
         };
-        // R-5 / audit: use the checked receiver type for builtin-method lookup
+        // R-5 / audit (closed 0.36.78): use the checked receiver type for builtin-method lookup
         // before lowering. Avoids speculative lowering for any non-builtin
         // method that should fall through to `lower_method_call`.
         let receiver_id = self.expr_id(receiver, &format!("{role}.callee.inner"))?;
