@@ -3193,7 +3193,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// flow-specific, so the anchor uniquely identifies the flow's
     /// `__MultiTarget` enum — disambiguating the shared `Fault` variant that
     /// appears in every fallible flow's union.
-    fn owner_enum_of_scrutinee(&self, ty: &crate::ast::Type) -> Option<String> {
+    pub(super) fn owner_enum_of_scrutinee(&self, ty: &crate::ast::Type) -> Option<String> {
         let anchor = self.extract_anchor_variant(ty)?;
         // The anchor may itself be an enum type name (ordinary enum scrutinee).
         if let Some(td) = self.type_defs.get(&anchor) {

@@ -22,6 +22,35 @@ struct MatchArmEnv<'ctx> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// 0.36.12 (Phase B 状态语义, L1): a single-target flow result scrutinee —
+    /// the value's static type is exactly one state of a flow, its resolved
+    /// type renders as `Result<StaticState, (other states, ...)>` (ok-side =
+    /// the static state). Returns Some((flow, state)) when the scrutinee is a
+    /// flow-result record; None for enum (__MultiTarget/StateId) scrutinies,
+    /// built-ins, and arbitrary records.
+    fn flow_result_static_state(
+        &self,
+        scrutinee_type: Option<&crate::ast::Type>,
+    ) -> Option<(String, String)> {
+        let st = scrutinee_type?;
+        // Multi-target unions (including `-> S | Fault`) own a registered
+        // __MultiTarget enum resolved via the anchor-variant lookup — the
+        // tagged dispatch path owns them, never this static path. Only
+        // single-target flow results (plain records, no registered enum)
+        // reach here.
+        if self.owner_enum_of_scrutinee(st).is_some() {
+            return None;
+        }
+        let s = crate::core::fmt_type(st);
+        let head = s.strip_prefix("Result<")?.split(',').next()?.trim();
+        for (flow, fd) in &self.flow_defs {
+            if fd.states.iter().any(|sd| sd.name == head) {
+                return Some((flow.clone(), head.to_string()));
+            }
+        }
+        None
+    }
+
     pub(in crate::codegen) fn bind_pattern_variables(
         &mut self,
         arm: &MatchArm,
@@ -68,6 +97,98 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         return Ok(local_vars);
                     }
+                }
+                // 0.36.12 (Phase B 状态语义): single-target flow result match —
+                // the static arm binds its fields DIRECTLY from the record value
+                // (no __MultiTarget union payload exists); other arms are
+                // statically dead and their bodies compile with sentinel
+                // bindings (the dead blocks are never entered).
+                if let Some((flow, ss)) = self.flow_result_static_state(scrutinee_type) {
+                    if ss == *name {
+                        let rec_ty =
+                            crate::ast::Type::Name(format!("flow::{}::{}", flow, ss), Vec::new());
+                        let fields = self.record_fields_of(&rec_ty).unwrap_or_default();
+                        match scrutinee_val {
+                            BasicValueEnum::StructValue(sv) => {
+                                for (_, inner_pat) in inner_patterns {
+                                    if let PatternKind::Variable(bind_name) = &inner_pat.kind {
+                                        let Some(fi) = fields.iter().position(|f| f == bind_name)
+                                        else {
+                                            continue;
+                                        };
+                                        let val = self
+                                            .builder
+                                            .build_extract_value(sv, fi as u32, "static_field")
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "static field extract: {}",
+                                                    e
+                                                ))
+                                            })?;
+                                        self.bind_pattern_var(
+                                            &mut local_vars,
+                                            bind_name,
+                                            val,
+                                            val.get_type(),
+                                        )?;
+                                    }
+                                }
+                            }
+                            BasicValueEnum::PointerValue(pv) => {
+                                let rec_llvm = self.flow_state_llvm_type(&ss).ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "flow state '{}' llvm type not registered",
+                                        ss
+                                    ))
+                                })?;
+                                for (_, inner_pat) in inner_patterns {
+                                    if let PatternKind::Variable(bind_name) = &inner_pat.kind {
+                                        let Some(fi) = fields.iter().position(|f| f == bind_name)
+                                        else {
+                                            continue;
+                                        };
+                                        let gep = self
+                                            .gep()
+                                            .build_struct_gep(
+                                                rec_llvm,
+                                                pv,
+                                                fi as u32,
+                                                &format!("static_gep_{}", bind_name),
+                                            )
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "static field gep: {}",
+                                                    e
+                                                ))
+                                            })?;
+                                        let val = self.build_load(rec_llvm, gep, "static_v")?;
+                                        self.bind_pattern_var(
+                                            &mut local_vars,
+                                            bind_name,
+                                            val,
+                                            val.get_type(),
+                                        )?;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        // Statically dead arm: bind sentinels so the (never
+                        // entered) body still compiles.
+                        for (_, inner_pat) in inner_patterns {
+                            if let PatternKind::Variable(bind_name) = &inner_pat.kind {
+                                let zero = self.context.i64_type().const_int(0, false).into();
+                                self.bind_pattern_var(
+                                    &mut local_vars,
+                                    bind_name,
+                                    zero,
+                                    zero.get_type(),
+                                )?;
+                            }
+                        }
+                    }
+                    return Ok(local_vars);
                 }
                 // For constructor patterns, bind inner variables from the payload field.
                 // Most enum-like representations put the tag at index 0 and the payload
@@ -1639,11 +1760,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Look up the variant ordinal index from type definitions,
                 // scoped to the scrutinee's enum (v0.34.18a: disambiguates the
                 // shared `Fault` variant across per-flow __MultiTarget unions).
-                let ordinal = self
-                    .find_variant_ordinal_scoped(name, scrutinee_type)
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("match arm variant lookup: {}", e))
-                    })?;
+                let ordinal = match self.find_variant_ordinal_scoped(name, scrutinee_type) {
+                    Ok(o) => o,
+                    Err(_) => {
+                        // 0.36.12 (Phase B 状态语义, L1): single-target flow
+                        // result match — the scrutinee's static type is exactly
+                        // ONE state of a flow (`d: Device::Active`), so no
+                        // per-transition __MultiTarget enum is registered and
+                        // constructor arms cannot resolve ordinals. Checker
+                        // ground truth (E0215): the arm naming the STATIC state
+                        // always matches (bind its fields from the record
+                        // value); arms for OTHER states of the same flow are
+                        // statically never taken (dead code). Previously this
+                        // compiled in the VM but errored E0713 in codegen.
+                        let static_state = self
+                            .flow_result_static_state(scrutinee_type)
+                            .map(|(_, state)| state);
+                        let Some(static_state) = static_state else {
+                            return Err(CompileError::LlvmError(format!(
+                                "match arm variant lookup: enum variant '{}' not found in \
+                                 any registered enum type definition",
+                                name
+                            )));
+                        };
+                        let next_bb = self
+                            .context
+                            .append_basic_block(function, &format!("static_next{}", arm_idx));
+                        if static_state == *name {
+                            // Static arm: always taken.
+                            self.builder.position_at_end(else_bb);
+                            self.build_br(arm_bb)?;
+                        } else {
+                            // Non-static arm: never taken — the dispatch block
+                            // falls straight through to the next arm's block
+                            // (terminate it now; LLVM must never see an empty
+                            // unterminated block — it crashes LowerExpect).
+                            self.builder.position_at_end(else_bb);
+                            self.build_br(next_bb)?;
+                        }
+                        return Ok((arm_bb, next_bb));
+                    }
+                };
                 // K-2 family: tag constant at the scrutinee's own width
                 // (icmp operands must match).
                 let tag_val = scrutinee_iv.get_type().const_int(ordinal, false);
