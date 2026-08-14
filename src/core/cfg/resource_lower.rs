@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
-    MatchArm, Permission, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
-    ResolvedIndex, ResolvedLocal, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
-    ResolvedProjection, ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
-    ResolvedValueProjection,
+    MatchArm, Permission, ResolvedBlock, ResolvedCall, ResolvedExpr, ResolvedExprKind,
+    ResolvedFStringPart, ResolvedIndex, ResolvedLocal, ResolvedPattern, ResolvedPatternKind,
+    ResolvedPlace, ResolvedProjection, ResolvedSignature, ResolvedStmt, ResolvedStmtKind,
+    ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::{
     CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan, LoanId,
@@ -1410,6 +1410,36 @@ impl<'a> ActionEmitter<'a> {
                 for argument in &call.arguments {
                     self.visit_expr(&argument.value, None);
                 }
+                // 0.36.47 容器方法变换面（Phase C"容器方法余面"）：线性接收者的
+                // 变换方法（Mutate 借用标记；结果 = List/Map/Set/Tuple 且携带
+                // 线性义务）降为消费语义——接收者容器整体转出（Move），义务
+                // 转移到结果（`let ys = xs.reverse()`：xs 移入 reverse，ys 携带
+                // 元素义务、drop(ys) 结算——与 for 迭代同构；此前 Mutate 借用
+                // 不解体容器 → 用户被迫额外 drop(xs) = 不可达语义）。
+                // 读取/提取面（len/is_empty/count/find/first/last/find_map——
+                // 结果标量/裸元素/Option）保持借用：接收者仍需整体 drop。
+                if let Some(first) = call.arguments.first() {
+                    if matches!(call.permission, Some(Permission::Mutate))
+                        && self.method_transform_result(call)
+                    {
+                        if let ResolvedExprKind::Load(place) = &first.value.kind {
+                            if self.place_is_linear(place) {
+                                let canonical = self.canonical_place(place);
+                                self.push_action(
+                                    &expression.node_id,
+                                    &expression.origin,
+                                    ActionDraft {
+                                        kind: CanonicalActionKind::Move,
+                                        resource: self.resource_for_place(&canonical),
+                                        source: Some(canonical.clone()),
+                                        target: None,
+                                        loan: None,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
                 if !matches!(call.permission, Some(Permission::View | Permission::Mutate)) {
                     for argument in &call.arguments {
                         let transferred_endpoint = match &argument.value.kind {
@@ -1926,6 +1956,20 @@ impl<'a> ActionEmitter<'a> {
 
     fn place_is_linear(&self, place: &ResolvedPlace) -> bool {
         self.place_type(place).is_some_and(|ty| self.is_linear(&ty))
+    }
+
+    /// 0.36.47 容器方法变换面判定：结果 = 名义容器（List/Map/Set）或元组。
+    /// 变换方法与 for 迭代同构——容器整体转出、义务移至结果；读取/提取方法
+    /// （标量/裸元素/Option/Result 结果）保持借用面。
+    fn method_transform_result(&self, call: &ResolvedCall) -> bool {
+        match self.types.get(&call.result) {
+            Some(ResolvedType::Nominal { item, .. }) => matches!(
+                item.as_str(),
+                "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set"
+            ),
+            Some(ResolvedType::Tuple(_)) => true,
+            _ => false,
+        }
     }
 
     /// 0.36.46 定向头提取（绑定初始化器形状）：初始化为 `Load(xs[0])` 的

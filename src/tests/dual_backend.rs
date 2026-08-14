@@ -3503,6 +3503,200 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.47 — 容器方法余面：trait 方法级泛型实例化 + 线性接收者变换面 ──
+// 两个独立断点，本切一并闭环：
+//   1) **trait 方法级泛型实例化（修既有 bug，非线性同样受影响）**：`map<U>`/
+//      `reduce<U>` 等方法的签名里方法级泛型名（U）在 trait_method_sigs 注册时
+//      仍是名字型（Type::Name("U")），resolve_trait_method / infer_method_call
+//      从不实例化 → `xs.map(f)` 一律 E0211「expected fn(T) -> U, found fn(T) -> T」，
+//      连 List<i32>.map 都不可用（此前 `.map(` 在仓库语料零成功用例）。修：
+//      trait_method_generics 注册方法级泛型名；调用侧 instantiate_method_generics
+//      把名字型替换为 fresh TypeVar（同一名字参数/返回共享同一变量），arg 统一
+//      后 zonk 返回类型。元数据关联：U 为方法级（非 trait 级）——trait 级 T 走
+//      既有接收者替换，U 走本切新落地的实例化面。
+//   2) **线性接收者变换面（Phase C「容器方法余面」）**：ListExt 变换方法
+//      （Mutate 借用标记；结果 = List/Map/Set/Tuple 携带线性义务）降为消费
+//      语义——接收者容器整体转出（Move，与 for 迭代同构），义务移至结果
+//      （`let ys = xs.map(f)`：xs 移入方法，ys 携带元素义务、drop(ys) 结算）；
+//      此前 Mutate 借用不解体容器 → 用户被迫再 drop(xs) = 不可达语义
+//      （E0256 死锁）。读取/提取面（len/count/find/first/last/find_map——
+//      标量/裸元素/Option 结果）保持借用接收者（len+drop 合法、不 drop 容器
+//      E0256、first() 提取 + drop 余部 = 0.36.46 同构面不变）。
+// 健全性：义务守恒——变换 = 容器整体移入、结果整体移出（1:1）；读 = 容器
+// 义务不动（结果无义务）。线性元素在变换回调内逐元素恰一次（map 实测）。
+// 测试自包含（lib 环境不加载 stdlib——inline trait/impl 提供 map/len）。
+
+/// Self-contained ListExt subset (lib tests do not load stdlib): provides
+/// `map` (transform face) and `len` (read face) for the 0.36.47 method face.
+const METHOD_FACE_PREFIX: &str = "\
+trait ListExt<T> {\
+    func map<U>(f: func(T) -> U) -> List<U>\
+    func len() -> i32\
+}\
+impl<T> ListExt<T> for List<T> {\
+    func map<U>(f: func(T) -> U) -> List<U> {\
+        let mut acc: List<U> = []\
+        for x in self { push(acc, f(x)) }\
+        acc\
+    }\
+    func len() -> i32 { len(self) }\
+}\
+";
+
+#[test]
+fn dual_method_transform_map_ok() {
+    // L1+L2: `let ys = xs.map(load)`（cap 元素回调每元素 drop）+ len + 结果
+    // drop——容器整体转出变换面三后端等价。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func load(c: cap FileReadCap) -> i32 { drop(c); 42 }
+func f(xs: List<cap FileReadCap>) -> i32 {
+    let ys = xs.map(load)
+    let n = ys.len()
+    drop(ys)
+    n
+}
+func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); println(r); 0 }
+"#;
+    let src = format!("{}{}", METHOD_FACE_PREFIX, src);
+    let expected = "2";
+    let checked = checked_codegen_compile_and_run(&src).expect("resolved codegen map transform");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) map transform");
+    let unga = compile_and_run(&src).expect("legacy codegen map transform");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) map transform");
+    let (_, vm) = run_source_bytecode_with_stdout(&src);
+    assert_eq!(vm.trim(), expected, "vm map transform");
+}
+
+#[test]
+fn dual_method_transform_map_values_ok() {
+    // L1: 变换结果元素值面——map 回调返回 7 → ys=[7,7] → 14。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func load(c: cap FileReadCap) -> i32 { drop(c); 7 }
+func f(xs: List<cap FileReadCap>) -> i32 {
+    let ys = xs.map(load)
+    let n = ys[0] + ys[1]
+    drop(ys)
+    n
+}
+func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); println(r); 0 }
+"#;
+    let src = format!("{}{}", METHOD_FACE_PREFIX, src);
+    let expected = "14";
+    let checked = checked_codegen_compile_and_run(&src).expect("resolved codegen map values");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) map values");
+    let unga = compile_and_run(&src).expect("legacy codegen map values");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) map values");
+    let (_, vm) = run_source_bytecode_with_stdout(&src);
+    assert_eq!(vm.trim(), expected, "vm map values");
+}
+
+#[test]
+fn dual_method_transform_generic_instantiation_ok() {
+    // L1+L2: 方法级泛型 U 实例化——List<i32>.map 此前 E0211 死锁；lambda /
+    // 命名函数实参均可判型 + 三后端运行（值面 36）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func double(x: i32) -> i32 { x * 3 }
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    let ys = xs.map(fn(x: i32) -> i32 { x * 2 })
+    let zs = ys.map(double)
+    let n = zs[0] + zs[1] + zs[2]
+    drop(xs)
+    println(n)
+    0
+}
+"#;
+    let src = format!("{}{}", METHOD_FACE_PREFIX, src);
+    let expected = "36"; // 1*2*3 + 2*2*3 + 3*2*3 = 6 + 12 + 18
+    let checked = checked_codegen_compile_and_run(&src).expect("resolved codegen map generic U");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) map generic U");
+    let unga = compile_and_run(&src).expect("legacy codegen map generic U");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) map generic U");
+    let (_, vm) = run_source_bytecode_with_stdout(&src);
+    assert_eq!(vm.trim(), expected, "vm map generic U");
+}
+
+#[test]
+fn dual_method_transform_consume_rejected() {
+    // L2: 容器整体转出后二次使用 → E0304（moved after consumed）。
+    let src = "cap FileReadCap; func load(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func f(xs: List<cap FileReadCap>) -> i32 { \
+             let ys = xs.map(load); let zs = xs.map(load); drop(ys); drop(zs); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }";
+    let src = format!("{}{}", METHOD_FACE_PREFIX, src);
+    let diags =
+        check_source(&src).expect_err("container transform receiver must be single-use (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("'xs'"),
+        "expected E0304 double-use diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_method_transform_result_leak_rejected() {
+    // L2: 变换结果（义务载体）不消费 → E0256。
+    // map with an identity callback keeps the element obligations on the
+    // result (List<cap> is linear) — leaving `ys` unconsumed must be E0256.
+    let src = "cap FileReadCap; func id(c: cap FileReadCap) -> cap FileReadCap { c } \
+         func f(xs: List<cap FileReadCap>) -> i32 { let ys = xs.map(id); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }";
+    let src = format!("{}{}", METHOD_FACE_PREFIX, src);
+    let diags = check_source(&src).expect_err("transform result must be consumed (E0256)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'ys'"),
+        "expected E0256 result diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_method_read_face_kept() {
+    // L2: 读取面保持——len 不消费容器（借用面）：合法路径仍需 drop(xs)，
+    // 不 drop → E0256（变换面打开后读面行为不变）。
+    let src = "cap FileReadCap; \
+         func f(xs: List<cap FileReadCap>) -> i32 { let n = xs.len(); drop(xs); n } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); println(r); 0 }";
+    let src = format!("{}{}", METHOD_FACE_PREFIX, src);
+    check_source(&src).expect("read face len + drop");
+    let (_, vm) = run_source_bytecode_with_stdout(&src);
+    assert_eq!(vm.trim(), "2", "vm read face len");
+    let src2 = "cap FileReadCap; \
+         func f(xs: List<cap FileReadCap>) -> i32 { let n = xs.len(); n } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }";
+    let src2 = format!("{}{}", METHOD_FACE_PREFIX, src2);
+    let diags =
+        check_source(&src2).expect_err("read face without container consumption must be E0256");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'xs'"),
+        "expected E0256 read-face diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.36.46 — 元素级投影定向分析：`xs[0]` 头提取面（Phase C 剩余容器面）──
 // M9/0.36.25-26 的索引析构全面拒绝（E0304，fail-closed）在本切打开**唯一
 // 可无损证明健全的提取形状**——定向头提取 `let c = xs[0]`（非可弃线性容器

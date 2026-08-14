@@ -25,6 +25,36 @@ fn strip_flow_qualifier(ty: &Type) -> Type {
 }
 
 impl<'a> Checker<'a> {
+    /// 0.36.47: 把方法签名中残留的方法级泛型名字型（`Type::Name("U")`）替换为
+    /// fresh TypeVar——同一名字在本方法的所有参数与返回类型间共享同一变量。
+    pub(in crate::core) fn instantiate_method_generics(
+        &mut self,
+        params: &mut [Type],
+        ret: &mut Type,
+        names: &[String],
+    ) {
+        if names.is_empty() {
+            return;
+        }
+        let mut type_map: HashMap<String, Type> = HashMap::new();
+        let mut gen_slice: Vec<GenericParam> = Vec::with_capacity(names.len());
+        for name in names {
+            let fresh = self.fresh_var();
+            type_map.insert(name.clone(), fresh);
+            gen_slice.push(GenericParam {
+                meta: AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
+                    "infer.instantiate_method_generics",
+                )),
+                name: name.clone(),
+                bounds: vec![],
+            });
+        }
+        for param in params.iter_mut() {
+            *param = subst_type_params(param, &gen_slice, &type_map);
+        }
+        *ret = subst_type_params(ret, &gen_slice, &type_map);
+    }
+
     pub(in crate::core) fn infer_method_call(
         &mut self,
         obj: &Expr,
@@ -639,6 +669,24 @@ impl<'a> Checker<'a> {
                             (params, ret)
                         };
                         let user_args = &args;
+                        // 0.36.47: 方法级泛型（`func map<U>` 的 U）实例化为 fresh
+                        // TypeVar——signature 里的 U 在注册期是名字型，不实例化
+                        // 则 unify 永远失败（E0211「expected fn(T) -> U, found
+                        // fn(T) -> T」）；实例化后 U 经实参推断绑定，返回类型
+                        // zonk 出具体型。
+                        let mut method_params = method_params;
+                        let mut method_ret = method_ret;
+                        if let Some(mg) = self
+                            .trait_method_generics
+                            .get(&(trait_name.clone(), method_name.to_string()))
+                            .cloned()
+                        {
+                            self.instantiate_method_generics(
+                                &mut method_params,
+                                &mut method_ret,
+                                &mg,
+                            );
+                        }
                         if user_args.len() != method_params.len() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0257,
@@ -670,7 +718,7 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        return method_ret;
+                        return self.unification.zonk_or_unknown(&method_ret);
                     }
                 }
             }
@@ -832,7 +880,18 @@ impl<'a> Checker<'a> {
                 .cloned()
             {
                 let user_args = &args;
-                let method_params = &params;
+                // 0.36.47: trait 对象面同款——方法级泛型名实例化（DynTrait 无法
+                // 从接收者解 T，但 U 至少须可绑）。
+                let mut method_params = params;
+                let mut method_ret = ret;
+                if let Some(mg) = self
+                    .trait_method_generics
+                    .get(&(trait_name.clone(), method_name.to_string()))
+                    .cloned()
+                {
+                    self.instantiate_method_generics(&mut method_params, &mut method_ret, &mg);
+                }
+                let method_params = &method_params;
                 if user_args.len() != method_params.len() {
                     self.emit_code(
                         crate::diagnostic::codes::E0257,
@@ -863,7 +922,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                return ret;
+                return self.unification.zonk_or_unknown(&method_ret);
             }
         }
         self.errors.push(
