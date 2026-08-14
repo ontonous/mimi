@@ -7,6 +7,25 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.8 — 跨 FFI = Fault 检查点（裁决 3 收官）+ Phase A 挣绿核验
+
+- **FFI 检查点全量 nominal oracle**（L1, DoD #4 扩界）：`enter_ffi → ffi_crash`
+  把 flow 落到 nominal Fault（`last_state = FFI_Pinned()`、
+  `unexpected_event = ffi_crash()`），完整负载（snapshot +
+  SystemTrace/MemoryDump/PanicPayload 深层字段）在 `mimi run` vs `mimi build`
+  （checked + legacy 双管线）逐字节一致。FFI 崩溃是 Fault，不是 Result——
+  预期 FFI 失败经 `fails E` 走非 pinned 过渡。
+- **FFI 检查点不重入不循环**（L2）：enter_ffi/exit_ffi/ffi_crash 是状态作用域
+  sink——从非规范 from-state 调用（含对 Fault 值、跨 flow 值）一律 E0211 拒绝
+  （flow-qualified transition keys 隔离 flow）。
+- **Phase A 挣绿收官核验**（DoD #1–5）：
+  ① Fault payload 零字符串编码状态（`check_fault_nominal_gate` PASSING）+ ②
+  `last_state == "..."` 全仓归零；③ recover 缺臂 E0215（match 非穷尽）；
+  ④ 错误 trace 双后端等价 oracle（0.36.7 全量 trace + 0.36.8 FFI 检查点）；
+  ⑤ 二次 Fault 升级负测试（E0801/E0440）。
+- **验证**：flow_features 244 / dual_ 884 / real_world 31 / 全量 lib 全绿；
+  fmt + clippy + 语言文档 + 边缘隔离门禁绿。
+
 ### 0.36.7 — Fault≠Result 语义边界（裁决 3）+ 错误 trace 双后端等价 oracle（DoD #4）
 
 - **E0441：Fault 禁作函数返回值**（裁决 3, L2）：`Fault` 是状态不是值——只能经

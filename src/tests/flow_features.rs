@@ -4945,6 +4945,135 @@ func main() -> i32 {
 }
 
 #[test]
+fn ffi_checkpoint_full_nominal_dual_backend_oracle() {
+    // 0.36.8 (裁决 3, 跨 FFI = Fault; DoD #4 扩展到 FFI 检查点): the FFI
+    // checkpoint — enter_ffi → ffi_crash — must land the flow in a NOMINAL
+    // Fault (last_state = FFI_Pinned, unexpected_event = ffi_crash) whose full
+    // payload (snapshot + SystemTrace/MemoryDump/PanicPayload deep fields) is
+    // byte-identical across `mimi run` / `mimi build` (checked + legacy
+    // pipelines). An FFI crash is a Fault, never a Result — expected FFI
+    // outcomes travel as `fails E` on non-pinned transitions.
+    let src = r#"
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+    transition process(Active) -> Active { return Active { buffer: self.buffer + 1 } }
+}
+func main() -> i32 {
+    let s = Active { buffer: 7 }
+    let s2 = FFI::process(s)
+    let fp = FFI::enter_ffi(s2)
+    let f = FFI::ffi_crash(fp)
+    println(f.last_state)
+    println(f.unexpected_event)
+    println(f.snapshot)
+    println(f.trace.last_state_name)
+    println(f.trace.unexpected_event)
+    println(f.trace.snapshot)
+    println(f.trace.memory_dump.fields)
+    println(f.trace.memory_dump.count)
+    println(f.trace.panic_payload.error_type)
+    println(f.trace.panic_payload.file)
+    println(f.trace.panic_payload.line)
+    println(f.trace.panic_payload.stack)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    let checked = checked_codegen_compile_and_run(src)
+        .expect("FFI checkpoint oracle must compile via mimi-build pipeline");
+    assert_eq!(
+        bc, checked,
+        "FFI checkpoint: mimi run vs mimi build (DoD #4)"
+    );
+    let legacy =
+        compile_and_run(src).expect("FFI checkpoint oracle must compile via legacy pipeline");
+    assert_eq!(
+        bc, legacy,
+        "FFI checkpoint: mimi run vs legacy-only codegen"
+    );
+    // Nominal discrimination: the checkpoint's own state/event, in nominal
+    // form — never a string-encoded attribute.
+    assert!(
+        bc.contains("FFI_Pinned()") && bc.contains("ffi_crash()"),
+        "FFI checkpoint Fault must carry nominal StateId/EventId, got:\n{bc}"
+    );
+}
+
+#[test]
+fn ffi_checkpoint_state_safety_negative() {
+    // 0.36.8 (裁决 3, 跨 FFI = Fault — 检查点不重入不循环): the FFI
+    // checkpoint verbs are state-scoped sinks. enter_ffi/exit_ffi/ffi_crash
+    // only exist for their canonical from-states (Active / FFI_Pinned /
+    // FFI_Pinned); calling a checkpoint verb from any other state — including
+    // a Fault value (no re-entry, no loop) or another flow's value (qualified
+    // keys isolate flows) — is rejected by the checker (E0211).
+    let base = r#"
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+    transition process(Active) -> Active { return Active { buffer: self.buffer + 1 } }
+}
+flow Other {
+    state Free
+}
+"#;
+    let cases: Vec<(&str, &str)> = vec![
+        // exit from the non-pinned state
+        (
+            "exit_from_active",
+            "    let s = Active { buffer: 7 }\n    let bad = FFI::exit_ffi(s)\n",
+        ),
+        // crash from the non-pinned state
+        (
+            "crash_from_active",
+            "    let s = Active { buffer: 7 }\n    let bad = FFI::ffi_crash(s)\n",
+        ),
+        // re-enter from the pinned state (no FFI nesting)
+        (
+            "reenter_from_pinned",
+            "    let s = Active { buffer: 7 }\n    let fp = FFI::enter_ffi(s)\n    let bad = FFI::enter_ffi(fp)\n",
+        ),
+        // checkpoint verb on a Fault value (no re-entry after a crash)
+        (
+            "verb_on_fault",
+            "    let s = Active { buffer: 7 }\n    let fp = FFI::enter_ffi(s)\n    let f = FFI::ffi_crash(fp)\n    let bad = FFI::exit_ffi(f)\n",
+        ),
+    ];
+    for (label, body) in cases {
+        let src = format!("{base}\nfunc main() -> i32 {{\n{body}    0\n}}\n");
+        let errors = check_source(&src).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0211)),
+            "{label}: checkpooint verb misuse must be E0211, got: {:?}",
+            errors
+                .iter()
+                .map(|e| e.code.as_deref().unwrap_or("none"))
+                .collect::<Vec<_>>()
+        );
+    }
+    // Cross-flow isolation: a pinned value of flow A can never drive flow B's
+    // checkpoint (the flow-qualified transition keys reject it).
+    let cross = format!(
+        "{base}\nfunc main() -> i32 {{\n    let s = Active {{ buffer: 7 }}\n    let fp = FFI::enter_ffi(s)\n    let o = Other::peer_fault(Free {{ }})\n    let bad = FFI::exit_ffi(o)\n    0\n}}\n"
+    );
+    let errors = check_source(&cross).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0211)),
+        "cross-flow checkpoint call must be E0211, got: {:?}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn ffi_pinned_transitions_injected() {
     // L2: verify that enter_ffi, exit_ffi, and ffi_crash are injected
     // when state FFI_Pinned is declared.
