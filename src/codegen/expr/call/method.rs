@@ -1641,6 +1641,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_from_json_turbofish(type_args, args, vars);
         }
 
+        // 0.36.32: session_open::<S>() — typed endpoint construction; runtime
+        // is an opaque handle. Residual/order enforcement is compile-time, so
+        // delegate to the plain builtin dispatch (mirror of the checker side).
+        if name == "session_open" {
+            let mut lowered = Vec::with_capacity(args.len());
+            for arg in args {
+                lowered.push(self.compile_expr(arg, vars)?);
+            }
+            let metadata: Vec<BasicMetadataValueEnum<'ctx>> =
+                lowered.into_iter().map(Into::into).collect();
+            return self.compile_builtin_call(name, &metadata);
+        }
+
         // Monomorphized call: func::<Type>(args)
         // Build type_map from explicit type args
         let func = self.find_func_def(name)?;

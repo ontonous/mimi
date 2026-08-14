@@ -3518,9 +3518,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "session_send" => self.compile_session_send(args),
             "session_recv" => self.compile_session_recv(args),
             "session_close" => self.compile_session_close(args),
-            "session_open" => Err(CompileError::Unsupported(
-                "session_open does not yet lower to a typed SessionChan endpoint".into(),
-            )),
+            // 0.36.32: session_open::<S>() — a fresh pair's first endpoint as
+            // an opaque i64 handle (residual enforcement is compile-time only).
+            "session_open" => self.compile_session_open_endpoint(args),
             "session_pair" => self.compile_session_open(args),
             "actor_mailbox_depth" => {
                 self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth")

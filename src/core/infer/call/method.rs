@@ -966,6 +966,54 @@ impl<'a> Checker<'a> {
             }
             return type_args[0].clone();
         }
+        // 0.36.32: session_open::<S>() — typed session endpoint construction.
+        // The residual engine (E0414/E0425/E0426) is live on SessionChan<S>
+        // values; the plain session_open() form types as bare SessionChan
+        // (no S), and the generic turbofish path only consults user funcs
+        // (E0401 — the 0.36.23 dead-face). Return SessionChan<S> so the
+        // endpoint actually carries the protocol residual.
+        if name == "session_open" {
+            if type_args.len() != 1 {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    "session_open::<S> expects exactly 1 type argument (a declared \
+                     session name)",
+                );
+                return Type::Name("unknown".into(), vec![]);
+            }
+            let s = &type_args[0];
+            let s_name = match s.unlocated() {
+                Type::Name(n, args) if args.is_empty() => n.clone(),
+                _ => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0413,
+                        format!(
+                            "session_open type argument must be a declared session \
+                             name, found {}",
+                            fmt_type(s)
+                        ),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+            };
+            if !self.session_types.contains_key(&s_name) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0413,
+                    format!(
+                        "session_open::<{}> — '{}' is not a declared session type",
+                        s_name, s_name
+                    ),
+                );
+                return Type::Name("unknown".into(), vec![]);
+            }
+            if !args.is_empty() {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    "session_open takes no arguments",
+                );
+            }
+            return Type::Name("SessionChan".into(), vec![s.clone()]);
+        }
         // Turbofish: func::<Type>(args) — explicit type instantiation
         let (params, ret) = match self.funcs.get(name) {
             Some(sig) => sig.clone(),

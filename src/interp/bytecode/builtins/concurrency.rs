@@ -176,6 +176,16 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_session_pair,
     });
+    // 0.36.32: typed-endpoint construction `session_open::<S>()` — runtime is
+    // the same fresh pair as session_pair; the difference lives at the type/
+    // residual level (the SessionChan<S> endpoint carries the protocol).
+    // Returns ONE endpoint handle (the lo side), mirroring codegen.
+    reg.register(BuiltinDesc {
+        name: "session_open",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_session_open,
+    });
     reg.register(BuiltinDesc {
         name: "session_send",
         arity: 2,
@@ -491,6 +501,12 @@ fn builtin_session_pair(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, 
     let lo = crate::runtime::mimi_session_lo(packed);
     let hi = crate::runtime::mimi_session_hi(packed);
     Ok(Value::List(Arc::new(vec![Value::Int(lo), Value::Int(hi)])))
+}
+
+fn builtin_session_open(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
+    let packed = crate::runtime::mimi_session_pair();
+    let lo = crate::runtime::mimi_session_lo(packed);
+    Ok(Value::Int(lo))
 }
 
 fn builtin_session_send(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
