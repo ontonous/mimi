@@ -1439,6 +1439,9 @@ impl<'a> Checker<'a> {
                         self.record_expression_type(target, &target_ty);
                         // Re-check value with expected type so empty lists (and other
                         // context-sensitive literals) inherit the variable's element type.
+                        // (Re-inference of the RHS is SAFE for session calls: the
+                        // residual engine echoes already-recorded call-sites instead of
+                        // advancing them twice — 0.36.38.)
                         value_ty = self.check_expr(&target_ty, value, scopes);
                         // C2 (audit 2026-08-03): mirror the annotated-let coercion
                         // (line ~688) on assignment — the 0.34.6 one-way numeric

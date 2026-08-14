@@ -7,7 +7,7 @@
 use super::super::call_try_basic_value;
 use super::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -1097,7 +1097,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(BasicValueEnum::IntValue(lo))
     }
 
-    pub(super) fn compile_session_open(
+    /// 0.36.38: session_pair() / session_pair::<S>() — the fresh cross-wired
+    /// pair as a TUPLE of the two opaque handles {lo, hi} (send on lo → recv
+    /// on hi). Previously the LO form returned a heap 2-element List; the
+    /// tuple VALUE matches the (i64, i64) / (SessionChan<S>, SessionChan<dual
+    /// S>) typing and lets both plain and turbofish forms share one shape.
+    pub(super) fn compile_session_pair_tuple(
         &self,
         _args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
@@ -1137,41 +1142,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         .ok_or_else(|| CompileError::LlvmError("session_hi returned void".into()))?
         .into_int_value();
         let i64_ty = self.context.i64_type();
-        // CG-C2: use malloc_or_abort instead of bare build_array_malloc (OOM → null deref).
-        let data = self.malloc_or_abort(i64_ty.const_int(16, false), "spd")?;
-        // SAFETY (M9): in_bounds GEP with indices 0 and 1 on a freshly allocated
-        // 2-element i64 array; stores write only within that allocation.
-        // SAFETY: data is non-null (malloc_or_abort); indices 0/1 in 16-byte block.
-        unsafe {
-            self.builder
-                .build_store(
-                    self.builder
-                        .build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(0, false)], "s0")
-                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
-                    lo,
-                )
-                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-            self.builder
-                .build_store(
-                    self.builder
-                        .build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(1, false)], "s1")
-                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
-                    hi,
-                )
-                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-        }
-        let di8 = self
+        let tuple_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let tuple_val = self
             .builder
-            .build_bit_cast(
-                data,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "spi8",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?
-            .into_pointer_value();
-        Ok(BasicValueEnum::PointerValue(
-            self.alloc_list_result(i64_ty.const_int(2, false), di8)?,
-        ))
+            .build_insert_value(tuple_ty.get_undef(), lo, 0, "sp_lo")
+            .map_err(|e| CompileError::LlvmError(format!("insert lo: {}", e)))?
+            .into_struct_value();
+        let tuple_val = self
+            .builder
+            .build_insert_value(tuple_val, hi, 1, "sp_hi")
+            .map_err(|e| CompileError::LlvmError(format!("insert hi: {}", e)))?
+            .into_struct_value();
+        Ok(BasicValueEnum::StructValue(tuple_val))
     }
 
     // ── v0.29.44: Shadow memory tagging codegen ───────────────────────

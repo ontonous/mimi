@@ -7,6 +7,34 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.38 — session_pair::<S>() 类型化对端：双端残差全闭环（L1/L2）
+
+- **背景**：§4d 候选取 (A) 落地。0.36.32-34 的 `session_open::<S>()` 只建造
+  单端点（lo），hi 端仍是 raw i64——整个对端的协议面是"死面"
+  （0.36.23）：`let pair = session_pair(); pair[i]` 形式对 hi 端零检查。
+- **设计**：`session_pair::<S>()` → `(SessionChan<S>, SessionChan<dual S>)`：
+  lo 端说 S，hi 端说 dual(S)（首动作 = Recv，恰与物理交叉接线
+  send-lostop/recv → recv-hi 一致）。`dual` 以程序化类型
+  `Type::Name("dual", [S])` 由 checker 构造（用户不写 `dual` 类型字面）；
+  `builtin_nominal` 注册 `dual` 为"注解身份"（SessionChan 值类型从不 lower
+  类型实参 → i64 句柄，dual 永不成为运行时类型）。普通形兼容：
+  `session_pair()` → 类型从 `List<i64>` 改为 `(i64, i64)`（pre-1.0 breaking，
+  语料机械迁移 `pair[0]`/`pair[1]` → `let (ch0, ch1)`）。
+- **残差播种统一**：新增 `session::residual_from_chan_type`（普通名 resolve；
+  `dual X` → dual(resolve(X))），替换两处 infer/三处 checker 参数播种；
+  三个后端（legacy 元组 load、resolved slice、VM）共用 {lo, hi} 运行时形状。
+- **调用点幂等（顺带修复）**：Assign 臂的 expected-type 重检
+  （`check_expr`）会重推 RHS——`total = total + session_recv(ch1)` 中的
+  session_recv 被第二次 execute → 伪 TOOL-RESOLUTION-001 + 残差双推进。
+  修复：`session_recorded_for_call`——同一 call-site 若已记录且当前残差 ==
+  记录 after，则纯回声（不推进，recv 从记录 before 纯计算载荷类型）；
+  残差偏离记录态 = 真正二次执行 → 维持 fail-closed 冲突错误。
+- **循环边界（定案）**：while 体残差 P0-4 保存/还原——循环后 continuation
+  不得假设循环内 send 已发生：close/作用域退出在还原态上 E0414/E0425
+  fail-closed（typed 对端不再静默放行；旧 raw 形式什么都不查）。
+- **迁移注记**：`let pair = session_pair(); ch0 = pair[0]; ch1 = pair[1]` →
+  `let (ch0, ch1) = session_pair::<S>()`（lo 说 S，hi 自动 dual）。
+
 ### 0.36.37 — for 迭代 List<cap> 元素消费：周期语义 + 容器义务消解（L1/L2）
 
 - **背景**：§4g 矩阵最后一块阻塞面——`for x in v { sink(x) }`（List<cap>）

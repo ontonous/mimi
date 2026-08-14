@@ -318,6 +318,45 @@ pub fn session_from_chan_type(ty: &Type) -> Option<String> {
     }
 }
 
+/// Resolve the residual session type of a `SessionChan<...>` type annotation.
+///
+/// Handles both expression forms:
+/// - `SessionChan<X>` (plain declared name) → `resolve(X)` from `session_types`;
+/// - `SessionChan<dual X>` (0.36.38: the hi end of `session_pair::<S>()`, whose
+///   type the checker engineers as `Type::Name("dual", [X])`) →
+///   `dual(resolve(X))` — the other end of the cross-wired pair speaks the
+///   dual protocol.
+///
+/// Returns `None` for bare `SessionChan`, unknown names, or malformed args
+/// (the untracked best-effort skeleton).
+pub fn residual_from_chan_type(
+    ty: &Type,
+    session_types: &HashMap<String, SessionType>,
+) -> Option<SessionType> {
+    let args = match ty.unlocated() {
+        Type::Name(n, args) if n == "SessionChan" || n == "session_chan" => args,
+        _ => return None,
+    };
+    let first = args.first()?;
+    match first.unlocated() {
+        Type::Name(n, inner) if n == "dual" && inner.len() == 1 => {
+            if let Type::Name(x, xargs) = inner[0].unlocated() {
+                if xargs.is_empty() {
+                    let body = session_types.get(x)?;
+                    let resolved = resolve(body, session_types).unwrap_or_else(|| body.clone());
+                    return Some(dual(&resolved));
+                }
+            }
+            None
+        }
+        Type::Name(n, inner) if inner.is_empty() => {
+            let body = session_types.get(n)?;
+            Some(resolve(body, session_types).unwrap_or_else(|| body.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +429,52 @@ mod tests {
         let s = SessionType::Send(i32_ty(), Box::new(SessionType::End));
         let err = apply_action(&s, SessionAction::Close).unwrap_err();
         assert!(matches!(err, SessionOrderError::ExpectedEnd { .. }));
+    }
+
+    #[test]
+    fn residual_from_chan_type_plain_and_dual() {
+        let mut env = HashMap::new();
+        env.insert(
+            "Echo".to_string(),
+            SessionType::Send(
+                i32_ty(),
+                Box::new(SessionType::Recv(str_ty(), Box::new(SessionType::End))),
+            ),
+        );
+        // SessionChan<Echo> → Echo's body.
+        let plain = Type::Name(
+            "SessionChan".into(),
+            vec![Type::Name("Echo".into(), vec![])],
+        );
+        let r = residual_from_chan_type(&plain, &env).unwrap();
+        assert!(matches!(r, SessionType::Send(..)), "plain resolves to Echo");
+        // SessionChan<dual Echo> → dual(Echo) — Recv first (0.36.38 hi end).
+        let dual_ty = Type::Name(
+            "SessionChan".into(),
+            vec![Type::Name(
+                "dual".into(),
+                vec![Type::Name("Echo".into(), vec![])],
+            )],
+        );
+        let r = residual_from_chan_type(&dual_ty, &env).unwrap();
+        match r {
+            SessionType::Recv(t, cont) => {
+                // dual(Echo) = ?i32 . !i32 . end — the first Recv carries the
+                // payload of the original first Send (!i32).
+                assert!(matches!(t.unlocated(), Type::Name(n, _) if n == "i32"));
+                assert!(matches!(*cont, SessionType::Send(..)));
+            }
+            other => panic!("expected Recv-first dual, got {:?}", other),
+        }
+        // Unknown session name → None (untracked skeleton).
+        let bad = Type::Name(
+            "SessionChan".into(),
+            vec![Type::Name("Nope".into(), vec![])],
+        );
+        assert!(residual_from_chan_type(&bad, &env).is_none());
+        // Bare SessionChan → None.
+        let bare = Type::Name("SessionChan".into(), vec![]);
+        assert!(residual_from_chan_type(&bare, &env).is_none());
     }
 
     #[test]

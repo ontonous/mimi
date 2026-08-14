@@ -3237,9 +3237,7 @@ fn dual_session_residual_roundtrip() {
     let src = r#"
 session Echo = !i32 . ?i32 . end
 func main() -> i32 {
-    let pair = session_pair()
-    let ch0 = pair[0]
-    let ch1 = pair[1]
+    let (ch0, ch1) = session_pair::<Echo>()
     session_send(ch0, 42)
     let n = session_recv(ch1)
     session_send(ch1, n * 2)
@@ -3272,9 +3270,7 @@ fn dual_session_residual_branch_merge() {
     let src = r#"
 session Echo = !i32 . ?i32 . end
 func main() -> i32 {
-    let pair = session_pair()
-    let ch0 = pair[0]
-    let ch1 = pair[1]
+    let (ch0, ch1) = session_pair::<Echo>()
     let cond = 1
     if cond > 0 {
         session_send(ch0, 1)
@@ -3282,13 +3278,16 @@ func main() -> i32 {
         session_send(ch0, 2)
     }
     let n = session_recv(ch1)
+    session_send(ch1, n + 1)
+    let r = session_recv(ch0)
     session_close(ch0)
     session_close(ch1)
     println(n)
+    println(r)
     0
 }
 "#;
-    let expected = "1";
+    let expected = "1\n2";
     let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session merge");
     assert_eq!(
         checked.trim(),
@@ -3306,40 +3305,80 @@ func main() -> i32 {
 }
 
 #[test]
-fn dual_session_residual_loop_ops() {
+fn dual_session_residual_multi_step() {
     if !can_link() {
         return;
     }
     let src = r#"
-session S = !i32 . end
+session S = !i32 . !i32 . !i32 . end
 func main() -> i32 {
-    let pair = session_pair()
-    let ch0 = pair[0]
-    let ch1 = pair[1]
-    let mut i = 0
-    while i < 3 {
-        session_send(ch0, i)
-        i = i + 1
-    }
+    let (ch0, ch1) = session_pair::<S>()
+    session_send(ch0, 0)
+    session_send(ch0, 1)
+    session_send(ch0, 2)
     session_close(ch0)
     let mut total: i64 = 0
-    let mut j = 0
-    while j < 3 {
-        total = total + session_recv(ch1)
-        j = j + 1
-    }
+    total = total + session_recv(ch1)
+    total = total + session_recv(ch1)
+    total = total + session_recv(ch1)
     session_close(ch1)
     println(total)
     0
 }
 "#;
     let expected = "3";
-    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session loop");
-    assert_eq!(checked.trim(), expected, "resolved(codegen) session loop");
-    let unga = compile_and_run(src).expect("legacy codegen session loop");
-    assert_eq!(unga.trim(), expected, "legacy(codegen) session loop");
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen session multi-step");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) session multi-step"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen session multi-step");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) session multi-step");
     let (_, vm) = run_source_bytecode_with_stdout(src);
-    assert_eq!(vm.trim(), expected, "vm session loop");
+    assert_eq!(vm.trim(), expected, "vm session multi-step");
+}
+
+// 0.36.38 (Phase C, §4d): the residual engine attributes ONE advancement to
+// each call-site, and a while-loop's body residual is RESTORED at the
+// backedge (P0-4: the loop may run zero times). So session actions inside a
+// while-loop are rejected FAIL-CLOSED — the continuation must not assume the
+// loop's sends happened: close/scope-exit after the loop surfaces E0414 /
+// E0425 on the restored residual. Loops over linear CONTAINERS are supported
+// (0.36.37 for-loop element Introduce); session-actions-in-loops on TYPED
+// pairs are a documented static boundary.
+#[test]
+fn dual_session_loop_actions_rejected_fail_closed() {
+    let diags = check_source(
+        "session S = !i32 . end \
+         func main() -> i32 { \
+             let (ch0, ch1) = session_pair::<S>() \
+             let mut i = 0 \
+             while i < 3 { \
+                 session_send(ch0, i) \
+                 i = i + 1 \
+             } \
+             session_close(ch0) \
+             session_close(ch1) \
+             0 }",
+    )
+    .expect_err("session action inside a while-loop must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0414"),
+        "closing on the restored (pre-loop) residual must surface E0414:\n{rendered}"
+    );
+    // The typed pair must NOT silently pass the loop (the old pair[0]/pair[1]
+    // raw-i64 form checked nothing).
+    assert!(
+        rendered.contains("E0425"),
+        "loop must additionally surface scope-exit residual violations:\n{rendered}"
+    );
 }
 
 // ============================================================
@@ -3524,6 +3563,135 @@ fn dual_session_typed_endpoint_residual_enforced() {
         rendered.contains("E0413"),
         "expected E0413 unknown session, got:\n{rendered}"
     );
+}
+
+// 0.36.38 (Phase C, §4d option (A)): session_pair::<S>() — the typed PAIR
+// form. Returns (SessionChan<S>, SessionChan<dual S>): the lo end speaks S,
+// the hi end speaks the dual (send on lo ↔ recv on hi, matching the
+// cross-wired runtime). Both endpoints carry residuals, so the static
+// protocol proof spans the whole pair — the 0.36.23 dead face (raw i64
+// handles via pair[i]) is closed on the pair form too. Runtime shape is a
+// {lo, hi} tuple value on ALL backends.
+#[test]
+fn dual_session_typed_pair_roundtrip() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Echo = !i32 . ?i32 . end
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<Echo>()
+    session_send(ch0, 42)
+    let n = session_recv(ch1)
+    session_send(ch1, n * 2)
+    let r = session_recv(ch0)
+    session_close(ch0)
+    session_close(ch1)
+    println(n)
+    println(r)
+    0
+}
+"#;
+    let expected = "42\n84";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen typed pair");
+    assert_eq!(checked.trim(), expected, "resolved(codegen)");
+    let unga = compile_and_run(src).expect("legacy codegen typed pair");
+    assert_eq!(unga.trim(), expected, "legacy(codegen)");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm");
+}
+
+// L2: the hi end carries the DUAL residual — its FIRST action must be recv
+// (dual of !i32... is ?i32...); a send-first hi end (and symmetrically a
+// recv-first lo end) is a static E0414. Also pins E0413 for unknown session
+// names on the pair turbofish.
+#[test]
+fn dual_session_typed_pair_direction_enforced() {
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end \
+         func main() -> i32 { \
+             let (lo, hi) = session_pair::<Echo>() \
+             session_send(hi, 1) \
+             session_recv(lo) \
+             session_close(lo) \
+             session_close(hi) \
+             0 }",
+    )
+    .expect_err("hi-end send-first must be a static E0414");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0414"),
+        "expected E0414 on hi-end send-first, got:\n{rendered}"
+    );
+
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end \
+         func main() -> i32 { \
+             let (lo, hi) = session_pair::<Echo>() \
+             session_recv(lo) \
+             session_send(hi, 1) \
+             session_close(lo) \
+             session_close(hi) \
+             0 }",
+    )
+    .expect_err("lo-end recv-first must be a static E0414");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0414"),
+        "expected E0414 on lo-end recv-first, got:\n{rendered}"
+    );
+
+    let diags = check_source(
+        "func main() -> i32 { \
+             let (lo, hi) = session_pair::<Nope>() \
+             session_close(lo) \
+             session_close(hi) \
+             0 }",
+    )
+    .expect_err("unknown session name must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0413"),
+        "expected E0413 for unknown session, got:\n{rendered}"
+    );
+}
+
+// The plain session_pair() form — (i64, i64) tuple of raw handles — keeps
+// working (untyped: no residual enforcement). Pins the tuple-shape compat
+// after the List<i64> → (i64, i64) migration.
+#[test]
+fn dual_session_plain_pair_tuple_form() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func main() -> i32 {
+    let (a, b) = session_pair()
+    session_send(a, 7)
+    let m = session_recv(b)
+    println(m)
+    0
+}
+"#;
+    let expected = "7";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved plain pair");
+    assert_eq!(checked.trim(), expected, "resolved(codegen)");
+    let unga = compile_and_run(src).expect("legacy plain pair");
+    assert_eq!(unga.trim(), expected, "legacy(codegen)");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm");
 }
 
 #[test]

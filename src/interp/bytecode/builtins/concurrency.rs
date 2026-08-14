@@ -500,7 +500,10 @@ fn builtin_session_pair(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, 
     let packed = crate::runtime::mimi_session_pair();
     let lo = crate::runtime::mimi_session_lo(packed);
     let hi = crate::runtime::mimi_session_hi(packed);
-    Ok(Value::List(Arc::new(vec![Value::Int(lo), Value::Int(hi)])))
+    // 0.36.38: the pair is a TUPLE (lo, hi) — matches the (i64, i64) /
+    // (SessionChan<S>, SessionChan<dual S>) typing and the codegen's
+    // {lo, hi} tuple struct value.
+    Ok(Value::Tuple(vec![Value::Int(lo), Value::Int(hi)]))
 }
 
 fn builtin_session_open(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {

@@ -1014,6 +1014,61 @@ impl<'a> Checker<'a> {
             }
             return Type::Name("SessionChan".into(), vec![s.clone()]);
         }
+        // 0.36.38 (Phase C, §4d option (A)): session_pair::<S>() — the typed
+        // PAIR form. Returns (SessionChan<S>, SessionChan<dual S>): the lo end
+        // speaks S, the hi end speaks the dual (send on lo ↔ recv on hi,
+        // matching the cross-wired runtime). Both endpoints carry residuals
+        // (residual_from_chan_type seeds the dual expression), so the
+        // compile-time protocol proof spans BOTH ends of the channel pair —
+        // the 0.36.23 "dead face" (raw i64 handles) is closed on the pair
+        // form too. Migration: `let pair = session_pair(); pair[i]` →
+        // `let (lo, hi) = session_pair::<S>()`.
+        if name == "session_pair" {
+            if type_args.len() != 1 {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    "session_pair::<S> expects exactly 1 type argument (a declared \
+                     session name)",
+                );
+                return Type::Name("unknown".into(), vec![]);
+            }
+            let s = &type_args[0];
+            let s_name = match s.unlocated() {
+                Type::Name(n, args) if args.is_empty() => n.clone(),
+                _ => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0413,
+                        format!(
+                            "session_pair type argument must be a declared session \
+                             name, found {}",
+                            fmt_type(s)
+                        ),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+            };
+            if !self.session_types.contains_key(&s_name) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0413,
+                    format!(
+                        "session_pair::<{}> — '{}' is not a declared session type",
+                        s_name, s_name
+                    ),
+                );
+                return Type::Name("unknown".into(), vec![]);
+            }
+            if !args.is_empty() {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    "session_pair takes no arguments",
+                );
+            }
+            let dual_arg = Type::Name("dual".into(), vec![s.clone()]);
+            return Type::Tuple(vec![
+                Type::Name("SessionChan".into(), vec![s.clone()]),
+                Type::Name("SessionChan".into(), vec![dual_arg]),
+            ]);
+        }
         // Turbofish: func::<Type>(args) — explicit type instantiation
         let (params, ret) = match self.funcs.get(name) {
             Some(sig) => sig.clone(),
