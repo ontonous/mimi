@@ -7,6 +7,21 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.25 — M9 门禁补全：线性容器 slice 读取 fail-open → fail-closed（L2）
+
+- **补全（src/core/cfg/resource_lower.rs）**：M9 门禁（0.36.22 索引读取
+  E0304）的**姊妹形态**——`v[1..]`（List<cap>）此前**免检放行**：slice 复制
+  句柄值（别名化）且只 drop 切片副本，容器自身句柄静默泄漏（探针 .m5 check
+  ✓，与 0.36.22 修复前的索引读取同款 fail-open）。现将 slice 表达纳入同一
+  门禁（reject_index_read_extraction 增加 Slice 臂 + 共用诊断出口），消息升级
+  为 "cannot be read by index or slice"。
+- **边界守恒**：整体移动/丢弃（sink(v) ✓）、非线性容器 slice（xs[1..] ✓）
+  不受影响；flow-state 元素容器 slice 继续合法（droppable 豁免）。
+- **回归扩展**：dual_linear_container_index_read_rejected 增加 slice 拒绝 +
+  非线性 slice / 整体移动两个正例控制。全量 5366 passed / 0 failed /
+  7 ignored；fmt + clippy + docs + edge 全绿。
+- 线性系统元素消费缺口（match/for/index/slice）至此**全部 fail-closed**。
+
 ### 0.36.24 — 登记差距：flow-state 进容器（Result/Option）native 面 E0200（IDD 已知差距）
 
 - **探针实证**：`let got = match boxed { Ok(c) => c, Err(_) => Zero{..} }` 后

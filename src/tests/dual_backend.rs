@@ -3435,10 +3435,40 @@ fn dual_linear_container_index_read_rejected() {
         "whole-container drop must stay legal"
     );
 
+    // 0.36.25: slice sibling — `v[1..]` copies handle values and leaks the
+    // container's own elements; same fail-closed rule.
+    let diags = check_source(
+        "cap FileReadCap; func main() -> i32 {              let v: List<cap FileReadCap> = [FileReadCap, FileReadCap];              let s = v[1..]; drop(s); 0 }",
+    )
+    .expect_err("slice of linear container must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("by index or slice"),
+        "expected E0304 slice diagnostic, got:\n{rendered}"
+    );
+
     // Non-linear containers are untouched by the gate.
     assert!(
         check_source("func main() -> i32 { let xs = [1, 2, 3]; println(xs[1]); 0 }").is_ok(),
         "non-linear index read must stay legal"
+    );
+    assert!(
+        check_source(
+            "func main() -> i32 { let xs = [1, 2, 3]; let s = xs[1..]; println(len(s)); 0 }"
+        )
+        .is_ok(),
+        "non-linear slice must stay legal"
+    );
+    assert!(
+        check_source(
+            "cap FileReadCap; func sink(v: List<cap FileReadCap>) -> i32 { drop(v); 1 }              func main() -> i32 { let v: List<cap FileReadCap> = [FileReadCap, FileReadCap];                  println(sink(v)); 0 }",
+        )
+        .is_ok(),
+        "whole-container move must stay legal"
     );
 }
 

@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
     MatchArm, Permission, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
-    ResolvedIndex, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
-    ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
+    ResolvedIndex, ResolvedLocal, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
+    ResolvedProjection, ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
+    ResolvedValueProjection,
 };
 use crate::core::{
     CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan, LoanId,
@@ -1317,42 +1318,68 @@ impl<'a> ActionEmitter<'a> {
     /// attributed the whole container as consumed by the read, but only the
     /// extracted handle was released, silently leaking every unextracted
     /// element (inconsistent with match/for extraction, which are fail-closed
-    /// E0256/E0304). Reject uniformly: a linear container must be moved or
-    /// dropped as a whole.
+    /// E0256/E0304). 0.36.25: the SLICE sibling (`v[1..]`) copies the same
+    /// handle values while consuming the container obligation — identical
+    /// leak, closed identically. Reject uniformly: a linear container must
+    /// be moved or dropped as a whole.
     fn reject_index_read_extraction(&mut self, expression: &ResolvedExpr) {
-        if let ResolvedExprKind::Load(place) = &expression.kind {
-            let has_index = place
-                .projections
-                .iter()
-                .any(|projection| matches!(projection, ResolvedProjection::Index { .. }));
-            if has_index {
-                if let Some(local) = self.body.locals.get(&place.base) {
-                    // Non-droppable linear element containers (Cap/SessionChan)
-                    // leak every unextracted element on index read (M9).
-                    // Flow-state-element containers are auto-droppable at
-                    // scope exit (0.31.16 P0-5), so element reads there are a
-                    // sanctioned pattern and stay legal.
-                    if self.is_linear(&local.ty) && !self.is_droppable_type(&local.ty) {
-                        self.errors.push(
-                            Diagnostic::error_code(
-                                crate::diagnostic::codes::E0304,
-                                format!(
-                                    "'{}' cannot be read by index: element-level extraction \
-                                     from a linear container is not tracked and leaks every \
-                                     unextracted element",
-                                    self.local_name(&place.base)
-                                ),
-                                expression.origin.user_span(),
-                            )
-                            .with_help(
-                                "move or drop the whole container (e.g. drop(v)) instead of \
-                                 indexing into it",
-                            ),
-                        );
+        // Non-droppable linear element containers (Cap/SessionChan) leak
+        // every unextracted element on element-level reads (M9/slice).
+        // Flow-state-element containers are auto-droppable at scope exit
+        // (0.31.16 P0-5), so element reads there are a sanctioned pattern
+        // and stay legal.
+        let non_droppable_linear_container = |local: &ResolvedLocal| -> bool {
+            self.is_linear(&local.ty) && !self.is_droppable_type(&local.ty)
+        };
+        match &expression.kind {
+            ResolvedExprKind::Load(place) => {
+                let has_index = place
+                    .projections
+                    .iter()
+                    .any(|projection| matches!(projection, ResolvedProjection::Index { .. }));
+                if has_index {
+                    if let Some(local) = self.body.locals.get(&place.base) {
+                        if non_droppable_linear_container(local) {
+                            self.push_index_read_error(&place.base, expression);
+                        }
                     }
                 }
             }
+            // 0.36.25: `v[1..]` on a linear container — the slice copies the
+            // handle values (alias!) and only the slice's copies are dropped;
+            // the container's own handles leak. Same fail-closed rule.
+            ResolvedExprKind::Slice { target, .. } => {
+                if let ResolvedExprKind::Load(place) = &target.kind {
+                    if place.projections.is_empty() {
+                        if let Some(local) = self.body.locals.get(&place.base) {
+                            if non_droppable_linear_container(local) {
+                                self.push_index_read_error(&place.base, expression);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+
+    fn push_index_read_error(&mut self, base: &ResolvedLocalId, expression: &ResolvedExpr) {
+        self.errors.push(
+            Diagnostic::error_code(
+                crate::diagnostic::codes::E0304,
+                format!(
+                    "'{}' cannot be read by index or slice: element-level extraction \
+                     from a linear container is not tracked and leaks every \
+                     unextracted element",
+                    self.local_name(base)
+                ),
+                expression.origin.user_span(),
+            )
+            .with_help(
+                "move or drop the whole container (e.g. drop(v)) instead of \
+                 indexing or slicing into it",
+            ),
+        );
     }
 
     fn place_type(&self, place: &ResolvedPlace) -> Option<ResolvedTypeId> {
