@@ -104,91 +104,123 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // statically dead and their bodies compile with sentinel
                 // bindings (the dead blocks are never entered).
                 if let Some((flow, ss)) = self.flow_result_static_state(scrutinee_type) {
-                    if ss == *name {
-                        let rec_ty =
-                            crate::ast::Type::Name(format!("flow::{}::{}", flow, ss), Vec::new());
-                        let fields = self.record_fields_of(&rec_ty).unwrap_or_default();
-                        match scrutinee_val {
-                            BasicValueEnum::StructValue(sv) => {
-                                for (_, inner_pat) in inner_patterns {
-                                    if let PatternKind::Variable(bind_name) = &inner_pat.kind {
-                                        let Some(fi) = fields.iter().position(|f| f == bind_name)
-                                        else {
-                                            continue;
-                                        };
-                                        let val = self
-                                            .builder
-                                            .build_extract_value(sv, fi as u32, "static_field")
-                                            .map_err(|e| {
-                                                CompileError::LlvmError(format!(
-                                                    "static field extract: {}",
-                                                    e
-                                                ))
-                                            })?;
-                                        self.bind_pattern_var(
-                                            &mut local_vars,
-                                            bind_name,
-                                            val,
-                                            val.get_type(),
-                                        )?;
+                    // Only actual flow-state constructor names take the static
+                    // record path. Built-in `Ok`/`Err` from a fails-transition
+                    // still need the generic Result payload binding below.
+                    if self
+                        .find_variant_ordinal_scoped(name, scrutinee_type)
+                        .is_err()
+                    {
+                        if ss == *name {
+                            let rec_ty = crate::ast::Type::Name(
+                                format!("flow::{}::{}", flow, ss),
+                                Vec::new(),
+                            );
+                            let fields = self.record_fields_of(&rec_ty).unwrap_or_default();
+                            match scrutinee_val {
+                                BasicValueEnum::StructValue(sv) => {
+                                    for (_, inner_pat) in inner_patterns {
+                                        if let PatternKind::Variable(bind_name) = &inner_pat.kind {
+                                            let Some(fi) =
+                                                fields.iter().position(|f| f == bind_name)
+                                            else {
+                                                continue;
+                                            };
+                                            let val = self
+                                                .builder
+                                                .build_extract_value(sv, fi as u32, "static_field")
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "static field extract: {}",
+                                                        e
+                                                    ))
+                                                })?;
+                                            self.bind_pattern_var(
+                                                &mut local_vars,
+                                                bind_name,
+                                                val,
+                                                val.get_type(),
+                                            )?;
+                                        }
                                     }
                                 }
-                            }
-                            BasicValueEnum::PointerValue(pv) => {
-                                let rec_llvm = self.flow_state_llvm_type(&ss).ok_or_else(|| {
-                                    CompileError::LlvmError(format!(
-                                        "flow state '{}' llvm type not registered",
-                                        ss
-                                    ))
-                                })?;
-                                for (_, inner_pat) in inner_patterns {
-                                    if let PatternKind::Variable(bind_name) = &inner_pat.kind {
-                                        let Some(fi) = fields.iter().position(|f| f == bind_name)
-                                        else {
-                                            continue;
-                                        };
-                                        let gep = self
-                                            .gep()
-                                            .build_struct_gep(
-                                                rec_llvm,
-                                                pv,
-                                                fi as u32,
-                                                &format!("static_gep_{}", bind_name),
-                                            )
-                                            .map_err(|e| {
-                                                CompileError::LlvmError(format!(
-                                                    "static field gep: {}",
-                                                    e
-                                                ))
-                                            })?;
-                                        let val = self.build_load(rec_llvm, gep, "static_v")?;
-                                        self.bind_pattern_var(
-                                            &mut local_vars,
-                                            bind_name,
-                                            val,
-                                            val.get_type(),
-                                        )?;
+                                BasicValueEnum::PointerValue(pv) => {
+                                    let rec_llvm =
+                                        self.flow_state_llvm_type(&ss).ok_or_else(|| {
+                                            CompileError::LlvmError(format!(
+                                                "flow state '{}' llvm type not registered",
+                                                ss
+                                            ))
+                                        })?;
+                                    for (_, inner_pat) in inner_patterns {
+                                        if let PatternKind::Variable(bind_name) = &inner_pat.kind {
+                                            let Some(fi) =
+                                                fields.iter().position(|f| f == bind_name)
+                                            else {
+                                                continue;
+                                            };
+                                            let gep = self
+                                                .gep()
+                                                .build_struct_gep(
+                                                    rec_llvm,
+                                                    pv,
+                                                    fi as u32,
+                                                    &format!("static_gep_{}", bind_name),
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "static field gep: {}",
+                                                        e
+                                                    ))
+                                                })?;
+                                            let val = self.build_load(rec_llvm, gep, "static_v")?;
+                                            self.bind_pattern_var(
+                                                &mut local_vars,
+                                                bind_name,
+                                                val,
+                                                val.get_type(),
+                                            )?;
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
-                        }
-                    } else {
-                        // Statically dead arm: bind sentinels so the (never
-                        // entered) body still compiles.
-                        for (_, inner_pat) in inner_patterns {
-                            if let PatternKind::Variable(bind_name) = &inner_pat.kind {
-                                let zero = self.context.i64_type().const_int(0, false).into();
-                                self.bind_pattern_var(
-                                    &mut local_vars,
-                                    bind_name,
-                                    zero,
-                                    zero.get_type(),
-                                )?;
+                        } else {
+                            // Statically dead arm: bind sentinels so the (never
+                            // entered) body still compiles. The sentinel must use
+                            // the same LLVM type as the live arm's field, otherwise
+                            // a dead arm body that returns the bound value (e.g.
+                            // `A { value } => value` after the static `B` arm)
+                            // makes the match phi disagree on i64 vs f64. Use the
+                            // static state record's declared field type for each
+                            // bound name.
+                            let rec_ty = crate::ast::Type::Name(
+                                format!("flow::{}::{}", flow, ss),
+                                Vec::new(),
+                            );
+                            let record_fields =
+                                self.record_field_defs_of(&rec_ty).unwrap_or_default();
+                            for (_, inner_pat) in inner_patterns {
+                                if let PatternKind::Variable(bind_name) = &inner_pat.kind {
+                                    let field_ty =
+                                        record_fields.iter().find(|f| f.name == *bind_name);
+                                    let zero = field_ty
+                                        .and_then(|f| self.llvm_type_for(&f.ty))
+                                        .map(|bt| bt.const_zero().into())
+                                        .unwrap_or_else(|| {
+                                            self.context.i64_type().const_int(0, false).into()
+                                        });
+                                    self.bind_pattern_var(
+                                        &mut local_vars,
+                                        bind_name,
+                                        zero,
+                                        zero.get_type(),
+                                    )?;
+                                }
                             }
                         }
+                        return Ok(local_vars);
                     }
-                    return Ok(local_vars);
                 }
                 // For constructor patterns, bind inner variables from the payload field.
                 // Most enum-like representations put the tag at index 0 and the payload
@@ -241,6 +273,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // errors: Result<T, (Source, E)> rejected tuples have their
                 // own hard-coded {i64,i64} reconstruction below, and other
                 // shapes are unverified.
+                // Q1b (0.36.56 Phase E): built-in Result<T,E> Ok payloads that
+                // travel as ptrtoint-encoded i64 need the AST type of T so the
+                // legacy emitter can register `var_types` and later field access
+                // can recover the struct from the i64. Mirrors the Err-string
+                // side channel below, but for the successful flow-state path.
+                let ok_expected_ty: Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> =
+                    if payload_idx == 1 && variant_owner.is_none() {
+                        let derive =
+                        |st: &crate::ast::Type| -> Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> {
+                            let ok_ty: Option<&crate::ast::Type> = match st.unlocated() {
+                                crate::ast::Type::Result(ok, _) => Some(ok.as_ref()),
+                                // AST surface form: Result<T, E> parses as
+                                // Name("Result", [T, E]) in legacy paths.
+                                crate::ast::Type::Name(n, args)
+                                    if n == "Result" && args.len() == 2 =>
+                                {
+                                    Some(&args[0])
+                                }
+                                _ => None,
+                            };
+                            ok_ty.and_then(|t| {
+                                let llvm = self.llvm_type_for(t)?;
+                                // Only record/struct payloads need the
+                                // ptrtoint recovery; ints/strings have their
+                                // own natural slot handling.
+                                if matches!(
+                                    llvm,
+                                    BasicTypeEnum::StructType(_) | BasicTypeEnum::PointerType(_)
+                                ) {
+                                    Some((t.clone(), llvm))
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        scrutinee_type
+                            .and_then(derive)
+                            .or_else(|| self.pending_scrutinee_result_ty.as_ref().and_then(derive))
+                    } else {
+                        None
+                    };
                 let err_expected_ty: Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> =
                     if payload_idx == 2 && variant_owner.is_none() {
                         let derive =
@@ -548,6 +621,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.var_type_names.insert(bind_name.clone(), full);
                                     }
                                     self.register_list_elem_type(bind_name, ast_ty);
+                                } else if let Some((ref ok_ast, _)) = ok_expected_ty {
+                                    // Q1b: built-in Ok payloads whose record type
+                                    // arrives as an i64 handle — register the AST
+                                    // type so field access can recover the struct.
+                                    self.var_types.insert(bind_name.clone(), ok_ast.clone());
+                                    if let Some(full) = self.get_full_type_name(ok_ast) {
+                                        self.var_type_names.insert(bind_name.clone(), full);
+                                    }
+                                    self.register_list_elem_type(bind_name, ok_ast);
                                 } else if let Some((ref err_ast, _)) = err_expected_ty {
                                     // Q1: built-in Err string payload — register
                                     // the scrutinee's error AST type (string) for
@@ -1442,6 +1524,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         // returns Some for any pointer value (including ADT pointers).
         let inferred_type = self.infer_object_type(scrutinee, vars);
         let is_string_scrutinee = inferred_type == "string";
+        // 0.36.56 (Phase E/状态语义 L1): single-target flow results are plain
+        // state records, not __MultiTarget enums. Their first field may be a
+        // non-integer payload (e.g. f64), so extracting a tag from field 0 is
+        // invalid. Keep the tag-less path for these static flow-result matches;
+        // constructor arms are dispatched by the static-state fallback below.
+        let scrutinee_type_hint = self.expr_type_of(scrutinee, vars);
+        // Only treat this as a tag-less static flow record when the match is
+        // NOT a built-in Result fails-transition shape. `Ok`/`Err` arms resolve
+        // their ordinals through the built-in Result layout; the state-record
+        // path is exclusively for constructor arms naming plain flow states.
+        let is_static_flow_result = scrutinee_type_hint
+            .as_ref()
+            .and_then(|ty| {
+                let has_resolved_ctor = arms.iter().any(|arm| {
+                    matches!(
+                        &arm.pat.kind,
+                        PatternKind::Constructor(name, _)
+                            if self.find_variant_ordinal_scoped(name, Some(ty)).is_ok()
+                    )
+                });
+                self.flow_result_static_state(Some(ty))
+                    .map(|pair| (pair, !has_resolved_ctor))
+            })
+            .map(|((_, _), ok)| ok)
+            .unwrap_or(false);
         // Only integer/enum matches need a tag value. Tuple/array/slice/string matches
         // work directly on the scrutinee value.
         let needs_tag = if is_string_scrutinee {
@@ -1454,16 +1561,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             })
         };
-        let scrutinee_iv: Option<inkwell::values::IntValue<'ctx>> = match scrutinee_val {
-            BasicValueEnum::IntValue(iv) => Some(iv),
-            BasicValueEnum::StructValue(sv) => {
-                if is_string_scrutinee {
-                    None
-                } else {
+        let scrutinee_iv: Option<inkwell::values::IntValue<'ctx>> = if is_static_flow_result {
+            None
+        } else {
+            match scrutinee_val {
+                BasicValueEnum::IntValue(iv) => Some(iv),
+                BasicValueEnum::StructValue(sv) => {
+                    if is_string_scrutinee {
+                        None
+                    } else {
+                        let tag = self
+                            .builder
+                            .build_extract_value(sv, 0, "enum_tag")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("extract enum tag: {}", e))
+                            })?
+                            .into_int_value();
+                        Some(
+                            self.builder
+                                .build_int_z_extend(tag, self.context.i64_type(), "tag_ext")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("extend tag: {}", e))
+                                })?,
+                        )
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) if needs_tag => {
+                    // Tag is always at index 0 as an i32 regardless of payload type.
+                    let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
+                    let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                    let enum_ty = self.context.struct_type(&[i32_ty, i64_ty], false);
+                    let tag_gep = self
+                        .gep()
+                        .build_struct_gep(BasicTypeEnum::StructType(enum_ty), pv, 0, "tag_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("tag gep: {}", e)))?;
                     let tag = self
-                        .builder
-                        .build_extract_value(sv, 0, "enum_tag")
-                        .map_err(|e| CompileError::LlvmError(format!("extract enum tag: {}", e)))?
+                        .build_load(
+                            BasicTypeEnum::IntType(self.context.i32_type()),
+                            tag_gep,
+                            "tag_load",
+                        )?
                         .into_int_value();
                     Some(
                         self.builder
@@ -1471,30 +1608,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?,
                     )
                 }
+                _ => None,
             }
-            BasicValueEnum::PointerValue(pv) if needs_tag => {
-                // Tag is always at index 0 as an i32 regardless of payload type.
-                let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
-                let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
-                let enum_ty = self.context.struct_type(&[i32_ty, i64_ty], false);
-                let tag_gep = self
-                    .gep()
-                    .build_struct_gep(BasicTypeEnum::StructType(enum_ty), pv, 0, "tag_gep")
-                    .map_err(|e| CompileError::LlvmError(format!("tag gep: {}", e)))?;
-                let tag = self
-                    .build_load(
-                        BasicTypeEnum::IntType(self.context.i32_type()),
-                        tag_gep,
-                        "tag_load",
-                    )?
-                    .into_int_value();
-                Some(
-                    self.builder
-                        .build_int_z_extend(tag, self.context.i64_type(), "tag_ext")
-                        .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?,
-                )
-            }
-            _ => None,
         };
 
         let function = self
@@ -1750,6 +1865,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .context
                         .append_basic_block(function, &format!("next{}", arm_idx));
                     return Ok((arm_bb, next_bb));
+                }
+                // 0.36.56 (Phase E/状态语义 L1): single-target flow result match —
+                // the scrutinee's static type is exactly ONE state of a flow,
+                // so there is no __MultiTarget enum/tag. The arm naming the
+                // static state always matches; other arms are statically dead.
+                // This must run before requiring `scrutinee_iv`, because the
+                // plain state record's first field may be f64/bool etc.
+                if self
+                    .find_variant_ordinal_scoped(name, scrutinee_type)
+                    .is_err()
+                {
+                    if let Some((_, static_state)) = self.flow_result_static_state(scrutinee_type) {
+                        let next_bb = self
+                            .context
+                            .append_basic_block(function, &format!("static_next{}", arm_idx));
+                        if static_state == *name {
+                            // Static arm: always taken.
+                            self.builder.position_at_end(else_bb);
+                            self.build_br(arm_bb)?;
+                        } else {
+                            // Non-static arm: never taken — the dispatch block
+                            // falls straight through to the next arm's block.
+                            self.builder.position_at_end(else_bb);
+                            self.build_br(next_bb)?;
+                        }
+                        return Ok((arm_bb, next_bb));
+                    }
                 }
                 // Constructor pattern: compare tag using ordinal index
                 let scrutinee_iv = scrutinee_iv.ok_or_else(|| {

@@ -35,6 +35,32 @@ pub(crate) const DEPTH_MAX_MODULE: usize = 32;
 /// 2 MB budget with margin; legitimate code nests f-strings ≤ 5 levels.
 pub(crate) const DEPTH_MAX_FSTRING: usize = 64;
 
+/// Return true if `cleaned` (digits with underscores already removed) is the
+/// textual magnitude of `i64::MIN` in one of the supported integer bases
+/// (decimal, hexadecimal, binary, octal).
+///
+/// The positive decimal `9223372036854775808` cannot be parsed as `i64`, so
+/// unary-minus and negative-pattern folding recognize all base spellings of
+/// `2^63` and directly produce `Lit::Int(i64::MIN)`.
+pub(crate) fn is_i64_min_magnitude(cleaned: &str) -> bool {
+    if cleaned == "9223372036854775808" {
+        return true;
+    }
+    let (digits, min_digits) = if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+        (&cleaned[2..], "8000000000000000")
+    } else if cleaned.starts_with("0b") || cleaned.starts_with("0B") {
+        (
+            &cleaned[2..],
+            "1000000000000000000000000000000000000000000000000000000000000000",
+        )
+    } else if cleaned.starts_with("0o") || cleaned.starts_with("0O") {
+        (&cleaned[2..], "1000000000000000000000")
+    } else {
+        return false;
+    };
+    digits == min_digits
+}
+
 impl Parser {
     /// Guard against deep recursion on the cheap paths (expressions,
     /// statements, types, patterns, session-type chains). Returns Err if

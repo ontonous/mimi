@@ -170,13 +170,14 @@ impl Parser {
                 };
                 self.advance();
                 let cleaned = v.replace('_', "");
-                let abs = if cleaned == "9223372036854775808" {
+                if crate::parser::helpers::is_i64_min_magnitude(&cleaned) {
                     // i64::MIN: the positive magnitude exceeds i64, so fold
-                    // the sign directly (decimal form only, like parse_expr).
+                    // the sign directly (all base spellings, like parse_expr).
                     return Ok(
                         self.pattern_from(start_pos, PatternKind::Literal(Lit::Int(i64::MIN)))
                     );
-                } else if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+                }
+                let abs = if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
                     i64::from_str_radix(&cleaned[2..], 16)
                         .map_err(|_| ParseError::new("invalid hex integer", line, col))?
                 } else if cleaned.starts_with("0b") || cleaned.starts_with("0B") {

@@ -4006,7 +4006,13 @@ fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
             Stmt::Block(stmts)
             | Stmt::Arena(stmts)
             | Stmt::Unsafe(stmts)
-            | Stmt::IeeeFloat(stmts) => stmts.iter().any(stmt_has_cross_boundary),
+            | Stmt::IeeeFloat(stmts)
+            | Stmt::Defer(stmts)
+            | Stmt::OnFailure(stmts)
+            | Stmt::Parasteps(stmts) => stmts.iter().any(stmt_has_cross_boundary),
+            Stmt::Pinned { expr, body, .. } => {
+                expr_has_cross_boundary(expr) || body.iter().any(stmt_has_cross_boundary)
+            }
             Stmt::Drop(e) => expr_has_cross_boundary(e),
             _ => false,
         }

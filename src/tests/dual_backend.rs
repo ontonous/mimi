@@ -5866,6 +5866,409 @@ func main() -> i32 {
     assert_eq!(resolved.trim(), expected, "resolved slice fails Err tuple");
 }
 
+// 0.36.56 (Phase E): single-target flow results are plain state records, not
+// __MultiTarget enums. Their first field may be f64; the legacy match emitter
+// previously tried to extract an integer enum tag from `{ double }` and
+// panicked with `Found FloatValue ... expected IntValue`. The static-state
+// match path must be tag-less, and the statically-dead arm's sentinel must use
+// the same field type so the match phi unifies (i64 vs f64).
+#[test]
+fn dual_flow_f64_payload_match_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow F {
+    state A { value: f64 }
+    state B { value: f64 }
+    transition go(A) -> B {
+        return B { value: self.value + 1.0 }
+    }
+}
+func main() -> i32 {
+    let s = A { value: 1.0 }
+    let r = F::go(s)
+    let v = match r {
+        B { value } => value,
+        A { value } => value
+    }
+    println(v)
+    0
+}
+"#;
+    let expected = "2";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm f64 flow payload match");
+    let legacy = compile_and_run(src).expect("legacy f64 flow payload match");
+    assert_eq!(legacy.trim(), expected, "legacy f64 flow payload match");
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved f64 flow payload match");
+    assert_eq!(resolved.trim(), expected, "resolved f64 flow payload match");
+}
+
+// 0.36.56 (Phase E): ieee_float values may escape a flow transition payload as
+// NaN/Inf (the escape hatch is scoped to the ieee block), but the next
+// deterministic float operation outside ieee_float must still hit E0813. This
+// pins the Flow × ieee_float boundary launch previously blocked by the f64
+// flow-payload match ICE above.
+#[test]
+fn dual_ieee_flow_nonfinite_reentry_trap_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow F {
+    state A { value: f64 }
+    state B { value: f64 }
+    transition go(A) -> B {
+        ieee_float {
+            return B { value: sqrt(-1.0) }
+        }
+    }
+}
+func main() -> i32 {
+    let s = A { value: 1.0 }
+    let r = F::go(s)
+    let v = match r {
+        B { value } => value,
+        A { value } => value
+    }
+    println("nan")
+    let y = v * 2.0
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "ieee_float flow payload should type-check: {:?}",
+        check_source(src)
+    );
+    let vm_err = run_source_bytecode_result(src).expect_err("VM must trap outside ieee_float");
+    assert!(
+        vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
+        "VM ieee/flow boundary: {vm_err}"
+    );
+    let legacy_err = compile_and_run(src).expect_err("legacy must trap on non-finite re-entry");
+    assert!(
+        legacy_err.contains("E0813") || legacy_err.contains("NaN/Inf"),
+        "legacy ieee/flow boundary: {legacy_err}"
+    );
+    let resolved_err = checked_codegen_compile_and_run(src)
+        .expect_err("resolved must trap on non-finite re-entry");
+    assert!(
+        resolved_err.contains("E0813") || resolved_err.contains("NaN/Inf"),
+        "resolved ieee/flow boundary: {resolved_err}"
+    );
+}
+
+// 0.36.59 (Phase E): an explicit `return` inside a tail wrapper block (such as
+// `ieee_float { return B { ... } }`) in a fails transition must still wrap the
+// target as Ok. Previously `compile_block_last_val`'s Return path missed the
+// fails-transition Ok wrap, making native take the Err arm while the VM took Ok.
+#[test]
+fn dual_ieee_flow_fails_ok_state_native() {
+    if !can_link() {
+        return;
+    }
+    let ok_src = r#"
+flow F {
+    state A { value: f64 }
+    state B { value: f64 }
+    transition go(A) -> B fails string {
+        ieee_float {
+            return B { value: 1.0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s0 = A { value: 1.0 }
+    let r = F::go(s0)
+    match r {
+        Ok(s1) => { println("ok"); print(s1.value); 0 },
+        Err(_) => { println("err"); 1 },
+    }
+}
+"#;
+    let expected = "ok
+1";
+    let (_, vm) = run_source_bytecode_with_stdout(ok_src);
+    assert_eq!(vm.trim(), expected, "vm ieee-fails tail return Ok");
+    let legacy = compile_and_run(ok_src).expect("legacy ieee-fails tail return Ok");
+    assert_eq!(legacy.trim(), expected, "legacy ieee-fails tail return Ok");
+    let resolved =
+        checked_codegen_compile_and_run(ok_src).expect("resolved ieee-fails tail return Ok");
+    assert_eq!(
+        resolved.trim(),
+        expected,
+        "resolved ieee-fails tail return Ok"
+    );
+
+    let nan_src = r#"
+flow F {
+    state A { value: f64 }
+    state B { value: f64 }
+    transition go(A) -> B fails string {
+        ieee_float {
+            return B { value: sqrt(-1.0) }
+        }
+    }
+}
+func main() -> i32 {
+    let s0 = A { value: 1.0 }
+    let r = F::go(s0)
+    match r {
+        Ok(s1) => {
+            print(s1.value)
+            let y = s1.value * 2.0
+            0
+        },
+        Err(_) => 1,
+    }
+}
+"#;
+    let vm_err = run_source_bytecode_result(nan_src).expect_err("VM must trap after NaN Ok");
+    assert!(
+        vm_err.contains("E0813") || vm_err.contains("invalid floating-point"),
+        "VM ieee-fails tail return trap: {vm_err}"
+    );
+    let legacy_err = compile_and_run(nan_src).expect_err("legacy must trap after NaN Ok");
+    assert!(
+        legacy_err.contains("E0813") || legacy_err.contains("NaN/Inf"),
+        "legacy ieee-fails tail return trap: {legacy_err}"
+    );
+    let resolved_err =
+        checked_codegen_compile_and_run(nan_src).expect_err("resolved must trap after NaN Ok");
+    assert!(
+        resolved_err.contains("E0813") || resolved_err.contains("NaN/Inf"),
+        "resolved ieee-fails tail return trap: {resolved_err}"
+    );
+}
+
+// 0.36.56 (Phase E): state-machine guard negative/positive on single-target
+// flow-result matches. The static arm may still be guarded; a failing guard
+// must fall through to the next arm just like in the VM, instead of being
+// treated as immediately taken.
+#[test]
+fn dual_flow_match_guard_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow F {
+    state A { value: i32 }
+    state B { value: i32 }
+    transition go(A) -> B {
+        return B { value: self.value + 1 }
+    }
+}
+func main() -> i32 {
+    let s0 = A { value: 2 }
+    let r0 = F::go(s0)
+    let out0 = match r0 {
+        B { value } if value > 100 => 1,
+        B { value } => 2,
+        A { value } => 3,
+    }
+    println(out0)
+
+    let s1 = A { value: 200 }
+    let r1 = F::go(s1)
+    let out1 = match r1 {
+        B { value } if value > 100 => 1,
+        B { value } => 2,
+        A { value } => 3,
+    }
+    println(out1)
+    0
+}
+"#;
+    let expected = "2\n1";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm flow match guard");
+    let legacy = compile_and_run(src).expect("legacy flow match guard");
+    assert_eq!(legacy.trim(), expected, "legacy flow match guard");
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved flow match guard");
+    assert_eq!(resolved.trim(), expected, "resolved flow match guard");
+}
+
+// 0.36.56 (Phase E): `?` before linear resource consumption is not only a
+// checker rule — the accepted ordering must also run identically through the VM
+// and native backends, locking the flow-try linear ordering into the dual
+// invariant suite.
+#[test]
+fn dual_flow_try_before_linear_consumption_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow Parser {
+    state Pending { data: i32 }
+    state Ready { data: i32 }
+    transition parse(Pending, token: i32) -> Ready fails string {
+        let result = safe_div(10, token)
+        let value = result?
+        return Ready { data: value + self.data }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Pending { data: 5 }
+    let r = Parser::parse(s0, 2)
+    match r {
+        Ok(s1) => println(s1.data),
+        Err(_) => println(0 - 1),
+    }
+    0
+}
+"#;
+    let expected = "10";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm ? before linear consumption");
+    let legacy = compile_and_run(src).expect("legacy ? before linear consumption");
+    assert_eq!(
+        legacy.trim(),
+        expected,
+        "legacy ? before linear consumption"
+    );
+    let resolved =
+        checked_codegen_compile_and_run(src).expect("resolved ? before linear consumption");
+    assert_eq!(
+        resolved.trim(),
+        expected,
+        "resolved ? before linear consumption"
+    );
+}
+
+// 0.36.58 (Phase E): the legacy Ok(flow_state) decode fix must also hold when
+// the flow-state payload is f64, not only i32. This covers Result<T, (Source,E)>
+// with T = f64-record through VM/legacy/resolved.
+#[test]
+fn dual_flow_try_before_linear_consumption_f64_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow Parser {
+    state Pending { data: f64 }
+    state Ready { data: f64 }
+    transition parse(Pending, token: i32) -> Ready fails string {
+        let result = safe_div(10, token)
+        let scale = result?
+        return Ready { data: (self.data + 1.0) * scale }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Pending { data: 1.5 }
+    let r = Parser::parse(s0, 2)
+    match r {
+        Ok(s1) => print(s1.data),
+        Err(_) => print(-1.0),
+    }
+    0
+}
+"#;
+    let expected = "12.5";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm f64 ok flow payload");
+    let legacy = compile_and_run(src).expect("legacy f64 ok flow payload");
+    assert_eq!(legacy.trim(), expected, "legacy f64 ok flow payload");
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved f64 ok flow payload");
+    assert_eq!(resolved.trim(), expected, "resolved f64 ok flow payload");
+}
+
+// 0.36.58 (Phase E): old-state reuse must be fail-closed through the checked
+// production pipeline. The raw legacy test harness does not run the checker,
+// so this test explicitly pins the authoritative checked/CLI path.
+#[test]
+fn dual_flow_old_state_reuse_checked_fail_closed() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    state Done
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
+    transition finish(Positive) -> Done { return Done { } }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let _d = Counter::finish(s1)
+    println(s1.count)
+    0
+}
+"#;
+    let errors = check_source(src).expect_err("old-state reuse must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0423")
+                || d.message.contains("consumed by transition")),
+        "expected E0423, got: {:?}",
+        errors
+    );
+    let checked_err =
+        checked_codegen_compile_and_run(src).expect_err("checked pipeline must reject E0423");
+    assert!(
+        checked_err.contains("E0423") || checked_err.contains("consumed by transition"),
+        "checked pipeline must fail closed, got: {checked_err}"
+    );
+}
+
+// 0.36.58 (Phase E): `?` after linear consumption is the complementary
+// ordering guard. The checked pipeline must reject it with E0429 before any
+// native binary is produced.
+#[test]
+fn dual_flow_try_after_linear_consumption_checked_fail_closed() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow Parser {
+    state Pending { data: i32 }
+    state Ready { data: i32 }
+    transition parse(Pending, token: i32) -> Ready fails string {
+        let consumed = self
+        let result = safe_div(10, token)
+        let value = result?
+        return Ready { data: value }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Pending { data: 5 }
+    let r = Parser::parse(s0, 2)
+    match r {
+        Ok(s1) => s1.data,
+        Err(_) => 0 - 1,
+    }
+}
+"#;
+    let errors = check_source(src).expect_err("? after consumption must be rejected");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0429")),
+        "expected E0429, got: {:?}",
+        errors
+    );
+    let checked_err =
+        checked_codegen_compile_and_run(src).expect_err("checked pipeline must reject E0429");
+    assert!(
+        checked_err.contains("E0429"),
+        "checked pipeline must fail closed, got: {checked_err}"
+    );
+}
+
 // 0.36.36 candidate (1) — element-level consumption satisfies the container
 // obligation for match/if-let over linear aggregates (Option/Result): an
 // exhaustive destructure dissolves the container; payload bindings keep their

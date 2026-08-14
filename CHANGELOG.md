@@ -7,6 +7,145 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.60 — Phase E 查缺补漏：i64::MIN 基数拼写 + silent_transition 包裹块审计
+
+#### 1. i64::MIN 支持十六进制/二进制/八进制拼写
+
+全仓审计遗留清单里 `§1-#11`（i64::MIN 仅十进制可拼写）为低优先级语法缺口：
+`-9223372036854775808` 可用，但等值的 `-0x8000000000000000`、
+`-0b1000...`、`-0o1000...` 在解析阶段因正数形式超出 i64 范围而报
+“invalid hex/binary/octal integer”。本轮补齐，使所有受支持整数基数都能
+拼写 i64 下界。
+
+- **修复**：
+  - `src/parser/helpers.rs` 新增 `is_i64_min_magnitude`，识别十进制、
+    十六进制、二进制、八进制四种写法中的 `2^63` 幅值；
+  - `src/parser/parse_expr.rs` 一元负号路径与 `src/parser/pattern.rs`
+    负字面量模式路径统一改用该 helper，直接折叠为 `Lit::Int(i64::MIN)`。
+- **新增回归**：`audit2_pm_i64_min_radix_spellings_parse_and_match`
+  - 表达式侧：三种基数赋给 `i64` 变量并与十进制 `i64::MIN` 相等，运行返回
+    42；
+  - 模式侧：三种基数负模式均可解析（保持与既有十进制负模式一致的解析层
+    契约）。
+
+#### 2. silent_transition 的跨边界检测覆盖 Defer/OnFailure/Parasteps/Pinned
+
+审计遗留 `§4-#39`：`has_cross_boundary_ops` 只递归 Block/Arena/Unsafe/
+IeeeFloat，漏掉 `defer`/`on failure`/`parasteps`/`pinned` 包裹块，导致 stay
+transition 若把 `emit`/`send_event`/`channel_send` 等跨边界调用藏进上述
+包裹块时会被误判为 silent。
+
+- **修复**：`src/core/resolved/mod.rs` 的 `stmt_has_cross_boundary` 为
+  `Defer`/`OnFailure`/`Parasteps` 补齐块内递归；`Pinned` 同时检查 `expr` 与
+  `body`。
+- **新增回归**：`has_cross_boundary_ops_covers_wrapper_blocks`——四种包裹块内
+  的 `emit(...)` 均被识别为跨边界；空包裹块仍为 false，防 all-true 回归。
+
+#### 3. async ensures 合约的 `result` 局部类型对齐函数体真实返回类型
+
+审计遗留 `R-3 / §5-LOW`：`lower.rs` 降低 `ensures: result ...` 合约时，把
+`result` 局部登记为 `signature.result`（调用方视角 `Future<T>`），而函数体
+本身按 `body_result`（内部 `T`）降低。async 函数一旦启用，合约里的
+`result` 类型将与函数体/尾表达式不一致。
+
+- **修复**：`src/core/ir/lower.rs` 的 `Stmt::Ensures` 分支从
+  `self.signature.result.clone()` 改为 `self.body_result.clone()`，与 body /
+  return 降低使用同一类型。
+- **影响**：当前解析器还不接受 `async func` 顶层语法（该路径由内部构造与
+  未来异步语法接管），但语义定位已消除根因。
+
+- **挣绿**：`audit_fix_parser` 47 passed、lib 全量 5460 passed；
+  `cargo fmt --check` / docs / edge 门禁保持绿。
+
+### 0.36.59 — Phase E：fails transition 尾包装 `return` 的 Ok-wrap 修复
+
+探针发现 `ieee_float { return B { ... } }` 出现在 `fails E` transition 中时，
+VM 进入 Ok 分支，而 native 进入 Err 分支——一个明确的双后端 L1 分歧。
+
+- **根因**：`compile_block_last_val` 的 `Stmt::Return` 路径在处理尾位置
+  wrapper（`ieee_float`/`unsafe`/`arena`/`block`）时，漏掉了
+  `in_fails_transition` 的 `Ok` 包装。返回值被当成裸 state，native 将成功的
+  transition 误判为 Rejected/Err。
+- **修复**（src/codegen/block.rs）：在 `compile_block_last_val` 的 Return 分支
+  补齐 `if self.in_fails_transition { val = self.compile_ok_constructor(vec![val])?; }`，
+  与 `func.rs` 普通 Return、`block.rs` compile_block Return 保持一致。
+- **新增回归**：`dual_ieee_flow_fails_ok_state_native`
+  - 有限值：`ieee_float { return B { value: 1.0 } }` VM/legacy/resolved 均走
+    Ok 并输出 `ok 1`；
+  - NaN：Ok 分支取出 NaN 后，离开 ieee_float 的首个乘法在 VM/native 双方触发
+    E0813。
+
+### 0.36.58 — Phase E 审计记录：raw legacy `compile_file` 的线性边界定位
+
+对“旧 state 复用”做双后端 fail-closed 复核时，确认生产路径与测试路径存在边界：
+
+- 生产/CLI：`mimi build` 走 `compile_checked`，先由 checker 拒绝 E0423，不会
+  生成旧 state 复用产物；
+- resolved 路径：`checked_codegen_compile_and_run` 同样失败关闭；
+- **边界**：`compile_file` 是测试专用的 raw legacy 发射器，只解析 AST，不跑
+  checker；因此 `flow_state_use_after_transition_rejected` 这类负测试必须通过
+  `check_source` / checked 路径锁定，不应依赖 raw legacy 发射器拦截线性错误。
+- 已记录到 Phase E 不变量：旧 state 复用的权威保护在 checker + production
+  native 路径；raw legacy 测试 harness 不承担线性类型检查。
+- 新增 checked fail-closed 回归：
+  - `dual_flow_old_state_reuse_checked_fail_closed`——E0423 在
+    `check_source` 与 `checked_codegen_compile_and_run` 双入口均失败关闭；
+  - `dual_flow_try_after_linear_consumption_checked_fail_closed`——E0429
+    在 checked 管线编译前失败关闭；
+  - `dual_flow_try_before_linear_consumption_f64_native`——`?` 前线性消费的
+    legacy `Ok(flow_state)` 解码扩展覆盖 f64 record payload，VM/legacy/resolved
+    输出一致。
+
+### 0.36.57 — Phase E：legacy `Ok(flow_state)` 匹配解引用闭环 + `?` 前线性消费双后端
+
+继续 Phase E “`?` 前线性消费”双后端锁定时，发现 legacy 发射器对
+`fails E` 返回的 `Result<Ready, (Pending, string)>` 匹配 `Ok(s1)` 存在隐藏
+分歧：`flow_result_static_state` 把 `Ok`/`Err` 也视为 flow-state 构造子，导致
+`Ok` 臂走了“静态死臂” sentinel 绑定，`s1` 被绑成 `i64`，随后 `s1.data` 报
+“field access requires a struct or actor type, got i64”。
+
+- **修复**（src/codegen/expr/match.rs + src/codegen/expr/access.rs）：
+  - static flow-result 绑定路径增加 `find_variant_ordinal_scoped(...).is_err()`
+    门禁：只有真实 flow-state 构造子（如 `B { value }`）走静态 record 路径；
+    内置 `Ok`/`Err` 继续走通用 Result payload 绑定；
+  - 对 built-in `Ok` 的 record payload（legacy 以 ptrtoint i64 传递）从
+    `Result<T, E>` 推导 T 的 AST 类型并注册 `var_type_names`；
+  - `materialize_field_base` 对“已知 record 类型 + i64 值”支持 inttoptr + load，
+    使旧发射器也能对 `Ok(flow_state)` 做字段访问。
+- **新增回归**：`dual_flow_try_before_linear_consumption_native`——`?`
+  在线性消费前合法，VM/legacy/resolved 三端均输出 `10`。
+
+### 0.36.56 — Phase E 首项：单目标 Flow f64 payload 匹配 ICE 修复 + ieee_float × Flow 边界回归
+
+Phase E（加固与冻结）开始后首个攻击面来自路线图点名的 `ieee_float × Flow
+边界逃逸面`。构造探针时发现更基础的门禁缺口：**Flow 状态 payload 含 f64 时，
+单目标 transition 结果的 native match 直接 ICE**，导致该边界完全无法在 native
+侧验证。
+
+- **缺陷**（src/codegen/expr/match.rs，legacy emitter）：
+  1. 单目标 flow 结果是普通 state record（无 __MultiTarget enum/tag），但
+     `compile_match_expr` 对任意 `StructValue` 都提取首字段当整数 tag；当首字段
+     是 f64 时 `extractvalue { double }` 后 `.into_int_value()` panic。
+  2. 静态死臂 sentinel 一律绑 `i64 0`；若活臂返回 f64 绑定值，match phi 因
+     `i64 vs double` 报 E0200 不统一。
+- **修复**：
+  - 通过 `flow_result_static_state` 识别“非 Result 包装的单目标 flow record”，
+    对这类 match 走 tag-less 路径；
+  - 静态死臂按 state record 声明字段的 LLVM 类型构造 `const_zero()` 哨兵，
+    phi 类型与活臂一致；
+  - 静态分派仅在 `find_variant_ordinal_scoped` 找不到构造子时触发，避免误伤
+    `fails E` 返回的 `Ok/Err` 内置 Result 匹配。
+- **新增回归**：
+  - `dual_flow_f64_payload_match_native`——f64 flow payload 单目标 match 三后端
+    （VM/legacy/resolved）输出一致；
+  - `dual_ieee_flow_nonfinite_reentry_trap_native`——ieee_float 内产生的 NaN
+    可经 transition payload 逃出，但离开 ieee_float 后的首个确定性浮点乘法仍
+    在 VM/native 双方触发 E0813；
+  - `dual_flow_match_guard_native`——单目标 flow 结果上加 match guard，正/负
+    两条路径均与 VM 等价（guard 失败必须落到下一 arm）。
+- **挣绿**：`flow_turn_` 全组 14 passed；新增双后端测试通过；全量 lib 5453 项
+  中除一次网络超时 flake（单独重跑通过）外全绿；docs/edge/fmt 门禁保持绿。
+
 ### 0.36.55 — 0.1.6 四支柱里程碑核验：失败/状态/线性/语法全部“定案 + 挣绿”
 
 0.36.54 完成 Phase D 收官后，本 sprint 做一次跨 Phase A–D 的里程碑复核，把
