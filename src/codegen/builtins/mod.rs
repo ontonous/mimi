@@ -4304,4 +4304,17 @@ fn register_arithmetic_trap_fns<'ctx>(
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // 0.36.10: mimi_trap_no_flow_transition(flow, verb, from: *const c_char) -> !
+    module.add_function(
+        "mimi_trap_no_flow_transition",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 }

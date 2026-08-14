@@ -7,6 +7,28 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.10 — recover/reset 直调声明可错结果变量（裁决 6 follow-up 闭环）
+
+- **union 结果变量直调 recover/reset（裁决 6 follow-up）**：`let u = Svc::div(a, 0)`
+  （`-> S | Fault`）后可直接 `let r = Svc::recover(u)` / `Svc::reset(u)`，不再强制
+  中间 `match`。静态类型仍是首目标（`S`），运行时按**实际 tag** 分发：Fault →
+  调 Fault 重载（双后端一致）；live tag → 双后端同一错误文本
+  `[E0800] no transition {flow}::{verb} from state {state}`（VM 天然按记录名
+  分派，native 新增 union tag 判别 + `mimi_trap_no_flow_transition`）。
+- **checker + IR 双 widen（L2）**：新增 `faultable_result_vars`（含 2-target
+  `-> S | Fault` —— 旧 `multi_target_vars` 排 Fault 且要求 ≥2 用户态，漏掉最
+  常见形态）；recover/reset 的实参是该 flow 的 faultable 结果变量时，按
+  `flow::F::recover::Fault` 重载放行；resolved-IR lowering 对 recover/reset
+  单 (flow, verb) 重载回退 + 自洽 identity 转换（多目标函数恒走 legacy）。
+  跨 flow 值（含同名 state）与普通非 union 状态值仍 E0211 拒绝。
+- **测试（L1/L2，flow_features +7）**：`flow_union_result_recover_direct_call_dual_backend`
+  / `flow_union_result_reset_direct_call_dual_backend` /
+  `flow_union_result_recover_three_target_dual_backend`（`-> A | B | Fault` 全局
+  ordinal 判别）/ `flow_union_result_alias_recover_dual_backend`（`let x = failed`
+  别名保持可恢复）/ `flow_union_result_recover_live_traps_dual_backend`（live
+  恢复双后端同文本错误）/ `flow_union_result_recover_cross_flow_rejected` +
+  `flow_union_result_recover_plain_state_rejected`（L2 负测试）。
+
 ### 0.36.9 — 吸收声明门（裁决 6）+ 非事务草稿语义对齐（L1 分歧关闭）
 
 - **裁决 6（吸收声明门）**：一个运行期 panic 只有在该过渡的**声明目标集**含有

@@ -2572,7 +2572,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let from_type = Self::bare_flow_state_name(&from_type);
                                             let t = flow.transitions.iter().find(|t| {
                                                 t.name == *method_name && t.from_state == from_type
-                                            });
+                                            }).or_else(|| {
+                                                // 0.36.10 (裁决 6 follow-up): recover/reset on a
+                                                // declared-faultable result var — register the
+                                                // result under the Fault overload (runtime dispatch).
+                                                if method_name == "recover" || method_name == "reset"
+                                                    && matches!(call_args.first().map(|a| a.unlocated()), Some(Expr::Ident(v))
+                                                        if matches!(self.multi_target_result_vars.get(v), Some(f) if f == flow_name))
+                                                {
+                                                    flow.transitions.iter().find(|t| {
+                                                        t.name == *method_name && t.from_state == "Fault"
+                                                    })
+                                                } else {
+                                                    None
+                                                }
+                                        });
                                             if let Some(t) = t {
                                                 let from_state = t.from_state.clone();
                                                 let to_states = t.to_states.clone();
@@ -2600,6 +2614,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         to,
                                                         fails,
                                                     );
+                                                    // 0.36.10 (裁决 6 follow-up):
+                                                    // declared-faultable multi-target
+                                                    // result -> recover/reset-able.
+                                                    if to_states.len() > 1 {
+                                                        self.multi_target_result_vars.insert(
+                                                            name.to_string(),
+                                                            flow_name.to_string(),
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -2641,7 +2664,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let from_type = Self::bare_flow_state_name(&from_type);
                                             let t = flow.transitions.iter().find(|t| {
                                                 t.name == *method_name && t.from_state == from_type
-                                            });
+                                            }).or_else(|| {
+                                                // 0.36.10 (裁决 6 follow-up): recover/reset on a
+                                                // declared-faultable result var — register the
+                                                // result under the Fault overload (runtime dispatch).
+                                                if method_name == "recover" || method_name == "reset"
+                                                    && matches!(call_args.first().map(|a| a.unlocated()), Some(Expr::Ident(v))
+                                                        if matches!(self.multi_target_result_vars.get(v), Some(f) if f == flow_name))
+                                                {
+                                                    flow.transitions.iter().find(|t| {
+                                                        t.name == *method_name && t.from_state == "Fault"
+                                                    })
+                                                } else {
+                                                    None
+                                                }
+                                        });
                                             if let Some(t) = t {
                                                 let from_state = t.from_state.clone();
                                                 let to_states = t.to_states.clone();
@@ -2669,6 +2706,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         to,
                                                         fails,
                                                     );
+                                                    // 0.36.10 (裁决 6 follow-up):
+                                                    // declared-faultable multi-target
+                                                    // result -> recover/reset-able.
+                                                    if to_states.len() > 1 {
+                                                        self.multi_target_result_vars.insert(
+                                                            name.to_string(),
+                                                            flow_name.to_string(),
+                                                        );
+                                                    }
                                                 }
                                             }
                                         } else {
@@ -3024,6 +3070,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.context.struct_type(&field_tys, false)
                             };
                             self.tuple_type_stack.push(tuple_ty);
+                        }
+                    }
+                    // 0.36.10 (裁决 6 follow-up): aliasing a declared-faultable
+                    // result var (`let x = failed`) keeps recover/reset-ability —
+                    // the alias's slot holds the same __MultiTarget union, and
+                    // the runtime tag dispatch reads it the same way. Runs for
+                    // every variable-let; a no-op when the source is not a
+                    // faultable result var.
+                    if let PatternKind::Variable(alias_name) = &pat.kind {
+                        if let Expr::Ident(src) = init.unlocated() {
+                            if let Some(flow) = self.multi_target_result_vars.get(src).cloned() {
+                                self.multi_target_result_vars
+                                    .insert(alias_name.clone(), flow);
+                            }
                         }
                     }
                     self.compile_pattern_bind(pat, val, vars)?;

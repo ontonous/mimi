@@ -20009,6 +20009,7 @@ mod trap {
 // E-code strings matching `diagnostic::codes::E08xx` (standalone runtime can't
 // reach the crate module, so they are mirrored here; the VM side reads the
 // codes.rs constants directly). Keep in sync — see docs/error-codes.md.
+const E0800: &str = "E0800";
 const E0801: &str = "E0801";
 const E0802: &str = "E0802";
 const E0813: &str = "E0813";
@@ -20098,6 +20099,48 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
     trap_write_static(MSG);
     trap_write_static(b"\n");
     std::process::abort();
+}
+
+/// 0.36.10 (裁决 6 follow-up): `recover`/`reset` called on a transition result
+/// that DECLARED faultability (`-> S | Fault`) but whose runtime tag is NOT
+/// Fault — the value is a live state, and neither backend can recover/reset
+/// it. Mirrors the bytecode VM's flow-transition miss text exactly
+/// ("no transition {flow}::{verb} from state {state}", generic E0800).
+#[no_mangle]
+pub extern "C" fn mimi_trap_no_flow_transition(
+    flow: *const std::ffi::c_char,
+    verb: *const std::ffi::c_char,
+    from_state: *const std::ffi::c_char,
+) -> ! {
+    trap_write_code(E0800);
+    trap_write_static(b"no transition ");
+    trap_write_cstr_bounded(flow);
+    trap_write_static(b"::");
+    trap_write_cstr_bounded(verb);
+    trap_write_static(b" from state ");
+    trap_write_cstr_bounded(from_state);
+    trap_write_static(b"\n");
+    std::process::abort();
+}
+
+/// Bounded C-string writer for the trap helpers (same MAX_MSG discipline as
+/// `mimi_trap_overflow`): the string is a NUL-terminated static in the
+/// program image, so a bounded scan before the terminator is safe.
+fn trap_write_cstr_bounded(ptr: *const std::ffi::c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    let mut len = 0usize;
+    let base = ptr as *const u8;
+    const MAX_MSG: usize = 64;
+    // SAFETY: ptr points to a NUL-terminated static C string in the program
+    // image; bounded read up to MAX_MSG before the NUL terminator.
+    unsafe {
+        while len < MAX_MSG && *base.add(len) != 0 {
+            len += 1;
+        }
+    }
+    trap_write_raw(ptr as *const u8, len);
 }
 
 /// SD-9 (0.31.51b): Float finiteness trap. Called when a float operation

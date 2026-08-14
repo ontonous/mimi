@@ -475,6 +475,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             from_type_raw
         };
 
+        // 0.36.10 (裁决 6 follow-up): recover/reset on a DECLARED-faultable
+        // result variable (`let u = Svc::div(...)` where the transition
+        // declares `-> S | Fault`). Statically the value types as the first
+        // target, but at runtime it is the flow-wide `__MultiTarget` tagged
+        // union {i32 tag, i64 payload} — the tag decides whether the value
+        // actually reached Fault. Direct overload resolution by the static
+        // from-state would fail, so dispatch at runtime: Fault -> call the
+        // Fault overload on the boxed payload; otherwise trap (mirrors the
+        // bytecode VM's "no transition {flow}::{verb} from state {state}").
+        if matches!(transition_name, "recover" | "reset")
+            && matches!(args.first().map(|a| a.unlocated()), Some(Expr::Ident(v))
+                if matches!(self.multi_target_result_vars.get(v), Some(f) if f == flow_name))
+        {
+            return self.compile_flow_union_dispatch(
+                flow_name,
+                transition_name,
+                &from_type,
+                args,
+                vars,
+            );
+        }
+
         if let Some(table) = self.resolved_transitions.as_ref() {
             if !from_type.is_empty()
                 && !table.contains_key(&(
@@ -638,6 +660,236 @@ impl<'ctx> CodeGenerator<'ctx> {
         // injected transition that restores persistent shadows; mid-turn WAL dirty
         // degrade-to-reset is interp-primary (codegen has no live tx snapshot).
 
+        Ok(result)
+    }
+
+    /// 0.36.10 (裁决 6 follow-up): legacy-leg implementation of `recover`/
+    /// `reset` on a DECLARED-faultable result variable (`let u = Svc::div(..)`
+    /// with `-> S | Fault`). The value is the flow-wide `__MultiTarget` tagged
+    /// union `{i32 tag, i64 payload}`; the boxed payload only exists when the
+    /// transition actually faulted. Emit a runtime tag dispatch:
+    ///
+    /// - tag == flow-wide `Fault` ordinal → inttoptr the box, load the Fault
+    ///   record, and call `{flow}__{verb}__from_Fault` with it.
+    /// - otherwise → trap (mirrors the bytecode VM's "no transition
+    ///   {flow}::{verb} from state {state}" — recovering/resetting a live
+    ///   state is a runtime error in both backends).
+    ///
+    /// The checker only reaches here for same-flow faultable result vars
+    /// (cross-flow values are rejected statically), and multi-target bodies
+    /// always compile through the legacy path — the resolved emitter has no
+    /// `FlowStateSet` slice entry — so the IR-level identity conversion in
+    /// `lower.rs` is never consulted by an emitter.
+    fn compile_flow_union_dispatch(
+        &mut self,
+        flow_name: &str,
+        transition_name: &str,
+        from_type: &str,
+        args: &[Expr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let flow = self
+            .flow_defs
+            .get(flow_name)
+            .ok_or_else(|| CompileError::Generic(format!("unknown flow '{}'", flow_name)))?;
+        let t = flow
+            .transitions
+            .iter()
+            .find(|t| t.name == transition_name && t.from_state == "Fault")
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::TypeMismatch(format!(
+                    "flow transition '{}::{}' has no Fault-source overload for union dispatch",
+                    flow_name, transition_name
+                ))
+            })?;
+        let fn_name = CodeGenerator::transition_fn_name(flow_name, &t.name, "Fault");
+        let function = self.module.get_function(&fn_name).ok_or_else(|| {
+            CompileError::Generic(format!(
+                "flow transition function '{}' not found (was the flow compiled?)",
+                fn_name
+            ))
+        })?;
+
+        // The union value: {i32 tag, i64 payload}. `let u = Svc::div(..)`
+        // binds the STRUCT (by value from the transition call; Ident reads
+        // reload it); match-bound variants arrive as pointers into the
+        // union's alloca. Support both shapes.
+        let union_val = self.compile_expr(&args[0], vars)?;
+        // Opaque-pointer world: rebuild the {i32 tag, i64 payload} layout —
+        // LLVM structural equality guarantees this IS the __MultiTarget
+        // union's type (registered by register_flow_multi_target_enums).
+        let union_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(self.context.i32_type()),
+                BasicTypeEnum::IntType(self.context.i64_type()),
+            ],
+            false,
+        );
+        let (tag, payload) = match union_val {
+            BasicValueEnum::StructValue(sv) => {
+                let tag: BasicValueEnum = self
+                    .builder
+                    .build_extract_value(sv, 0, "ud_tag")
+                    .map_err(|e| CompileError::LlvmError(format!("ud tag extract: {}", e)))?;
+                let payload: BasicValueEnum = self
+                    .builder
+                    .build_extract_value(sv, 1, "ud_payload")
+                    .map_err(|e| CompileError::LlvmError(format!("ud payload extract: {}", e)))?;
+                (tag, payload)
+            }
+            BasicValueEnum::PointerValue(union_ptr) => {
+                let tag = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::IntType(self.context.i32_type()),
+                        self.gep()
+                            .build_struct_gep(union_ty, union_ptr, 0, "ud_tag_ptr")
+                            .map_err(|e| CompileError::LlvmError(format!("ud tag gep: {}", e)))?,
+                        "ud_tag",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("ud tag load: {}", e)))?;
+                let payload = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                        self.gep()
+                            .build_struct_gep(union_ty, union_ptr, 1, "ud_payload_ptr")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("ud payload gep: {}", e))
+                            })?,
+                        "ud_payload",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("ud payload load: {}", e)))?;
+                (tag, payload)
+            }
+            other => {
+                return Err(CompileError::Generic(format!(
+                "flow transition '{}::{}' union dispatch: source value has unexpected shape {:?}",
+                flow_name,
+                transition_name,
+                other.get_type()
+            )))
+            }
+        };
+        let fault_ord = self
+            .multi_target_global_ordinals
+            .get(flow_name)
+            .and_then(|m| m.get("Fault"))
+            .copied()
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "flow '{}' has no global multi-target ordinal for 'Fault'",
+                    flow_name
+                ))
+            })?;
+        let is_fault = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag.into_int_value(),
+                self.context.i32_type().const_int(fault_ord, false),
+                "ud_is_fault",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("ud int compare: {}", e)))?;
+
+        // Current function and dispatch blocks.
+        let current_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no insert block for union dispatch".into()))?;
+        let fault_bb = self.context.append_basic_block(current_fn, "ud_fault");
+        let trap_bb = self.context.append_basic_block(current_fn, "ud_trap");
+        let merge_bb = self.context.append_basic_block(current_fn, "ud_merge");
+        self.builder
+            .build_conditional_branch(is_fault, fault_bb, trap_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ud br: {}", e)))?;
+
+        // Fault path: unbox the record and call the Fault overload.
+        let result: BasicValueEnum = {
+            self.builder.position_at_end(fault_bb);
+            let fault_struct_ty = self
+                .type_llvm
+                .get(&format!("flow::{}::Fault", flow_name))
+                .cloned()
+                .or_else(|| self.flow_state_llvm_type("Fault"))
+                .ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "flow '{}' Fault record type not registered",
+                        flow_name
+                    ))
+                })?;
+            let fault_ptr = self
+                .builder
+                .build_int_to_ptr(
+                    payload.into_int_value(),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "ud_fault_ptr",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("ud inttoptr: {}", e)))?;
+            let fault_struct = self
+                .builder
+                .build_load(fault_struct_ty, fault_ptr, "ud_fault_rec")
+                .map_err(|e| CompileError::LlvmError(format!("ud fault load: {}", e)))?;
+            // Event params (recover/reset normally have none, but a user
+            // override may add them) follow the from-state payload.
+            let mut call_args = Vec::with_capacity(args.len());
+            call_args.push(fault_struct);
+            for (i, arg) in args.iter().enumerate().skip(1) {
+                let mut val = self.compile_expr(arg, vars)?;
+                if let Some(param) = function.get_nth_param(i as u32) {
+                    if let BasicTypeEnum::StructType(sty) = param.get_type() {
+                        if let BasicValueEnum::PointerValue(pv) = val {
+                            val = self.build_load(BasicTypeEnum::StructType(sty), pv, "ud_arg")?;
+                        }
+                    }
+                }
+                call_args.push(val);
+            }
+            let meta_args = self.values_to_metadata(&call_args);
+            let call = self.build_call(function, &meta_args, "ud_transition")?;
+            let call_result = call_try_basic_value(&call)
+                .unwrap_or(self.context.i64_type().const_int(0, false).into());
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CompileError::LlvmError(format!("ud fault br: {}", e)))?;
+            call_result
+        };
+
+        // Live path: trap, mirroring the VM's flow-transition miss.
+        self.builder.position_at_end(trap_bb);
+        {
+            let trap_fn = self.get_runtime_fn("mimi_trap_no_flow_transition")?;
+            let flow_c = self
+                .builder
+                .build_global_string_ptr(flow_name, "ud_flow_name")
+                .map_err(|e| CompileError::LlvmError(format!("ud flow cstr: {}", e)))?;
+            let verb_c = self
+                .builder
+                .build_global_string_ptr(transition_name, "ud_verb_name")
+                .map_err(|e| CompileError::LlvmError(format!("ud verb cstr: {}", e)))?;
+            let from_c = self
+                .builder
+                .build_global_string_ptr(from_type, "ud_from_name")
+                .map_err(|e| CompileError::LlvmError(format!("ud from cstr: {}", e)))?;
+            self.builder
+                .build_call(
+                    trap_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(flow_c.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(verb_c.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(from_c.as_pointer_value()),
+                    ],
+                    "ud_trap_call",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("ud trap call: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("ud unreachable: {}", e)))?;
+        }
+
+        self.builder.position_at_end(merge_bb);
         Ok(result)
     }
 

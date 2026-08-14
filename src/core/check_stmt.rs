@@ -840,10 +840,20 @@ impl<'a> Checker<'a> {
                                 self.multi_target_vars.insert(name.clone(), targets);
                             }
                         }
+                        // 0.36.10 (裁决 6 follow-up): transition results that
+                        // DECLARED faultability (`-> S | Fault`, incl. the
+                        // 2-target case multi_target_vars does not track) are
+                        // recover/reset-able directly (runtime tag dispatch).
+                        if let Some(flow) = self.check_faultable_transition(init_expr) {
+                            self.faultable_result_vars.insert(name.clone(), flow);
+                        }
                         // T-H16: aliasing a multi-target var keeps the restriction.
                         if let Expr::Ident(src) = init_expr.unlocated() {
                             if let Some(targets) = self.multi_target_vars.get(src).cloned() {
                                 self.multi_target_vars.insert(name.clone(), targets);
+                            }
+                            if let Some(flow) = self.faultable_result_vars.get(src).cloned() {
+                                self.faultable_result_vars.insert(name.clone(), flow);
                             }
                         }
                     }
@@ -1855,6 +1865,37 @@ impl<'a> Checker<'a> {
     /// return the list of target state types if the transition has >1 to_states.
     /// Returns None if not a multi-target transition call.
     /// Only counts user-declared targets (excludes Fault from matrix expansion).
+    /// 0.36.10 (裁决 6 follow-up): does this expression resolve to a flow
+    /// transition call whose declared targets include Fault (`-> S | Fault`
+    /// or `-> A | B | Fault`)? Returns the flow name. Such results are
+    /// Fault-able at runtime — the caller may pass them directly to
+    /// recover/reset (the runtime dispatches on the actual tag).
+    fn check_faultable_transition(&self, expr: &Expr) -> Option<String> {
+        // C::go(s) is parsed as Expr::Call(Expr::Field(Expr::Ident("C"), "go"), [s])
+        if let Expr::Call(callee, _) = expr.unlocated() {
+            if let Expr::Field(obj, method) = callee.unlocated() {
+                if let Expr::Ident(flow_name) = obj.unlocated() {
+                    for item in &self.file.items {
+                        if let crate::ast::Item::Flow(f) = item {
+                            if f.name == *flow_name {
+                                for t in &f.transitions {
+                                    if t.name == *method
+                                        && !t.is_fallback
+                                        && t.to_states.len() > 1
+                                        && t.to_states.iter().any(|s| s == "Fault")
+                                    {
+                                        return Some(flow_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn check_multi_target_transition(&self, expr: &Expr) -> Option<Vec<Type>> {
         // C::go(s) is parsed as Expr::Call(Expr::Field(Expr::Ident("C"), "go"), [s])
         if let Expr::Call(callee, _) = expr.unlocated() {
