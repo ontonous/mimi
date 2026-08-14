@@ -7,6 +7,25 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.22 — M9 修复：线性容器索引读取 fail-open → fail-closed（L2 挣绿）
+
+- **修复（src/core/cfg/resource_lower.rs）**：`ActionEmitter::visit_expr` 顶部
+  `reject_index_read_extraction`——Load(place) 带 Index 投影、本地类型线性且
+  **不可自动弃**（Cap/SessionChan 元素）→ E0304 专用诊断
+  （"element-level extraction from a linear container is not tracked and
+  leaks every unextracted element"）。此前索引读取把容器整体记为已消费，但只
+  release 提取句柄，未提取元素静默泄漏（fail-open，与 match/for 的
+  fail-closed 不一致——0.36.18 M9 发现）。
+- **边界守恒**：flow-state 元素容器（0.31.16 P0-5 自动弃）的索引读取 = 既定
+  合法模式继续放行（`mutate_field_writeback_clause6_dual_backend` 保持绿）；
+  非线容器索引、整体 drop 不受影响。探针 m1（绑定）/m2（调用实参）/m3（整体
+  drop ✓）/m4（非线性 ✓）。
+- **回归（L2）**：`dual_linear_container_index_read_rejected`——bind + 调用
+  实参双形态断言 E0304 + 正例控制（drop(容器) 合法、非线性索引合法）。
+- 全量 5365 passed / 0 failed / 7 ignored（初次全量出现 audit_h13 fd 复用
+  flake，单测复跑 3 passed 确认与本次变更无关）；fmt + clippy + docs + edge
+  全绿。Phase C M9 缺口闭合，线性系统支柱推进一格。
+
 ### 0.36.21 — Phase B 正式窗口：Protocol 定案（(a) checker-only 确认 + dyn=稳定逃生舱）+ spec §3.9/§6.5 定稿
 
 - **Protocol 定案落字（docs/language-spec.md）**：
