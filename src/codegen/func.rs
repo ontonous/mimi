@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use crate::ast::*;
+use crate::codegen::block::register_qualified_var_type;
 use crate::codegen::types;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -2648,7 +2649,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 method_name,
                                             );
                                             if !impl_ret.is_empty() {
-                                                self.var_type_names.insert(name.clone(), impl_ret);
+                                                register_qualified_var_type(
+                                                    &mut self.var_type_names,
+                                                    name,
+                                                    impl_ret,
+                                                );
                                             }
                                         }
                                     } else if let Expr::Ident(flow_name) = obj.unlocated() {
@@ -2725,7 +2730,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 method_name,
                                             );
                                             if !impl_ret.is_empty() {
-                                                self.var_type_names.insert(name.clone(), impl_ret);
+                                                register_qualified_var_type(
+                                                    &mut self.var_type_names,
+                                                    name,
+                                                    impl_ret,
+                                                );
                                             }
                                         }
                                     } else {
@@ -2734,7 +2743,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         let impl_ret = self
                                             .infer_impl_method_return_type(&obj_type, method_name);
                                         if !impl_ret.is_empty() {
-                                            self.var_type_names.insert(name.clone(), impl_ret);
+                                            register_qualified_var_type(
+                                                &mut self.var_type_names,
+                                                name,
+                                                impl_ret,
+                                            );
                                         }
                                     }
                                 }
@@ -3607,6 +3620,52 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(ControlFlow::Continue(last_val))
     }
 
+    /// 0.36.49 (Phase C): mirror of `simple.rs::collect_arg_cap_places` for
+    /// returned expressions. Every capability variable reachable through a
+    /// returned value is being moved out of this function; the legacy emitter
+    /// must mark those places consumed to match the checker's transfer-on-return
+    /// semantics.
+    fn collect_expr_cap_places(
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        out: &mut Vec<String>,
+    ) {
+        match expr.unlocated() {
+            Expr::Ident(name) => {
+                if vars.contains_key(name) {
+                    out.push(name.clone());
+                }
+            }
+            Expr::NamedArg(_, value) => Self::collect_expr_cap_places(value, vars, out),
+            Expr::Tuple(values) => {
+                for v in values {
+                    Self::collect_expr_cap_places(v, vars, out);
+                }
+            }
+            Expr::List(values) => {
+                for v in values {
+                    Self::collect_expr_cap_places(v, vars, out);
+                }
+            }
+            Expr::SetLiteral(values) => {
+                for v in values {
+                    Self::collect_expr_cap_places(v, vars, out);
+                }
+            }
+            Expr::Record { fields, .. } => {
+                for field in fields {
+                    Self::collect_expr_cap_places(&field.value, vars, out);
+                }
+            }
+            Expr::Field(obj, _) => Self::collect_expr_cap_places(obj, vars, out),
+            Expr::Index(base, index) => {
+                Self::collect_expr_cap_places(base, vars, out);
+                Self::collect_expr_cap_places(index, vars, out);
+            }
+            _ => {}
+        }
+    }
+
     /// Emit the implicit return at the end of a function: check for unconsumed
     /// capabilities, convert pointer-to-struct returns, clean up scopes, verify
     /// postconditions, and build the final return instruction.
@@ -3619,6 +3678,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
         expr: Option<&Expr>,
     ) -> MimiResult<()> {
+        // 0.36.49 (Phase C): a capability reached via the implicit tail
+        // expression is transferred to the caller, not leaked. Mark it
+        // consumed so the legacy scope check does not demand an extra drop;
+        // no runtime cap_consume is emitted here because ownership of the
+        // returned handle moves out of this function.
+        if let Some(expr) = expr {
+            let mut returned_caps = Vec::new();
+            Self::collect_expr_cap_places(expr, vars, &mut returned_caps);
+            for name in returned_caps {
+                if self.is_cap_var(&name) {
+                    self.consume_cap(&name)?;
+                }
+            }
+        }
+
         // Check for unconsumed capabilities before returning
         self.check_unconsumed_caps()?;
 

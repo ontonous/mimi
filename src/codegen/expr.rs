@@ -1442,7 +1442,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// checker types render (fmt_type) so print/dispatch string gates like
     /// `starts_with("Result")` recognize it.
     pub(super) fn infer_impl_method_return_type(&self, type_name: &str, method: &str) -> String {
-        if let Some(trait_impls) = self.type_impls.get(type_name) {
+        // 0.36.48: strip generic args before lookup — `impl<T> ListExt<T> for
+        // List<T>` registers under the BASE name ("List"), so both concrete
+        // ("List<i64>") and placeholder ("List<T>") obj shapes must resolve to
+        // the base name to hit the impl signature. The result template's
+        // placeholder params are substituted downstream by
+        // register_qualified_var_type (bare uppercase → i64 slot name).
+        let base = type_name.split('<').next().unwrap_or(type_name);
+        if let Some(trait_impls) = self.type_impls.get(base) {
             for methods in trait_impls.values() {
                 if let Some(m) = methods.iter().find(|m| m.name == method) {
                     if let Some(ret) = &m.ret {

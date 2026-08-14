@@ -1418,11 +1418,20 @@ impl<'a> ActionEmitter<'a> {
                 // 不解体容器 → 用户被迫额外 drop(xs) = 不可达语义）。
                 // 读取/提取面（len/is_empty/count/find/first/last/find_map——
                 // 结果标量/裸元素/Option）保持借用：接收者仍需整体 drop。
-                if let Some(first) = call.arguments.first() {
-                    if matches!(call.permission, Some(Permission::Mutate))
-                        && self.method_transform_result(call)
-                    {
-                        if let ResolvedExprKind::Load(place) = &first.value.kind {
+                if matches!(call.permission, Some(Permission::Mutate))
+                    && self.method_transform_result(call)
+                {
+                    // 0.36.48：变换面 ALL 线性参数整体转出（不只 receiver）。
+                    // 义务守恒：结果容器的义务 = 每个线性实参的义务并集。
+                    //   - receiver（xs.reverse()）：xs 移入方法（4u 已开）；
+                    //   - 容器参数（xs.concat(ys)：ys 元素义务并入结果 zs，
+                    //     用户只 drop(zs)——此前 ys 义务原处 → E0256 死锁）；
+                    //   - 线性值参数（xs.remove(v)/xs.intersperse(sep)：元素
+                    //     义务进方法，由方法体结算/并入结果恰一次）。
+                    // 读/提取面（len/first/find_map——结果标量/裸元素/Option）
+                    // 不在此列：参数保持借用（容器义务原处）。
+                    for argument in &call.arguments {
+                        if let ResolvedExprKind::Load(place) = &argument.value.kind {
                             if self.place_is_linear(place) {
                                 let canonical = self.canonical_place(place);
                                 self.push_action(

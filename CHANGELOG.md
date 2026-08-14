@@ -7,6 +7,74 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.49 — legacy 转移面补全：隐式尾返回 cap 转移 + 方法实参 cap 转移（L1/L2）
+
+承接 0.36.48 §4v.4 登记的两个 E0303 fail-closed 差距（p13/p14），本轮把这两处
+合法转移面在 legacy native 发射器补全；checker/VM 已支持，native 此前误报：
+
+- **p13：隐式尾返回 cap 转移**（`func id(x: cap) -> cap { x }`）——legacy
+  `emit_implicit_return` 在返回前无条件 `check_unconsumed_caps()`，把尾表达式中
+  转移给调用方的 cap 参数当作泄漏（E0303）。修：`emit_implicit_return` 先收集
+  尾返回表达式可达的所有 cap 位置（Ident + Tuple/List/Set/Record/Field/Index
+  递归，镜像 `simple.rs::collect_arg_cap_places`），逐个 `consume_cap` 簿记；
+  不发射运行期 `cap_consume`——句柄所有权随返回值离开本函数，由调用方登记/drop。
+- **p14：方法实参 cap 转移**（`xs.take_away(v)` / stdlib `xs.remove(v)`，v: cap）——
+  legacy 方法路径（`compile_self_method_call`）从未像自由函数路径那样收集并消费
+  实参里的 cap 位置，导致合法方法实参转移在函数出口被 E0303 误伤。修：在方法
+  实参编译后镜像同一 `collect_arg_cap_places` 逻辑（本切在 method.rs 新增
+  `collect_method_arg_cap_places`），逐个 `consume_cap`；callee 的 cap 参数由其
+  自身 scope 接管。
+- **fail-closed 保持**：返回前已 `drop(x)` 再返回 `x` 仍 E0304（consumed more
+  than once）；同一 cap 作为两个方法实参仍 E0304；未消费/未返回的 cap 仍按既有
+  门禁拒绝。
+- **挣绿**：双后端 4 项新测试——尾返回 cap 正例三后端（checked + legacy native
+  × VM）、返回后复用负例、方法实参 cap 正例三后端（自包含 trait `take_away` 避开
+  VM `remove` builtin 劫持）、方法实参双用负例。全量相关 `dual_linear_cap_*` 4/4
+  绿；`cargo check` + `cargo fmt` 通过。
+
+### 0.36.48 — stdlib ListExt 方法面逐方法验证：变换面 ALL 线性参数转出 + resolved guard 精确化（L1/L2）
+
+承接 0.36.47 的 4u「记录」（stdlib 余下 ListExt 变换方法逐个验证），本轮把
+容器方法余面按方法摊开验证，并修复验证中暴露的三处缺口：
+
+- **变换面 ALL 线性参数整体转出（0.36.47 补完）**：变换方法（Mutate，结果为
+  List/Map/Set/Tuple 携带义务）不只接收者整体转出——`call.arguments` 全循环，
+  每个线性实参（Load place 且 place_is_linear）都推 Move：
+  - 容器参数（`xs.concat(ys)`）：ys 的元素义务并入结果 zs，用户只 `drop(zs)`
+    ——此前 ys 义务原处 → E0256 死锁；
+  - 线性值参数（`xs.remove(v)` / `xs.intersperse(sep)`）：义务进方法恰一次
+    （方法体结算 或 并入结果）。
+  义务守恒：结果义务 = 每个线性实参义务的并集。读/提取面（len/is_empty/
+  find/count/find_map/reduce——标量/裸元素/Option 结果）参数保持借用（义务
+  原处；`reduce` 归入读面：标量结果，drop(xs) 结算空壳合法）。
+- **resolved eligibility guard 精确化（修 0.36.47 的误伤）**：0.36.47 的 guard
+  以 `call.type_arguments` 非空判定"方法级泛型调用"→ resolved lowering 把
+  impl 级泛型 T（ListExt<T>）也装进 type_arguments → **所有** trait 方法调用
+  （intersperse/chunks/…）都被拒 → main 整体落 legacy → 触发 legacy for 链
+  类型缺口（E0713）。修：`trait_method_generics`（checker 已有的
+  (trait, method) → 方法级泛型名表）镜像到 CheckedProgram（FlowAcc → from_flow_acc
+  安装），eligibility 用 MethodId（`function:{Trait}:for:{Type}::{method}:{hash}`）
+  解析 (trait, method)，查**方法级泛型数 >0** 才拒（map<U>/filter<U>/find_map<U>/
+  reduce<U> 仍归 legacy 单态化切片）。
+- **legacy for 链类型登记（E0713「for loop requires a list or range (got
+  integer)」根修）**：无注解方法链 `let cs = ns.chunks(2)` 此前不登记变量类型
+  → 外层 for 把 c 绑成 i64 → 内层 `for x in c` 崩（0.36.35 同类补丁
+  `let y = x` 只覆盖 Ident 继承）。修：func.rs/block.rs 的 Q3 方法调用登记点
+  统一走 `register_qualified_var_type`——签名推断串（"List<T>"/"List<List<T>>"）
+  中裸大写占位符替换为列表槽位名 i64（LLVM 层 List 元素恒 i64 槽，map 单态
+  化本就是 `$T_i64`），登记 "List<i64>"/"List<List<i64>>" → for 元素解析、
+  方法分发、单态化命名全部连通（chunks 出现 `$T_i64` mono 版）。
+- **双后端等价矩阵（探针 13/16 + 链组合）**：p01 reverse / p02 take / p03
+  drop_n / p04 concat / p05 remove_at / p07 first / p08 filter / p09 reduce /
+  p10 partition / p11 chunks / p12 find_map / p15 intersperse + p26（intersperse
+  → chunks → 双层 for 链，310）全部 VM=native 等价。p13/p14（`func id(x: cap) -> cap`
+  裸返回 cap 参数 / `xs.remove(v)` 的 v: cap 方法实参转移）保持 E0303
+  fail-closed（legacy capability check 未识别方法实参路径转移）——登记为已知
+  差距（§4v），不放开（宁可拒不可漏）。
+- **验证过程发现假警报**：native 本地可执行 exit code 被 shell 截断到 8 位
+  （310 → 54=310 mod 256）——探针判定改用 mod 256 对拍（此前的"native 值错"
+  均为截断误判）。
+
 ### 0.36.47 — 容器方法余面：trait 方法级泛型实例化 + 线性接收者变换面（L1/L2）
 
 - **修既有 bug（非线性也受影响）**：`map<U>` 等 ListExt 方法的方法级泛型名
