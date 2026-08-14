@@ -67,8 +67,7 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 ## 2. 类型语法（parse_type.rs）
 
 ```
-Type := PostfixType { '?' }
-PostfixType := TypeAtom { '<' TypeList '>' } [ '->' Type ]      (* 仅 allow_func 时 *)
+Type := TypeAtom { '<' TypeList '>' } [ '->' Type ]      (* 0.36.27: 删 '?' 后缀——T? 别名已移除，写 Option<T>；仅 allow_func 时 *)
 TypeAtom :=
       Ident                    (* 命名类型，含 Result/List/Option 等，parse_type.rs:81-85 *)
     | '_'                      (* Type::Infer，:77-80 *)

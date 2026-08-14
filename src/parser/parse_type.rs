@@ -44,12 +44,18 @@ impl Parser {
                     }
                 };
             } else if self.at(&TokenKind::Question) {
-                // The wrapped type is also a first-class AST node. Capture its
-                // span before consuming `?`, including a preceding generic
-                // application rebuilt above.
-                ty = ty.with_meta(self.consumed_meta(start_pos, AstOrigin::User));
-                self.advance();
-                ty = Type::Option(Box::new(ty));
+                // 0.36.27 (Phase D pre-roll, 语法重设计): postfix alias `T?`
+                // ≡ Option<T> removed — corpus-wide audit showed zero real
+                // uses; it was the only DEAD meaning of the three-way `?`
+                // (try / optional-chain `?.` / nullable alias). `?` inside a
+                // type position now gets a migration diagnostic instead.
+                let tok = self.peek();
+                return Err(ParseError::new(
+                    "unexpected '?' after type — the postfix nullable-type \
+                     alias `T?` was removed in 0.36.27; write Option<T> instead",
+                    tok.line,
+                    tok.col,
+                ));
             } else {
                 break;
             }
@@ -648,18 +654,15 @@ mod tests {
 
     #[test]
     fn nested_composite_types_have_exact_source_aware_half_open_spans() {
-        let source = "Result<List<i32>,\n  Option<&mut string>>?";
+        // 0.36.27: the postfix `?` (removed) is gone from the source — the
+        // composite span coverage (Result over List over Option<&mut>)
+        // survives without it.
+        let source = "Result<List<i32>,\n  Option<&mut string>>";
         let source_id = SourceId::new(91);
         let ty = parse_source_type(source, source_id);
         assert_user_span(&ty, span_for(source, source, source_id));
 
-        let Type::Option(result) = ty.unlocated() else {
-            panic!("expected postfix option type");
-        };
-        let result_source = source.strip_suffix('?').expect("option suffix");
-        assert_user_span(result, span_for(source, result_source, source_id));
-
-        let Type::Name(result_name, result_args) = result.unlocated() else {
+        let Type::Name(result_name, result_args) = ty.unlocated() else {
             panic!("expected Result application");
         };
         assert_eq!(result_name, "Result");
@@ -687,6 +690,35 @@ mod tests {
         // v0.34.4 (ADR-004): explicit lifetimes removed — Option stays None.
         assert_eq!(lifetime.as_deref(), None);
         assert_user_span(inner, span_for(source, "string", source_id));
+    }
+
+    #[test]
+    fn postfix_question_marker_is_removed_alias_with_migration_note() {
+        // 0.36.27: `T?` was a dead alias for Option<T> (zero corpus uses).
+        // It must now parse-fail with the migration diagnostic, and the
+        // explicit Option<T> name form must stay untouched.
+        let try_type = |source: &str| -> Result<Type, String> {
+            let tokens = Lexer::new(source).tokenize().expect("lex type");
+            let mut parser = Parser::new_with_source(tokens, SourceId::new(97));
+            parser.parse_type().map_err(|e| e.to_string())
+        };
+        match try_type("i32?") {
+            Err(err) => {
+                assert!(
+                    err.contains("Option<T>"),
+                    "expected migration note, got: {err}"
+                );
+            }
+            Ok(ty) => panic!("`i32?` must not parse anymore, got: {ty:?}"),
+        }
+        assert!(
+            try_type("Option<i32>").is_ok(),
+            "explicit Option<T> must still parse"
+        );
+        match try_type("List<i32?>") {
+            Err(_) => {}
+            Ok(ty) => panic!("`List<i32?>` must not parse anymore, got: {ty:?}"),
+        }
     }
 
     #[test]
