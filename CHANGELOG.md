@@ -7,6 +7,23 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.14 — Phase B 交叉复核：Session × Protocol 状态语义（无第二状态模型）+ mut lint 设计存档
+
+- **交叉复核结论（docs/language-spec.md + 实现证据）**：Session = 线性能力
+  模型（两端通信有序性），**不是**第二业务状态模型——§6.4 "Flow is the sole
+  model for business state and change" 无违例；spec 承诺的 typed residual
+  诊断码 E0425/E0426/E0304/E0427 在实现中均有 emit 点（spec→code 抽查通过）。
+- **codegen residual lowering [experimental] = 保守表述（非矛盾）**：实测
+  `tests/real_world/flow_session.mimi` VM=10/11 与 native=10/11 逐字节一致
+  ——基础 send/recv/close 原生端完整 lower，real_world 套件双跑本已覆盖；
+  "not yet fully lower" 仅指复杂 residual 形态（E0425-27 拒绝路径）。
+- **登记项**：§3.10 conceptual `session_pair::<T>()` vs surface 无参
+  `session_pair()` 的 minor drift（不动代码）；dyn Protocol gate 缺口继续
+  保持登记（§5b）。mut→Flow 迁移 lint 设计已存档（§5d，触发/提示文本/不做
+  理由，0.36.21+ 与 Actor mut 定案合并实现）。
+- 详见 `devdocs/v0.36/phase-b-state-semantics-study.md` §5c/5d。
+  门禁全绿（docs + edge + fmt + clippy），无代码变更（纯预研文档轮）。
+
 ### 0.36.13 — Phase B 扫描修债：spec 消除 Actor 状态双表述（§6.4 重写）+ SD-5 L1 证据
 
 - **spec 双表述矛盾消除（Phase B DoD 前置）**：§6.4 旧文 "actor 任意可变业务
