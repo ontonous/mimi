@@ -554,7 +554,11 @@ fn require_scalar_type(
                         // typed residual surface is compile-time only
                         // (E0414/E0425/E0426), so no declaration catalog
                         // entry is required for the native slice.
-                        if item_str.ends_with("SessionChan") {
+                        // 0.36.35: Flow-state nominals ('state:Flow::State')
+                        // are similarly admitted — the resolved emitter
+                        // lowers them via the legacy type_defs record layout
+                        // (resolved/mod.rs lower_type state: fallback).
+                        if item_str.ends_with("SessionChan") || item_str.starts_with("state:") {
                             Ok(())
                         } else {
                             Err(UnsupportedResolvedNode::new(

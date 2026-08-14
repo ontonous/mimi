@@ -27,7 +27,23 @@ pub(in crate::codegen) fn llvm_type_for_resolved<'ctx>(
     id: &ResolvedTypeId,
 ) -> Result<BasicTypeEnum<'ctx>, CompileError> {
     let mut active = BTreeSet::new();
-    lower_resolved_type(context, types, id, &mut active)
+    let mut no_hook = |_: &ResolvedTypeId| None;
+    lower_resolved_type(context, types, id, &mut active, &mut no_hook)
+}
+
+/// 0.36.35: nominal-resolution hook — lets a caller (the resolved emitter with
+/// generator/type_defs access) supply the LLVM layout for nominal identities
+/// the pure table cannot derive (Flow-state record layouts). Consulted inside
+/// Nominal lowering BEFORE the builtin-name match, so nested container payloads
+/// (Result<state, E>, Option<state>) get the same layout as top-level values.
+pub(in crate::codegen) fn llvm_type_for_resolved_with<'ctx>(
+    context: &'ctx Context,
+    types: &ResolvedTypeTable,
+    id: &ResolvedTypeId,
+    nominal_hook: &mut dyn FnMut(&ResolvedTypeId) -> Option<BasicTypeEnum<'ctx>>,
+) -> Result<BasicTypeEnum<'ctx>, CompileError> {
+    let mut active = BTreeSet::new();
+    lower_resolved_type(context, types, id, &mut active, nominal_hook)
 }
 
 fn lower_resolved_type<'ctx>(
@@ -35,6 +51,7 @@ fn lower_resolved_type<'ctx>(
     types: &ResolvedTypeTable,
     id: &ResolvedTypeId,
     active: &mut BTreeSet<ResolvedTypeId>,
+    nominal_hook: &mut dyn FnMut(&ResolvedTypeId) -> Option<BasicTypeEnum<'ctx>>,
 ) -> Result<BasicTypeEnum<'ctx>, CompileError> {
     let resolved = types.get(id).ok_or_else(|| {
         CompileError::Unsupported(format!(
@@ -53,7 +70,7 @@ fn lower_resolved_type<'ctx>(
     let lowered = match resolved {
         ResolvedType::Primitive(primitive) => Ok(lower_primitive(context, *primitive)),
         ResolvedType::Option(payload) => {
-            let payload = lower_resolved_type(context, types, payload, active)?;
+            let payload = lower_resolved_type(context, types, payload, active, nominal_hook)?;
             // Match legacy ABI: widen sub-64-bit integer payloads to i64.
             // This ensures Option<i32> uses {i1, i64} layout, matching
             // mimi_type_to_llvm's Type::Option lowering. Per-function dispatch
@@ -65,7 +82,7 @@ fn lower_resolved_type<'ctx>(
             )))
         }
         ResolvedType::Result { ok, error: _error } => {
-            let ok = lower_resolved_type(context, types, ok, active)?;
+            let ok = lower_resolved_type(context, types, ok, active, nominal_hook)?;
             // Match legacy ABI: widen sub-64-bit integer ok-payload to i64,
             // and ALWAYS use i64 for the error slot regardless of E type.
             // Per-function dispatch (cross-emitter) depends on this compatibility.
@@ -80,7 +97,8 @@ fn lower_resolved_type<'ctx>(
             let elements = elements
                 .iter()
                 .map(|element| -> Result<BasicTypeEnum<'ctx>, CompileError> {
-                    let lowered = lower_resolved_type(context, types, element, active)?;
+                    let lowered =
+                        lower_resolved_type(context, types, element, active, nominal_hook)?;
                     // Match legacy ABI: widen sub-64-bit integer fields (except
                     // i1/bool) to i64 in tuple layout. This ensures per-function
                     // dispatch compatibility between resolved and legacy emitters
@@ -117,9 +135,9 @@ fn lower_resolved_type<'ctx>(
             // unsupported nominal/generic type from being hidden inside a
             // seemingly lowerable closure or C function pointer.
             for parameter in parameters {
-                let _ = lower_resolved_type(context, types, parameter, active)?;
+                let _ = lower_resolved_type(context, types, parameter, active, nominal_hook)?;
             }
-            let _ = lower_resolved_type(context, types, result, active)?;
+            let _ = lower_resolved_type(context, types, result, active, nominal_hook)?;
 
             let pointer = BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()));
             match abi {
@@ -135,6 +153,11 @@ fn lower_resolved_type<'ctx>(
         ResolvedType::Nominal {
             item, arguments, ..
         } => {
+            // 0.36.35: caller-supplied nominal hook wins (Flow-state record
+            // layouts come from the legacy type_defs via the emitter).
+            if let Some(hooked) = nominal_hook(id) {
+                return Ok(hooked);
+            }
             // 0.35.23 deep-eval: the container's LLVM layout is INDEPENDENT
             // of its element type ({i64 len, ptr} for List; opaque i64 handle
             // for Map/Set), so a user-record element (List<LogEntry>) must
@@ -146,7 +169,7 @@ fn lower_resolved_type<'ctx>(
             // layout at the actual use site.
             let _ = arguments
                 .iter()
-                .map(|arg| lower_resolved_type(context, types, arg, active))
+                .map(|arg| lower_resolved_type(context, types, arg, active, nominal_hook))
                 .collect::<Vec<_>>();
             match item.as_str() {
                 "builtin:type:List" => {
