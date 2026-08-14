@@ -70,6 +70,15 @@ struct ActionEmitter<'a> {
     /// expression was rejected; the Bind arm uses it to skip pairing an
     /// initializer whose extraction already failed (the E0304 stands alone).
     last_visit_rejected: bool,
+    /// 0.36.46: 已做定向头提取（`xs[0]`）的容器基——元素认领后容器保留余部
+    /// 义务，每容器至多一次索引提取（二次认领同一位置 = 超认领 → E0304）。
+    extracted_containers: BTreeSet<ResolvedLocalId>,
+    /// 0.36.46: 绑定初始化器访问上下文中放行的定向提取基——Bind 臂在
+    /// visit_expr 后据此做专门的"元素 Introduce + 容器余部保留"记账。
+    directional_extraction_base: Option<ResolvedLocalId>,
+    /// 0.36.46: 当前是否位于绑定初始化器访问中——定向提取仅对 let-绑定面开
+    /// （调用实参 `sink(xs[0])` / 其他位置保持 fail-closed E0304）。
+    in_bind_initializer: bool,
 }
 
 impl<'a> ActionEmitter<'a> {
@@ -109,6 +118,9 @@ impl<'a> ActionEmitter<'a> {
             consumed_resources: BTreeSet::new(),
             rejected_extraction_places: BTreeSet::new(),
             last_visit_rejected: false,
+            extracted_containers: BTreeSet::new(),
+            directional_extraction_base: None,
+            in_bind_initializer: false,
         }
     }
 
@@ -351,9 +363,16 @@ impl<'a> ActionEmitter<'a> {
     }
 
     fn catalog_pattern(&mut self, pattern: &ResolvedPattern, initializer: Option<&ResolvedExpr>) {
-        let sources = initializer
-            .map(|value| self.capability_places(value))
-            .unwrap_or_default();
+        // 0.36.46 定向头提取：`let c = xs[0]`——绑定认领一个元素（fresh 身份），
+        // 容器保留余部义务（自身身份不动）。目录在此也跳过继承，否则 c 会拿到
+        // xs 的资源身份（幻影），稍后的 drop(xs) 撞 double-consume。
+        let sources = if self.is_directional_head_binding(initializer) {
+            Vec::new()
+        } else {
+            initializer
+                .map(|value| self.capability_places(value))
+                .unwrap_or_default()
+        };
         let expanded = self.expand_sources(&sources);
         let mut bindings = Vec::new();
         self.linear_bindings(pattern, &mut bindings);
@@ -600,7 +619,48 @@ impl<'a> ActionEmitter<'a> {
                 if let Some(initializer) = initializer {
                     let reference = self.single_binding(pattern);
                     self.last_visit_rejected = false;
+                    self.in_bind_initializer = true;
                     self.visit_expr(initializer, reference.as_ref());
+                    self.in_bind_initializer = false;
+                    // 0.36.46: 定向头提取 `let c = xs[0]`——c 认领一个元素义务
+                    //（fresh Introduce），容器保留余部义务（既有 fact 不动；
+                    // 后续 drop(xs) = 释放余部；不触 xs → 返回门禁 E0256）。
+                    // 与普通配对不同：绝不把容器整体 Move 进 c。
+                    if let Some(base) = self.directional_extraction_base.take() {
+                        let mut bindings = Vec::new();
+                        self.linear_bindings(pattern, &mut bindings);
+                        if bindings.len() != 1 {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0304,
+                                    format!(
+                                        "head extraction `{}[0]` binds {} linear name(s);                                          exactly one element is released",
+                                        self.local_name(&base),
+                                        bindings.len()
+                                    ),
+                                    statement.origin.user_span(),
+                                )
+                                .with_help(&format!(
+                                    "bind the extracted element with a single name (`let c = {}[0]`)",
+                                    self.local_name(&base)
+                                )),
+                            );
+                            return;
+                        }
+                        let target = self.place_from_local(&bindings[0]);
+                        self.push_action(
+                            &statement.node_id,
+                            &statement.origin,
+                            ActionDraft {
+                                kind: CanonicalActionKind::Introduce,
+                                resource: self.resource_for_local(&bindings[0]),
+                                source: Some(target.clone()),
+                                target: Some(target),
+                                loan: None,
+                            },
+                        );
+                        return;
+                    }
                     // 0.36.43: an E0304-rejected extraction (v[0] — index/slice/
                     // tuple projection of a non-droppable linear container) must
                     // not pair its place into the binding — the extracted value
@@ -1868,6 +1928,37 @@ impl<'a> ActionEmitter<'a> {
         self.place_type(place).is_some_and(|ty| self.is_linear(&ty))
     }
 
+    /// 0.36.46 定向头提取（绑定初始化器形状）：初始化为 `Load(xs[0])` 的
+    /// 单投影字面量 0 + 非可弃线性容器基——目录与 Bind 臂共用的放行判定。
+    fn is_directional_head_binding(&self, initializer: Option<&ResolvedExpr>) -> bool {
+        let Some(value) = initializer else {
+            return false;
+        };
+        let ResolvedExprKind::Load(place) = &value.kind else {
+            return false;
+        };
+        if !self.is_directional_head_index(place) {
+            return false;
+        }
+        self.body
+            .locals
+            .get(&place.base)
+            .is_some_and(|l| self.is_linear(&l.ty) && !self.is_droppable_type(&l.ty))
+    }
+
+    /// 0.36.46 定向头提取形状：`xs[0]`——单一投影、字面量常量 0 的 Index。
+    /// 定向 = 只开头部位置；`xs[1]` / 动态索引 / 多级投影保持 fail-closed。
+    fn is_directional_head_index(&self, place: &ResolvedPlace) -> bool {
+        place.projections.len() == 1
+            && matches!(
+                &place.projections[0],
+                ResolvedProjection::Index {
+                    index: ResolvedIndex::Constant(0),
+                    ..
+                }
+            )
+    }
+
     /// M9 (0.36.22): element extraction by INDEX READ from a linear container
     /// was the fail-open member of the element-consumption gap — the ledger
     /// attributed the whole container as consumed by the read, but only the
@@ -1876,7 +1967,8 @@ impl<'a> ActionEmitter<'a> {
     /// E0256/E0304). 0.36.25: the SLICE sibling (`v[1..]`) copies the same
     /// handle values while consuming the container obligation — identical
     /// leak, closed identically. Reject uniformly: a linear container must
-    /// be moved or dropped as a whole.
+    /// be moved or dropped as a whole. 0.36.46: 定向头提取面（let 绑定 +
+    /// 字面量 0）例外——见 is_directional_head_index 与 Bind 臂配对。
     fn reject_index_read_extraction(&mut self, expression: &ResolvedExpr) {
         // Non-droppable linear element containers (Cap/SessionChan) leak
         // every unextracted element on element-level reads (M9/slice).
@@ -1903,11 +1995,43 @@ impl<'a> ActionEmitter<'a> {
                     if let Some(local) = self.body.locals.get(&place.base) {
                         if non_droppable_linear_container(local) {
                             if has_index {
-                                self.push_index_read_error(&place.base, expression);
+                                if self.in_bind_initializer && self.is_directional_head_index(place)
+                                {
+                                    // 0.36.46 定向头提取：`let c = xs[0]`——
+                                    // 字面量 0、单一投影、直接局部基、非可弃
+                                    // 线性容器。c 认领一个元素义务（Bind 臂做
+                                    // fresh Introduce），容器保留余部义务（须
+                                    // 整体消费一次：drop = 释放余部）。每容器
+                                    // 至多一次索引提取——重复认领 → E0304。
+                                    if !self.extracted_containers.insert(place.base.clone()) {
+                                        self.errors.push(
+                                            Diagnostic::error_code(
+                                                crate::diagnostic::codes::E0304,
+                                                format!(
+                                                    "resource '{}' head element is claimed more than once",
+                                                    self.local_name(&place.base)
+                                                ),
+                                                expression.origin.user_span(),
+                                            )
+                                            .with_help(&format!(
+                                                "extract `{}[0]` at most once per container; consume the remainder with a whole-container drop/move/return",
+                                                self.local_name(&place.base)
+                                            )),
+                                        );
+                                        self.last_visit_rejected = true;
+                                        emitted = true;
+                                    } else {
+                                        self.directional_extraction_base = Some(place.base.clone());
+                                    }
+                                    // 放行（不 reject）：Bind 臂专门配对。
+                                } else {
+                                    self.push_index_read_error(&place.base, expression);
+                                    emitted = true;
+                                }
                             } else {
                                 self.push_element_leak_error(expression);
+                                emitted = true;
                             }
-                            emitted = true;
                         }
                     }
                 }

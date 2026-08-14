@@ -3503,6 +3503,215 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.46 — 元素级投影定向分析：`xs[0]` 头提取面（Phase C 剩余容器面）──
+// M9/0.36.25-26 的索引析构全面拒绝（E0304，fail-closed）在本切打开**唯一
+// 可无损证明健全的提取形状**——定向头提取 `let c = xs[0]`（非可弃线性容器
+// List<cap>）：
+//   * c 认领头部元素义务：fresh 资源身份 Introduce（元素级记账）；
+//   * 容器保留**余部义务**（自身身份不动）：须整体消费一次（drop = 释放
+//     余部 / move / return）——不触容器 → 返回门禁 E0256（余部泄漏）；
+//   * 每容器至多一次索引提取：二次认领同一位置 = 超认领 → E0304
+//     （"head element is claimed more than once"）；
+//   * 定向 = 只开**字面量常量 0**（单一投影、直接局部基）：`xs[1]` / 动态
+//     索引 / 多级投影 / 调用实参位置（`sink(xs[0])`）/ 元组投影 / 切片
+//     保持 fail-closed E0304；
+//   * 泛型面（`first<T>(xs: List<T>) -> T { xs[0] }`）维持 E0432（0.36.39
+//     H2：黑盒不投影、对 T 零依赖不变）。
+// 健全性：总义务守恒——1（提取元素）+ (n-1)（余部整体消费）= n 元素义务；
+// 任意 n ≥ 1 下可完整结算；空表 `xs[0]` 为运行期越界 trap（与非线性索引
+// 一致，非静默泄漏）。
+
+#[test]
+fn dual_linear_directional_head_extraction_ok() {
+    // L1+L2: `let c = xs[0]; sink(c); drop(xs)`（2 元素表）——提取 + 余部
+    // 整体消费三后端等价；返回提取值经计算。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 11 }
+func f(xs: List<cap FileReadCap>) -> i32 {
+    let c = xs[0]
+    let n = sink(c)
+    drop(xs)
+    n
+}
+func main() -> i32 {
+    let l = [FileReadCap, FileReadCap]
+    let r = f(l)
+    println(r)
+    0
+}
+"#;
+    let expected = "11";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen head extraction");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) head extraction"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen head extraction");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) head extraction");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm head extraction");
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_drop_ok() {
+    // L1+L2: 纯释放形状——`let c = v[0]; drop(c); drop(v)`（0.36.43 起即
+    // 无 ICE；本切语义定案后为合法面）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func main() -> i32 {
+    let v: List<cap FileReadCap> = [FileReadCap, FileReadCap]
+    let c = v[0]
+    drop(c)
+    drop(v)
+    println(3)
+    0
+}
+"#;
+    let expected = "3";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen head extract drop");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) head extract drop"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen head extract drop");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) head extract drop");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm head extract drop");
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_remainder_rejected() {
+    // L2: 提取合法但余部未整体消费 → E0256（容器身份保留余部义务）。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func f(v: List<cap FileReadCap>) -> i32 { let c = v[0]; sink(c); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }",
+    )
+    .expect_err("head extraction without remainder consumption must be E0256");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'v'"),
+        "expected E0256 remainder diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_element_rejected() {
+    // L2: 提取出的元素未消费 → E0256（c 自身义务）。
+    let diags = check_source(
+        "cap FileReadCap; func f(v: List<cap FileReadCap>) -> i32 { \
+             let c = v[0]; drop(v); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }",
+    )
+    .expect_err("extracted element must be consumed (E0256)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'c'"),
+        "expected E0256 element diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_double_rejected() {
+    // L2: 每容器至多一次——第二次 `let d = xs[0]` 超认领 → E0304。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func f(v: List<cap FileReadCap>) -> i32 { \
+             let c = v[0]; sink(c); let d = v[0]; sink(d); drop(v); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }",
+    )
+    .expect_err("second head extraction must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("claimed more than once"),
+        "expected E0304 double-claim diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_nonzero_rejected() {
+    // L2: 定向只开常量 0——`xs[1]` 保持 fail-closed E0304。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func f(v: List<cap FileReadCap>) -> i32 { \
+             let c = v[1]; sink(c); drop(v); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }",
+    )
+    .expect_err("non-zero literal index extraction must stay rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_call_arg_rejected() {
+    // L2: 仅 let-绑定面开——调用实参位置 `sink(v[0])` 保持 fail-closed E0304
+    //（无绑定可承载元素义务）。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func f(v: List<cap FileReadCap>) -> i32 { sink(v[0]); drop(v); 0 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = f(l); 0 }",
+    )
+    .expect_err("call-argument index read must stay rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_directional_head_extraction_tuple_rejected() {
+    // L2: 元组投影 `t.0` 不在本切开放面（定向 = List 头提取）——保持 E0304。
+    let diags = check_source(
+        "cap FileReadCap; func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func f(t: (cap FileReadCap, cap FileReadCap)) -> i32 { \
+             let c = t.0; sink(c); drop(t); 0 } \
+         func main() -> i32 { let t = (FileReadCap, FileReadCap); let r = f(t); 0 }",
+    )
+    .expect_err("tuple projection must stay rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.36.45 — 泛型×线性单态化切片 6：for + if-let 组合（元素级绑定面）──
 // 0.36.42 的 if-let 中介面与 0.36.40 的 for 穷举解构在本切合流：`for x in xs`
 // 内嵌 `if let Some(y) = x`——**元素级 if-let**（List 元素是 Option，逐迭代
@@ -3926,28 +4135,27 @@ fn generic_callable_param_transfer_loop_double_backend() {
 
 #[test]
 fn resource_index_extraction_drop_no_ice() {
-    // L2: `let x = v[0]; drop(x); drop(v)` — 提取被 E0304 拒绝，之后两个 drop
-    // 都必须是干净的单次消费诊断（此前 drop(v) 撞 RESOURCE-LINEAR-001）。
-    let diags = check_source(
-        "cap FileReadCap; func concrete(v: List<cap FileReadCap>) -> i32 { \
+    // L2: `let x = v[0]; drop(x); drop(v)` — 0.36.46 定向头提取面打开后为合法
+    // 形状（x 认领头部元素、drop(v) 释放余部）；保持无 ICE / 无
+    // RESOURCE-LINEAR-001 double-drop 信号（0.36.43 的 ICE 修复本身仍被锁住）。
+    let src = "cap FileReadCap; func concrete(v: List<cap FileReadCap>) -> i32 { \
          let x = v[0]; drop(x); drop(v); 1 } \
          func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = concrete(l); \
-         println(r); 0 }",
-    )
-    .expect_err("index extraction + later drops must not ICE (E0304)");
-    let rendered = diags
-        .iter()
-        .map(|d| format!("{}", d))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        rendered.contains("E0304"),
-        "expected E0304 diagnostic, got:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("dropped twice"),
-        "RESOURCE-LINEAR-001 double-drop signal leaked into diagnostics:\n{rendered}"
-    );
+         println(r); 0 }";
+    check_source(src).expect("directional head extraction + remainder drop");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), "1", "vm head extraction + remainder drop");
+    if can_link() {
+        let built = compile_and_run(src).expect("codegen head extraction + remainder drop");
+        assert_eq!(
+            built.trim(),
+            "1",
+            "legacy(codegen) head extraction + remainder drop"
+        );
+        let checked =
+            checked_codegen_compile_and_run(src).expect("resolved codegen head extraction");
+        assert_eq!(checked.trim(), "1", "resolved(codegen) head extraction");
+    }
 }
 
 #[test]
@@ -4003,22 +4211,23 @@ fn resource_tuple_projection_extraction_no_ice() {
 
 #[test]
 fn resource_index_extraction_alone_still_rejected() {
-    // L2: 拒绝本身保持——`let x = v[0]` 单独（无后续 drop）依旧 E0304。
+    // L2: 0.36.46 后提取本身合法，但容器余部义务仍在——`let x = v[0]; drop(x)`
+    // 后 v 未被整体消费 → E0256（余部泄漏；0.36.43 前此处为整条 E0304）。
     let diags = check_source(
         "cap FileReadCap; func concrete(v: List<cap FileReadCap>) -> i32 { \
          let x = v[0]; drop(x); 1 } \
          func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = concrete(l); \
          println(r); 0 }",
     )
-    .expect_err("index extraction alone must stay rejected (E0304)");
+    .expect_err("extraction without container remainder consumption must be E0256");
     let rendered = diags
         .iter()
         .map(|d| format!("{}", d))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("E0304"),
-        "expected E0304 diagnostic, got:\n{rendered}"
+        rendered.contains("E0256") && rendered.contains("'v'"),
+        "expected E0256 remainder leak diagnostic, got:\n{rendered}"
     );
 }
 
@@ -5610,20 +5819,21 @@ fn dual_linear_whilelet_option_container_stays_rejected() {
 
 #[test]
 fn dual_linear_container_index_read_rejected() {
-    // Bind form — the demonstrated leak (`let c = v[0]; drop(c)` passed the
-    // checker while v's other elements leaked; l4 probe).
+    // Bind form（0.36.46 定向前）——`let c = v[0]; drop(c)` 且 v 未整体消费
+    // = 余部泄漏 → E0256（0.36.46 前后都不是静默泄漏；打开的是"提取 + 余部
+    // 整体消费"的合法形状）。
     let diags = check_source(
         "cap FileReadCap; func take_first(v: List<cap FileReadCap>) -> i32 {              let c = v[0]; drop(c); 1 }          func main() -> i32 { let l = [FileReadCap, FileReadCap]; println(take_first(l)); 0 }",
     )
-    .expect_err("index read of linear container must be rejected (E0304)");
+    .expect_err("head extraction without remainder consumption must be E0256");
     let rendered = diags
         .iter()
         .map(|d| format!("{}", d))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("E0304") && rendered.contains("by index"),
-        "expected E0304 index-read diagnostic, got:\n{rendered}"
+        rendered.contains("E0256") && rendered.contains("'v'"),
+        "expected E0256 remainder-leak diagnostic, got:\n{rendered}"
     );
 
     // Call-argument form — element passed to a consuming callee.
