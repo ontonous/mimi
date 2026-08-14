@@ -3350,6 +3350,49 @@ func main() -> i32 {
 // was released — every unextracted element leaked silently (l4 probe).
 // Now rejected uniformly (E0304): move or drop the whole container.
 
+// ============================================================
+// 0.36.24 (registered known gap → Phase C 0.36.36+ window): flow-state
+// values carried in Result/Option containers lose their nominal identity in
+// the native emitter's match-merge / transition-overload resolution.
+//   - checker: ✓ (state:Counter::Zero)
+//   - bytecode VM: ✓ correct semantics ("2")
+//   - native: capability gate E0200 (loud fail-closed — "no overload for
+//     source state got"/"cannot unify PointerType(ptr) with IntType(i64)")
+// The ok-payload slot binds as a boxed ptr; the sibling literal arm compiles
+// flat, and the merge/overload paths cannot unify the two representations.
+// IDD known-gap test: pins the SEMANTIC contract (both backends must print
+// 2); ignored until Phase C unifies the state ABI across container/flat
+// contexts (monomorphization/state representation work, 0.36.36+).
+
+#[test]
+#[ignore = "0.36.36 Phase C: flow-state-in-container native ABI 统一（Result/Option 槽位 ptr vs 平铺 i64）"]
+fn dual_flow_state_in_container_native_gap() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+}
+func main() -> i32 {
+    let boxed: Result<Zero, string> = Ok(Zero { n: 1 })
+    let got = match boxed {
+        Ok(c) => c
+        Err(_) => Zero { n: 0 }
+    }
+    let c2 = Counter::inc(got)
+    println(c2.n)
+    0
+}
+"#;
+    let expected = "2";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm state-in-result");
+    let native = compile_and_run(src).expect("codegen must match VM once 0.36.36 unifies the ABI");
+    assert_eq!(native.trim(), expected, "codegen state-in-result");
+}
+
 #[test]
 fn dual_linear_container_index_read_rejected() {
     // Bind form — the demonstrated leak (`let c = v[0]; drop(c)` passed the

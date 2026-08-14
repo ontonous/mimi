@@ -7,6 +7,18 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.24 — 登记差距：flow-state 进容器（Result/Option）native 面 E0200（IDD 已知差距）
+
+- **探针实证**：`let got = match boxed { Ok(c) => c, Err(_) => Zero{..} }` 后
+  `Counter::inc(got)`——checker ✓、VM ✓（2）、native **E0200 响亮拒绝**（"no
+  overload for source state got" / "cannot unify PointerType(ptr) with
+  IntType(i64)"——Result 槽位 ptr vs 字面量臂平铺 i64）。Option 同形复现
+  （.r3）。capability gate fail-closed，无静默 miscompile。
+- **登记**：IDD 已知差距测试 `dual_flow_state_in_container_native_gap`
+  （#[ignore]，钉住"双后端须印 2"语义契约）→ Phase C（0.36.36+）容器载荷
+  表示统一窗口；Phase E "旧 state 复用"负测试排期对齐。
+- 门禁全绿；除 gap 测试外无代码变更（探针轮）。
+
 ### 0.36.23 — 预研发现：SessionChan<T> 用户层不可构造（Phase C Session 重设计输入）
 
 - **探针实证（phase-c-linearity-study.md §4d）**：`session_pair()` 返回
