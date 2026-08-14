@@ -2580,18 +2580,32 @@ impl<'a> Checker<'a> {
                 // AGENTS.md §0 H2 ruling (audit-type 2026-08-03): the earlier
                 // "container pass-through is legal" exemption was proven to be
                 // an exactly-once escape and is abolished.
+                //
+                // 0.36.39 (泛型×线性单态化切片 1): 线性黑盒直通——若该参数位置
+                // 的调体对 T 的线性性零依赖（每条路径转移，或对 cap 类允 drop），
+                // 则放行（实参按 call-site 具体类型追踪、返回绑定按实例化类型
+                // 追踪，0.36.38 已实证）；否则维持 E0432 fail-closed。SessionChan
+                // 及其任意嵌套走 transfer-only（中途 drop = E0425 弃置）。
                 for (index, argument_ty) in arg_tys.iter().enumerate() {
                     if self.is_linear_surface_type(argument_ty) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0432,
-                            format!(
-                                "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
-                                 generic parameters are not linearly tracked (use a concrete function signature)",
-                                fmt_type(argument_ty),
-                                index + 1,
-                                name
-                            ),
-                        );
+                        let bb_sound = if self.surface_type_contains_session(argument_ty) {
+                            self.generic_linear_blackbox_sound(name, index, false)
+                        } else {
+                            self.generic_linear_blackbox_sound(name, index, true)
+                        };
+                        if !bb_sound {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0432,
+                                format!(
+                                    "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
+                                     generic parameters are not linearly tracked (use a concrete function signature, \
+                                     or a pass-through/drop-only generic body)",
+                                    fmt_type(argument_ty),
+                                    index + 1,
+                                    name
+                                ),
+                            );
+                        }
                     }
                 }
 

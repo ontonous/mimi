@@ -1165,12 +1165,25 @@ impl<'a> Checker<'a> {
                 // otherwise `func::<cap X>(cap_value)` silently escapes
                 // exactly-once (E0432). Non-generic callees keep concrete
                 // linear tracking (no rejection).
-                if !generics.is_empty() && self.is_linear_surface_type(&at) {
+                // 0.36.39: 线性黑盒直通豁免（同 simple.rs 全局调用臂）——调体
+                // 对 T 线性性零依赖则放行，否则 E0432；SessionChan 走 transfer-only。
+                let bb_reject = if !generics.is_empty() && self.is_linear_surface_type(&at) {
+                    let bb_sound = if self.surface_type_contains_session(&at) {
+                        self.generic_linear_blackbox_sound(name, i, false)
+                    } else {
+                        self.generic_linear_blackbox_sound(name, i, true)
+                    };
+                    !bb_sound
+                } else {
+                    false
+                };
+                if bb_reject {
                     self.emit_code(
                         crate::diagnostic::codes::E0432,
                         format!(
                             "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
-                             generic parameters are not linearly tracked (use a concrete function signature)",
+                             generic parameters are not linearly tracked (use a concrete function signature, \
+                             or a pass-through/drop-only generic body)",
                             fmt_type(&at),
                             i + 1,
                             name
