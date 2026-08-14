@@ -7,6 +7,32 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.44 — 泛型×线性单态化切片 5：高阶直通——callable-值调用 + closure 臂（L1/L2）
+
+- **开面**：高阶调用携带线性容器——`foldT(xs, fn(x: T) -> i32 { sink_g(x) })`
+  泛型调体逐元素直通闭包参数（fold 计数）双后端挣绿：
+  - Lambda 字面量实参 = 匿名"臂"：参数名逐一 live 黑盒结算体（恰一次转移/
+    drop）；弃置参数体（`{ 0 }` 不触参数）= 具体面元素泄漏同款 → E0432；
+  - 闭包绑定（`let c = fn(...)`）义务在**定义点**结算——后续调用只传闭包
+    标识符时无法再检查体；捕获 live 容器名的闭包体经 expr_uses_name 的
+    Lambda 递归触达 → fail-closed；
+  - 方法调用（`receiver.method(args)` = Call(Field(receiver, _), args)）
+    实参触碰 live 的名字逐一带整体转移（transfer_wrapped_args，构造包装臂
+    提取为共享 helper）；**线性接收者**方法面（`xs.map(f)`）保持 fail-closed
+    （容器方法 = 余面，stdlib map_list 体维持 E0432）；
+  - 可调用值调用（`f(x)`，f = func 参数）经 transfer_wrapped_args 转移-out
+    （f 的体由定义点/具体面各自追踪——具体面 closure 直通已有 0.36.44 前探针
+    实证，本切片收敛泛型面）。
+- **健全性**：闭包集体黑盒结算（约束恰一次）；被拒形状（弃置/捕获）均
+  fail-closed；合法路径（drop 体/绑定体/方法实参转移）双后端等价。
+- **已知怪癖（记实不修）**：for-面 transfer_out 模式对"内部消费型"泛型调用
+  保守标为返回值携带 → 结果绑定在二元/算术位置误报活值（`r + 0` 形状拒绝，
+  `r` 尾返回形状合法）——0.36.40 遗留，调用方以尾返回形状规避。
+- **挣绿**：内联/绑定闭包直通 fold 计数 = 2（VM + legacy codegen + resolved
+  codegen 三后端）；callable-param 循环直通 = 0。
+- **回归**：正例 4 + 负例 3（弃置内联/弃置绑定/捕获）；concrete closure 面
+  （0.36.44 前探针形态）保持 clean。全量 5421 绿；real_world 70/70。
+
 ### 0.36.43 — 元素析构记账修复：E0304 错误路径状态污染清零（L2）
 
 - **背景**：M9/0.36.25-26 索引析构拒绝（`v[0]` / `v[1..]` / `(a,b).0` 在非

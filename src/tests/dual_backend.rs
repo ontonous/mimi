@@ -3503,6 +3503,173 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.44 — 泛型×线性单态化切片 5：高阶直通（callable-值调用 + closure 臂）──
+// 开面：高阶调用携带线性容器——`foldT(xs, fn(x: T) -> i32 { sink_g(x) })`：
+//   * Lambda 字面量实参 = 匿名"臂"：参数名逐一 live 黑盒结算体（恰一次转移/
+//     drop；弃置参数体 `{ 0 }` = 具体面元素泄漏同款 → E0432）；
+//   * 闭包绑定（`let c = fn(...)`）义务在定义点结算——后续调用只传闭包标识符时
+//     无法再检查体；捕获 live 名字的闭包体经 expr_uses_name Lambda 递归触达；
+//   * 方法调用（`receiver.method(args)` = Call(Field(receiver, _), args)）实参
+//     触碰 live 的名字逐一带整体转移（transfer_wrapped_args）；线性接收者方法面
+//     （`xs.map(f)`）保持 fail-closed（容器方法 = 余面）；
+//   * 可调用值调用（`f(x)`，f = func 参数）经构造包装同款转移-out（f 的体由
+//     定义点/具体面各自追踪）。
+// 健全性：闭包集体黑盒结算（约束恰一次）；被拒形状（弃置/捕获）fail-closed；
+// 合法路径（drop 体/绑定体/方法实参转移）双后端等价挣绿。
+
+#[test]
+fn generic_closure_arm_inline_double_backend() {
+    // L1: 内联 drop 闭包——元素经闭包参数直通 sink（fold 计数 = 2）。
+    let src = "cap FileReadCap; \
+               func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+               func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+               let mut n = 0; for x in xs { n = n + f(x) } n } \
+               func host<T>(xs: List<T>) -> i32 { \
+               let r = foldT(xs, fn(x: T) -> i32 { sink_g(x) }); r } \
+               func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
+               println(r); 0 }";
+    check_source(src).expect("inline closure arm must check");
+    let expected = "2";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm inline closure arm");
+    if can_link() {
+        let built = compile_and_run(src).expect("codegen inline closure arm");
+        assert_eq!(built.trim(), expected, "legacy(codegen) inline closure arm");
+        let checked =
+            checked_codegen_compile_and_run(src).expect("resolved codegen inline closure");
+        assert_eq!(
+            checked.trim(),
+            expected,
+            "resolved(codegen) inline closure arm"
+        );
+    }
+}
+
+#[test]
+fn generic_closure_arm_bound_double_backend() {
+    // L1: 绑定闭包直通——`let c = fn(...)` 义务在定义点结算（体黑盒干净）。
+    let src = "cap FileReadCap; \
+               func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+               func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+               let mut n = 0; for x in xs { n = n + f(x) } n } \
+               func host<T>(xs: List<T>) -> i32 { \
+               let c = fn(x: T) -> i32 { sink_g(x) }; \
+               let r = foldT(xs, c); r } \
+               func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
+               println(r); 0 }";
+    check_source(src).expect("bound closure arm must check");
+    let expected = "2";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm bound closure arm");
+    if can_link() {
+        let built = compile_and_run(src).expect("codegen bound closure arm");
+        assert_eq!(built.trim(), expected, "legacy(codegen) bound closure arm");
+    }
+}
+
+#[test]
+fn generic_closure_arm_abandon_inline_rejected() {
+    // L2: 内联弃置闭包（`{ 0 }` 不触参数）= 具体面元素泄漏同款 → E0432。
+    let diags = check_source(
+        "cap FileReadCap; \
+         func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+         func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+         let mut n = 0; for x in xs { n = n + f(x) } n } \
+         func host<T>(xs: List<T>) -> i32 { \
+         let r = foldT(xs, fn(x: T) -> i32 { 0 }); r } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
+         println(r); 0 }",
+    )
+    .expect_err("abandoning closure must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn generic_closure_arm_abandon_bound_rejected() {
+    // L2: 绑定弃置闭包——定义点结算拒绝（调用点只传标识符，无法再查体）。
+    let diags = check_source(
+        "cap FileReadCap; \
+         func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+         func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+         let mut n = 0; for x in xs { n = n + f(x) } n } \
+         func host<T>(xs: List<T>) -> i32 { \
+         let c = fn(x: T) -> i32 { 0 }; \
+         let r = foldT(xs, c); r } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
+         println(r); 0 }",
+    )
+    .expect_err("bound abandoning closure must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn generic_closure_capture_rejected() {
+    // L2: 闭包体捕获 live 容器名（`foldT(xs, fn(y) { foldT(xs, ...) })`）——
+    // 经 expr_uses_name 的 Lambda 递归触达 → fail-closed。
+    let diags = check_source(
+        "cap FileReadCap; \
+         func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+         func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+         let mut n = 0; for x in xs { n = n + f(x) } n } \
+         func host<T>(xs: List<T>) -> i32 { \
+         let c = fn(y: T) -> i32 { foldT(xs, fn(z: T) -> i32 { sink_g(z) }) }; \
+         let r = foldT(xs, c); r } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
+         println(r); 0 }",
+    )
+    .expect_err("closure capture of live container must be rejected");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn generic_callable_param_transfer_loop_double_backend() {
+    // L1: callable-值调用（`f(x)`，f = func 参数）在 for 体内经转移-out 直通。
+    let src = "cap FileReadCap; \
+               func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+               func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+               for x in xs { f(x); } 0 } \
+               func host<T>(xs: List<T>) -> i32 { \
+               let c = fn(x: T) -> i32 { sink_g(x) }; foldT(xs, c) } \
+               func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
+               println(r); 0 }";
+    check_source(src).expect("callable-param call in loop must check");
+    let expected = "0";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm callable-param loop");
+    if can_link() {
+        let built = compile_and_run(src).expect("codegen callable-param loop");
+        assert_eq!(
+            built.trim(),
+            expected,
+            "legacy(codegen) callable-param loop"
+        );
+    }
+}
+
 // ─── 0.36.43 — 元素析构记账修复：E0304 错误路径状态污染（RESOURCE-LINEAR-001）──
 // M9/0.36.25-26 的索引析构拒绝（`v[0]` / `v[1..]` / `(a,b).0` 在非线性容器上
 // 的 E0304）纯属诊断——但后续 lowering 仍把被拒投影配对进绑定/调用/drop：
