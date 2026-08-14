@@ -7,6 +7,32 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.15 — 语法重设计预研：scope-guard resolved 发射器 L1 修复（defer/on failure 双 harness 钉住）+ spec 表面修正
+
+- **L1 修复（生产路径）**：CLI `mimi build`（compile_checked，resolved 发射器）
+  把 `defer`/`on failure` 体当内联块在语句位置就地编译——`defer` 先于正文执行、
+  `on failure` 正常返回也触发；双后端测试走 legacy compile_file（0.31.24 起
+  register_model 正确）→ 套件全绿掩盖生产路径 miscompile（路径盲区）。
+  src/codegen/resolved/mod.rs：`ResolvedScopeKind::Defer`/`FailureGuard` 不再
+  内联——语句位置登记、函数出口 LIFO 发射（Return 臂 + 尾部回落发射 defer 并
+  丢弃补偿；`exit(...)` 前发射补偿镜像 legacy hook；每函数入口清栈）。
+- **探针实证（修复后 native == VM）**：`BODY/DEFER`、LIFO `body/third/second/
+  first`、早退 `work/cleanup/42`、`exit(1)` 不触发补偿（三后端一致，探针 + 测试）。
+- **spec 表面修正（docs/language-spec.md §4.6）**：删除不存在的 `defer failure`
+  表面（parser/语法参考中无此形态），改为真实双表面 `defer { }`（任意出口 LIFO）
+  + `on failure { }`（失败出口补偿，语句执行点登记）；保留作用域守卫收敛意图 +
+  Phase D 统一裁决注记。
+- **语法面清单（devdocs/v0.36/phase-d-syntax-inventory.md）**：关键字清理 5/6
+  已完成（c_shared/c_borrow/local_shared/weak_local/raw_string 已非关键字，
+  lexer 测试断言实证），仅 `parasteps` 仍占硬关键字；`?` 三义产生式已分离、
+  用户感知歧义留 Phase D；保留字 67 词（≤80 冻结目标达成）；软关键字僵尸审计
+  目标清单登记。
+- **测试（dual_backend +3，双 harness）**：
+  `dual_guard_resolved_defer_order` / `dual_guard_resolved_defer_lifo_and_comp_discard` /
+  `dual_guard_resolved_defer_early_return`——同一程序经 legacy compile_and_run 与
+  checked_codegen_compile_and_run 双路径对 VM 断言（消灭路径盲区）。
+  全量 5354 passed / 0 failed / 7 ignored；fmt + clippy + docs + edge 全绿。
+
 ### 0.36.14 — Phase B 交叉复核：Session × Protocol 状态语义（无第二状态模型）+ mut lint 设计存档
 
 - **交叉复核结论（docs/language-spec.md + 实现证据）**：Session = 线性能力

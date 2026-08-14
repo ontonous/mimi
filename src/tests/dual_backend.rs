@@ -15015,6 +15015,94 @@ fn dual_from_json_map_option_map_list_product_tuple() {
 // 0.31.24: defer LIFO tests
 // ============================================================
 
+// ============================================================
+// 0.36.15: scope-guard semantics on the RESOLVED (production) emitter.
+// The dual harness below uses the legacy `compile_file` path, which has had
+// correct register-at-statement / emit-at-exit defer lowering since 0.31.24 —
+// but the CLI `mimi build`/`compile_checked` path compiled `defer` /
+// `on failure` bodies INLINE at their statement position: defers ran before
+// the body statements and on-failure fired on NORMAL exits (L1 divergence,
+// invisible to the legacy dual harness). These tests pin the same programs
+// through BOTH harnesses (legacy + checked/resolved) against the VM.
+
+/// defer block runs at scope exit in statement order (resolved path).
+#[test]
+fn dual_guard_resolved_defer_order() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func main() -> i32 {
+    defer { println("DEFER") }
+    println("BODY")
+    0
+}
+"#;
+    let expected = "BODY\nDEFER";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) defer order");
+    let unga = compile_and_run(src).expect("legacy codegen");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) defer order");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm defer order");
+}
+
+/// defer LIFO + on-failure silently discarded on normal exit (resolved path).
+#[test]
+fn dual_guard_resolved_defer_lifo_and_comp_discard() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func main() -> i32 {
+    defer { println("first") }
+    defer { println("second") }
+    defer { println("third") }
+    on failure { println("ONFAIL") }
+    println("body")
+    0
+}
+"#;
+    let expected = "body\nthird\nsecond\nfirst";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) LIFO + comp discard"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) LIFO + comp discard");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm LIFO + comp discard");
+}
+
+/// defer on early return (resolved path).
+#[test]
+fn dual_guard_resolved_defer_early_return() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func helper() -> i32 {
+    defer { println("cleanup") }
+    println("work")
+    return 42
+}
+func main() -> i32 {
+    let x = helper()
+    println(x)
+    0
+}
+"#;
+    let expected = "work\ncleanup\n42";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) early return");
+    let unga = compile_and_run(src).expect("legacy codegen");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) early return");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm early return");
+}
+
 /// defer basic: single defer block runs on normal exit.
 #[test]
 fn dual_defer_basic() {

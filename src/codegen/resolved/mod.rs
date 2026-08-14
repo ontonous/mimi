@@ -126,6 +126,19 @@ struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
     /// Per-callable place inputs (dynamic index expressions). Set before
     /// emitting each function body, cleared after.
     place_inputs: BTreeMap<NodeId, crate::core::ResolvedExpr>,
+    /// 0.36.15 (Phase D 预研 L1 修复): scope-guard semantics on the resolved
+    /// (production, `mimi build`/compile_checked) emitter. The legacy
+    /// func.rs/block.rs machinery registers `defer`/`on failure` blocks at
+    /// their statement position and emits them at scope exit; the resolved
+    /// emitter previously inlined both kinds at their statement position, so
+    /// `defer` bodies ran BEFORE the body statements and `on failure` fired on
+    /// NORMAL exits (the dual harness uses legacy compile_file and stayed
+    /// green — the CLI path miscompiled). These stacks mirror the
+    /// register-emit model: blocks are recorded here at statement position and
+    /// emitted LIFO at function exits (defer always; on-failure only on
+    /// fault/exit(...) paths, discarded on normal return).
+    defer_scopes: Vec<ResolvedBlock>,
+    comp_scopes: Vec<ResolvedBlock>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -148,6 +161,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             generator: self,
             loop_stack: Vec::new(),
             place_inputs: BTreeMap::new(),
+            defer_scopes: Vec::new(),
+            comp_scopes: Vec::new(),
         }
         .compile_program()
         .map_err(|error| {
@@ -173,6 +188,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             generator: self,
             loop_stack: Vec::new(),
             place_inputs: BTreeMap::new(),
+            defer_scopes: Vec::new(),
+            comp_scopes: Vec::new(),
         }
         .compile_subset(eligible)
         .map_err(|error| {
@@ -622,6 +639,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             old_snapshots: BTreeMap::new(),
         };
         self.bind_parameters(callable, function, &mut frame)?;
+        // 0.36.15 L1: guard stacks are per-function — clear residue from the
+        // previous callable and bind the enclosing body for deferred emission.
+        self.defer_scopes.clear();
+        self.comp_scopes.clear();
         // 0.34.41 第二档: contract guard emission (--verify-contracts).
         // Mirrors legacy func.rs ordering: requires asserts run at entry after
         // parameter binding, before the body; old() snapshots are captured at
@@ -638,6 +659,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             self.generator.end_function_heap_scope();
             return Ok(());
         }
+        // 0.36.15 L1: fallthrough exit — deferred blocks run LIFO before the
+        // implicit return; on-failure compensations are discarded (normal
+        // exit).
+        let pending_defers = std::mem::take(&mut self.defer_scopes);
+        self.emit_guard_stack(&callable.body, pending_defers, &mut frame)?;
+        self.comp_scopes.clear();
         let result_type = self.lower_type(&callable.signature.result)?;
         let value = match value {
             Some(value) => value,
@@ -1168,6 +1195,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
     }
 
+    /// 0.36.15 L1: emit registered guard blocks (defer / on-failure
+    /// compensation) in LIFO order, then drop the stack. `pending` is taken
+    /// out of the emitter so the &mut self emit below does not alias a field.
+    fn emit_guard_stack(
+        &mut self,
+        body: &ResolvedBody,
+        pending: Vec<ResolvedBlock>,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        for block in pending.iter().rev() {
+            self.emit_block(body, block, frame)?;
+        }
+        Ok(())
+    }
+
     fn emit_block(
         &mut self,
         body: &ResolvedBody,
@@ -1299,6 +1341,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let value = value
                     .map(|value| self.generator.claim_resolved_string_return(value))
                     .transpose()?;
+                // 0.36.15 L1: deferred blocks run LIFO before every return
+                // (legacy: pop_defer_scope before emit_return); pending
+                // on-failure compensations are discarded — normal exit.
+                let pending_defers = std::mem::take(&mut self.defer_scopes);
+                self.emit_guard_stack(body, pending_defers, frame)?;
+                self.comp_scopes.clear();
                 // 0.34.41 第二档: ensures guards on early return paths too
                 // (legacy emit_return is the single funnel there; here every
                 // Return statement funnels its own check before the ret).
@@ -1390,8 +1438,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     self.generator.ieee_depth -= 1;
                     r?;
                 } else {
-                    // Lexical scope: emit the inner block inline.
-                    self.emit_block(body, scope_block, frame)?;
+                    // 0.36.15 L1: `defer` / `on failure` are scope GUARDS, not
+                    // inline blocks — the resolved emitter previously inlined
+                    // their bodies at the statement position, so `defer` ran
+                    // before the body and `on failure` fired on normal exits
+                    // (CLI `mimi build`/compile_checked path; the dual harness
+                    // uses legacy compile_file and stayed green). Record the
+                    // block here and emit it at function exits: defer LIFO on
+                    // every exit, on-failure only before fault propagation
+                    // (the `exit(...)` call), discarded on normal return —
+                    // mirroring legacy func.rs/block.rs register_defer /
+                    // register_comp.
+                    match scope_kind {
+                        crate::core::ir::ResolvedScopeKind::Defer => {
+                            self.defer_scopes.push(scope_block.clone());
+                        }
+                        crate::core::ir::ResolvedScopeKind::FailureGuard => {
+                            self.comp_scopes.push(scope_block.clone());
+                        }
+                        _ => {
+                            // Lexical / unsafe / arena / allocator / parallel
+                            // scopes: emit the inner block inline.
+                            self.emit_block(body, scope_block, frame)?;
+                        }
+                    }
                 }
                 Ok(None)
             }
@@ -1900,6 +1970,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.apply_conversion(value, conversion)
             }
             ResolvedExprKind::Call(call) => {
+                // 0.36.15 L1: `exit(...)` is the explicit fault-propagation
+                // call — run registered `on failure` compensations (LIFO)
+                // before it, mirroring the legacy block.rs exit hook. The
+                // guard blocks belong to the enclosing function body
+                // (current_body; Copy so the borrow does not conflict with
+                // the &mut self emit below).
+                let is_exit = matches!(
+                    &call.callee,
+                    ResolvedCallee::Function(owner)
+                        if self.program.functions().get(owner).map(|f| f.qualified_name.as_str()) == Some("exit")
+                );
+                if is_exit && !self.comp_scopes.is_empty() {
+                    // The guard blocks live in the callee-owner's body
+                    // registry; re-fetch and clone it (rare path) so the
+                    // &mut self emit below does not alias `self.program`.
+                    let pending = std::mem::take(&mut self.comp_scopes);
+                    if let ResolvedCallee::Function(owner) = &call.callee {
+                        if let Some(guard_callable) = self.program.callable(owner).cloned() {
+                            for block in pending.iter().rev() {
+                                self.emit_block(&guard_callable.body, block, frame)?;
+                            }
+                        }
+                    }
+                }
                 // 0.34.43: positions whose callee parameter is a non-self
                 // view/mutate borrow are passed BY ADDRESS (the caller's
                 // storage pointer) — the reference ABI legacy declare_func
