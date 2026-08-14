@@ -1,0 +1,658 @@
+//! 0.36.39 (Phase C — 泛型×线性单态化，切片 1)：线性黑盒直通判定。
+//!
+//! 背景（AGENTS.md §0 H2 / §2.3 裁决）：泛型参数不被线性追踪
+//! （GenericParameter `is_linear() == false`）——线性值（cap / SessionChan /
+//! Flow state / 含线性元素的容器）流入泛型调用会逃逸 exactly-once 强制，故
+//! 全量 E0432 拒绝。0.36.36-38 已把"名字级"追踪做实（call-site 具体类型驱动：
+//! `capability_places` 按实参具体类型移动、返回绑定按 call-site 实例化类型
+//! 追踪——E0432 放行后 probe 实证 `let d = pass_through(c); drop(d)` 全链正确，
+//! 漏 drop 会 E0256）。缺口只剩"调体是否可能静默弃值"。
+//!
+//! 本模块判定：泛型函数第 `param_index` 个参数是否**线性黑盒健全**——调体对
+//! T 的线性性零依赖：每条路径要么把值转移出去（return，可嵌在容器/元组内，或
+//! 移入另一个"线性安全接收者"），要么显式 drop，绝不静默丢弃、绝不做依赖消费
+//! 形状的析构。此判定对任意具体线性实例化都健全（决策与 T 无关），从而放行
+//! "直通 / 整容器移交 / drop"类调用，同时 fail-closed 拒绝"丢弃 / 半丢弃 /
+//! 元素析构 / 条件路径依赖"类（后者留给 per-instantiation 切片 2，仍 E0432）。
+//!
+//! 保守原则：任何未覆盖形态（builtin 接收、闭环递归、条件中读取、循环内移动、
+//! 赋值改写、结构化解构、条件分支路径不对称消费）一律判 false（fail-closed）。
+//!
+//! 流动模型：`stmts_flow(stmts, live) -> Result<post_live, ()>`——路径敏感；
+//! `If` 的 join 要求每个 live 名字在 then/else 两分支后的存活状态一致（两分支
+//! 都活 → 仍活；都消名 → 已亡；仅一分支存活 → 路径依赖 → fail-closed），保证
+//! join 后的分析对两条运行时路径同时成立。
+
+use crate::ast::{Expr, FuncDef, Item, Stmt};
+use crate::core::checker::Checker;
+
+// ─── 表达式 / 语句的"触及"查询（保守，用于 fail-closed 门）───────────
+
+/// 名字是否作为子 place 出现在表达式里（`x`、`x.f`、`x[0]`、容器字面量、元组…）。
+fn expr_uses_name(e: &Expr, names: &[String]) -> bool {
+    match e.unlocated() {
+        Expr::Ident(n) => names.iter().any(|w| w == n),
+        Expr::Field(obj, _)
+        | Expr::TupleIndex(obj, _)
+        | Expr::Index(obj, _)
+        | Expr::Unary(crate::ast::UnOp::Deref, obj) => expr_uses_name(obj, names),
+        Expr::Call(callee, args) => {
+            expr_uses_name(callee, names) || args.iter().any(|a| expr_uses_name(a, names))
+        }
+        Expr::Tuple(elems) => elems.iter().any(|el| expr_uses_name(el, names)),
+        Expr::List(elems) => elems.iter().any(|el| expr_uses_name(el, names)),
+        Expr::Binary(_, l, r) => expr_uses_name(l, names) || expr_uses_name(r, names),
+        Expr::Record { fields, .. } => fields.iter().any(|f| expr_uses_name(&f.value, names)),
+        Expr::Cast(inner, _) | Expr::Try(inner) | Expr::Await(inner) | Expr::Spawn(inner) => {
+            expr_uses_name(inner, names)
+        }
+        Expr::Block(stmts) => stmts.iter().any(|s| stmt_uses_name(s, names)),
+        Expr::If {
+            cond, then_, else_, ..
+        } => {
+            expr_uses_name(cond, names)
+                || then_.iter().any(|s| stmt_uses_name(s, names))
+                || else_
+                    .as_ref()
+                    .is_some_and(|es| es.iter().any(|s| stmt_uses_name(s, names)))
+        }
+        _ => false,
+    }
+}
+
+fn stmt_uses_name(s: &Stmt, names: &[String]) -> bool {
+    match s.unlocated() {
+        Stmt::Let {
+            init: Some(e), pat, ..
+        } => expr_uses_name(e, names) || pattern_uses_name(pat, names),
+        Stmt::Assign { target, value } => {
+            expr_uses_name(target, names) || expr_uses_name(value, names)
+        }
+        Stmt::Return(Some(e)) => expr_uses_name(e, names),
+        Stmt::Drop(e) => expr_uses_name(e, names),
+        Stmt::Expr(e) => expr_uses_name(e, names),
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            expr_uses_name(cond, names)
+                || then_.iter().any(|s| stmt_uses_name(s, names))
+                || else_
+                    .as_ref()
+                    .is_some_and(|es| es.iter().any(|s| stmt_uses_name(s, names)))
+        }
+        Stmt::While { cond, body, .. } => {
+            expr_uses_name(cond, names) || body.iter().any(|s| stmt_uses_name(s, names))
+        }
+        Stmt::WhileLet {
+            init, body, pat, ..
+        } => {
+            expr_uses_name(init, names)
+                || pattern_uses_name(pat, names)
+                || body.iter().any(|s| stmt_uses_name(s, names))
+        }
+        Stmt::For {
+            var,
+            iterable,
+            body,
+            ..
+        } => {
+            expr_uses_name(iterable, names)
+                || pattern_uses_name(var, names)
+                || body.iter().any(|s| stmt_uses_name(s, names))
+        }
+        Stmt::Loop(body) => body.iter().any(|s| stmt_uses_name(s, names)),
+        Stmt::Block(block)
+        | Stmt::Arena(block)
+        | Stmt::Unsafe(block)
+        | Stmt::IeeeFloat(block)
+        | Stmt::Parasteps(block)
+        | Stmt::OnFailure(block)
+        | Stmt::Defer(block) => block.iter().any(|s| stmt_uses_name(s, names)),
+        Stmt::Func(f) => f.body.iter().any(|s| stmt_uses_name(s, names)),
+        _ => false,
+    }
+}
+
+/// 名字是否以"整体值"位置出现在表达式里：`return x` / `return (x,)` /
+/// `return [x]` / record 字面量都是整体转移；`x.f` / `x[0]` / `f(x)` 是投影或
+/// 调用实参，不是整体（投影 = 只转移一部分，容器余部静默弃置 → H2 逃逸）。
+/// Cast 同样不算（类型改写，线性值不随类型转换保持）——保守排除。
+fn expr_whole_contains(e: &Expr, name: &str) -> bool {
+    match e.unlocated() {
+        Expr::Ident(n) => n == name,
+        Expr::Tuple(elems) => elems.iter().any(|el| expr_whole_contains(el, name)),
+        Expr::List(elems) => elems.iter().any(|el| expr_whole_contains(el, name)),
+        Expr::Record { fields, .. } => fields.iter().any(|f| expr_whole_contains(&f.value, name)),
+        _ => false,
+    }
+}
+
+fn pattern_uses_name(p: &crate::ast::Pattern, names: &[String]) -> bool {
+    match &p.kind {
+        crate::ast::PatternKind::Variable(n) => names.iter().any(|w| w == n),
+        crate::ast::PatternKind::Tuple(ps) | crate::ast::PatternKind::Array(ps) => {
+            ps.iter().any(|p| pattern_uses_name(p, names))
+        }
+        crate::ast::PatternKind::Constructor(_, ps) => {
+            ps.iter().any(|(_, p)| pattern_uses_name(p, names))
+        }
+        // Slice 带 rest 绑定：保守视为可触及（`[a, ..rest]` rest 可能承载值）。
+        crate::ast::PatternKind::Slice(ps, rest) => {
+            ps.iter().any(|p| pattern_uses_name(p, names))
+                || rest.as_ref().is_some_and(|r| pattern_uses_name(r, names))
+        }
+        _ => false,
+    }
+}
+
+/// 模式绑定的单一标识符（`let q = x` 纯别名只接受 Variable 模式）。
+fn pattern_binds_ident(p: &crate::ast::Pattern) -> Option<String> {
+    match &p.kind {
+        crate::ast::PatternKind::Variable(n) => Some(n.clone()),
+        _ => None,
+    }
+}
+
+// ─── Checker 接口 ─────────────────────────────────────────────────────
+
+impl<'a> Checker<'a> {
+    /// 顶层 `Item::Func` 体查表（stdlib 源也可以命中；找不到 → None，调用方
+    /// 保守 fail-closed）。
+    pub(crate) fn find_func_def_ast(&self, name: &str) -> Option<&'a FuncDef> {
+        self.file.items.iter().find_map(|item| match item {
+            Item::Func(f) if f.name == name => Some(f),
+            Item::Module(m) => m.items.iter().find_map(|inner| match inner {
+                Item::Func(f) if f.name == name => Some(f),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
+    /// 函数 `name` 第 `param_index` 个参数是否位于泛型位置（其类型提及任一
+    /// 泛型参数名）。具体位置恒可信（callee 自身名字级分析追踪），返回 false。
+    fn param_is_generic_position(&self, name: &str, param_index: usize) -> bool {
+        let Some(generic_names) = self.func_generics.get(name) else {
+            return false;
+        };
+        if generic_names.is_empty() {
+            return false;
+        }
+        let Some(param_ty) = self.funcs.get(name).and_then(|(ps, _)| ps.get(param_index)) else {
+            return false;
+        };
+        generic_names.iter().any(|gp| {
+            crate::core::type_folder::type_any(param_ty, &|cand| {
+                matches!(
+                    cand.unlocated(),
+                    crate::ast::Type::Name(n, _) if *n == gp.name
+                )
+            })
+        })
+    }
+
+    /// 泛型函数 `name` 的第 `param_index` 个参数是否线性黑盒健全（见模块头）。
+    /// `allow_drop=false` 时 drop-从句被禁用（transfer-only：SessionChan 及其
+    /// 任意嵌套只能转移，中途 drop = E0425 协议弃置——concrete 语义同款）。
+    /// 记忆化（双模式独立缓存）+ 递归守护；具体（非泛型）参数位置直接判 true。
+    pub(crate) fn generic_linear_blackbox_sound(
+        &mut self,
+        name: &str,
+        param_index: usize,
+        allow_drop: bool,
+    ) -> bool {
+        if !self.param_is_generic_position(name, param_index) {
+            return true;
+        }
+        {
+            let cache = if allow_drop {
+                &self.linear_blackbox_cache
+            } else {
+                &self.linear_blackbox_transfer_cache
+            };
+            if let Some(cached) = cache.get(name) {
+                if let Some(v) = cached.get(param_index) {
+                    return *v;
+                }
+            }
+        }
+        let guard = format!("{name}#{param_index}#{}", if allow_drop { 1 } else { 0 });
+        if !self.linear_blackbox_visiting.insert(guard.clone()) {
+            // 递归闭环 → 无法证明 → fail-closed。
+            return false;
+        }
+        let Some(func) = self.find_func_def_ast(name) else {
+            self.linear_blackbox_visiting.remove(&guard);
+            return false;
+        };
+        let Some(param) = func.params.get(param_index) else {
+            self.linear_blackbox_visiting.remove(&guard);
+            return false;
+        };
+        let ok = linear_blackbox_body(
+            &func.body,
+            std::slice::from_ref(&param.name),
+            allow_drop,
+            self,
+        );
+        self.linear_blackbox_visiting.remove(&guard);
+        let cache = if allow_drop {
+            &mut self.linear_blackbox_cache
+        } else {
+            &mut self.linear_blackbox_transfer_cache
+        };
+        let entry = cache.entry(name.to_string()).or_default();
+        while entry.len() <= param_index {
+            entry.push(false);
+        }
+        entry[param_index] = ok;
+        ok
+    }
+
+    /// 表层类型是否携带 SessionChan（递归容器/元组/Option/Result 等）。
+    /// 会话端点只能转移不能 drop（concrete 面 E0425）→ 泛型直通须走
+    /// transfer-only 模式（allow_drop=false）。
+    pub(crate) fn surface_type_contains_session(&self, ty: &crate::ast::Type) -> bool {
+        match ty.unlocated() {
+            crate::ast::Type::Name(name, args) => {
+                (name == "SessionChan" || name == "session_chan")
+                    || args.iter().any(|a| self.surface_type_contains_session(a))
+            }
+            crate::ast::Type::Option(inner)
+            | crate::ast::Type::CBuffer(inner)
+            | crate::ast::Type::Slice(inner)
+            | crate::ast::Type::Newtype(_, inner) => self.surface_type_contains_session(inner),
+            crate::ast::Type::Array(inner, _) => self.surface_type_contains_session(inner),
+            crate::ast::Type::Result(ok, err) => {
+                self.surface_type_contains_session(ok) || self.surface_type_contains_session(err)
+            }
+            crate::ast::Type::Tuple(items) => items
+                .iter()
+                .any(|item| self.surface_type_contains_session(item)),
+            crate::ast::Type::Located { ty, .. } => self.surface_type_contains_session(ty),
+            _ => false,
+        }
+    }
+}
+
+// ─── 路径敏感流动分析 ─────────────────────────────────────────────────
+
+/// 流动状态：`live` = 仍携带义务的名字；`consumed` = 已转移/已 drop/已被别名
+/// 接管的名字（之后任何再触 = use-after-move → fail-closed——黑盒直通只承认
+/// 纯转移，不承认"转移后复用"的半黑盒）。
+#[derive(Clone, Default)]
+struct FlowState {
+    live: Vec<String>,
+    consumed: Vec<String>,
+}
+
+impl FlowState {
+    fn any_uses(&self, e: &Expr) -> bool {
+        expr_uses_name(e, &self.live) || expr_uses_name(e, &self.consumed)
+    }
+    fn any_uses_stmt(&self, s: &Stmt) -> bool {
+        stmt_uses_name(s, &self.live) || stmt_uses_name(s, &self.consumed)
+    }
+    /// 转移/drop/别名接管 `name`（从 live 移入 consumed）。
+    fn consume(&mut self, name: &str) {
+        self.live.retain(|w| w != name);
+        if !self.consumed.iter().any(|w| w == name) {
+            self.consumed.push(name.to_string());
+        }
+    }
+}
+
+/// 判定函数体在参数 `live_in`（单元素：被检参数名）下线性黑盒健全：每条出口
+/// 路径都转移（或 `allow_drop` 时显式 drop）该名字；任何静默弃值 / 转移后复用
+/// → false。
+pub(crate) fn linear_blackbox_body(
+    stmts: &[Stmt],
+    live_in: &[String],
+    allow_drop: bool,
+    checker: &mut Checker<'_>,
+) -> bool {
+    let start = FlowState {
+        live: live_in.to_vec(),
+        consumed: Vec::new(),
+    };
+    stmts_flow(stmts, start, allow_drop, checker).is_ok_and(|post| post.live.is_empty())
+}
+
+/// 顺序语句流动：`Ok(post_state)` / `Err(())`（某路径静默弃值、转移后复用或
+/// 未覆盖形态）。每条语句的 post-state 是下一条语句的输入。
+fn stmts_flow(
+    stmts: &[Stmt],
+    state_in: FlowState,
+    allow_drop: bool,
+    checker: &mut Checker<'_>,
+) -> Result<FlowState, ()> {
+    let mut state = state_in;
+    for (idx, stmt) in stmts.iter().enumerate() {
+        // 块尾裸表达式 = 返回（`func f<T>(x: T) -> T { x }` 的体是
+        // `[Expr(x)]`，等价 `return x`——正常 checker 同样按尾表达式处理）。
+        // 块尾裸表达式 = 返回（`func f<T>(x: T) -> T { x }` 的体是
+        // `[Expr(x)]`，等价 `return x`——正常 checker 同样按尾表达式处理）。
+        if idx == stmts.len() - 1 {
+            if let Stmt::Expr(e) = stmt.unlocated() {
+                if state
+                    .consumed
+                    .iter()
+                    .any(|n| expr_uses_name(e, std::slice::from_ref(n)))
+                {
+                    return Err(()); // 转移后复用
+                }
+                if let Expr::Call(callee, args) = e.unlocated() {
+                    // 尾部调用链：`{ g(x) }` —— x 经 g 转移；返回值是否带值
+                    // 由 transfer-模式定（调用方按 concrete 类型追踪）。
+                    let mut t = state;
+                    let _ = call_transfer(callee, args, &mut t, allow_drop, checker)?;
+                    if !t.live.is_empty() {
+                        return Err(()); // 有名字未移入调用 → 弃值
+                    }
+                    return Ok(t);
+                }
+                for name in &state.live {
+                    if !expr_whole_contains(e, name) {
+                        return Err(());
+                    }
+                }
+                state.live.clear();
+                return Ok(state);
+            }
+        }
+        state = stmt_flow(stmt, state, allow_drop, checker)?;
+        if state.live.is_empty() {
+            return Ok(state);
+        }
+    }
+    Ok(state)
+}
+
+/// 单语句流动（返回该语句后的状态）。`Err(())` = 该语句形态未覆盖 /
+/// 已构成弃值 / 转移后复用。
+fn stmt_flow(
+    s: &Stmt,
+    state: FlowState,
+    allow_drop: bool,
+    checker: &mut Checker<'_>,
+) -> Result<FlowState, ()> {
+    match s.unlocated() {
+        Stmt::Let {
+            init: Some(e), pat, ..
+        } => {
+            if !state.any_uses(e) {
+                return Ok(state);
+            }
+            if state
+                .consumed
+                .iter()
+                .any(|n| expr_uses_name(e, std::slice::from_ref(n)))
+            {
+                return Err(()); // 转移后复用
+            }
+            // 纯别名：`let q = x`（且 x 在 live 中）→ 义务转移到 q。
+            if let (Some(bound), Expr::Ident(src)) = (pattern_binds_ident(pat), e.unlocated()) {
+                if state.live.iter().any(|w| w == src) {
+                    let mut next = state;
+                    next.consume(src);
+                    next.live.push(bound);
+                    return Ok(next);
+                }
+            }
+            // 调用初始化：`let y = g(x)` —— 移交调用转移逻辑；返回值是否携带
+            // 线性值由接收者 transfer-模式判定（调体每条路径 return 该参数）。
+            if let Expr::Call(callee, args) = e.unlocated() {
+                let mut next = state;
+                let returns_value = call_transfer(callee, args, &mut next, allow_drop, checker)?;
+                if returns_value {
+                    if let Some(bound) = pattern_binds_ident(pat) {
+                        next.live.push(bound); // y 承载转移出的值
+                    } else {
+                        return Err(()); // 结构化解构返回值 = 消费形状 → 切片 2
+                    }
+                }
+                return Ok(next);
+            }
+            // 其他表达式包含 live 名字（`let q = x + 1` 等）→ fail-closed。
+            Err(())
+        }
+        Stmt::Assign { target, value } => {
+            if state.any_uses(target) || state.any_uses(value) {
+                Err(()) // 赋值改写旧值 / 结构化移动 / 转移后复用 → fail-closed
+            } else {
+                Ok(state)
+            }
+        }
+        Stmt::Return(Some(e)) => {
+            if state
+                .consumed
+                .iter()
+                .any(|n| expr_uses_name(e, std::slice::from_ref(n)))
+            {
+                return Err(()); // 转移后复用
+            }
+            if let Expr::Call(callee, args) = e.unlocated() {
+                // 返回调用链：`return g(x)` —— x 经 g 转移（g 黑盒健全）。
+                let mut t = state;
+                let _ = call_transfer(callee, args, &mut t, allow_drop, checker)?;
+                if !t.live.is_empty() {
+                    return Err(()); // 有名字未移入调用 → 弃值
+                }
+                return Ok(t);
+            }
+            for name in &state.live {
+                if !expr_whole_contains(e, name) {
+                    return Err(());
+                }
+            }
+            let mut next = state;
+            next.live.clear(); // 路径终止：所有 live 名字已作为整体随返回值转移
+            Ok(next)
+        }
+        Stmt::Return(None) => {
+            if state.live.is_empty() {
+                Ok(state)
+            } else {
+                Err(()) // 隐式返回值不含任何 live 名字 → 弃值
+            }
+        }
+        Stmt::Drop(e) => {
+            if state
+                .consumed
+                .iter()
+                .any(|n| expr_uses_name(e, std::slice::from_ref(n)))
+            {
+                return Err(()); // 重复 drop / 转移后 drop
+            }
+            let touched: Vec<String> = state
+                .live
+                .iter()
+                .filter(|n| expr_uses_name(e, std::slice::from_ref(n)))
+                .cloned()
+                .collect();
+            if !touched.is_empty() && !allow_drop {
+                return Err(()); // transfer-only：值只许转移，drop = 协议弃置
+            }
+            // 非整体触碰（drop(xs[0]) 只释放一个元素，余部弃置）→ fail-closed。
+            if state
+                .live
+                .iter()
+                .any(|n| expr_uses_name(e, std::slice::from_ref(n)) && !expr_whole_contains(e, n))
+            {
+                return Err(());
+            }
+            let mut next = state;
+            for n in touched {
+                next.consume(&n);
+            }
+            Ok(next)
+        }
+        Stmt::Expr(e) => expr_flow(e, state, allow_drop, checker),
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            if state.any_uses(cond) {
+                return Err(()); // 线性值进条件 = 读取 / 复用 → fail-closed
+            }
+            let then_post = stmts_flow(then_, state.clone(), allow_drop, checker)?;
+            let else_post = match else_ {
+                Some(es) => stmts_flow(es, state.clone(), allow_drop, checker)?,
+                None => state.clone(), // 无 else：恒等分支
+            };
+            // join：每个名字在 then/else 后的存活状态必须一致；每个被消费名
+            // 的消费位置同样必须一致（单分支消费 = 路径依赖 → fail-closed）。
+            let mut post = FlowState::default();
+            for n in &state.live {
+                let alive_then = then_post.live.iter().any(|w| w == n);
+                let alive_else = else_post.live.iter().any(|w| w == n);
+                if alive_then != alive_else {
+                    return Err(()); // 路径依赖存活 → 延续无法静态证明 → fail-closed
+                }
+                let consumed_then = then_post.consumed.iter().any(|w| w == n);
+                let consumed_else = else_post.consumed.iter().any(|w| w == n);
+                if alive_then && (consumed_then || consumed_else) {
+                    // 同分支既消费又存活不可能（consume 移出 live）——防御。
+                    return Err(());
+                }
+                if alive_then {
+                    post.live.push(n.clone());
+                } else {
+                    post.consume(n);
+                }
+            }
+            // 分支内消费的既有消费集（不以 live 起始的名字不可能被消费）。
+            for n in &state.consumed {
+                let c_then = then_post.consumed.iter().any(|w| w == n);
+                let c_else = else_post.consumed.iter().any(|w| w == n);
+                if c_then != c_else {
+                    return Err(()); // 消费路径不一致 → 延续复用无法证明 → fail-closed
+                }
+                if c_then {
+                    post.consume(n);
+                }
+            }
+            Ok(post)
+        }
+        Stmt::While { .. } | Stmt::WhileLet { .. } | Stmt::Loop(_) | Stmt::For { .. } => {
+            if state.any_uses_stmt(s) {
+                Err(()) // 循环 0 次迭代 + 路径敏感消费不可证 → fail-closed
+            } else {
+                Ok(state)
+            }
+        }
+        Stmt::Block(block)
+        | Stmt::Arena(block)
+        | Stmt::Unsafe(block)
+        | Stmt::IeeeFloat(block)
+        | Stmt::Parasteps(block)
+        | Stmt::OnFailure(block)
+        | Stmt::Defer(block) => stmts_flow(block, state, allow_drop, checker),
+        Stmt::Func(_) => Ok(state),
+        _ => Ok(state),
+    }
+}
+
+/// 表达式级流动：非调用表达式触碰 live/consumed → fail-closed；调用移交
+/// `call_transfer`。
+fn expr_flow(
+    e: &Expr,
+    state: FlowState,
+    allow_drop: bool,
+    checker: &mut Checker<'_>,
+) -> Result<FlowState, ()> {
+    let Expr::Call(callee, args) = e.unlocated() else {
+        if state.any_uses(e) {
+            return Err(());
+        }
+        return Ok(state);
+    };
+    let mut next = state;
+    let _ = call_transfer(callee, args, &mut next, allow_drop, checker)?;
+    Ok(next)
+}
+
+/// 调用 = 向"线性安全接收者"转移。返回 `Ok(true)` 当返回值携带被转移的值
+/// （接收者 transfer-模式：调体每条路径 return 该参数）。
+fn call_transfer(
+    callee: &Expr,
+    args: &[Expr],
+    state: &mut FlowState,
+    allow_drop: bool,
+    checker: &mut Checker<'_>,
+) -> Result<bool, ()> {
+    if !expr_uses_name(callee, &state.live)
+        && !args
+            .iter()
+            .any(|a| state.live.iter().any(|n| expr_whole_contains(a, n)))
+        && !state.consumed.iter().any(|n| {
+            expr_uses_name(callee, std::slice::from_ref(n))
+                || args
+                    .iter()
+                    .any(|a| expr_uses_name(a, std::slice::from_ref(n)))
+        })
+    {
+        return Ok(false);
+    }
+    // 已消费名字出现在本次调用（转移后复用）→ fail-closed（在转移处理
+    // 之前检查：本调用即将消费的名字不算复用）。
+    for n in &state.consumed {
+        if expr_uses_name(callee, std::slice::from_ref(n))
+            || args
+                .iter()
+                .any(|a| expr_uses_name(a, std::slice::from_ref(n)))
+        {
+            return Err(());
+        }
+    }
+    // 接收者必须是已声明函数（非 builtin / 非方法链）。
+    let Expr::Ident(callee_name) = callee.unlocated() else {
+        return Err(());
+    };
+    if crate::core::builtins::is_builtin_callable(callee_name) {
+        return Err(()); // builtin 非线性感知 → fail-closed
+    }
+    let Some(param_tys) = checker.funcs.get(callee_name).cloned() else {
+        return Err(());
+    };
+    // 每个 live 名字必须作为实参移入可信接收者：
+    //   - 具体参数位置：callee 自身名字级分析全权追踪 → 恒可信（但返回值
+    //     是否携带无法确证 → 保守不算 transfer-out）；
+    //   - 泛型参数位置：递归黑盒判定（记忆化 + 递归守护）。
+    let mut returns_value = false;
+    for n in state.live.clone() {
+        let Some((arg_index, _)) = args
+            .iter()
+            .enumerate()
+            .find(|(_, a)| expr_whole_contains(a, &n))
+        else {
+            if expr_uses_name(callee, std::slice::from_ref(&n)) {
+                return Err(());
+            }
+            return Err(()); // 未移入任何实参 → 弃值
+        };
+        // 该名字出现在多个实参里（重复借用/多重转移）→ fail-closed。
+        let occurrences = args.iter().filter(|a| expr_whole_contains(a, &n)).count();
+        if occurrences > 1 {
+            return Err(());
+        }
+        if param_tys.0.get(arg_index).is_none() {
+            return Err(());
+        }
+        let transfer_out = if checker.param_is_generic_position(callee_name, arg_index) {
+            if !checker.generic_linear_blackbox_sound(callee_name, arg_index, allow_drop) {
+                return Err(());
+            }
+            // transfer-模式（return-only）独立判定：调体每条路径 return 该参数
+            // → 返回值携带该值；否则（drop 路径）返回值不视为携带（保守，
+            // 调用方按 concrete 类型照常追踪 y 的线性义务）。
+            checker.generic_linear_blackbox_sound(callee_name, arg_index, false)
+        } else {
+            false // 具体位置：无法确证返回值携带 → 保守
+        };
+        if transfer_out {
+            returns_value = true;
+        }
+        state.consume(&n);
+    }
+    Ok(returns_value)
+}

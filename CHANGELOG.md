@@ -7,6 +7,35 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.39 — 泛型×线性单态化切片 1：线性黑盒直通（E0432 边界首开，L1/L2）
+
+- **背景**：路线图 Phase C「泛型×线性单态化」首付。§2.3（0.34.21）以来线性值
+  （cap/SessionChan/Flow state/含线性元素容器）全量 E0432 拒绝——泛型参数
+  `is_linear() == false`，线性值流经泛型调用会逃逸 exactly-once。0.36.36-38
+  已把"名字级"追踪做实（call-site 具体类型驱动：实参按具体类型移动、返回绑定
+  按实例化类型追踪），唯一缺口 = 调体可能静默弃值。本切打开唯一可无损证明
+  健全的面：**线性黑盒调体**——对 T 的线性性零依赖（每条路径整体转移或显式
+  drop，绝不静默丢弃、绝不投影/析构/读入条件循环/转移后复用）→ 放行；
+  其余形态维持 E0432（fail-closed 地板）。
+- **机制**（`src/core/checker/linear_blackbox.rs`）：路径敏感流动分析——
+  `FlowState { live, consumed }`；整体值位置判定 `expr_whole_contains`
+  （`return x`/`(x,)`/`[x]`/record 字面量 = 整体；`xs[0]`/`x.f`/调用实参 =
+  投影，H2 元素弃置逃逸不因本切打开）；可信接收者链递归判定（记忆化 +
+  递归守护，闭环 fail-closed）；`let y = g(x)` 链式转移按接收者 transfer-模式
+  判定返回值是否携带。**SessionChan（含任意嵌套）transfer-only**：transfer-
+  模式禁 drop 从句（concrete 面 drop 未完成协议 = E0425 同款禁令）——
+  `dropit<T> { drop(x) }` 接受 cap 实例化、拒绝 SessionChan 实例化。
+- **切入门**：infer 全局调用（simple.rs）+ turbofish 实例化（method.rs）两处
+  E0432 站点按参数黑盒健全性决定豁免；closure 臂维持 E0432（切片 2）。
+- **迁移注记**：无语法 breaking；语义面从"泛型调用一律拒绝线性实参"收窄为
+  "拒绝黑盒不健全的调体"（负例仍全量 E0432；E0432 消息补充
+  "pass-through/drop-only generic body" 提示）。
+- **回归**：负例 9 项（cap discard / container projection / wildcard discard /
+  single-branch abandon / reuse-after-transfer / session drop / missing-drop
+  E0256 保持 / turbofish-swallow）+ 正例 5 项三 harness（cap/container-whole/
+  branch/session-transfer roundtrip、turbofish pass-through）。全量 5390 绿；
+  real_world 70/70（69 build+exec，flow_test_macros SKIP 为既有 VM-only 面）。
+
 ### 0.36.38 — session_pair::<S>() 类型化对端：双端残差全闭环（L1/L2）
 
 - **背景**：§4d 候选取 (A) 落地。0.36.32-34 的 `session_open::<S>()` 只建造

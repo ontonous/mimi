@@ -61,6 +61,18 @@ pub(crate) struct Checker<'a> {
     /// Populated in `collect_item_decls` (0.34.19 CHECKER-GAP: capability
     /// aliases were declared but never resolved as values).
     pub(crate) cap_components: HashMap<String, Vec<String>>,
+    /// 0.36.39 (泛型×线性单态化切片 1): 线性黑盒直通判定的记忆化缓存
+    /// (func name → per-param soundness)，双模式：
+    ///   `linear_blackbox_cache` = drop-宽容（cap/flow state/其容器：drop 即
+    ///   释放，算合法消费）;
+    ///   `linear_blackbox_transfer_cache` = transfer-only（SessionChan 及其
+    ///   任意嵌套：中途 drop = E0425 协议弃置，只许转移/显式完成）。
+    /// 命中 true → 该调用点可放行线性实参（调体对 T 的线性性零依赖）；false →
+    /// 维持 E0432。
+    pub(crate) linear_blackbox_cache: HashMap<String, Vec<bool>>,
+    pub(crate) linear_blackbox_transfer_cache: HashMap<String, Vec<bool>>,
+    /// 递归守护：黑盒判定沿"可信接收者"链递归，闭环 → fail-closed。
+    pub(crate) linear_blackbox_visiting: HashSet<String>,
     /// Strict mode: enforce $$ lock semantics
     pub(crate) strict: bool,
     /// Track variable scopes for shadowing detection
@@ -279,6 +291,9 @@ impl<'a> Checker<'a> {
             declared_caps: HashSet::new(),
             declared_flows: HashSet::new(),
             cap_components: HashMap::new(),
+            linear_blackbox_cache: HashMap::new(),
+            linear_blackbox_transfer_cache: HashMap::new(),
+            linear_blackbox_visiting: HashSet::new(),
             strict: false,
             var_scopes: vec![HashMap::new()],
             mut_vars: vec![HashMap::new()],
@@ -1071,6 +1086,7 @@ pub(crate) mod flow;
 mod func;
 mod generics;
 mod items;
+mod linear_blackbox;
 mod pattern;
 mod types;
 mod vars;

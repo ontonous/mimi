@@ -3186,6 +3186,323 @@ fn dual_generic_turbofish_explicit() {
     );
 }
 
+// ─── 0.36.39 — 泛型×线性单态化切片 1（线性黑盒直通）──────────────
+// Generic parameters keep `is_linear() = false` (GenericParameter), so a
+// bare linear arg flowing through a generic call can still escape exactly-
+// once — the blanket E0432 rejection (§2.3 / H2 audit) stays as the
+// fail-closed floor. 0.36.39 opens the one face that is provably sound
+// WITHOUT per-instantiation analysis: a **linear black-box** callee — its
+// body has ZERO dependence on T's linearity. Every path either transfers
+// the parameter out (returned as a whole value — bare ident/literal
+// containment — or moved into a trusted receiver that is itself black-box
+// sound) or explicitly drops it (drop-tolerant linear types only). It is
+// never silently abandoned, never projected (`xs[0]`), never destructured,
+// never read, never reused after transfer. Sound because the caller-side
+// analysis tracks the ARGUMENT and RETURN concrete types at the call site
+// (call-site instantiation — verified in 0.36.38): `let d = pass_through(c)`
+// still requires `drop(d)` (E0256), and the callee made no T-dependent
+// consumption decisions.
+//
+// SessionChan — and any type nesting a SessionChan (List<SessionChan<S>>,
+// Result<.., SessionChan<S>>, …) — is **transfer-only**: drop inside the
+// generic body = E0425 protocol abandonment (same contract as the concrete
+// face, probe-verified 0.36.39), so `dropit<T>(x: T) { drop(x) }` accepts a
+// cap instantiation but must reject a SessionChan one.
+//
+// Everything outside the black-box face keeps E0432 fail-closed: discard
+// (`swallow`), container projection (`first<T>` = `xs[0]`), wildcard
+// discard (`let _ = y`), single-branch abandon, reuse-after-transfer.
+// Full per-instantiation element-level analysis (slice 2) is deferred.
+
+#[test]
+fn dual_generic_linear_cap_pass_through_ok() {
+    // L1+L2: pass_through («linear black box») is now legal for cap args —
+    // caller-side concrete tracking still enforces exactly-once (see
+    // dual_generic_linear_cap_missing_drop_rejected).
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func pass_through<T>(x: T) -> T { x }
+func main() -> i32 {
+    let c = FileReadCap
+    let d = pass_through(c)
+    drop(d)
+    println(42)
+    0
+}
+"#;
+    let expected = "42";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen pass-through");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) cap pass-through"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen pass-through");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) cap pass-through");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm cap pass-through");
+}
+
+#[test]
+fn dual_generic_linear_cap_missing_drop_rejected() {
+    // L2: the opened face does NOT relax caller-side exactly-once — the
+    // instantiated return binding `d` is still linear and must be consumed.
+    let diags = check_source(
+        "cap FileReadCap; func pass_through<T>(x: T) -> T { x }          func main() -> i32 { let c = FileReadCap; let d = pass_through(c); println(1); 0 }",
+    )
+    .expect_err("pass-through return binding must still be consumed (E0256)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256"),
+        "expected E0256 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_discard_rejected() {
+    // L2: a body that silently discards the parameter is NOT a black box —
+    // the cap would be abandoned inside the generic callee (E0432 stays).
+    let diags = check_source(
+        "cap FileReadCap; func swallow<T>(x: T) -> i32 { 1 }          func main() -> i32 { let c = FileReadCap; swallow(c); 0 }",
+    )
+    .expect_err("silent discard inside generic callee must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_container_whole_transfer_ok() {
+    // L1+L2: a container of linear elements can cross the generic boundary
+    // when it is transferred whole; element consumption then happens in
+    // CONCRETE context (the 0.36.36-37 for-loop) on the caller side.
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func id_list<T>(v: List<T>) -> List<T> { v }
+func sink(c: cap FileReadCap) -> i32 { drop(c); 5 }
+func main() -> i32 {
+    let l = [FileReadCap, FileReadCap]
+    let l2 = id_list(l)
+    let mut t = 0
+    for c in l2 { t = t + sink(c) }
+    println(t)
+    0
+}
+"#;
+    let expected = "10";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen container transfer");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) container transfer"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen container transfer");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) container transfer");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm container transfer");
+}
+
+#[test]
+fn dual_generic_linear_container_projection_rejected() {
+    // H2 (audit-type 2026-08-03) stays: `first<T>(xs: List<T>) { xs[0] }`
+    // PROJECTS one element out of the container — the remaining elements are
+    // silently discarded inside the generic callee. Projection is not a
+    // whole-value transfer → E0432.
+    let diags = check_source(
+        "cap FileReadCap; func first<T>(xs: List<T>) -> T { xs[0] }          func main() -> i32 { let l = [FileReadCap]; let c = first(l); drop(c); 0 }",
+    )
+    .expect_err("container projection inside generic callee must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_branch_transfer_ok() {
+    // L1+L2: every path transfers the value — branch-symmetric echo.
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func f<T>(b: bool, x: T) -> T { if b { return x } else { return x } }
+func main() -> i32 {
+    let c = FileReadCap
+    let d = f(true, c)
+    drop(d)
+    println(7)
+    0
+}
+"#;
+    let expected = "7";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen branch transfer");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) branch transfer"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen branch transfer");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) branch transfer");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm branch transfer");
+}
+
+#[test]
+fn dual_generic_linear_branch_abandon_rejected() {
+    // L2: one branch abandons the value (drops it only in the other) —
+    // path-dependent presence → E0432.
+    let diags = check_source(
+        "cap FileReadCap; func f<T>(b: bool, x: T) -> i32 { if b { drop(x); 0 } else { 0 } }          func main() -> i32 { let c = FileReadCap; let r = f(true, c); println(r); 0 }",
+    )
+    .expect_err("single-branch consumption must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_reuse_after_transfer_rejected() {
+    // L2: `g(x)` transfers x into a trusted receiver; a later `drop(x)` is
+    // use-after-move inside the generic body (never visible to the
+    // name-level analysis because T is non-linear) → E0432.
+    let diags = check_source(
+        "cap FileReadCap; func g<T>(u: T) -> T { u }          func f<T>(x: T) -> i32 { let y = g(x); drop(x); 0 }          func main() -> i32 { let c = FileReadCap; let r = f(c); println(r); 0 }",
+    )
+    .expect_err("reuse-after-transfer inside generic callee must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_session_transfer_ok() {
+    // L1+L2: SessionChan flows through a black-box generic transfer AND the
+    // protocol is completed on both endpoints — the previously-rejected
+    // (0.34.21 E0432) pattern is legal under the whole-value transfer face.
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Echo = !i32 . ?i32 . end
+func pass_through<T>(x: T) -> T { x }
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<Echo>()
+    let d = pass_through(ch0)
+    session_send(d, 42)
+    let n = session_recv(ch1)
+    session_send(ch1, n * 2)
+    let r = session_recv(d)
+    session_close(d)
+    session_close(ch1)
+    println(n)
+    println(r)
+    0
+}
+"#;
+    let expected = "42\n84";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session transfer");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) session transfer"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen session transfer");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) session transfer");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm session transfer");
+}
+
+#[test]
+fn dual_generic_linear_session_drop_rejected() {
+    // L2: SessionChan is transfer-only — `dropit<T> { drop(x) }` accepts a
+    // cap instantiation but a SESSION instantiation would abandon the
+    // protocol (E0425 on the concrete face) → E0432 (transfer-only mode).
+    let diags = check_source(
+        "session S = !i32 . ?i32 . end; func dropit<T>(x: T) -> i32 { drop(x); 42 }          func main() -> i32 { let (ch0, ch1) = session_pair::<S>(); let r = dropit(ch0);          let n = session_recv(ch1); session_send(ch1, n + 1); session_close(ch1); println(r); 0 }",
+    )
+    .expect_err("SessionChan drop inside generic callee must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_cap_pass_through_turbofish_ok() {
+    // L1+L2: the explicit turbofish instantiation honors the same black-box
+    // exemption (the C2 audit site).
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func pass_through<T>(x: T) -> T { x }
+func main() -> i32 {
+    let c = FileReadCap
+    let d = pass_through::<cap FileReadCap>(c)
+    drop(d)
+    println(9)
+    0
+}
+"#;
+    let expected = "9";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen turbofish pass-through");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) turbofish pass-through"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen turbofish pass-through");
+    assert_eq!(
+        unga.trim(),
+        expected,
+        "legacy(codegen) turbofish pass-through"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
+}
+
 // ─── 0.34.21 — 泛型 × 线性边界（§2.3 裁决）────────────────────
 // Generic parameters are not linearly tracked (GenericParameter
 // is_linear() = false). Linear capabilities (Cap/SessionChan/Flow state)
@@ -3200,26 +3517,6 @@ fn dual_generic_turbofish_explicit() {
 // be consumed whole (drop/move/return); per-element consumption via
 // match/for remains an analysis gap (fail-closed E0256, not a silent
 // leak).
-
-#[test]
-fn dual_generic_linear_cap_rejected() {
-    // E0432: a Cap value passed into a generic call would escape
-    // exactly-once enforcement. This is a hard L2 contract.
-    let diags = check_source(
-        "cap FileReadCap; func pass_through<T>(x: T) -> T { x } \
-         func main() -> i32 { let c = FileReadCap; let d = pass_through(c); drop(d); println(42); 0 }",
-    )
-    .expect_err("cap as generic argument must be rejected (E0432)");
-    let rendered = diags
-        .iter()
-        .map(|d| format!("{}", d))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        rendered.contains("E0432"),
-        "expected E0432 diagnostic, got:\n{rendered}"
-    );
-}
 
 // ============================================================
 // 0.36.19 (Phase C Session lowering 挣绿面): complex-residual dual
@@ -4285,27 +4582,6 @@ fn dual_linear_container_index_read_rejected() {
     assert!(
         check_source("func main() -> i32 { let t = (1, 2); println(t.0); 0 }").is_ok(),
         "non-linear tuple field access must stay legal"
-    );
-}
-
-#[test]
-fn dual_generic_linear_session_rejected() {
-    // E0432: same contract for SessionChan endpoints.
-    let diags = check_source(
-        "session S = !i32 . ?i32 . end \
-         func pass_through<T>(x: T) -> T { x } \
-         func client(ch: SessionChan<S>) -> i32 { let d = pass_through(ch); session_close(d); 0 } \
-         func main() -> i32 { 0 }",
-    )
-    .expect_err("SessionChan as generic argument must be rejected (E0432)");
-    let rendered = diags
-        .iter()
-        .map(|d| format!("{}", d))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        rendered.contains("E0432"),
-        "expected E0432 diagnostic, got:\n{rendered}"
     );
 }
 
