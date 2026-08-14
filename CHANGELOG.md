@@ -23,6 +23,16 @@
   8 ignored（含 0.36.24 gap 登记）；fmt + clippy + docs + edge 全绿。
 - 元素消费缺口（match/for/index/slice/字面量索引/元组字段）全 family fail-closed。
 
+### 0.36.30 — 元素级消费现状矩阵（Phase C 设计输入，文档轮）
+
+- **实测钉住**（phase-c §4g）：for 元素消费（m1，E0304+）、match Some 消费
+  （m2，E0256 容器义务未识别）均为**已登记 fail-closed**（无新漏网）；受准面
+  = cap split（0.36.20）+ **记录/元组解构**（m4：`let (c, n) = unpack(p)` 含
+  cap 字段，check ✓）——解构面补双后端 harness 断言排 0.36.31。
+- **设计输入**：Phase C 单态化窗口"总元素消费满足容器义务"两候选（按元素记账
+  vs 现状文档化受准面）登记；E0256 消息面扩改待窗口。
+- 探针侧记：m3 的 fail() 非发散（None 臂类型不合）——非语言缺陷。
+
 ### 0.36.29 — guard 统一机制定案（方案 B）+ SessionChan 死面证据链闭合（文档轮）
 
 - **guard 定案（phase-d §3）**：保留双关键字 `defer { }` / `on failure { }`
