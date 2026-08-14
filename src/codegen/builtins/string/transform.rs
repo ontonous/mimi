@@ -309,14 +309,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // clamping). Runtime helper `mimi_str_substring_clamp(ptr,len,start,end)`
         // (src/runtime/mod.rs:2022, audit-wave1) implements exactly this.
         //
-        // TODO(#audit-wave2): the `.substring()` METHOD form is strict in the
-        // VM (builtin_substring_method), but codegen's method dispatch
-        // funnels it into this same builtin via string_method_to_builtin
-        // (expr/call/method.rs:6498) — those dispatch files are outside this
-        // fix's ownership, so the method-form corner currently picks up
-        // clamping too (std::strings' trait wrapper already does: it calls
-        // str_substring, std/strings.mimi:41). Splitting the two forms needs
-        // a dispatch-name or pending-flag change in method.rs/builtins/mod.rs.
+        // The `.substring()` METHOD form is STRICT in both the VM and codegen:
+        // method.rs routes it to `str_substring_strict` (2026-08-06, D-5),
+        // whose emitter calls `mimi_str_substring` instead of this clamp path.
         let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(&args[0], "str_substring")?;
         let sub_fn = self.get_or_declare_ptr_len_str_fn("mimi_str_substring_clamp", 2)?;
         let raw_result = self

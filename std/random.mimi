@@ -28,10 +28,12 @@ trait RandomChoice<T> {
 }
 
 // RandomChoice implementation for built-in List<T> type.
-// Note: the remove-at loop is inlined into both methods below — the std
-// module loader only carries `pub` items across `use std::random`, so a
-// module-private helper is invisible to consumers (E0401) while carried
-// bodies that call it are not.
+// The remove-at logic lives in the pub free helper `random_remove_ith`
+// below: the std module loader only carries `pub` items across
+// `use std::random`, so a module-private helper would be invisible to
+// consumers (E0401) while carried bodies that call it are not. Keeping the
+// loop in a free generic function is also required by native codegen (see
+// the helper comment for the stack-alloca aliasing note).
 impl<T> RandomChoice<T> for List<T> {
     func random_choice() -> Result<T, string> {
         let l = len(self)
@@ -49,13 +51,7 @@ impl<T> RandomChoice<T> for List<T> {
         while rs_k < n && rs_k < rs_len {
             let rs_idx = to_int(floor(random() * to_float(len(rs_remaining))))
             push(rs_result, rs_remaining[rs_idx])
-            let mut rs_kept: List<T> = []
-            let mut rs_i: i32 = 0
-            while rs_i < len(rs_remaining) {
-                if rs_i != rs_idx { push(rs_kept, rs_remaining[rs_i]) }
-                rs_i = rs_i + 1
-            }
-            rs_remaining = rs_kept
+            rs_remaining = random_remove_ith(rs_remaining, rs_idx)
             rs_k = rs_k + 1
         }
         rs_result
@@ -66,16 +62,27 @@ impl<T> RandomChoice<T> for List<T> {
         while len(sh_rest) > 0 {
             let sh_idx = to_int(floor(random() * to_float(len(sh_rest))))
             push(sh_res, sh_rest[sh_idx])
-            let mut sh_kept: List<T> = []
-            let mut sh_i: i32 = 0
-            while sh_i < len(sh_rest) {
-                if sh_i != sh_idx { push(sh_kept, sh_rest[sh_i]) }
-                sh_i = sh_i + 1
-            }
-            sh_rest = sh_kept
+            sh_rest = random_remove_ith(sh_rest, sh_idx)
         }
         sh_res
     }
+}
+
+// random_remove_ith: Returns a new list with the i-th element removed.
+// It is a pub free helper so it survives the std module loader's pub-only
+// merge (private helpers are invisible to consumers). Keeping the remove-at
+// loop in a free generic function also avoids the codegen stack-alloca
+// aliasing bug seen when the loop is inlined directly inside generic impl
+// methods (shuffle/random_sample previously corrupted sh_rest by reusing the
+// same list alloca for the next sh_kept).
+pub func random_remove_ith<T>(xs: List<T>, i: i32) -> List<T> {
+    let mut kept: List<T> = []
+    let mut k: i32 = 0
+    while k < len(xs) {
+        if k != i { push(kept, xs[k]) }
+        k = k + 1
+    }
+    kept
 }
 
 // random_choice: Returns a random element from xs, or Err if xs is empty.

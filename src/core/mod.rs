@@ -61,13 +61,43 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 }
 
 pub fn check_program(file: &File) -> Result<CheckedProgram, Vec<Diagnostic>> {
-    let acc = checker::flow::flow_check_with_artifacts(file)?;
-    CheckedProgram::from_flow_acc(file, acc)
+    let acc = checker::flow::flow_check_with_artifacts(file).map_err(|mut errors| {
+        sort_diagnostics(&mut errors);
+        errors
+    })?;
+    CheckedProgram::from_flow_acc(file, acc).map_err(|mut errors| {
+        sort_diagnostics(&mut errors);
+        errors
+    })
 }
 
 pub fn check_program_strict(file: &File) -> Result<CheckedProgram, Vec<Diagnostic>> {
-    let acc = checker::flow::flow_check_strict_with_artifacts(file)?;
-    CheckedProgram::from_flow_acc(file, acc)
+    let acc = checker::flow::flow_check_strict_with_artifacts(file).map_err(|mut errors| {
+        sort_diagnostics(&mut errors);
+        errors
+    })?;
+    CheckedProgram::from_flow_acc(file, acc).map_err(|mut errors| {
+        sort_diagnostics(&mut errors);
+        errors
+    })
+}
+
+/// Stable diagnostic order for all `check_program` entry points.
+///
+/// The resolved IR pipeline uses `HashMap` catalogs internally; without a
+/// final sort the same invalid program can surface diagnostics in different
+/// orders across runs. Sort by source position first, then message/code, to
+/// keep CLI and test output deterministic while preserving conventional
+/// source-order reporting.
+fn sort_diagnostics(errors: &mut Vec<Diagnostic>) {
+    errors.sort_by(|a, b| {
+        a.span
+            .start_line
+            .cmp(&b.span.start_line)
+            .then(a.span.start_col.cmp(&b.span.start_col))
+            .then(a.message.cmp(&b.message))
+            .then(a.code.cmp(&b.code))
+    });
 }
 
 /// Verify that MMS rule attachments are consistent.

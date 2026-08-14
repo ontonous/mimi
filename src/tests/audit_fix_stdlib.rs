@@ -13,8 +13,9 @@
 //! all-VM-only tests are exactly how the net `Ok(dangling string)` codegen
 //! bug shipped — the broken backend had no watching test. Every test added
 //! or updated in Wave-2 carries a `compile_and_run`-side (native codegen)
-//! assertion where the stdlib surface is exercisable there; legacy VM-only
-//! tests are tagged TODO(#audit-wave2-codegen-side) until converted.
+//! assertion where the stdlib surface is exercisable there; the remaining
+//! legacy VM-only cases are either covered by an explicit dual companion
+//! elsewhere in this file or blocked by a documented root-cause entry.
 use super::*;
 
 /// Read a std module source file (same resolution as `run_with_stdlib`).
@@ -36,8 +37,6 @@ fn audit2_compile_and_run_with_stdlib(stdlib_name: &str, src: &str) -> Result<St
 
 // ===== mymath.mimi — fix 1: gcd abs-normalizes, lcm overflow-safe + abs =====
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_gcd_abs_normalized() {
     // gcd used to return a negative value when either argument was negative
@@ -57,10 +56,22 @@ func main() -> i32 {
         run_with_stdlib("mymath.mimi", src),
         interp::Value::Int(2419)
     );
+
+    let cg_src = r#"
+func main() -> i32 {
+    let a = gcd(4, -2)
+    let b = gcd(-12, 8)
+    let c = gcd(-17, -5)
+    let d = gcd(0, -9)
+    println(a * 1000 + b * 100 + c * 10 + d)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen gcd_abs scenario failed: {}", e));
+    assert_eq!(out.trim(), "2419", "codegen must match normalized gcd");
 }
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_lcm_overflow_safe_and_abs() {
     // lcm(65536, 65536) overflowed i32 via the naive a*b/gcd form even
@@ -81,12 +92,25 @@ func main() -> i32 {
         run_with_stdlib("mymath.mimi", src),
         interp::Value::Int(65585)
     );
+
+    let cg_src = r#"
+func main() -> i32 {
+    let a = lcm(65536, 65536)
+    let b = lcm(2, -4)
+    let c = lcm(-6, 8)
+    let d = lcm(0, 5)
+    let e = lcm(-3, -7)
+    println(a + b + c + d + e)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen lcm scenario failed: {}", e));
+    assert_eq!(out.trim(), "65585", "codegen must match safe lcm");
 }
 
 // ===== mymath.mimi — fix 2: free factorial gains the n>12 overflow guard ====
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_factorial_free_overflow_guard() {
     // The IntMath method caps at 12! and returns -1; the free function had
@@ -106,12 +130,29 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Int(4));
+
+    let cg_src = r#"
+func main() -> i32 {
+    let a = factorial(5)
+    let b = factorial(12)
+    let c = factorial(13)
+    let d = factorial(-1)
+    let mut ok = 0
+    if a == 120 { ok = ok + 1 }
+    if b == 479001600 { ok = ok + 1 }
+    if c == -1 { ok = ok + 1 }
+    if d == -1 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen factorial guard failed: {}", e));
+    assert_eq!(out.trim(), "4", "codegen must match factorial guards");
 }
 
 // ===== mymath.mimi — fix 3: try_pow_int overflow bounds for negative bases ==
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_try_pow_int_negative_base_edges() {
     // Old check `result < MIN / base` for base < 0 was inverted: it rejected
@@ -143,12 +184,39 @@ func main() -> i32 {
         run_with_stdlib("mymath.mimi", src),
         interp::Value::Int(1111111)
     );
+
+    let cg_src = r#"
+func main() -> i32 {
+    let mut score = 0
+    let r1 = match try_pow_int(-2, 3) { Ok(v) => v, Err(_) => 999999 }
+    if r1 == -8 { score = score + 1 }
+    let r2 = match try_pow_int(-2, 31) { Ok(v) => v, Err(_) => 999999 }
+    if r2 == -2147483648 { score = score + 10 }
+    let r3 = match try_pow_int(-2, 32) { Ok(_) => 999999, Err(_) => -1 }
+    if r3 == -1 { score = score + 100 }
+    let r4 = match try_pow_int(2, 30) { Ok(v) => v, Err(_) => 999999 }
+    if r4 == 1073741824 { score = score + 1000 }
+    let r5 = match try_pow_int(7, 11) { Ok(v) => v, Err(_) => 999999 }
+    if r5 == 1977326743 { score = score + 10000 }
+    let r6 = match try_pow_int(7, 12) { Ok(_) => 999999, Err(_) => -1 }
+    if r6 == -1 { score = score + 100000 }
+    let r7 = match try_pow_int(-1, 3) { Ok(v) => v, Err(_) => 999999 }
+    if r7 == -1 { score = score + 1000000 }
+    println(score)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen try_pow_int negative base failed: {}", e));
+    assert_eq!(
+        out.trim(),
+        "1111111",
+        "codegen must match negative-base pow guards"
+    );
 }
 
 // ===== mymath.mimi — fix 4: random_exponential guards lambda <= 0 ===========
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_random_exponential_invalid_lambda_sentinel() {
     // λ <= 0 used to divide by zero (trap). Now returns the -1.0 sentinel,
@@ -164,6 +232,25 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Int(2));
+
+    let cg_src = r#"
+func main() -> i32 {
+    let z = random_exponential(0.0)
+    let n = random_exponential(-3.5)
+    let mut ok = 0
+    if z == -1.0 { ok = ok + 1 }
+    if n == -1.0 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen random_exponential sentinel failed: {}", e));
+    assert_eq!(
+        out.trim(),
+        "2",
+        "codegen must match invalid-lambda sentinel"
+    );
 }
 
 // ===== strings.mimi — fix 5: trim_left/trim_right strip the whitespace set ==
@@ -173,8 +260,8 @@ func main() -> i32 {
 // pub bodies calling them are not (E0401). Dual-backend guard:
 // audit2_std_trim_left_right_dual below.
 
-// TODO(#audit-wave2-codegen-side): VM-only companion of
-// audit2_std_trim_left_right_dual (which carries the codegen side).
+// VM-only companion of audit2_std_trim_left_right_dual (which carries the
+// codegen side). Kept as a focused whitespace-set regression.
 #[test]
 fn audit_stdlib_trim_left_right_whitespace_set() {
     // trim_left/trim_right only stripped " " while the docs (and trim())
@@ -196,8 +283,6 @@ func main() -> string {
 
 // ===== strings.mimi — fix 6: words() drops empty tokens =====================
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_words_filters_empty_tokens() {
     // "a  b" split by " " yields ["a", "", "b"]; the empty token made
@@ -217,12 +302,33 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_with_stdlib("strings.mimi", src), interp::Value::Int(5));
+
+    let cg_src = r#"
+func main() -> i32 {
+    let w = words("a  b")
+    let n = count_words("  hello   world  ")
+    let w2 = words("  hello   world  ")
+    let mut ok = 0
+    if len(w) == 2 { ok = ok + 1 }
+    if w[0] == "a" { ok = ok + 1 }
+    if w[1] == "b" { ok = ok + 1 }
+    if n == 2 { ok = ok + 1 }
+    if len(w2) == 2 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("strings.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen words empty-token guard failed: {}", e));
+    assert_eq!(
+        out.trim(),
+        "5",
+        "codegen must match words empty-token filtering"
+    );
 }
 
 // ===== collections.mimi — fix 7: take/drop_n negative-n guard ===============
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_take_drop_negative_n_guard() {
     // take(xs, -1) used to wrap through slice semantics (all-but-last);
@@ -253,12 +359,37 @@ func main() -> i32 {
         run_with_stdlib("collections.mimi", src),
         interp::Value::Int(12)
     );
+
+    let cg_src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3, 4]
+    let mut ok = 0
+    if len(take(xs, -1)) == 0 { ok = ok + 1 }
+    let dn = drop_n(xs, -1)
+    if len(dn) == 4 { ok = ok + 1 }
+    if dn[0] == 1 { ok = ok + 1 }
+    if dn[3] == 4 { ok = ok + 1 }
+    if len(take(xs, 0)) == 0 { ok = ok + 1 }
+    if len(drop_n(xs, 0)) == 4 { ok = ok + 1 }
+    let tp = take(xs, 2)
+    if len(tp) == 2 { ok = ok + 1 }
+    if tp[1] == 2 { ok = ok + 1 }
+    let dp = drop_n(xs, 1)
+    if len(dp) == 3 { ok = ok + 1 }
+    if dp[0] == 2 { ok = ok + 1 }
+    if len(xs.take(-1)) == 0 { ok = ok + 1 }
+    if len(xs.drop_n(-1)) == 4 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("collections.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen take/drop negative-n guard failed: {}", e));
+    assert_eq!(out.trim(), "12", "codegen must match take/drop guards");
 }
 
 // ===== fs.mimi — fix 8: file_size returns bytes, not characters =============
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_file_size_counts_bytes_not_chars() {
     // "héllo" is 5 chars but 6 UTF-8 bytes (é = 2 bytes); file_size used
@@ -279,12 +410,26 @@ func main() -> i32 {{
         path.display()
     );
     let v = run_with_stdlib("fs.mimi", &src);
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(v, interp::Value::Int(6), "byte size of 'héllo' is 6");
+
+    let cg_src = format!(
+        r#"
+func main() -> i32 {{
+    match file_size("{}") {{
+        Ok(n) => println(n)
+        Err(_) => println(-1)
+    }}
+    0
+}}
+"#,
+        path.display()
+    );
+    let out = audit2_compile_and_run_with_stdlib("fs.mimi", &cg_src)
+        .unwrap_or_else(|e| panic!("codegen file_size bytes failed: {}", e));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.trim(), "6", "codegen must also count UTF-8 bytes");
 }
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting.
 #[test]
 fn audit_stdlib_file_size_missing_file_is_err() {
     let src = r#"
@@ -296,6 +441,19 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_with_stdlib("fs.mimi", src), interp::Value::Int(1));
+
+    let cg_src = r#"
+func main() -> i32 {
+    match file_size("/nonexistent_path_audit_stdlib_xyz") {
+        Ok(_) => println(999)
+        Err(_) => println(1)
+    }
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("fs.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen file_size missing failed: {}", e));
+    assert_eq!(out.trim(), "1", "codegen must surface missing-file error");
 }
 
 // ===== net.mimi — fix 9: recv EOF / empty body are success, not error =======
@@ -597,12 +755,17 @@ func main() -> i32 {
 // ===== random.mimi — Wave-2 §1.6-mechanism fix: private remove_at inlined ==
 
 #[test]
-fn audit2_std_random_sample_shuffle_semantics_vm() {
+fn audit2_std_random_sample_shuffle_semantics_dual() {
     // Regression for the remove_at inlining: the private helper was
     // invisible across `use std::random` (loader carries only pub items,
     // same mechanism as strings.mimi is_ws_char / red line §1.6). Shuffle
     // must preserve the multiset of elements and random_sample(n) must
     // return n elements — RNG-independent assertions only.
+    //
+    // 0.36.65: the remove-at loop moved into the pub free helper
+    // `random_remove_ith`, which also avoids the codegen stack-alloca
+    // aliasing bug seen when the loop was inlined directly in generic impl
+    // methods (the old code SIGSEGVed on native shuffle).
     let src = r#"
 func xs_sum(xs: List<i32>) -> i32 {
     let mut s = 0
@@ -620,14 +783,34 @@ func main() -> i32 {
     ok
 }
 "#;
-    assert_eq!(run_with_stdlib("random.mimi", src), interp::Value::Int(3));
-    // TODO(#audit-wave2-codegen-side): codegen-side assertion blocked by a
-    // PRE-EXISTING codegen bug (Wave-2 STDLIB calibration): while-loop list
-    // building inside `impl<T> RandomChoice<T> for List<T>` methods yields
-    // wrong values (e.g. 203993 instead of 150) or SIGSEGV on the checked
-    // path, while the identical loop in a free generic function is correct
-    // on both backends. HEAD's remove_at version SIGSEGVs the same way —
-    // the inlining is not the cause. VM (reference) is correct.
+    let v = run_with_stdlib("random.mimi", src);
+    assert_eq!(v, interp::Value::Int(3));
+
+    let cg_src = r#"
+func xs_sum(xs: List<i32>) -> i32 {
+    let mut s = 0
+    for v in xs { s = s + v }
+    s
+}
+func main() -> i32 {
+    let xs = [10, 20, 30, 40, 50]
+    let s = shuffle(xs)
+    let p = random_sample(xs, 3)
+    let mut ok = 0
+    if len(s) == 5 { ok = ok + 1 }
+    if xs_sum(s) == 150 { ok = ok + 1 }
+    if len(p) == 3 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("random.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen random sample/shuffle failed: {}", e));
+    assert_eq!(
+        out.trim(),
+        "3",
+        "codegen must match VM random sample/shuffle"
+    );
 }
 
 // ===== result.mimi — fix 10: map/map_result rebuild Err at Result<U, E> =====
@@ -698,9 +881,6 @@ func main() -> i32 {
     assert_eq!(out.trim(), "11", "codegen must preserve the Err payload");
 }
 
-// TODO(#audit-wave2-codegen-side): VM-only (run_with_stdlib); add a
-// compile_and_run-side assertion when converting (shares the result.mimi
-// generic surface with audit_stdlib_map_result_preserves_err_value).
 #[test]
 fn audit_stdlib_result_ext_map_method_rebuilds_err() {
     // Same fix through the ResultExt::map trait method on an Err value.
@@ -715,6 +895,21 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_with_stdlib("result.mimi", src), interp::Value::Int(1));
+
+    let cg_src = r#"
+func main() -> i32 {
+    let r: Result<i32, string> = Err("kaputt")
+    let m: Result<bool, string> = r.map(fn(x: i32) -> bool { x > 0 })
+    match m {
+        Ok(_) => println(0)
+        Err(e) => if e == "kaputt" { println(1) } else { println(2) }
+    }
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("result.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen ResultExt::map Err rebuild failed: {}", e));
+    assert_eq!(out.trim(), "1", "codegen must preserve Err through .map()");
 }
 
 #[test]

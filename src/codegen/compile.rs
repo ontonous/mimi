@@ -1507,9 +1507,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok(())
             }
-            Err(_) => {
-                // If bytecode comptime folding fails, skip gracefully.
-                // The comptime values will be evaluated at runtime.
+            Err(err) => {
+                // If bytecode comptime folding fails, skip gracefully rather
+                // than aborting the whole compilation. Report the failure so
+                // it is not silently swallowed (the doc comment above promises
+                // a warning; comptime values will be evaluated at runtime).
+                eprintln!(
+                    "warning: comptime folding failed ({}); comptime values will be evaluated at runtime",
+                    err
+                );
                 Ok(())
             }
         }
