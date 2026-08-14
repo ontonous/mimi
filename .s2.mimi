@@ -1,0 +1,19 @@
+session Hello = !i32 . ?i32 . end
+func echo_passthrough(ch: i64) -> i64 {
+    session_send(ch, 42)
+    let got = session_recv(ch)
+    session_close(ch)
+    got
+}
+func main() -> i32 {
+    let pair = session_pair()
+    let a = pair[0]
+    let b = pair[1]
+    let r = echo_passthrough(a)
+    let first = session_recv(b)
+    session_send(b, first + 1)
+    session_close(b)
+    println(r)
+    println(first)
+    0
+}

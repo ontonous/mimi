@@ -23,6 +23,20 @@
   8 ignored（含 0.36.24 gap 登记）；fmt + clippy + docs + edge 全绿。
 - 元素消费缺口（match/for/index/slice/字面量索引/元组字段）全 family fail-closed。
 
+### 0.36.29 — guard 统一机制定案（方案 B）+ SessionChan 死面证据链闭合（文档轮）
+
+- **guard 定案（phase-d §3）**：保留双关键字 `defer { }` / `on failure { }`
+  （方案 B）——机制已单轨（语句位置登记 → 出口发射），双表面双 harness 三
+  后端矩阵全绿（L1 挣绿），零迁移量；`defer on failure { }` 语法收敛纯表面、
+  不改变语义，留 Phase D 窗口；C（事件化）维持否决。**作用域守卫支柱
+  定案 + 挣绿 ✅**（spec §4.6 无遗留超售）。
+- **T? 建议节更新**：§2b 由"正式窗口执行"改为"✅ 0.36.27 已落地"（交叉引用
+  回归测试 + 0.36.28 复证）。
+- **SessionChan 证据链闭合（phase-c §4f）**：跨函数 typed 端点构造 → E0211
+  （死面从"推测"升级为"可证伪构造失败"）；raw i64 句柄绕开 residual 类型 →
+  协议违序退化为运行时死锁（checker 零诊断，VM/native 一致）——方案 (A)
+  类型化端点入 0.36.36 正式窗口的前置证据齐。无代码变更，门禁维持绿。
+
 ### 0.36.28 — 诊断次序修复：`?.` 接收者校验不被 callee 形状错误掩埋（L2）
 
 - **修复（src/core/infer/call.rs）**：infer_call_expr 的非函数 callee 分支此前
