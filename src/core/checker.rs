@@ -74,6 +74,12 @@ pub(crate) struct Checker<'a> {
     /// = 具体面 0.36.36 义务消解镜像）；由 generic_linear_blackbox_sound 按参数
     /// 表面类型设置/恢复，供 linear_blackbox.rs 的 Stmt::IfLet 臂读取。
     pub(crate) blackbox_param_scrutinee_option: bool,
+    /// 0.36.45: 遍历入参 List<...> 的元素 Option-ness 链——`for x in xs` 的
+    /// 元素绑定作为 if-let scrutinee 时经此开 Option 中介面（List<Option<T>>
+    /// 逐元素 if-let 的泛型镜像；非 Option 元素 fail-closed）。
+    pub(crate) blackbox_element_option_chain: Vec<bool>,
+    /// 当前 for 层的元素 Option-ness（For 臂弹出暂存；嵌套 for 各自存取）。
+    pub(crate) blackbox_current_element_option: Option<bool>,
     pub(crate) linear_blackbox_transfer_cache: HashMap<String, Vec<bool>>,
     /// 递归守护：黑盒判定沿"可信接收者"链递归，闭环 → fail-closed。
     pub(crate) linear_blackbox_visiting: HashSet<String>,
@@ -298,6 +304,8 @@ impl<'a> Checker<'a> {
             linear_blackbox_cache: HashMap::new(),
             linear_blackbox_transfer_cache: HashMap::new(),
             blackbox_param_scrutinee_option: false,
+            blackbox_element_option_chain: Vec::new(),
+            blackbox_current_element_option: None,
             linear_blackbox_visiting: HashSet::new(),
             strict: false,
             var_scopes: vec![HashMap::new()],

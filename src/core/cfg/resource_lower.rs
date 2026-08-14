@@ -494,6 +494,66 @@ impl<'a> ActionEmitter<'a> {
         }
     }
 
+    /// 0.36.45: then 块内首个线性消费的最内层节点——CFG 点序把内层表达式
+    /// 点排在外层语句点之前，Introduce 键到语句节点会在首个消费之后应用
+    /// （顺序翻转）；键到消费自身所在的点 + 动作秩排序（Introduce=3 <
+    /// Move=5）保证先复位后消费。二元/累加形状从右侧下探（`n = n + f(x)`
+    /// 的消费在右），构造/调用形状直接落在调用节点。
+    fn linear_action_node(&self, expr: &ResolvedExpr) -> (NodeId, crate::core::Origin) {
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ResolvedExprKind::Call(call) => {
+                    // 调用实参链下钻：线性消费发生在最内层实参（
+                    // `println(sink(x))` 里 x 的 Move 键在 sink 调用节点，
+                    // 不在 println 外层）——点序内层在前，Introduce 必须 ≤
+                    // 首个消费点；Nominal 通常只走首实参（接收者/首个值），
+                    // 首实参及其嵌套链已覆盖标准形状。
+                    if let Some(first) = call.arguments.first().map(|a| &a.value) {
+                        current = first;
+                        continue;
+                    }
+                    return (current.node_id.clone(), current.origin.clone());
+                }
+                ResolvedExprKind::Load(_) => {
+                    return (current.node_id.clone(), current.origin.clone());
+                }
+                ResolvedExprKind::Binary { right, .. } => current = right,
+                ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+                    // 臂体/块体常被 block 包裹：下钻首语句的表达式
+                    //（点序内层在前，块节点点 = 块出口，落在其后会顺序翻转）。
+                    let head: Option<&ResolvedExpr> = block
+                        .statements
+                        .first()
+                        .and_then(|s| match &s.kind {
+                            ResolvedStmtKind::Expr(e) => Some(e),
+                            ResolvedStmtKind::Return { value: Some(e), .. } => Some(e),
+                            ResolvedStmtKind::Bind {
+                                initializer: Some(e),
+                                ..
+                            } => Some(e),
+                            ResolvedStmtKind::Assign { value, .. } => Some(value),
+                            _ => None,
+                        })
+                        .or_else(|| block.result.as_ref().map(|v| &**v));
+                    match head {
+                        Some(e) => current = e,
+                        None => {
+                            // 首语句是 Drop 等非表达式语句：其动作键在语句节点
+                            // 本身——以语句节点为 Introduce 锚（同点 + 动作秩
+                            // Introduce=3 < Drop=5 保证先复位后消费）。
+                            if let Some(st) = block.statements.first() {
+                                return (st.node_id.clone(), st.origin.clone());
+                            }
+                            return (current.node_id.clone(), current.origin.clone());
+                        }
+                    }
+                }
+                _ => return (current.node_id.clone(), current.origin.clone()),
+            }
+        }
+    }
+
     fn visit_block(&mut self, block: &ResolvedBlock, return_result: bool) {
         // v0.34.8 (golden §6.2): reset the double-consume tracker at each
         // block boundary — a resource consumed in one branch is legitimately
@@ -1004,6 +1064,53 @@ impl<'a> ActionEmitter<'a> {
                         vec![container_place],
                         &initializer.node_id,
                         &initializer.origin,
+                    );
+                }
+                // 0.36.45: then 块绑定名 Introduce（for 体内 if-let 的循环
+                // 载入修正）。绑定是逐迭代临时资源——每轮循环重新 Introduce
+                // 复位 availability；否则上一迭代的 Consumed 事实被背边携带，
+                // 下一迭代的 Move 撞 "moved after it was consumed"
+                // （基线非循环单遍不受影响）。
+                let mut bindings = Vec::new();
+                self.linear_bindings(pattern, &mut bindings);
+                // 0.36.45: 绑定 Introduce 必须落在 then 块入口（仅 then 路径
+                // 执行 + 每迭代复位）——若落在头部分支前，fall-through 也
+                // 会看到 Available 的 y → 汇合撞 "consumed on only some
+                // paths"；若键到语句节点，CFG 点序把内层表达式点排在前面
+                //（stmt 点 = 语句出口），Introduce 会应用在首个消费之后。
+                // 键到首语句的表达式/初始化器节点 = 块的入口点——与消费
+                // 同点，dataflow 按动作秩排序（Introduce=3 < Move=5）保证
+                // 先复位后消费。空 then 块（弃置 y）退化为头部键：两路径
+                // 均匀看到 Available → 返回门禁 E0256（弃置即拒绝）。
+                let (then_head_node, then_head_origin) = match then_block.statements.first() {
+                    Some(stmt) => match stmt.kind {
+                        ResolvedStmtKind::Expr(ref e)
+                        | ResolvedStmtKind::Return {
+                            value: Some(ref e), ..
+                        } => self.linear_action_node(e),
+                        ResolvedStmtKind::Bind {
+                            initializer: Some(ref init),
+                            ..
+                        } => self.linear_action_node(init),
+                        ResolvedStmtKind::Assign { ref value, .. } => {
+                            self.linear_action_node(value)
+                        }
+                        _ => (stmt.node_id.clone(), stmt.origin.clone()),
+                    },
+                    None => (initializer.node_id.clone(), initializer.origin.clone()),
+                };
+                for binding in bindings {
+                    let target = self.place_from_local(&binding);
+                    self.push_action(
+                        &then_head_node,
+                        &then_head_origin,
+                        ActionDraft {
+                            kind: CanonicalActionKind::Introduce,
+                            resource: self.resource_for_local(&binding),
+                            source: Some(target.clone()),
+                            target: Some(target),
+                            loan: None,
+                        },
                     );
                 }
                 self.visit_block(then_block, false);
@@ -1595,6 +1702,30 @@ impl<'a> ActionEmitter<'a> {
     fn visit_arm(&mut self, arm: &MatchArm) {
         if let Some(guard) = &arm.guard {
             self.visit_expr(guard, None);
+        }
+        // 0.36.45: 臂模式绑定 Introduce——与 IfLet 臂同款循环载入修正：臂绑定
+        // 是逐迭代临时资源（非循环单遍 or_insert 即够）；循环内需每迭代复位，
+        // 否则上一迭代的 Consumed 事实被背边携带 → "moved after consumed"。
+        // 键在臂体首动作内层节点（0.36.45 then 头键同理由：点序内层在前，
+        // Introduce 秩 3 < Move 秩 5 保证先复位后消费）。
+        let mut bindings = Vec::new();
+        self.linear_bindings(&arm.pattern, &mut bindings);
+        if !bindings.is_empty() {
+            let (node, origin) = self.linear_action_node(&arm.body);
+            for binding in bindings {
+                let target = self.place_from_local(&binding);
+                self.push_action(
+                    &node,
+                    &origin,
+                    ActionDraft {
+                        kind: CanonicalActionKind::Introduce,
+                        resource: self.resource_for_local(&binding),
+                        source: Some(target.clone()),
+                        target: Some(target),
+                        loan: None,
+                    },
+                );
+            }
         }
         self.visit_expr(&arm.body, None);
     }

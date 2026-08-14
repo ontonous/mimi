@@ -281,6 +281,14 @@ impl<'a> Checker<'a> {
             _ => false,
         };
         self.blackbox_param_scrutinee_option = is_option_scrutinee;
+        // 0.36.45: 元素 Option-ness 链（List<Option<T>> → [true]；
+        // List<List<Option<T>>> → [false, true]）。For 臂逐层弹出。
+        // 链与当前元素标志均按旧值存取：转移调用会重入此入口（then 块内
+        // 的泛型调用 → call_transfer → 目标函数的 bb-sound），硬置 None
+        // 会 clobber 外层 for 的元素标志。
+        let saved_chain = std::mem::take(&mut self.blackbox_element_option_chain);
+        let saved_element = self.blackbox_current_element_option;
+        self.blackbox_element_option_chain = option_element_chain(param.ty.unlocated());
         let ok = linear_blackbox_body(
             &func.body,
             std::slice::from_ref(&param.name),
@@ -288,6 +296,8 @@ impl<'a> Checker<'a> {
             self,
         );
         self.blackbox_param_scrutinee_option = saved_scrutinee_option;
+        self.blackbox_element_option_chain = saved_chain;
+        self.blackbox_current_element_option = saved_element;
         self.linear_blackbox_visiting.remove(&guard);
         let cache = if allow_drop {
             &mut self.linear_blackbox_cache
@@ -559,6 +569,19 @@ fn stmts_flow(
         }
         state = stmt_flow(stmt, state, allow_drop, checker)?;
         if state.live.is_empty() {
+            // 0.36.45: live 清空后的剩余语句仍须检查已消费名字的复用——
+            // `sink_g(y); sink_g(y)` 的第二条（y 已转移再触 = 转移后复用）。
+            // 此前直接返回使尾部/后续语句脱离检查（泛型 double-use 漏网；
+            // concrete 面由 dataflow 的 Move-after-Consumed 拒绝）。
+            for rest in &stmts[idx + 1..] {
+                if state
+                    .consumed
+                    .iter()
+                    .any(|n| stmt_uses_name(rest, std::slice::from_ref(n)))
+                {
+                    return Err(());
+                }
+            }
             return Ok(state);
         }
     }
@@ -821,7 +844,9 @@ fn stmt_flow(
             // else（及 no-else 回退）：仅 Option 中介面开——None 变体零负载，
             // 不匹配路径不涉及任何弃置 → 无 drop 门禁（transfer-only 的会话
             // 也可 if-let 转移）；其余容器 fail-closed（concrete E0256）。
-            if !checker.blackbox_param_scrutinee_option {
+            if !checker.blackbox_param_scrutinee_option
+                && checker.blackbox_current_element_option != Some(true)
+            {
                 return Err(());
             }
             if let Some(es) = else_ {
@@ -886,10 +911,19 @@ fn stmt_flow(
             {
                 return Err(()); // 循环体内再触容器名 → fail-closed
             }
-            if !info.names.is_empty()
-                && !linear_blackbox_body(body, &info.names, allow_drop, checker)
-            {
-                return Err(()); // 元素绑定未在黑盒规则内处理
+            if !info.names.is_empty() {
+                // 0.36.45: 弹出本层元素 Option-ness（无参类型链则 None
+                // → 体颠的 if-let 保持 fail-closed）；嵌套 for 依链逐层。
+                let saved_chain = std::mem::take(&mut checker.blackbox_element_option_chain);
+                let saved_element = checker.blackbox_current_element_option;
+                let mut chain = saved_chain;
+                checker.blackbox_current_element_option = chain.pop();
+                let ok = linear_blackbox_body(body, &info.names, allow_drop, checker);
+                checker.blackbox_element_option_chain = chain;
+                checker.blackbox_current_element_option = saved_element;
+                if !ok {
+                    return Err(()); // 元素绑定未在黑盒规则内处理
+                }
             }
             let mut next = state;
             next.consume(&v);
@@ -1094,4 +1128,26 @@ fn call_transfer(
         state.consume(&n);
     }
     Ok(returns_value)
+}
+
+/// 0.36.45: 从参数表面类型提取 List 元素 Option-ness 链——
+/// `List<Option<T>>` → [true]; `List<List<Option<T>>>` → [false, true];
+/// 非 List 或非单元素容器 → 空链（对应 for 层保持 fail-closed）。
+fn option_element_chain(ty: &Type) -> Vec<bool> {
+    let mut chain = Vec::new();
+    let mut current = ty;
+    while let Type::Name(name, args) = current.unlocated() {
+        if name != "List" || args.len() != 1 {
+            break;
+        }
+        let elem = &args[0];
+        let is_option = match elem.unlocated() {
+            Type::Name(n, _) => n == "Option",
+            Type::Option(_) => true,
+            _ => false,
+        };
+        chain.push(is_option);
+        current = elem;
+    }
+    chain
 }
