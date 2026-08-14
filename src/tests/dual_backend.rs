@@ -3503,6 +3503,130 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.41 — 泛型×线性单态化切片 3：match 臂残差分支级复位（会话元素面）──
+// 0.36.40 记录的两个未覆盖面在本切闭合其**会话面**：
+//   - match 臂残差从 match 入口状态独立分析（臂是互斥分支，非顺序）；合并时
+//     只要求入口已追踪的端点跨臂一致（发散/缺键 → E0425，镜像 Stmt::If 合并）；
+//     模式绑定引入的 SessionChan（`Some(d)`）按臂局部处理、臂体获得完整订单
+//     检查（`session_close(d)` 于 !i32 头 → E0414），弃置经作用域出口 E0425
+//     表面化（此前是 untracked skeleton）。
+//   - 组合效果：`flip<T>(o: Option<T>) -> Option<T>`（0.36.40 构造包装）+ 调用
+//     方 match 提取 + 每臂独立协议 = "SessionChan 经 Option 提取"的全协议到达
+//     绿（双后端 6 端到端往返）。
+// 健全性 = 不变量延续：臂内订单检查为具体面既有契约的逐臂应用；入口端点跨臂
+// 一致 = 分支汇合不变量（0.36.38 §4d）；臂局部端点不参与汇合（无续存义务）。
+
+#[test]
+fn dual_session_option_extract_roundtrip() {
+    // L1+L2: SessionChan 经泛型 flip（构造包装）穿越 + 调用方 match 提取；
+    // Some 臂持 d 完成全协议且 d 订单受检（close 于正确残差），None 臂持独立的
+    // ch1 协议（运行时不触发，静态合法）——跨臂残差互不串位。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Echo = !i32 . ?i32 . end
+func attach<T>(x: T) -> T { x }
+func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } }
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<Echo>()
+    let o = Some(ch0)
+    let o2 = flip(o)
+    match o2 {
+        Some(d) => {
+            session_send(d, 5)
+            let n = session_recv(ch1)
+            session_send(ch1, n + 1)
+            let r = session_recv(d)
+            session_close(d)
+            session_close(ch1)
+            println(r)
+        }
+        None => {
+            let n = session_recv(ch1)
+            session_send(ch1, n + 1)
+            session_close(ch1)
+        }
+    }
+    0
+}
+"#;
+    let expected = "6";
+    let checked =
+        checked_codegen_compile_and_run(src).expect("resolved codegen session option extract");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) session option extract"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen session option extract");
+    assert_eq!(
+        unga.trim(),
+        expected,
+        "legacy(codegen) session option extract"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm session option extract");
+}
+
+#[test]
+fn dual_session_match_arm_order_enforced() {
+    // L2: 模式绑定臂端点（`Some(d)` 的 d）的协议顺序现已检查——于 !i32 头直接
+    // close → E0414（0.36.40 起为 untracked skeleton，本切闭合）。
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end          func main() -> i32 {              let (ch0, ch1) = session_pair::<Echo>()              let o = Some(ch0)              match o { Some(d) => { session_close(d) }, None => { } }              0 }",
+    )
+    .expect_err("arm-bound endpoint order must be enforced (E0414)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0414"),
+        "expected E0414 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_session_match_arm_abandon_rejected() {
+    // L2: 臂内弃置模式绑定端点（d 未完成协议即离开臂）→ 作用域出口 E0425
+    // （0.36.40 起该弃置静默无诊断，本切表面化）。
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end          func main() -> i32 {              let (ch0, ch1) = session_pair::<Echo>()              let o = Some(ch0)              match o { Some(d) => { println(1) }, None => { session_close(ch1) } }              0 }",
+    )
+    .expect_err("arm-bound endpoint abandonment must surface (E0425)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0425"),
+        "expected E0425 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_session_match_arm_divergent_rejected() {
+    // L2: match 入口已追踪的端点（ch1，match 前已 recv 推进）在一个臂中被别名
+    // 转移走且未续存（`let e = ch1` 后弃置 e），另一臂完成——汇合发散 → E0425
+    // "dropped or transferred away in match arm"（+ e 的出口 E0425）。
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end          func main() -> i32 {              let (ch0, ch1) = session_pair::<Echo>()              let n0 = session_recv(ch1)              let o = Some(ch0)              match o {                  Some(d) => { let e = ch1 },                  None => { session_send(ch1, n0 + 1); session_close(ch1) }              }              0 }",
+    )
+    .expect_err("entry-tracked endpoint dropped/transferred in one arm is a merge divergence (E0425)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0425"),
+        "expected E0425 diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.36.40 — 泛型×线性单态化切片 2：结构化整体消费（元素级贯通）──────
 // 切片 1（0.36.39）只放行"整体值转移 / 显式 drop"的黑盒调体；任何结构性
 // 消费（for/match 解构、投影 `xs[0]`）仍 E0432。切片 2 打开**穷举解构面**：
