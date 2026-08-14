@@ -3651,6 +3651,65 @@ fn dual_actor_await_get() {
 }
 
 #[test]
+fn dual_actor_field_writable_regardless_of_mut_marker() {
+    // 0.36.13 (Phase B 状态语义, SD-5 L1 证据): the `mut` marker is a
+    // declarative concurrency-isolation hint, never write-enforced — a
+    // non-`mut` actor field is mutated identically on both backends (same as
+    // the marked twin). Pins the §6.4 clarified semantics (and the stale
+    // "removed from stable set" wording that 0.36.13 removed).
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor Unmarked {
+            count: i32 = 0;
+            func bump() { self.count = self.count + 1 }
+            func get() -> i32 { self.count }
+        }
+        actor Marked {
+            mut count: i32 = 0;
+            func bump() { self.count = self.count + 1 }
+            func get() -> i32 { self.count }
+        }
+        func main() -> i32 {
+            let u = Unmarked.spawn();
+            u.bump();
+            u.bump();
+            println(u.get());
+            let m = Marked.spawn();
+            m.bump();
+            println(m.get());
+            0
+        }
+    "#,
+        "2\n1"
+    );
+}
+
+#[test]
+fn dual_actor_runs_flow_non_mut_field_allowed() {
+    // 0.36.13 (Phase B 状态语义): `actor runs FlowName` rejects `mut` business
+    // fields (E0402), but non-`mut` per-instance fields remain legal — the
+    // ban is scoped to the escape hatch, not to all fields.
+    let src = r#"
+flow Job {
+    state Idle { n: i32 }
+    transition start(Idle) -> Idle { return Idle { n: self.n + 1 } }
+}
+
+actor Runner runs Job {
+    scratch: i32 = 0;
+}
+
+func main() -> i32 { 0 }
+"#;
+    if let Err(diags) = check_source(src) {
+        panic!("runs-Flow non-mut field must check: {:?}", diags);
+    }
+}
+
+#[test]
 fn dual_actor_explicit_string_temp_return() {
     if !can_link() {
         return;

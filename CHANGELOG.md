@@ -7,6 +7,34 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.13 — Phase B 扫描修债：spec 消除 Actor 状态双表述（§6.4 重写）+ SD-5 L1 证据
+
+- **spec 双表述矛盾消除（Phase B DoD 前置）**：§6.4 旧文 "actor 任意可变业务
+  字段/mutating method removed from stable set" + "helper 仅允许无状态计算"
+  与 Removed 清单条目直接抵触 SD-5（`mut` = 简单状态逃生舱，保留）与实现。
+  重写 §6.4：字段写自由（marker 为声明性并发隔离提示，永不写强制）、
+  `runs Flow` 拒绝 `mut` 业务字段（E0402）、业务状态变更归 Flow 过渡；
+  Removed 清单删除旧条目 + 0.36.13 修正注记（沿用 v0.34.28 修正注记惯例）。
+  check_language_docs 门禁复验绿。
+- **实现语义矩阵钉住（探针，0.36.13）**：普通 actor 的 mut / 非 mut 字段均可由
+  同步方法写（双后端一致 2/1）；`runs Flow` + `mut` = E0402、+ 非 mut = 合法。
+- **dyn Protocol feature-gate 缺口（登记，0.36.21+ 定案）**：spec §6.5 承诺
+  experimental 项独立门禁，实现无任何 feature-flag 机制——`unsafe_cast_protocol`
+  当前无门禁可用（dual tests 直用）；候选处置 (b) 正式定案其为稳定逃生舱（与
+  unsafe FFI 同级）并移除 "feature-gated" 表述。详见
+  `devdocs/v0.36/phase-b-state-semantics-study.md` §5b。
+- **测试（dual_backend +2）**：
+  `dual_actor_field_writable_regardless_of_mut_marker`（L1：无标记字段写双后端
+  2\n1 与标记孪生一致）、`dual_actor_runs_flow_non_mut_field_allowed`（L2）。
+  全量 5351 passed / 0 failed / 7 ignored；fmt + clippy + docs + edge 全绿。
+- **并行 fd 竞态修复（审计发现）**：`audit_h13_close_fd_still_closes_real_fds`
+  在进程内借 VM 关闭一个已 `drop` 的 fd——fd 号提前释放后可能被并行线程的新
+  打开复用，本测试的进程内 close 把另一个测试的 owned fd 关掉 →
+  整套件间歇 `IO Safety violation: owned file descriptor already closed`
+  SIGABRT（--test-threads=4 约 1/3 概率，threads=1 永不触发）。改为
+  `mem::forget` 让 fd 保持占用直到 VM close（无法复用），4 线程连续 3 次
+  全量 0 failed 验证。
+
 ### 0.36.12 — Phase B 预研首项：单目标 flow 结果 match 静态分派（L1 修复）+ Protocol/Actor-mut 定位审计
 
 - **L1 修复（状态语义挣绿面首项）**：`let d = F::toggle(...)`（单目标

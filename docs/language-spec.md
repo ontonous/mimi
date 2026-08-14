@@ -1113,9 +1113,15 @@ func take(x: T)          // by-value consume
 ### 6.4 State: Flow and Actor `[stable]`
 - Flow is the sole model for business state and change;
 - Actor is Flow's concurrent runtime container;
-- Ordinary Actor arbitrary mutable business field and mutating method: **removed** from stable set;
-- Actor helper only allows stateless computation;
-- Mailbox method call migrates to typed Flow event;
+- Actor fields are writable on every backend regardless of the `mut` marker — the
+  marker is a **declarative concurrency-isolation hint** (simple-state escape
+  hatch, SD-5), never a write-enforced permission (0.36.13 澄清，消除与 SD-5 的
+  双表述并存);
+- `actor Name runs FlowName` rejects `mut` business fields (**E0402**): state must
+  be carried by the Flow's payloads (atomic-turn guarantee);
+- Actor mailboxes and sync methods perform per-instance field access; business
+  state *change* belongs to Flow transitions (migrate mailbox method calls to
+  typed Flow events);
 - Actor runtime holds unique Flow instance.
 
 ### 6.5 Abstraction: trait and Protocol `[stable]`
@@ -1286,8 +1292,11 @@ Quote/AST generation remains experimental until:
 - Failure variant name heuristics;
 - `?` process exit;
 - User-visible bare Session `i64` handle;
-- Actor arbitrary mutable business fields;
 - Unknown attribute silent ignore.
+
+> **0.36.13 修正**：~~Actor arbitrary mutable business fields~~ 移除自本清单——
+> SD-5 明确保留 `mut` 为简单状态逃生舱（§6.4 + §Actor `mut` Field Semantics）；
+> 仅 `actor runs FlowName` 场景拒绝 `mut` 业务字段（E0402）。
 
 > **v0.34.28 修正**：`math { Expr... }` 不在此清单——它是 **stable** verifier 通道
 > （§5.6/§6.8），此前误列 Removed，同步战役纠正。
