@@ -1,0 +1,12 @@
+func might_fail() -> Result<i32, string> {
+    return fault("boom")
+}
+func main() -> i32 {
+    on failure { println("ONFAIL") }
+    let r = might_fail()
+    println(match r {
+        Ok(n) => n,
+        Err(_) => -1,
+    })
+    0
+}

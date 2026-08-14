@@ -765,10 +765,16 @@ Each stage returns independent error:
 Boundary error escalation to Fault is explicitly decided by Flow strategy. Compiler must not generate pseudo business transitions for these errors.
 
 ### 4.6 Cleanup and Compensation `[stable]`
-1.0 converges to scope guards:
+1.0 converges to scope guards (0.36.15 表面修正：`defer failure` 无此表面形态，
+删除——真实双表面为 `defer { }` 与 `on failure { }`；统一裁决见 Phase D)：
 
-- `defer`: execute cleanup whether scope exits normally or abnormally;
-- `defer failure`: execute compensation only when scope exits with `Err`, Fault absorption, or panic;
+- `defer { }`: execute cleanup whether scope exits normally or abnormally (LIFO);
+- `on failure { }`: execute compensation only when scope exits with `Err`, Fault
+  absorption, or panic — registered at the statement's execution point, so it
+  fires only for failures occurring after it registered;
+- Both forms must behave identically on the interpreter and the native backend
+  (the resolved codegen registers guard blocks and emits them at function exits;
+  the legacy path matches since 0.31.24; pinned by dual-harness tests 0.36.15);
 - Transition rollback failure is a failure exit; a `return Target { ... }` terminal is not;
 - Ordinary `return Ok(...)` does not trigger failure-only compensation;
 - `break`/`continue` trigger rules explicitly defined by lexical scope;
