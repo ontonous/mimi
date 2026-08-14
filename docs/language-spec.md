@@ -442,7 +442,17 @@ Actor call failure must not return indistinguishable `0`. Call results distingui
 
 Protocol is a static topology projection of a Flow, not an ordinary trait, nor a default runtime reflection object.
 
-This stable commitment is limited to `StaticProtocolProjection`: checker-verified topology, statically generated language interfaces, stable Protocol identity, and version handshake. Type-erased `dyn Protocol`, runtime VTable dispatch, heterogeneous collections, and dynamic broadcast are `experimental` and must be independently feature-gated.
+This stable commitment is limited to `StaticProtocolProjection`: checker-verified topology, stable Protocol identity, and version handshake.
+
+- **0.36.21 定案（删除 "statically generated language interfaces" 承诺）**：Flow
+  声明已生成唯一的接口面（StateId/EventId 等，见 §3.4）；Protocol 投影只施加
+  check 约束，不产生第二套语言接口（0.36.16 证据：codegen protocol 拓扑表为死
+  存储、零消费者——投影无运行时/生成面）。
+- **`dyn Protocol` = 稳定逃生舱**：`unsafe_cast_protocol(flow)` 是与 `unsafe`
+  同级的显式边界动作（0.36.21 定案），双后端回归覆盖；Mimi 无独立
+  feature-flag 机制，逃生舱不以 feature gate 形式存在。
+- runtime VTable dispatch、heterogeneous collections、dynamic broadcast
+  **未实现**：capability gate 按稳定诊断报告（§9.5），维持 `experimental`。
 
 Stable Protocol describes:
 
@@ -1144,7 +1154,10 @@ Three cannot assume each other's responsibilities.
 - Permissions written as view/mutate/consume constraints;
 - String-based runtime `protocol_methods("Name")`: **removed**;
 - Typed compile-time reflection can be provided in `comptime`;
-- Dynamic `dyn Protocol` remains experimental until typed VTable, event/result ABI, and dual-backend consistency.
+- Dynamic `dyn Protocol`（`unsafe_cast_protocol`）= **稳定逃生舱**（0.36.21 定案：
+  与 unsafe 同级显式边界动作，双后端回归覆盖）；typed VTable、event/result
+  ABI 未实现，维持 `experimental`——capability gate 稳定诊断报告（§9.5），
+  不承诺独立门禁。
 
 ### 6.6 Session `[stable]` / `[experimental]`
 

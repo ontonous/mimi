@@ -7,6 +7,26 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.21 — Phase B 正式窗口：Protocol 定案（(a) checker-only 确认 + dyn=稳定逃生舱）+ spec §3.9/§6.5 定稿
+
+- **Protocol 定案落字（docs/language-spec.md）**：
+  - §3.9 稳定承诺收敛为 `StaticProtocolProjection`（checker 拓扑 + 稳定身份 +
+    版本握手）；**删除 "statically generated language interfaces" 承诺**（Flow
+    已生成唯一接口面，Protocol 投影零生成面——0.36.16 死存储证据）；
+  - **`dyn Protocol` = 稳定逃生舱**（与 unsafe 同级显式边界，双后端回归覆盖）
+    ——撤销 "must be independently feature-gated" 表述（Mimi 无独立
+    feature-flag 机制）；
+  - runtime VTable/异质集合/动态广播 = 未实现 + `experimental`，capability
+    gate 稳定诊断报告（§9.5）。
+  - §6.5 Protocol Convergence 的 dyn 条目同步定稿。
+- **定案文档**：phase-b-protocol-verdict-draft.md 草案 → 定案（方案 (a)
+  checker-only 正式确认；挣绿清单 = conformance 正/负例 + dyn 双后端 +
+  E0425-27 全部复核 ✓）。
+- Phase B 两问闭合：Actor mut（SD-5，0.36.13/14）+ Protocol（0.36.21）。
+  挣绿面复核：conformance/dyn 双后端 + Session residual 三形态（0.36.19）。
+- 门禁全绿（fmt + clippy + docs + edge）；spec 变更触及 §3.9/§6.5，docs 门禁
+  复验通过。
+
 ### 0.36.20 — cap split/借用线性边界复核（全 fail-closed，挣绿确认）+ 0.36.21 窗口前装填
 
 - **split 边界矩阵（探针实测，phase-c-linearity-study.md §4c）**：只 drop 一个
