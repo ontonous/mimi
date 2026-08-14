@@ -4838,6 +4838,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Parse a Flow state field_id into (flow_type_name, span_string).
     /// Format: "state:Flow::State/node:decl.field@external:HASH:LINE:COL-LINE:COL"
     /// Returns ("flow::Flow::State", "LINE:COL-LINE:COL").
+    /// Well-known field order of the Fault crash-context records
+    /// (SystemTrace/MemoryDump/PanicPayload). The index values are shared
+    /// across the records where names collide (unexpected_event/snapshot are
+    /// SystemTrace index 1/2 and the Fault record's own 1/2), so a single
+    /// name→index map is consistent for every projection the checker can
+    /// produce on these builtins.
+    fn builtin_trace_field_index(field_name: &str) -> Option<u32> {
+        Some(match field_name {
+            "last_state_name" => 0,
+            "unexpected_event" => 1,
+            "snapshot" => 2,
+            "memory_dump" => 3,
+            "panic_payload" => 4,
+            // MemoryDump { fields: string, count: i32 }
+            "fields" => 0,
+            "count" => 1,
+            // PanicPayload { error_type: string, file: string, line: i32, stack: string }
+            "error_type" => 0,
+            "file" => 1,
+            "line" => 2,
+            "stack" => 3,
+            _ => return None,
+        })
+    }
+
     fn parse_flow_field_id(field_id: &NodeId) -> Option<(String, String)> {
         let id_str = &field_id.0;
         let state_path = id_str.strip_prefix("state:")?;
@@ -5021,6 +5046,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                 }
             }
+        }
+        // 0.36.7 (裁决 3/DoD #4): the Fault crash-context records
+        // (SystemTrace/MemoryDump/PanicPayload) are checker-internal
+        // builtins — their TypeDefs live in the checker's self.types but NOT
+        // in the checked program's type_defs catalog, and their field ids
+        // ship as bare `field:<name>`. Map them by the well-known constant
+        // field order (mirrors the layouts in codegen/resolved/types.rs and
+        // legacy codegen/compile.rs). Reached only after every catalog/name
+        // fallback misses, so it cannot shadow user or flow-record fields.
+        if let Some(index) = Self::builtin_trace_field_index(field_name) {
+            return Ok(index);
         }
         Err(CompileError::Unsupported(format!(
             "field '{field_name}' ({}) not found in any type definition",

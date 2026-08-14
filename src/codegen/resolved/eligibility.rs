@@ -494,10 +494,19 @@ fn require_scalar_type(
                 // opaque-i64 lowering as Map/Set. Without it, mimi-log's main
                 // (count_by_* → Record) fell back to legacy and hit the legacy
                 // List<record> for-loop gap.
+                // 0.36.7: the Fault crash-context records
+                // (SystemTrace/MemoryDump/PanicPayload) lower in types.rs
+                // with legacy-matching layouts — accept them so deep trace
+                // field access (`.trace.last_state_name`) keeps main in the
+                // resolved slice instead of forcing a legacy fallback that
+                // loses the qualified flow-fault field types.
                 "builtin:type:List"
                 | "builtin:type:Map"
                 | "builtin:type:Set"
-                | "builtin:type:Record" => {
+                | "builtin:type:Record"
+                | "builtin:type:SystemTrace"
+                | "builtin:type:MemoryDump"
+                | "builtin:type:PanicPayload" => {
                     for arg in arguments {
                         require_scalar_type(program, owner, arg)?;
                     }

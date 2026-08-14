@@ -384,6 +384,33 @@ mod export;
 mod pattern;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// 0.36.7 (裁决 1 跨 flow 补全, legacy leg): the var-type name registered
+    /// for a flow transition call result. For the Fault sink the FLOW-QUALIFIED
+    /// `flow::<name>::Fault` must be used — the legacy emitter registers every
+    /// flow state (incl. Fault) as `flow::<name>::<state>` record TypeDefs, so
+    /// `infer_object_type(Field(sf, last_state))` then resolves THIS flow's
+    /// StateId/EventId field types instead of the bare-name first-wins alias
+    /// (which can point at another flow's enums → wrong enum in native prints).
+    fn transition_result_var_type(flow_name: &str, to_state: &str) -> String {
+        if to_state == "Fault" {
+            format!("flow::{}::Fault", flow_name)
+        } else {
+            to_state.to_string()
+        }
+    }
+
+    /// Strip the generator-made `flow::<name>::` prefix from a from-state name
+    /// for transition-overload matching (the transition directory keys and
+    /// `TransitionDef.from_state` are bare). `::` cannot appear in user
+    /// identifiers, so any `flow::`-prefixed name is surface-made.
+    fn bare_flow_state_name(name: &str) -> String {
+        if name.starts_with("flow::") {
+            name.rsplit("::").next().unwrap_or(name).to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
     pub(super) fn compile_async_func(&mut self, func: &FuncDef) -> MimiResult<()> {
         // 1. Compile the actual body as a hidden regular function
         let body_name = format!("{}__async_body", func.name);
@@ -2539,6 +2566,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .first()
                                                 .map(|a| self.infer_object_type(a, vars))
                                                 .unwrap_or_default();
+                                            // 0.36.7: from-state args may be
+                                            // flow-qualified (`flow::<name>::Fault`);
+                                            // overload matching uses the bare name.
+                                            let from_type = Self::bare_flow_state_name(&from_type);
                                             let t = flow.transitions.iter().find(|t| {
                                                 t.name == *method_name && t.from_state == from_type
                                             });
@@ -2547,8 +2578,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 let to_states = t.to_states.clone();
                                                 let fails = t.fails.clone();
                                                 if let Some(to) = to_states.first() {
+                                                    // 0.36.7 (裁决 1 跨 flow 补全,
+                                                    // legacy leg): register the
+                                                    // flow-qualified record name for
+                                                    // the Fault sink so legacy field
+                                                    // inference (`infer_object_type`)
+                                                    // resolves `sf.last_state` against
+                                                    // THIS flow's `flow::<name>::Fault`
+                                                    // TypeDef (correct StateId/EventId
+                                                    // field types), not the bare-name
+                                                    // first-wins alias of another flow
+                                                    // (wrong enum in native prints).
+                                                    let var_ty = Self::transition_result_var_type(
+                                                        flow_name, to,
+                                                    );
                                                     self.var_type_names
-                                                        .insert(name.clone(), to.clone());
+                                                        .insert(name.clone(), var_ty);
                                                     self.track_flow_result_type(
                                                         name,
                                                         &from_state,
@@ -2590,6 +2635,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .first()
                                                 .map(|a| self.infer_object_type(a, vars))
                                                 .unwrap_or_default();
+                                            // 0.36.7: from-state args may be
+                                            // flow-qualified (`flow::<name>::Fault`);
+                                            // overload matching uses the bare name.
+                                            let from_type = Self::bare_flow_state_name(&from_type);
                                             let t = flow.transitions.iter().find(|t| {
                                                 t.name == *method_name && t.from_state == from_type
                                             });
@@ -2598,8 +2647,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 let to_states = t.to_states.clone();
                                                 let fails = t.fails.clone();
                                                 if let Some(to) = to_states.first() {
+                                                    // 0.36.7 (裁决 1 跨 flow 补全,
+                                                    // legacy leg): register the
+                                                    // flow-qualified record name for
+                                                    // the Fault sink so legacy field
+                                                    // inference (`infer_object_type`)
+                                                    // resolves `sf.last_state` against
+                                                    // THIS flow's `flow::<name>::Fault`
+                                                    // TypeDef (correct StateId/EventId
+                                                    // field types), not the bare-name
+                                                    // first-wins alias of another flow
+                                                    // (wrong enum in native prints).
+                                                    let var_ty = Self::transition_result_var_type(
+                                                        flow_name, to,
+                                                    );
                                                     self.var_type_names
-                                                        .insert(name.clone(), to.clone());
+                                                        .insert(name.clone(), var_ty);
                                                     self.track_flow_result_type(
                                                         name,
                                                         &from_state,

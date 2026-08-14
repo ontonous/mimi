@@ -7,6 +7,45 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.7 — Fault≠Result 语义边界（裁决 3）+ 错误 trace 双后端等价 oracle（DoD #4）
+
+- **E0441：Fault 禁作函数返回值**（裁决 3, L2）：`Fault` 是状态不是值——只能经
+  recover/reset 显式离开；预期失败走 `Result<T, E>` 值传播。checker 对 `func`
+  声明返回 Fault sink（裸 `Fault`）即 E0441（fail-closed）；`flow::<name>::Fault`
+  qualified 拼写被 parser 直接拒绝（`::` 类型名不可写），双面封死。
+- **Result 不是状态机 sink**（裁决 3, L2）：`transition x(A) -> Result<...>` 在
+  parse 层即拒绝（fail-closed）；`fails E` 是预期失败的唯一载体。
+- **DoD #4 错误 trace 双后端等价 oracle**（L1）：新增
+  `fault_trace_full_payload_dual_backend_oracle`——完整 Fault payload（双 flow 的
+  nominal `last_state`/`unexpected_event` 判别 + SystemTrace/MemoryDump/
+  PanicPayload 全部深层字段）在 `mimi run` vs `mimi build` 逐字节一致，且**两条
+  native 管线**（checked/compile_checked + legacy/compile_file）都与 bytecode 等价。
+- **resolved native slice 扩展**：`builtin:type:SystemTrace/MemoryDump/PanicPayload`
+  布局入 `types.rs`（与 legacy compile.rs 布局逐字段一致，保 per-function dispatch
+  ABI 兼容）+ eligibility 接受 + `lookup_field_index` 内建 trace 字段索引
+  （checker 内建记录字段 id 为裸 `field:<name>`，无 catalog 条目）——深层
+  `.trace.*` 投影不再把 main 踢回 legacy。
+- **legacy emitter 跨 flow Fault 补齐**（latent L1 修复）：legacy 路径
+  （`compile_file`/`compile_and_run`）对 flow-call 赋值变量（`let sf =
+  Scheduler::peer_fault(...)`）原以裸 `Fault` 登记 → `infer_object_type(sf.last_state)`
+  解析到首个 flow 的 StateId/EventId → 多 flow 程序 native 打印错误枚举
+  （elevator `open_door()`/oracle `Ready()`）。修复：func.rs 登记
+  `flow::<name>::Fault`（`transition_result_var_type`）+ 过渡匹配/调用点
+  `bare_flow_state_name` 剥 `flow::` 前缀（func.rs 两分支 + expr/call/method.rs
+  `compile_flow_transition_call`）。
+- **系统动词 ordinal 按 flow 作用域化**（latent L1，非确定性修复）：
+  `nominal_variant_enum` 原在全部 type_defs 上无序首匹配——注入动词
+  （peer_fault/recover/reset/Panic/ffi_crash）是**每个** flow 的 StateId/EventId
+  共有变体，且各 pass 边注册边迭代（HashMap 顺序随 mutation 漂移）→ 同一程序
+  两次编译可能取到不同 flow 的枚举 → fault record 的 last_state/unexpected_event
+  被打上错误 flow 的 ordinal → native 枚举 Display 打印错误名称
+  （elevator dual-backend 套件 open_door() vs peer_fault() 时好时坏）。修复：
+  枚举解析先按 `current_flow_name` 作用域查（同 `flow_state_llvm_type` 0.34.36
+  纪律），miss 才回退全表。新增 `fault_nominal_verb_ordinal_scoped_multi_flow_dual_backend`
+  每次编译连跑 3 轮断言三管线一致且稳定（防回归）。
+- **验证**：flow_features 242 / dual_ 883（+1 oracle）/ real_world 31 全绿；
+  语言文档 + 边缘隔离门禁绿。
+
 ### 0.36.6 — 二次 Fault 升级（裁决 4）+ 跨 flow Fault 调用点名义化补全（裁决 1）
 
 - **E0440：Fault 不是合法转移 source**（裁决 4, DoD #5）：checker 拒绝用户声明的

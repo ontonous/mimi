@@ -2408,6 +2408,147 @@ func main() -> i32 { 0 }
     );
 }
 
+// ── 0.36.7 Fault nominal: Fault≠Result 语义边界 (裁决 3) + DoD #4 oracle ──
+
+#[test]
+fn fault_cannot_be_function_return_value() {
+    // 0.36.7 (裁决 3): Fault 是状态不是值 — 禁止作为函数返回值 (E0441).
+    // Fault is entered by unexpected control-flow breakage and may only be
+    // left via recover/reset; expected failures travel as Result<T, E>
+    // values. The `flow::<name>::Fault` qualified spelling cannot even be
+    // written (the parser rejects `::`-qualified type names), so the bare
+    // `Fault` spelling is the only surface that reaches the checker — and it
+    // must be rejected with E0441.
+    let src = r#"
+flow Svc {
+    state Active { n: i32 }
+    transition crash(Active) -> Fault {
+        return Fault {
+            last_state: Active,
+            unexpected_event: crash,
+            snapshot: "boom",
+            trace: SystemTrace {
+                last_state_name: "Active",
+                unexpected_event: "crash",
+                snapshot: "boom",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "boom" }
+            }
+        }
+    }
+}
+func make_fault() -> Fault {
+    let f = Svc::crash(Active { n: 1 })
+    return f
+}
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0441)),
+        "func returning Fault must be E0441, got: {:?}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn flow_result_rejected_as_transition_target() {
+    // 0.36.7 (裁决 3): Result must not be a state-machine sink. A transition
+    // target is a state or a `|` union — never `Result<...>`; expected
+    // failures travel as `fails E` values instead. The parser rejects
+    // `-> Result<...>` outright (fail-closed at the syntax level).
+    let src = r#"
+flow Svc {
+    state Active { n: i32 }
+    transition go(Active) -> Result<Active, string> { return Active { n: 1 } }
+}
+func main() -> i32 { 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(src)
+        .tokenize()
+        .expect("lexer must accept the source");
+    let parsed = crate::parser::Parser::new(tokens).parse_file();
+    assert!(
+        parsed.is_err(),
+        "Result as transition target must be rejected at parse time (fail-closed)"
+    );
+}
+
+#[test]
+fn fault_trace_full_payload_dual_backend_oracle() {
+    // 0.36.7 (DoD #4): 错误 trace 双后端等价 oracle — the FULL Fault crash
+    // context must be byte-identical between `mimi run` (bytecode VM) and
+    // `mimi build` (LLVM native): the nominal last_state/unexpected_event for
+    // TWO flows with distinct states (per-flow StateId/EventId discrimination)
+    // plus every structured trace field. Deep `.trace.*` projection keeps
+    // main in the resolved native slice (SystemTrace/MemoryDump/PanicPayload
+    // lower there with legacy-matching layouts), so this guards the resolved
+    // fault machinery end-to-end.
+    let src = r#"
+flow Worker {
+    state Ready { v: i32 }
+    transition work(Ready) -> Ready { return Ready { v: self.v + 1 } }
+}
+flow Scheduler {
+    state Waiting { q: i32 }
+    transition schedule(Waiting) -> Waiting { return Waiting { q: self.q + 1 } }
+}
+func main() -> i32 {
+    let wf = Worker::peer_fault(Ready { v: 3 })
+    println(wf.last_state)
+    println(wf.unexpected_event)
+    println(wf.snapshot)
+    println(wf.trace.last_state_name)
+    println(wf.trace.unexpected_event)
+    println(wf.trace.snapshot)
+    println(wf.trace.memory_dump.fields)
+    println(wf.trace.memory_dump.count)
+    println(wf.trace.panic_payload.error_type)
+    println(wf.trace.panic_payload.file)
+    println(wf.trace.panic_payload.line)
+    println(wf.trace.panic_payload.stack)
+    let sf = Scheduler::peer_fault(Waiting { q: 5 })
+    println(sf.last_state)
+    println(sf.unexpected_event)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    // `mimi run` vs `mimi build`: the checked (`compile_checked`) pipeline —
+    // the exact path the CLI build takes (resolved per-function dispatch).
+    let native_checked =
+        checked_codegen_compile_and_run(src).expect("deep trace oracle must compile natively");
+    assert_eq!(
+        bc, native_checked,
+        "full fault trace must be byte-identical: mimi run vs mimi build (DoD #4 oracle)"
+    );
+    // The legacy-only pipeline (`compile_file`) must agree too — its flow-call
+    // var-type registration qualifies the Fault sink against the per-flow
+    // `flow::<name>::Fault` record TypeDef (0.36.7 cross-flow legacy fix).
+    let native_legacy =
+        compile_and_run(src).expect("deep trace oracle must compile via legacy path");
+    assert_eq!(
+        bc, native_legacy,
+        "full fault trace must be byte-identical: mimi run vs legacy-only codegen"
+    );
+    // The oracle's nominal discrimination: the second flow's Fault must print
+    // ITS OWN StateId, never the first flow's (cross-flow pollution guard).
+    assert!(
+        bc.contains("Waiting()"),
+        "Scheduler Fault last_state must be its own StateId, got:\n{bc}"
+    );
+    assert!(
+        bc.contains("Ready()"),
+        "Worker Fault last_state must be its own StateId, got:\n{bc}"
+    );
+}
+
 // ===================== Reset / Recover (v0.29.13) =====================
 
 #[test]
@@ -6754,4 +6895,45 @@ func main() -> i32 { 0 }
         tokens.is_err(),
         "lexer must reject `'a` lifetime syntax (ADR-004)"
     );
+}
+
+#[test]
+fn fault_nominal_verb_ordinal_scoped_multi_flow_dual_backend() {
+    // 0.36.7 (裁决 1 跨 flow 补全, L1): the injected system verbs
+    // (peer_fault/recover/reset/Panic/ffi_crash) are variants of EVERY flow's
+    // StateId/EventId enum. Unscoped variant-enum resolution
+    // (`nominal_variant_enum`) picked whichever flow's enum the type_defs
+    // HashMap yielded first (RandomState; the order also mutates as later
+    // passes register more type defs), so the fault record's
+    // last_state/unexpected_event were tagged with ANOTHER flow's ordinal and
+    // the native enum display printed the wrong state/event name — flapping
+    // run-to-run (elevator showed open_door() instead of peer_fault() in the
+    // dual-backend suite). `nominal_variant_enum` now scopes to the current
+    // flow's enums first (same discipline as flow_state_llvm_type, 0.34.36).
+    // L1: all three pipelines must agree AND stay stable across repeated
+    // compilations (the flake would surface as a run-to-run flip).
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/real_world/flow_elevator.mimi"),
+    )
+    .expect("read elevator real-world program");
+    for round in 0..3 {
+        let (_, bc) = run_source_bytecode_with_stdout(&src);
+        let checked = checked_codegen_compile_and_run(&src)
+            .expect("checked pipeline (mimi build path) must compile elevator");
+        let legacy =
+            compile_and_run(&src).expect("legacy pipeline (compile_file) must compile elevator");
+        assert_eq!(
+            bc, checked,
+            "elevator round {round}: mimi run vs mimi build"
+        );
+        assert_eq!(
+            bc, legacy,
+            "elevator round {round}: mimi run vs legacy-only codegen"
+        );
+        assert!(
+            bc.ends_with("peer_fault()\n"),
+            "elevator round {round}: fault unexpected_event must be its own flow's EventId, got:\n{bc}"
+        );
+    }
 }

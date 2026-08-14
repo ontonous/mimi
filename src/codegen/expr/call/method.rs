@@ -455,10 +455,25 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // The checker requires an exact source-state overload. Codegen must
         // never recover a failed resolution by selecting another candidate.
-        let from_type = args
+        let from_type_raw = args
             .first()
             .map(|a| self.infer_object_type(a, vars))
             .unwrap_or_default();
+        // 0.36.7 (裁决 1 跨 flow 补全, legacy leg): flow-call args may carry
+        // the flow-qualified record name (`flow::<name>::Fault`) after the
+        // qualified var registration (func.rs transition_result_var_type).
+        // The transition directory keys and TransitionDef.from_state use the
+        // bare name (`Fault`) — `::` cannot appear in user identifiers, so the
+        // `flow::` prefix is generator-made and safe to strip at this boundary.
+        let from_type = if from_type_raw.starts_with("flow::") {
+            from_type_raw
+                .rsplit("::")
+                .next()
+                .unwrap_or(&from_type_raw)
+                .to_string()
+        } else {
+            from_type_raw
+        };
 
         if let Some(table) = self.resolved_transitions.as_ref() {
             if !from_type.is_empty()
