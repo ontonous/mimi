@@ -13,10 +13,7 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Type
             | TokenKind::Func
             | TokenKind::Fn
-            | TokenKind::Fault
             | TokenKind::Fails
-            | TokenKind::Reset
-            | TokenKind::Recover
             | TokenKind::Actor
             | TokenKind::Newtype
             | TokenKind::Let
@@ -46,7 +43,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Pub
             | TokenKind::Drop
             | TokenKind::Defer
-            | TokenKind::Parasteps
             | TokenKind::Failure
             | TokenKind::Requires
             | TokenKind::Ensures
@@ -100,13 +96,10 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "if" => TokenKind::If,
         "else" => TokenKind::Else,
         "for" => TokenKind::For,
-        "fault" => TokenKind::Fault,
         "fails" => TokenKind::Fails,
         "in" => TokenKind::In,
         "while" => TokenKind::While,
         "return" => TokenKind::Return,
-        "reset" => TokenKind::Reset,
-        "recover" => TokenKind::Recover,
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
         "match" => TokenKind::Match,
@@ -117,7 +110,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "await" => TokenKind::Await,
         "unsafe" => TokenKind::Unsafe,
         "spawn" => TokenKind::Spawn,
-        "parasteps" => TokenKind::Parasteps,
         "quote" => TokenKind::Quote,
         "comptime" => TokenKind::Comptime,
         "failure" => TokenKind::Failure,
@@ -177,6 +169,98 @@ mod tests {
     }
 
     #[test]
+    fn keyword_table_count_is_63_hard_is_60() {
+        // 0.36.51+ (Phase D soft-keyword policy lock): the keyword table is
+        // deliberately small. This test keeps the count and the hard/soft split
+        // from drifting silently. `parasteps`, `fault`, `reset`, and
+        // `recover` are no longer in the table.
+        let all = [
+            "module",
+            "type",
+            "func",
+            "fn",
+            "actor",
+            "newtype",
+            "let",
+            "const",
+            "mut",
+            "ref",
+            "shared",
+            "weak",
+            "arena",
+            "cap",
+            "trait",
+            "impl",
+            "dyn",
+            "where",
+            "extern",
+            "if",
+            "else",
+            "for",
+            "fails",
+            "in",
+            "while",
+            "return",
+            "break",
+            "continue",
+            "match",
+            "use",
+            "pub",
+            "drop",
+            "defer",
+            "await",
+            "unsafe",
+            "spawn",
+            "quote",
+            "comptime",
+            "failure",
+            "requires",
+            "ensures",
+            "invariant",
+            "math",
+            "old",
+            "flow",
+            "state",
+            "transition",
+            "protocol",
+            "pinned",
+            "persistent",
+            "view",
+            "mutate",
+            "session",
+            "dual",
+            "end",
+            "and",
+            "or",
+            "not",
+            "loop",
+            "as",
+            "true",
+            "false",
+            "unit",
+        ];
+        assert_eq!(all.len(), 63, "keyword table must be exactly 63 entries");
+        let soft_operators = ["and", "or", "not"];
+        for name in all {
+            let kind = keyword_or_ident(name);
+            assert!(
+                !matches!(kind, TokenKind::Ident(_)),
+                "keyword table entry {name:?} must map to a keyword token kind"
+            );
+            let hard = !soft_operators.contains(&name);
+            assert_eq!(
+                is_keyword_kind(&kind),
+                hard,
+                "{name:?}: hard/soft classification mismatch"
+            );
+        }
+        assert!(matches!(keyword_or_ident("parasteps"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("fault"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("reset"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("recover"), TokenKind::Ident(_)));
+    }
+
+    #[test]
     fn keyword_or_ident_round_trip() {
         // Spot-check that the lookup table is symmetric with is_keyword_kind
         // for the keys we know must round-trip.
@@ -199,6 +283,11 @@ mod tests {
             keyword_or_ident("raw_string"),
             TokenKind::Ident(_)
         ));
+        // 0.36.50 (Phase D pre-roll): `parasteps` demoted from a hard keyword
+        // to a contextual identifier. The lexer no longer reserves it; the
+        // parser recognizes `parasteps { ... }` in statement position.
+        assert!(matches!(keyword_or_ident("parasteps"), TokenKind::Ident(_)));
+        assert!(!is_keyword_kind(&TokenKind::Parasteps));
         assert!(matches!(keyword_or_ident("alloc"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("async"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("with"), TokenKind::Ident(_)));
@@ -210,19 +299,25 @@ mod tests {
             keyword_or_ident("c_borrow_mut"),
             TokenKind::Ident(_)
         ));
+        // 0.36.52 (Phase D soft-keyword policy): reset/recover are system
+        // transition names, not syntax keywords; they tokenize as identifiers.
+        assert!(matches!(keyword_or_ident("reset"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("recover"), TokenKind::Ident(_)));
         // Type names remain identifiers (they're not reserved at lex time).
         assert_eq!(keyword_or_ident("i32"), TokenKind::Ident("i32".into()));
     }
 
     #[test]
-    fn fault_reset_recover_are_keywords() {
-        // F-H7: soft keywords must tokenize as keyword kinds.
-        assert!(matches!(keyword_or_ident("fault"), TokenKind::Fault));
-        assert!(matches!(keyword_or_ident("reset"), TokenKind::Reset));
-        assert!(matches!(keyword_or_ident("recover"), TokenKind::Recover));
-        assert!(is_keyword_kind(&TokenKind::Fault));
-        assert!(is_keyword_kind(&TokenKind::Reset));
-        assert!(is_keyword_kind(&TokenKind::Recover));
+    fn flow_words_tokenize_as_identifiers() {
+        // F-H7: `fault`/`reset`/`recover` are flow/system names, not global
+        // keywords. They tokenize as ordinary identifiers; the parser promotes
+        // `fault` to the internal flow declaration token inside a flow body.
+        assert!(matches!(keyword_or_ident("fault"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("reset"), TokenKind::Ident(_)));
+        assert!(matches!(keyword_or_ident("recover"), TokenKind::Ident(_)));
+        assert!(!is_keyword_kind(&TokenKind::Fault));
+        assert!(!is_keyword_kind(&TokenKind::Reset));
+        assert!(!is_keyword_kind(&TokenKind::Recover));
     }
 
     #[test]

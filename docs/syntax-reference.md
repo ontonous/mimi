@@ -8,8 +8,8 @@
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
 > See `docs/language-support.toml` for 9-dimension capability matrix.
 >
-> Version: v0.1.5-dev (2026-08-13, synced from golden — 0.35.39 僵尸关键字裁撤)
-> Implementation: v0.1.5-dev (internal sprint 0.35.X)
+> Version: v0.1.6-dev (2026-08-15, synced from golden — 0.36.54 Phase D 定案)
+> Implementation: v0.1.6-dev (internal sprint 0.36.X)
 > Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
 > 渲染例外（与 golden 的有意差异）：golden 的标题/引言元块与 §7 差异台账不进入本副本；
 > §7 台账见 golden 原文（0.34.33 起差异归零）。
@@ -36,13 +36,13 @@
 | 布尔 | `true` / `false` | parse_expr.rs:278-287 |
 | 单元 | `()`（表达式与类型两处均归一化为 `unit`） | parse_expr.rs:288-292；parse_type.rs:139-140 |
 
-### 1.3 关键字（67 个 `=> TokenKind` 映射：64 硬关键字 + and/or/not 软关键字，keywords.rs:81-147；0.35.39 实测）
+### 1.3 关键字（63 个 `=> TokenKind` 映射：60 硬关键字 + and/or/not 软关键字，keywords.rs:80-149；0.36.53 实测）
 
 ```
 module type func fn actor newtype let const mut ref
 shared weak arena cap trait impl dyn where extern
-if else for fault fails in while return reset recover break continue
-match use pub drop defer await unsafe spawn parasteps
+if else for fails in while return break continue
+match use pub drop defer await unsafe spawn
 quote comptime failure requires ensures invariant math old
 flow state transition protocol pinned persistent view mutate
 session dual end and or not loop as
@@ -53,14 +53,17 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 - **移出关键字表**：`subflow`（条款 2）、`steps`（MimiSpec-only）、`consume`（随 delegate 死）——现在 tokenize 为 Ident。
 - **软关键字化**：`and`/`or`/`not` 仍 tokenize 为运算符 kind，但**不是硬关键字**（绑定位置可作标识符）。
 - `delegate` **已软化为标识符**（tokenize 为 Ident，keywords.rs:242 测试断言；`let delegate = 5` / `func delegate()` 合法）；仅语句起始位置保留条款 2 拒绝诊断（parse_stmt.rs:131，与 `on` 同模式，parse_stmt.rs:182）。
-- [建议] 再审查：`reset`/`recover`（仅系统注入 transition 名）、`nothing`。
+- **v0.36.52 已处置**：`reset`/`recover` 降为普通标识符（仅系统注入 transition 名）；`nothing` 已在前轮删除。
 - **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。
-- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **67 个** `=> TokenKind` 映射（实测 keywords.rs:81-147，含 and/or/not 软关键字映射；其中 64 个硬关键字，`is_keyword_kind` 判定）。
+- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **63 个** `=> TokenKind` 映射（实测 keywords.rs:80-149，含 and/or/not 软关键字映射；其中 60 个硬关键字，`is_keyword_kind` 判定）。
 - **v0.35.39 已删除**（僵尸关键字裁撤，13 个）：`c_shared`/`c_borrow`/`c_borrow_mut`/`local_shared`/`weak_local`/`raw_string`/`nothing`(token)/`alloc`/`async`(top-level)/`with`/`desc`/`rule`/`mms`——关键字表 80 → 67，共享收敛为 `shared`/`weak` 二态；`Type::Nothing` 保留为语义残差类型（无关键字）。
+- **v0.36.50 已软化**（Phase D 预演）：`parasteps` 从硬关键字降为**上下文标识符**——词法层不再保留（tokenize 为 `Ident`），parser 在语句起始且后随 `{` 时识别为并行块；`func parasteps()` / `let parasteps = 7` 合法。关键字表 67 → 66。
+- **v0.36.52 已软化**（Phase D 软关键字政策）：`reset`/`recover` 只是系统注入 transition 名，不是语法关键字——降为普通标识符，`let reset = 1` / `func recover()` 合法。关键字表 66 → 64。
+- **v0.36.53 已软化**（Phase D 软关键字政策）：`fault` 不再是全局关键字——`fault ErrorType` 在 flow body 内由 parser 上下文识别，`let fault = 1` / `func fault()` 合法。关键字表 64 → 63。
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
-`old view mutate persistent and or not session dual end`
+`old view mutate persistent and or not session dual end parasteps`
 
 ---
 
@@ -149,7 +152,7 @@ Stmt := 'let' [ 'mut' ] [ 'ref' ] Pattern [ ':' Type ] [ '=' Expr ] ';'      (* 
                                          发射器以登记+出口发射实现——无
                                          'defer failure' 表面，见 language-spec
                                          §4.6 0.36.15 修正 *)
-      | 'parasteps' '{' Block '}' ';'                                        (* :108-115 *)
+      | 'parasteps' '{' Block '}' ';'                                        (* :108-115；0.36.50 起 parasteps 为上下文标识符，仅在语句起始 + 后随块时成立 *)
       | 'func' FuncDef ';'                                                   (* :116-120 *)
       | 'delegate' ... — **v0.34.1 已拒绝**（条款 2 诊断，parse_stmt.rs:139-160）
       | 'pinned' '(' Expr ')' [ '|' Ident '|' ] '{' Block '}'   (* :180-216；v0.34.3 timeout 字段删除 *)

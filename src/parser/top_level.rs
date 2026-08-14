@@ -1086,6 +1086,13 @@ impl Parser {
                 impl_protocols.push(proto);
                 continue;
             }
+            // 0.36.53 (Phase D soft-keyword policy): `fault` is no longer a
+            // global keyword. Inside a flow body the identifier `fault` is
+            // promoted to the internal declaration token so `fault ErrorType`
+            // keeps its existing parse path.
+            if self.at_ident_name("fault") {
+                self.tokens[self.pos].kind = TokenKind::Fault;
+            }
             // v0.34.1: `@transactional` abolished by amendment clause 3 (WAL).
             // Check for `persistent` modifier or `@` annotation.
             if self.at(&TokenKind::At) {
