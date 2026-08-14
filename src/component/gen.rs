@@ -592,6 +592,15 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         // real: (op: *const c_char) -> ! — SD-9 finiteness trap (mod.rs:19571)
         f.param("op", ptr(prim(U8))).effect("noreturn")
     });
+    gen.export("mimi_trap_no_flow_transition", |f| {
+        // real: (flow, verb, from_state: *const c_char) -> ! — 0.36.10
+        // recover/reset-on-live-state trap (mirrors the VM's flow-transition
+        // miss text, generic E0800)
+        f.param("flow", ptr(prim(U8)))
+            .param("verb", ptr(prim(U8)))
+            .param("from_state", ptr(prim(U8)))
+            .effect("noreturn")
+    });
     gen.export("mimi_runtime_set_error_handler", |f| {
         // real: (handler: Option<ErrorHandler>) — fn-pointer-sized (mod.rs:19080)
         f.param("handler", prim(IntPtr))

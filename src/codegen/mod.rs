@@ -523,6 +523,13 @@ pub struct CodeGenerator<'ctx> {
     /// ordinal) interprets as `B` — a silent L1 violation.
     multi_target_global_ordinals:
         std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
+    /// 0.36.10 (裁决 6 follow-up): variables bound to a transition result that
+    /// DECLARED faultability (`-> S | Fault`, incl. the 2-target case the
+    /// legacy `multi_target_states`/ordinal machinery covers via the flow-wide
+    /// `__MultiTarget` union). Maps variable name -> flow name. recover/reset
+    /// on such a value compiles to a runtime tag dispatch (legacy leg); the
+    /// union's boxed payload carries the actual state.
+    multi_target_result_vars: std::collections::HashMap<String, String>,
     /// Name of the flow whose transition is currently being compiled.
     /// Selects the right bucket in `multi_target_global_ordinals`.
     current_flow_name: String,
@@ -753,6 +760,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_multi_target_transition: false,
             multi_target_states: Vec::new(),
             multi_target_global_ordinals: std::collections::HashMap::new(),
+            multi_target_result_vars: std::collections::HashMap::new(),
             current_flow_name: String::new(),
             current_from_state: String::new(),
             fault_self_entry: None,

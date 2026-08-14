@@ -2843,6 +2843,275 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_union_result_recover_direct_call_dual_backend() {
+    // 0.36.10 (裁决 6 follow-up): a transition result that DECLARED
+    // faultability (`-> S | Fault`) may be passed DIRECTLY to recover/reset —
+    // no intermediate match required. The value is statically first-target
+    // typed but runtime-dispatches on the actual tag: the Faulted case
+    // recovers, the live case is a runtime error in both backends (the VM
+    // resolves the record name, the native union dispatch compares the tag).
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active, d: i32) -> Active | Fault {
+        self.value = 99
+        self.value = self.value / d
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let failed = Svc::crash(a, 0)
+    let r = Svc::recover(failed)
+    println(r.value)
+    0
+}
+"#;
+    let (_, vm_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "99",
+        "VM: direct recover of a faulted union result pulls the draft, got {:?}",
+        vm_out
+    );
+    let native = compile_and_run(src).expect("direct union recover must codegen");
+    assert_eq!(
+        native.trim(),
+        "99",
+        "native: direct recover of a faulted union result, got {:?}",
+        native
+    );
+}
+
+#[test]
+fn flow_union_result_reset_direct_call_dual_backend() {
+    // reset twin of the direct-call test: a faulted union result resets (the
+    // draft is discarded; both backends agree on the resulting root).
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active, d: i32) -> Active | Fault {
+        self.value = self.value / d
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let failed = Svc::crash(a, 0)
+    let r = Svc::reset(failed)
+    println(r.value)
+    0
+}
+"#;
+    let (_, vm_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "0",
+        "VM: direct reset of a faulted union result, got {:?}",
+        vm_out
+    );
+    let native = compile_and_run(src).expect("direct union reset must codegen");
+    assert_eq!(
+        native.trim(),
+        "0",
+        "native: direct reset of a faulted union result, got {:?}",
+        native
+    );
+}
+
+#[test]
+fn flow_union_result_recover_three_target_dual_backend() {
+    // 3-target union (`-> Active | Busy | Fault`): the Fault tag is the
+    // flow-wide name-sorted ordinal (never a per-transition subset index), and
+    // the dispatch must find it after both user states.
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    state Busy { n: i32 }
+    transition crash(Active, d: i32) -> Active | Busy | Fault {
+        self.value = self.value / d
+        if d > 5 { return Busy { n: self.value } }
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let failed = Svc::crash(a, 0)
+    let r = Svc::recover(failed)
+    println(r.value)
+    0
+}
+"#;
+    let (_, vm_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "7",
+        "VM 3-target direct recover, got {:?}",
+        vm_out
+    );
+    let native = compile_and_run(src).expect("3-target union recover must codegen");
+    assert_eq!(
+        native.trim(),
+        "7",
+        "native 3-target direct recover, got {:?}",
+        native
+    );
+}
+
+#[test]
+fn flow_union_result_alias_recover_dual_backend() {
+    // Aliasing the faultable result (`let x = failed`) keeps the runtime
+    // union shape and the recover-ability.
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active, d: i32) -> Active | Fault {
+        self.value = 99
+        self.value = self.value / d
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let failed = Svc::crash(a, 0)
+    let x = failed
+    let r = Svc::recover(x)
+    println(r.value)
+    0
+}
+"#;
+    let (_, vm_out) = run_source_bytecode_with_stdout(src);
+    assert_eq!(
+        vm_out.trim(),
+        "99",
+        "VM: alias direct recover, got {:?}",
+        vm_out
+    );
+    let native = compile_and_run(src).expect("alias union recover must codegen");
+    assert_eq!(
+        native.trim(),
+        "99",
+        "native: alias direct recover, got {:?}",
+        native
+    );
+}
+
+#[test]
+fn flow_union_result_recover_live_traps_dual_backend() {
+    // Recovering a LIVE union result (the tag is not Fault) is a runtime
+    // error in BOTH backends: the VM misses the (flow, verb, state) key, the
+    // native dispatch traps with the SAME text/format ("no transition
+    // {flow}::{verb} from state {state}", generic E0800).
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active, d: i32) -> Active | Fault {
+        self.value = self.value / d
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let live = Svc::crash(a, 1)
+    let r = Svc::recover(live)
+    println(r.value)
+    0
+}
+"#;
+    let vm = run_source_bytecode_result(src);
+    let vm_err = vm.expect_err("live union recover must error in the VM");
+    assert!(
+        vm_err.contains("no transition Svc::recover from state Active"),
+        "VM live-recover message, got: {}",
+        vm_err
+    );
+    let native = compile_and_run(src);
+    let native_err = native.expect_err("live union recover must trap natively");
+    assert!(
+        native_err.contains("no transition Svc::recover from state Active")
+            && native_err.contains("E0800"),
+        "native live-recover trap text, got: {}",
+        native_err
+    );
+}
+
+#[test]
+fn flow_union_result_recover_cross_flow_rejected() {
+    // L2: recover only accepts a faultable result OF THE SAME FLOW. A
+    // different flow's union-shaped value (even with a matching-name state)
+    // must be rejected statically — never dispatched against this flow's
+    // Fault overload.
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active, d: i32) -> Active | Fault {
+        self.value = self.value / d
+        return Active { value: self.value }
+    }
+}
+
+flow Other {
+    state Idle { n: i32 }
+    transition kick(Idle) -> Idle | Fault {
+        return Idle { n: 1 }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let failed = Svc::crash(a, 0)
+    let o = Other::kick(Idle { n: 2 })
+    let r = Svc::recover(o)
+    0
+}
+"#;
+    let result = check_source(src);
+    let err = result.expect_err("cross-flow recover must be a type error");
+    let text = format!("{:?}", err);
+    assert!(
+        text.contains("E0211"),
+        "cross-flow recover should be E0211, got: {}",
+        text
+    );
+}
+
+#[test]
+fn flow_union_result_recover_plain_state_rejected() {
+    // L2: recover on a PLAIN (non-union) state value stays rejected — only
+    // DECLARED-faultable result variables are widened. This preserves the
+    // 0.36.9 verdict: a statically-known live state cannot be recovered.
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active, d: i32) -> Active | Fault {
+        self.value = self.value / d
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let r = Svc::recover(a)
+    println(r.value)
+    0
+}
+"#;
+    let result = check_source(src);
+    let err = result.expect_err("plain-state recover must be a type error");
+    let text = format!("{:?}", err);
+    assert!(
+        text.contains("E0211"),
+        "plain-state recover should be E0211, got: {}",
+        text
+    );
+}
+
+#[test]
 fn transactional_persistent_draft_syntax_rejected_by_amendment_clause_3() {
     // @transactional was abolished by clause 3; the parser must reject it.
     // Non-transactional persistent-draft semantics (the faulting draft, not a

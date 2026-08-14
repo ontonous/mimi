@@ -2930,6 +2930,42 @@ impl BodyLowerer<'_> {
             })
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        // 0.36.10 (裁决 6 follow-up): recover/reset on a transition result that
+        // DECLARED faultability (`-> S | Fault`) is statically first-target
+        // typed but may be a Fault at runtime. The checker widens these calls
+        // (only for same-flow faultable result vars); the IR lowering must not
+        // re-reject them. recover/reset have at most one overload per flow —
+        // the injected/user Fault-entry `recover(Fault)` / `reset(Fault)` — so
+        // when the source-state match found nothing but exactly one (flow,
+        // event) signature exists, resolve to it (the runtime dispatches on the
+        // actual tag). Cross-flow values never match `flow_matches`.
+        let mut widened_recover_reset = false;
+        if candidates.is_empty() && matches!(event, "recover" | "reset") {
+            let flow_event_only: Vec<_> = self
+                .signatures
+                .iter()
+                .filter_map(|(owner, signature)| {
+                    let (candidate_flow, candidate_event, source_state) =
+                        parse_transition_owner(owner)?;
+                    let flow_matches = candidate_flow == flow
+                        || candidate_flow
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == flow);
+                    (flow_matches && candidate_event == event).then(|| {
+                        (
+                            owner.clone(),
+                            signature.clone(),
+                            candidate_flow.to_string(),
+                            source_state.to_string(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            if flow_event_only.len() == 1 {
+                candidates = flow_event_only;
+                widened_recover_reset = true;
+            }
+        }
         let [(_owner, signature, qualified_flow, source_state)] = candidates.as_slice() else {
             let available = self
                 .signatures
@@ -3017,14 +3053,30 @@ impl BodyLowerer<'_> {
         }
 
         let mut lowered = Vec::with_capacity(slots.len());
-        for (parameter, slot) in signature.parameters.iter().zip(slots) {
+        for (index, (parameter, slot)) in signature.parameters.iter().zip(slots).enumerate() {
             let Some((value, _)) = slot else {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!("transition parameter '{}' has no argument", parameter.name),
                 )]);
             };
-            let conversion = self.implicit_conversion(node_id, &value.ty, &parameter.ty)?;
+            // 0.36.10 (裁决 6 follow-up): the widened recover/reset source is
+            // statically first-target typed but the overload declares `Fault`;
+            // the runtime dispatches on the actual tag, so no implicit
+            // conversion exists (or is needed) at the IR level. Emit a
+            // self-consistent identity on the value's own type (from == to) —
+            // the IR is a checked artifact here; the multi-target body always
+            // compiles through the legacy path, which re-derives dispatch
+            // from the AST and never consults this conversion.
+            let conversion = if widened_recover_reset && index == 0 {
+                CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    to: value.ty.clone(),
+                    from: value.ty.clone(),
+                }
+            } else {
+                self.implicit_conversion(node_id, &value.ty, &parameter.ty)?
+            };
             lowered.push(ResolvedArgument {
                 parameter: parameter.id.clone(),
                 value,

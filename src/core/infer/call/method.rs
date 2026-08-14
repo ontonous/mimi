@@ -75,9 +75,24 @@ impl<'a> Checker<'a> {
                 // 0.36.6: a qualified flow result (e.g. `flow::Svc::Fault`) must
                 // still match the unqualified overload key (`Fault`).
                 let from_short = strip_flow_qualifier(&from_ty);
-                let overload_key = match from_short.unlocated() {
-                    Type::Name(n, _) => format!("{}::{}", short_key, n),
-                    _ => short_key.clone(),
+                // 0.36.10 (裁决 6 follow-up): recover/reset on a transition
+                // result that DECLARED faultability (`-> S | Fault`) — the
+                // static type is the first target, but at runtime the value
+                // may be a Fault. Accept the value directly (statically
+                // typing it as the first target); the runtime dispatches on
+                // the actual tag. Recovery of a non-Faulted tag is a runtime
+                // error in both backends. Cross-flow values stay rejected
+                // (the arg must belong to THIS flow).
+                let widened_recover_reset = matches!(method_name, "recover" | "reset")
+                    && matches!(args.first().map(|a| a.unlocated()), Some(Expr::Ident(v))
+                        if matches!(self.faultable_result_vars.get(v), Some(f) if f == module_name));
+                let overload_key = if widened_recover_reset {
+                    format!("{}::Fault", short_key)
+                } else {
+                    match from_short.unlocated() {
+                        Type::Name(n, _) => format!("{}::{}", short_key, n),
+                        _ => short_key.clone(),
+                    }
                 };
                 let signature = self
                     .funcs
@@ -100,6 +115,14 @@ impl<'a> Checker<'a> {
                         for (index, (actual, expected)) in
                             arg_types.iter().zip(params.iter()).enumerate()
                         {
+                            // 0.36.10 (裁决 6 follow-up): the widened
+                            // recover/reset path passes a statically
+                            // first-target-typed value where the overload
+                            // declares `Fault`; the runtime dispatch decides.
+                            // Skip the from-state unify for that single arg.
+                            if widened_recover_reset && index == 0 {
+                                continue;
+                            }
                             let actual_clean = strip_flow_qualifier(actual);
                             let coerced = is_numeric_coercion(expected, &actual_clean);
                             if !coerced && self.unification.unify(expected, &actual_clean).is_err()

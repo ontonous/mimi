@@ -143,6 +143,13 @@ pub(crate) struct Checker<'a> {
     /// Direct field access on these variables is rejected (E0420) —
     /// the caller must use match to handle all possible states.
     pub(crate) multi_target_vars: HashMap<String, Vec<Type>>,
+    /// 0.36.10 (裁决 6 follow-up): variables bound to a transition result that
+    /// DECLARED faultability (`-> S | Fault` — incl. the 2-target case that
+    /// multi_target_vars does NOT track, since it requires ≥2 user states).
+    /// Maps variable name -> flow name. Such a value is Fault-able at runtime,
+    /// so recover/reset may take it directly (statically first-target-typed;
+    /// the runtime dispatches on the actual tag).
+    pub(crate) faultable_result_vars: HashMap<String, String>,
     /// Declared session types: name → body (v0.29.19).
     pub(crate) session_types: HashMap<String, crate::ast::SessionType>,
     /// Residual protocol for variables typed as `SessionChan<S>` within the
@@ -301,6 +308,7 @@ impl<'a> Checker<'a> {
             transition_fails: None,
             transition_fails_types: HashMap::new(),
             multi_target_vars: HashMap::new(),
+            faultable_result_vars: HashMap::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),
             session_actions: std::collections::BTreeMap::new(),

@@ -746,6 +746,8 @@ declare void @mimi_trap_div_overflow()
 
 declare void @mimi_trap_float_not_finite(ptr)
 
+declare void @mimi_trap_no_flow_transition(ptr, ptr, ptr)
+
 define internal { i32, i64 } @"flow::Main::StateId_Fault"() {
 entry:
   %"flow::Main::StateId_Fault" = alloca { i32, i64 }, align 8
