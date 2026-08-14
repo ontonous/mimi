@@ -87,10 +87,11 @@ struct Frame {
 struct FlowTxCtx {
     /// Flow name (for diagnostics / persistent lookups).
     flow_name: String,
+    /// Transition name (0.36.9 裁决 6: absorption is gated on the DECLARED
+    /// target set — the name + from_state identify the exact transition).
+    transition_name: String,
     /// From-state name (becomes Fault.last_state).
     from_state: String,
-    /// The from-state payload as passed (pre-transition).
-    from_payload: Value,
     /// Persistent field names declared on the flow.
     persistent_fields: Vec<String>,
 }
@@ -320,49 +321,49 @@ impl BytecodeVM {
         let Some(idx) = self.stack.iter().rposition(|f| f.flow_tx.is_some()) else {
             return false;
         };
-        let (flow_name, from_state, from_payload, persistent) = {
+        let (flow_name, transition_name, from_state, persistent) = {
             let ctx = self.stack[idx].flow_tx.as_ref().expect("checked above");
             if ctx.from_state == "Fault" {
                 return false;
             }
             (
                 ctx.flow_name.clone(),
+                ctx.transition_name.clone(),
                 ctx.from_state.clone(),
-                ctx.from_payload.clone(),
                 ctx.persistent_fields.clone(),
             )
         };
+        // 0.36.9 (裁决 6, 吸收声明门): absorption is only legal for transitions
+        // whose DECLARED target union includes Fault (`-> S | Fault` / `-> Fault`).
+        // A panic inside a transition that did not declare faultability is a hard
+        // E0801 program error — the native backend already traps there (single
+        // target return has no Fault slot), so the VM must not silently absorb.
+        // This closes the L1 divergence: `mimi run` no longer fabricates a Fault
+        // for transitions whose contract says the result is the plain target.
+        let declared_faultable = self.program.flow_defs.get(&flow_name).is_some_and(|fd| {
+            fd.transitions.iter().any(|t| {
+                t.name == transition_name
+                    && t.from_state == from_state
+                    && t.to_states.iter().any(|s| s == "Fault")
+            })
+        });
+        if !declared_faultable {
+            return false;
+        }
         if !is_runtime_panic(e) {
             return false;
         }
         // Draft = the transition's `self` (register 0) — mutated in place by
         // the body. Non-transactional (all flows, since @transactional was
-        // abolished in v0.34.1): the draft survives; only dirty persistent
-        // fields are zeroed below so recover→reset restores defaults.
-        let mut restored = self.stack[idx].regs.first().cloned().unwrap_or(Value::Unit);
-        // v0.29.13/14: recover degrades to reset when persistent fields
-        // were dirtied during the turn that produced this Fault. Zero them
-        // in the Fault shadow so the injected recover verb restores defaults
-        // instead of the dirty draft.
-        if !persistent.is_empty() {
-            let entry_fields = record_fields_of(&from_payload);
-            let draft_fields = record_fields_of(&restored);
-            let dirty = persistent.iter().any(|name| {
-                match (entry_fields.get(name), draft_fields.get(name)) {
-                    (Some(old), Some(cur)) => !crate::interp::value::values_equal(cur, old),
-                    _ => false,
-                }
-            });
-            if dirty {
-                if let Value::Record(_, fields) = &mut restored {
-                    for name in &persistent {
-                        if let Some(v) = fields.get_mut(name) {
-                            *v = default_value_for_runtime(v);
-                        }
-                    }
-                }
-            }
-        }
+        // abolished in v0.34.1): the draft SURVIVES the absorb, and the Fault
+        // shadow carries it as-is. 0.36.9 (裁决 6): the pre-0.34.1 "degrade
+        // recover to reset when a persistent field was dirtied mid-turn"
+        // (dirty→zero) path is the obsolete @transactional rollback vestige —
+        // transactional semantics were abolished, so there is no rollback to
+        // model; recover pulls the faulting draft, matching codegen exactly
+        // (no dirty check). Removed for L1: absorbed persistent shadow now
+        // byte-identical across backends.
+        let restored = self.stack[idx].regs.first().cloned().unwrap_or(Value::Unit);
         let event = format!("panic:{}", e.code());
         let mut fault = crate::flow_matrix::make_fault_value(&from_state, &event, "");
         // v0.34.18b typed-fault parity: a `fault T` flow's Fault record carries a
@@ -2821,9 +2822,6 @@ impl BytecodeVM {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    // From-state payload for fault shadowing (captured before
-                    // args is moved into the frame).
-                    let from_payload = args.first().cloned().unwrap_or(Value::Unit);
                     // Call the transition function.
                     // If the transition has a `fails` clause, wrap the result:
                     // success → Ok(result), failure → Err((source, error)).
@@ -2840,8 +2838,8 @@ impl BytecodeVM {
                         let frame = self.cur_frame_mut();
                         frame.flow_tx = Some(FlowTxCtx {
                             flow_name,
+                            transition_name: method_name,
                             from_state,
-                            from_payload,
                             persistent_fields: persistent.unwrap_or_default(),
                         });
                     }
@@ -4156,28 +4154,6 @@ fn shadow_persistent_into_fault(fault: &mut Value, from: &Value, persistent: &[S
         if let Some(v) = from_fields.get(name) {
             fault_fields.insert(name.clone(), v.clone());
         }
-    }
-}
-
-/// Extract the field map of a Record value (empty map otherwise).
-fn record_fields_of(v: &Value) -> std::collections::HashMap<String, Value> {
-    match v {
-        Value::Record(_, fields) => fields.clone(),
-        _ => std::collections::HashMap::new(),
-    }
-}
-
-/// Default value for a runtime sample (mirror of tree-walker
-/// default_value_for_runtime).
-fn default_value_for_runtime(sample: &Value) -> Value {
-    match sample {
-        Value::Int(_) => Value::Int(0),
-        Value::Float(_) => Value::Float(0.0),
-        Value::Bool(_) => Value::Bool(false),
-        Value::String(_) => Value::String(Arc::new(String::new())),
-        Value::List(_) => Value::List(Arc::new(vec![])),
-        Value::Unit => Value::Unit,
-        other => other.clone(), // keep shape for complex types
     }
 }
 

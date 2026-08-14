@@ -2254,73 +2254,6 @@ func main() -> i32 {
     );
 }
 
-#[test]
-fn flow_panic_absorbed_to_fault() {
-    // Runtime div-by-zero inside a transition body → Fault with panic:E0801.
-    // Static type is still the declared to-state (Ready); check fields via
-    // runtime only (interp does not re-typecheck after absorption).
-    let src = r#"
-flow Calc {
-    state Ready { v: i32 }
-
-    transition boom(Ready, denom: i32) -> Ready {
-        let q = self.v / denom
-        return Ready { v: q }
-    }
-}
-
-func main() -> i32 {
-    let s = Ready { v: 10 }
-    let f = Calc::boom(s, 0)
-    // f is Fault at runtime; print SystemTrace fields
-    println(f.last_state)
-    println(f.unexpected_event)
-    0
-}
-"#;
-    // Type checker still sees Ready — field access on f is a static error.
-    // Use run_source_result only (interp path, no typecheck).
-    let result = run_source_bytecode_result(src);
-    assert_eq!(result, Ok(interp::Value::Int(0)), "got {:?}", result);
-    // Capture via a pure-return test without println side channel:
-    let src2 = r#"
-flow Calc {
-    state Ready { v: i32 }
-
-    transition boom(Ready, denom: i32) -> Ready {
-        let q = self.v / denom
-        return Ready { v: q }
-    }
-}
-
-func main() -> i32 {
-    let s = Ready { v: 10 }
-    let f = Calc::boom(s, 0)
-    match f {
-        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
-            match last_state {
-                Ready => match unexpected_event {
-                    Panic(_) => return 1
-                    _ => 0
-                }
-                _ => 0
-            }
-        }
-        _ => 0
-    }
-}
-"#;
-    // match may not support Fault pattern if type is Ready — use record field via Value path.
-    // Simpler: just assert run succeeds (absorbed) vs Err (not absorbed).
-    let r = run_source_bytecode_result(src);
-    assert!(
-        r.is_ok(),
-        "div-by-zero should be absorbed to Fault, got {:?}",
-        r
-    );
-    let _ = src2;
-}
-
 // ── 0.36.6 Fault nominal: 二次 Fault 升级 (裁决 4, DoD #5) ────────────
 
 #[test]
@@ -2589,23 +2522,32 @@ flow C {
 
 #[test]
 fn flow_reset_rebuilds_root() {
-    // 0.34.18b: @dense fallback removed (amendment clause 1). Enter Fault via a
-    // single-target transition whose body panics — the bytecode VM absorbs the
-    // panic into a Fault (dynamically typed; statically still `Pos`). reset then
-    // rebuilds the root with a default payload (n=0).
-    //
-    // Bytecode-only: reset/recover on an absorbed Fault is inherently dynamic —
-    // the static type of `f` is the to-state, not `Fault`, so codegen cannot
-    // type a `reset(f)` call. This mirrors flow_fault_recover_uses_faulting_persistent_draft.
+    // 0.36.9 (裁决 6, 吸收声明门): a transition may absorb a runtime panic
+    // into Fault ONLY if its declared target union includes Fault. The old
+    // "single-target absorbed panic" entry (dynamically typed, bytecode-only)
+    // is gone — single-target panics are hard E0801 traps in both backends.
+    // Fault is now entered via a DECLARED `-> Fault` transition; `f` is
+    // statically Fault-typed, so `reset(f)` is a typed call and the test is
+    // dual-backend. reset rebuilds the root with a default payload (n=0).
     let src = r#"
 flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
     transition inc(Zero) -> Pos { return Pos { n: self.n + 1 } }
-    transition crash(Pos) -> Pos {
-        let x = 1 / 0
-        return Pos { n: self.n }
+    transition crash(Pos) -> Fault {
+        return Fault {
+            last_state: Pos,
+            unexpected_event: crash,
+            snapshot: "boom",
+            trace: SystemTrace {
+                last_state_name: "Pos",
+                unexpected_event: "crash",
+                snapshot: "boom",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "boom" }
+            }
+        }
     }
 }
 
@@ -2624,23 +2566,44 @@ func main() -> i32 {
         "reset rebuilds root default, got {:?}",
         out
     );
+    let native = compile_and_run(src).expect("native reset must typecheck+codegen");
+    assert_eq!(
+        native.trim(),
+        "0",
+        "native reset rebuilds root default, got {:?}",
+        native
+    );
 }
 
 #[test]
 fn flow_recover_preserves_persistent() {
-    // 0.34.18b: persistent Config.max_retries survives an absorbed-panic Fault
-    // and is restored by recover. Entry is a single-target transition whose body
-    // panics (bytecode absorbs → Fault, shadowing the clean persistent field).
-    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
+    // 0.36.9 (裁决 6): re-anchored from the bytecode-only single-target
+    // absorbed-panic entry to a DECLARED `-> Fault` transition (statically
+    // typed, dual-backend). persistent Config.max_retries survives the Fault
+    // (explicit clean shadow) and is restored by recover. The mid-turn-dirty
+    // degradation (dirty→zero so recover degrades to reset) was abolished
+    // with @transactional (v0.34.1) — the draft is the truth; recover pulls
+    // the faulting shadow as-is (see flow_fault_recover_uses_faulting_persistent_draft).
     let src = r#"
 flow Svc {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32, req: i32 }
 
     transition start(Config) -> Active { return Active { max_retries: self.max_retries, req: 0 } }
-    transition crash(Active) -> Active {
-        let x = 1 / 0
-        return Active { max_retries: self.max_retries, req: self.req }
+    transition crash(Active) -> Fault {
+        return Fault {
+            last_state: Active,
+            unexpected_event: crash,
+            snapshot: "",
+            trace: SystemTrace {
+                last_state_name: "Active",
+                unexpected_event: "crash",
+                snapshot: "",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "" }
+            },
+            max_retries: self.max_retries
+        }
     }
 }
 
@@ -2659,22 +2622,40 @@ func main() -> i32 {
         "recover preserves persistent, got {:?}",
         out
     );
+    let native = compile_and_run(src).expect("native recover must typecheck+codegen");
+    assert_eq!(
+        native.trim(),
+        "7",
+        "native recover preserves persistent, got {:?}",
+        native
+    );
 }
 
 #[test]
 fn flow_reset_discards_persistent() {
-    // 0.34.18b: reset always zeros persistent fields — even though the absorbed
-    // Fault shadowed max_retries=7. Entry via single-target absorbed panic.
-    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
+    // 0.36.9 (裁决 6): re-anchored to a DECLARED `-> Fault` entry (dual-backend).
+    // reset always rebuilds root defaults — even though the Fault shadowed
+    // max_retries=7, reset discards it.
     let src = r#"
 flow Svc {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32 }
 
     transition start(Config) -> Active { return Active { max_retries: self.max_retries } }
-    transition crash(Active) -> Active {
-        let x = 1 / 0
-        return Active { max_retries: self.max_retries }
+    transition crash(Active) -> Fault {
+        return Fault {
+            last_state: Active,
+            unexpected_event: crash,
+            snapshot: "",
+            trace: SystemTrace {
+                last_state_name: "Active",
+                unexpected_event: "crash",
+                snapshot: "",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "" }
+            },
+            max_retries: self.max_retries
+        }
     }
 }
 
@@ -2688,36 +2669,185 @@ func main() -> i32 {
 "#;
     let (_, out) = run_source_bytecode_with_stdout(src);
     assert_eq!(out.trim(), "0", "reset discards persistent, got {:?}", out);
+    let native = compile_and_run(src).expect("native reset must typecheck+codegen");
+    assert_eq!(
+        native.trim(),
+        "0",
+        "native reset discards persistent, got {:?}",
+        native
+    );
 }
 
 #[test]
 fn flow_fault_recover_uses_faulting_persistent_draft() {
-    let src = r#"
+    // 0.36.9 (裁决 6, 吸收声明门 + 非事务草稿语义): the recovered persistent
+    // draft is the FAULTING DRAFT, not a reset default. The old bytecode-only
+    // entry (single-target `-> Active` that panics) is gone — single-target
+    // panics are hard E0801 traps in both backends, so the draft paths below
+    // are re-expressed as statically-typed, dual-backend programs:
+    //
+    //   Part A: an ABSORBED panic in a DECLARED `-> Active | Fault` transition
+    //           shadows the mid-turn draft (self.value = 99) into the Fault as-is
+    //           (the pre-0.34.1 dirty→zero degradation was removed; the draft is
+    //           the truth). The match binds the shadow → 99 in both backends.
+    //   Part B: an EXPLICIT `-> Fault` transition carrying the faulting draft
+    //           (self.value = 99) — recover pulls it → 99 in both backends.
+    let src_a = r#"
 flow Svc {
     persistent state Active { value: i32 }
-
-    transition crash(Active) -> Active {
+    transition crash(Active, d: i32) -> Active | Fault {
         self.value = 99
-        let x = 1 / 0
+        let x = self.value / d
         return Active { value: self.value }
     }
 }
-
 func main() -> i32 {
     let active = Active { value: 7 }
-    let failed = Svc::crash(active)
-    let recovered = Svc::recover(failed)
-    recovered.value
+    let failed = Svc::crash(active, 0)
+    match failed {
+        Active { value } => println(value)
+        Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _, value } => println(value)
+    }
+    0
 }
 "#;
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
+    let (_, out_a) = run_source_bytecode_with_stdout(src_a);
+    assert_eq!(
+        out_a.trim(),
+        "99",
+        "absorbed Fault shadows the mid-turn draft as-is, got {:?}",
+        out_a
+    );
+    let native_a = compile_and_run(src_a).expect("native absorbed draft must codegen");
+    assert_eq!(
+        native_a.trim(),
+        "99",
+        "native absorbed Fault shadows the mid-turn draft as-is, got {:?}",
+        native_a
+    );
+    let src_b = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash2(Active) -> Fault {
+        self.value = 99
+        return Fault {
+            last_state: Active,
+            unexpected_event: crash2,
+            snapshot: "",
+            trace: SystemTrace {
+                last_state_name: "Active",
+                unexpected_event: "crash2",
+                snapshot: "",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash2", file: "", line: 0, stack: "" }
+            },
+            value: self.value
+        }
+    }
+}
+func main() -> i32 {
+    let active = Active { value: 7 }
+    let failed = Svc::crash2(active)
+    let recovered = Svc::recover(failed)
+    println(recovered.value)
+    0
+}
+"#;
+    let (_, out_b) = run_source_bytecode_with_stdout(src_b);
+    assert_eq!(
+        out_b.trim(),
+        "99",
+        "recover pulls the faulting persistent draft, got {:?}",
+        out_b
+    );
+    let native_b = compile_and_run(src_b).expect("native recover draft must codegen");
+    assert_eq!(
+        native_b.trim(),
+        "99",
+        "native recover pulls the faulting persistent draft, got {:?}",
+        native_b
+    );
+}
+
+#[test]
+fn flow_single_target_panic_traps_not_absorbs_dual_backend() {
+    // 0.36.9 (裁决 6, 吸收声明门): a transition may absorb a runtime panic
+    // into Fault ONLY if its DECLARED target set includes Fault (`-> S | Fault`
+    // or `-> Fault`). A panic inside a single-target `-> Pos` transition
+    // violates the declared contract — the result is statically `Pos` and
+    // there is no Fault slot to deliver — so it is a hard E0801 trap in BOTH
+    // backends. The VM previously absorbed silently (L1 divergence: `mimi run`
+    // fabricated a Fault the native binary could never produce).
+    let src = r#"
+flow C {
+    state Pos { n: i32 }
+    transition crash(Pos, d: i32) -> Pos { return Pos { n: self.n / d } }
+}
+
+func main() -> i32 {
+    let p = C::crash(Pos { n: 5 }, 0)
+    println(p.n)
+    0
+}
+"#;
+    let vm = run_source_bytecode_result(src);
+    let vm_err = vm.expect_err("single-target panic must trap in the VM");
+    // The raw VM message carries the panic text (`run_value` pre-enrichment;
+    // the CLI enrichment prefixes the code — `mimi run` reports E0801).
+    assert!(
+        vm_err.contains("division") || vm_err.contains("zero"),
+        "VM trap should be the division-by-zero panic, got: {}",
+        vm_err
+    );
+    let native = compile_and_run(src);
+    let native_err = native.expect_err("single-target panic must trap natively");
+    assert!(
+        native_err.contains("E0801"),
+        "native trap should carry E0801, got: {}",
+        native_err
+    );
+    // The declared-Faultable twin (`-> Pos | Fault`) still absorbs in both
+    // backends — the gate flips on the DECLARED set, not the panic itself.
+    let absorb_src = r#"
+flow C {
+    state Pos { n: i32 }
+    transition crash(Pos, d: i32) -> Pos | Fault { return Pos { n: self.n / d } }
+}
+
+func main() -> i32 {
+    let u = C::crash(Pos { n: 5 }, 0)
+    match u {
+        Pos { n } => println(n)
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
+            println(last_state)
+            println(unexpected_event)
+        }
+    }
+    0
+}
+"#;
+    let (_, out) = run_source_bytecode_with_stdout(absorb_src);
+    assert_eq!(
+        out.trim(),
+        "Pos()\nPanic(E0801)",
+        "absorbing twin must absorb in the VM, got {:?}",
+        out
+    );
+    let native = compile_and_run(absorb_src).expect("absorbing twin must codegen");
+    assert_eq!(
+        native.trim(),
+        "Pos()\nPanic(E0801)",
+        "absorbing twin must absorb natively, got {:?}",
+        native
+    );
 }
 
 #[test]
 fn transactional_persistent_draft_syntax_rejected_by_amendment_clause_3() {
     // @transactional was abolished by clause 3; the parser must reject it.
-    // Non-transactional persistent-field dirty→reset semantics are covered
-    // by flow_fault_recover_uses_faulting_persistent_draft above.
+    // Non-transactional persistent-draft semantics (the faulting draft, not a
+    // reset default, is what recover pulls) are covered by
+    // flow_fault_recover_uses_faulting_persistent_draft above.
     let src = r#"
 flow Svc {
     @transactional persistent state Active { value: i32 }
@@ -2749,18 +2879,28 @@ func main() -> i32 {
 
 #[test]
 fn flow_user_reset_not_overridden() {
-    // 0.34.18b: user-defined reset(Fault) -> Zero wins over the injected system
-    // verb. Entry via single-target absorbed panic. Bytecode-only: see
-    // flow_reset_rebuilds_root note (dynamic Fault typing).
+    // 0.36.9 (裁决 6): user-defined reset(Fault) -> Zero wins over the injected
+    // system verb. Re-anchored from the bytecode-only single-target absorbed
+    // panic to a DECLARED `-> Fault` entry — statically typed, dual-backend.
     let src = r#"
 flow C {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
     transition inc(Zero) -> Pos { return Pos { n: self.n + 1 } }
-    transition crash(Pos) -> Pos {
-        let x = 1 / 0
-        return Pos { n: self.n }
+    transition crash(Pos) -> Fault {
+        return Fault {
+            last_state: Pos,
+            unexpected_event: crash,
+            snapshot: "",
+            trace: SystemTrace {
+                last_state_name: "Pos",
+                unexpected_event: "crash",
+                snapshot: "",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "" }
+            }
+        }
     }
     transition reset(Fault) -> Zero { return Zero { n: 42 } }
 }
@@ -2775,6 +2915,13 @@ func main() -> i32 {
 "#;
     let (_, out) = run_source_bytecode_with_stdout(src);
     assert_eq!(out.trim(), "42", "user reset wins, got {:?}", out);
+    let native = compile_and_run(src).expect("native user reset must codegen");
+    assert_eq!(
+        native.trim(),
+        "42",
+        "native user reset wins, got {:?}",
+        native
+    );
 }
 
 // ── v0.29.17 Subflow synchronous nesting ──────────────────────────────
@@ -6720,17 +6867,27 @@ func main() -> i32 {
 
 #[test]
 fn flow_explicit_reset_overrides_system_verb() {
-    // v0.31.10 / 0.34.18b: user-defined reset(Fault) -> State overrides the
-    // auto-injected system verb. Entry via single-target absorbed panic.
-    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
+    // v0.31.10 / 0.36.9 (裁决 6): user-defined reset(Fault) -> State overrides
+    // the auto-injected system verb. Re-anchored to a DECLARED `-> Fault` entry
+    // (dual-backend).
     let src = r#"
 flow Counter {
     state Zero { n: i32 }
     state Positive { n: i32 }
     transition inc(Zero) -> Positive { return Positive { n: 1 } }
-    transition crash(Positive) -> Positive {
-        let x = 1 / 0
-        return Positive { n: self.n }
+    transition crash(Positive) -> Fault {
+        return Fault {
+            last_state: Positive,
+            unexpected_event: crash,
+            snapshot: "",
+            trace: SystemTrace {
+                last_state_name: "Positive",
+                unexpected_event: "crash",
+                snapshot: "",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "" }
+            }
+        }
     }
     transition reset(Fault) -> Zero { return Zero { n: 42 } }
 }
@@ -6745,21 +6902,38 @@ func main() -> i32 {
     // User-defined reset returns n=42 (not the default n=0)
     let (_, out) = run_source_bytecode_with_stdout(src);
     assert_eq!(out.trim(), "42", "explicit reset overrides, got {:?}", out);
+    let native = compile_and_run(src).expect("native explicit reset must codegen");
+    assert_eq!(
+        native.trim(),
+        "42",
+        "native explicit reset overrides, got {:?}",
+        native
+    );
 }
 
 #[test]
 fn flow_explicit_recover_overrides_system_verb() {
-    // v0.31.10 / 0.34.18b: user-defined recover(Fault) -> State overrides the
-    // auto-injected system verb. Entry via single-target absorbed panic.
-    // Bytecode-only: see flow_reset_rebuilds_root note (dynamic Fault typing).
+    // v0.31.10 / 0.36.9 (裁决 6): user-defined recover(Fault) -> State overrides
+    // the auto-injected system verb. Re-anchored to a DECLARED `-> Fault` entry
+    // (dual-backend).
     let src = r#"
 flow Svc {
     persistent state Config { retries: i32 }
     state Running { n: i32 }
     transition start(Config) -> Running { return Running { n: self.retries } }
-    transition crash(Running) -> Running {
-        let x = 1 / 0
-        return Running { n: self.n }
+    transition crash(Running) -> Fault {
+        return Fault {
+            last_state: Running,
+            unexpected_event: crash,
+            snapshot: "",
+            trace: SystemTrace {
+                last_state_name: "Running",
+                unexpected_event: "crash",
+                snapshot: "",
+                memory_dump: MemoryDump { fields: "", count: 0 },
+                panic_payload: PanicPayload { error_type: "crash", file: "", line: 0, stack: "" }
+            }
+        }
     }
     transition recover(Fault) -> Config { return Config { retries: 99 } }
 }
@@ -6778,6 +6952,13 @@ func main() -> i32 {
         "99",
         "explicit recover overrides, got {:?}",
         out
+    );
+    let native = compile_and_run(src).expect("native explicit recover must codegen");
+    assert_eq!(
+        native.trim(),
+        "99",
+        "native explicit recover overrides, got {:?}",
+        native
     );
 }
 

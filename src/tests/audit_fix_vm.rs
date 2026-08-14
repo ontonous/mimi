@@ -346,7 +346,9 @@ func guarded(x: i64) -> i64 {
 flow F {
     state S { v: i64 }
 
-    transition go(S) -> S {
+    // 0.36.9 (裁决 6, 吸收声明门): absorption requires a DECLARED Fault target —
+    // re-anchored from the obsolete single-target absorb to `-> S | Fault`.
+    transition go(S) -> S | Fault {
         let y = guarded(-1)
         return S { v: y }
     }

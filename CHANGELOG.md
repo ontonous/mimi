@@ -7,6 +7,31 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.9 — 吸收声明门（裁决 6）+ 非事务草稿语义对齐（L1 分歧关闭）
+
+- **裁决 6（吸收声明门）**：一个运行期 panic 只有在该过渡的**声明目标集**含有
+  Fault（`-> S | Fault` 或 `-> Fault`）时才会被吸收为 Fault。单目标
+  `-> S` 过渡体内 panic 违反声明契约（结果静态类型是 S，没有 Fault 槽位）——
+  双后端一律硬 trap **E0801**。Bytecode VM 此前无条件吸收（`mimi run` 会凭空
+  造出 native 二进制永远无法产生的 Fault = L1 分歧），现按声明目标集门控
+  （`FlowTxCtx.transition_name` + `flow_defs` 声明表查询），与 native 对齐。
+- **非事务草稿语义对齐（L1）**：删除 VM 侧 "dirty 持久字段→归零使 recover 退化为
+  reset" 的旧路径——那是 @transactional（v0.34.1 已废除）时代的回滚残留；草稿
+  （body 对 `self` 的就地变更）即真相，吸收进 Fault 的 shadow 原样保留，recover
+  拉取 faulting draft（`self.value = 99` → 吸收 → recover → 99），双后端逐字节
+  一致（此前 VM=0 / native=99 分歧）。
+- **"动态 Fault typing"缺口关闭（bytecode-only 测试全部双后端化）**：
+  `flow_reset_rebuilds_root` / `flow_reset_discards_persistent` /
+  `flow_recover_preserves_persistent` / `flow_fault_recover_uses_faulting_persistent_draft`
+  / `flow_user_reset_not_overridden` / `flow_explicit_reset_overrides_system_verb` /
+  `flow_explicit_recover_overrides_system_verb` 从"单目标吸收（动态类型、仅
+  bytecode）"重锚为**声明式 `-> Fault` 入场**（静态 Fault 类型 → reset/recover
+  直调）+ `compile_and_run` 双后端断言；删除死于旧前提的
+  `flow_panic_absorbed_to_fault`。
+- **新负测试 + 吸收孪生 oracle**（L1/L2）：`flow_single_target_panic_traps_not_absorbs_dual_backend`
+  —— 单目标 `-> Pos` panic 双后端 E0801 硬 trap；同程序 `-> Pos | Fault` 孪生
+  双后端吸收（`Pos()\nPanic(E0801)` 逐字节一致）。
+
 ### 0.36.8 — 跨 FFI = Fault 检查点（裁决 3 收官）+ Phase A 挣绿核验
 
 - **FFI 检查点全量 nominal oracle**（L1, DoD #4 扩界）：`enter_ffi → ffi_crash`
