@@ -1001,6 +1001,7 @@ impl<'a> ActionEmitter<'a> {
         expression: &ResolvedExpr,
         borrow_reference: Option<&ResolvedLocalId>,
     ) {
+        self.reject_index_read_extraction(expression);
         match &expression.kind {
             ResolvedExprKind::Unary {
                 op: ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable,
@@ -1309,6 +1310,49 @@ impl<'a> ActionEmitter<'a> {
 
     fn place_is_linear(&self, place: &ResolvedPlace) -> bool {
         self.place_type(place).is_some_and(|ty| self.is_linear(&ty))
+    }
+
+    /// M9 (0.36.22): element extraction by INDEX READ from a linear container
+    /// was the fail-open member of the element-consumption gap — the ledger
+    /// attributed the whole container as consumed by the read, but only the
+    /// extracted handle was released, silently leaking every unextracted
+    /// element (inconsistent with match/for extraction, which are fail-closed
+    /// E0256/E0304). Reject uniformly: a linear container must be moved or
+    /// dropped as a whole.
+    fn reject_index_read_extraction(&mut self, expression: &ResolvedExpr) {
+        if let ResolvedExprKind::Load(place) = &expression.kind {
+            let has_index = place
+                .projections
+                .iter()
+                .any(|projection| matches!(projection, ResolvedProjection::Index { .. }));
+            if has_index {
+                if let Some(local) = self.body.locals.get(&place.base) {
+                    // Non-droppable linear element containers (Cap/SessionChan)
+                    // leak every unextracted element on index read (M9).
+                    // Flow-state-element containers are auto-droppable at
+                    // scope exit (0.31.16 P0-5), so element reads there are a
+                    // sanctioned pattern and stay legal.
+                    if self.is_linear(&local.ty) && !self.is_droppable_type(&local.ty) {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0304,
+                                format!(
+                                    "'{}' cannot be read by index: element-level extraction \
+                                     from a linear container is not tracked and leaks every \
+                                     unextracted element",
+                                    self.local_name(&place.base)
+                                ),
+                                expression.origin.user_span(),
+                            )
+                            .with_help(
+                                "move or drop the whole container (e.g. drop(v)) instead of \
+                                 indexing into it",
+                            ),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn place_type(&self, place: &ResolvedPlace) -> Option<ResolvedTypeId> {

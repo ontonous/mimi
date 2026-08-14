@@ -3342,6 +3342,63 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm session loop");
 }
 
+// ============================================================
+// 0.36.22 (M9, phase-c-linearity-study §2): index-read extraction from a
+// linear container is the fail-open member of the element-consumption gap.
+// match/for extractions fail closed (E0256/E0304); index reads used to
+// attribute the whole container as consumed while only the extracted handle
+// was released — every unextracted element leaked silently (l4 probe).
+// Now rejected uniformly (E0304): move or drop the whole container.
+
+#[test]
+fn dual_linear_container_index_read_rejected() {
+    // Bind form — the demonstrated leak (`let c = v[0]; drop(c)` passed the
+    // checker while v's other elements leaked; l4 probe).
+    let diags = check_source(
+        "cap FileReadCap; func take_first(v: List<cap FileReadCap>) -> i32 {              let c = v[0]; drop(c); 1 }          func main() -> i32 { let l = [FileReadCap, FileReadCap]; println(take_first(l)); 0 }",
+    )
+    .expect_err("index read of linear container must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("by index"),
+        "expected E0304 index-read diagnostic, got:\n{rendered}"
+    );
+
+    // Call-argument form — element passed to a consuming callee.
+    let diags = check_source(
+        "cap FileReadCap; func use_c(c: cap FileReadCap) -> i32 { drop(c); 1 }          func main() -> i32 { let l = [FileReadCap, FileReadCap]; println(use_c(l[0])); 0 }",
+    )
+    .expect_err("index read passed to callee must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("by index"),
+        "expected E0304 index-read diagnostic, got:\n{rendered}"
+    );
+
+    // Whole-container consumption stays legal (drop test).
+    assert!(
+        check_source(
+            "cap FileReadCap; func main() -> i32 {                  let l = [FileReadCap, FileReadCap]; drop(l); 0 }",
+        )
+        .is_ok(),
+        "whole-container drop must stay legal"
+    );
+
+    // Non-linear containers are untouched by the gate.
+    assert!(
+        check_source("func main() -> i32 { let xs = [1, 2, 3]; println(xs[1]); 0 }").is_ok(),
+        "non-linear index read must stay legal"
+    );
+}
+
 #[test]
 fn dual_generic_linear_session_rejected() {
     // E0432: same contract for SessionChan endpoints.
