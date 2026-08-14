@@ -6,16 +6,21 @@ use crate::span::Span;
 
 /// LOSSY no-text fallback for Span → LSP range.
 ///
-/// X-11 (full audit 2026-08-05 §3.10): Mimi span columns are 1-indexed CHAR
-/// counts (lexer advances per char); LSP `character` is UTF-16 code units.
-/// The exact conversion walks the line's chars summing `len_utf16`
-/// (AU-LSP-3, `PositionMap::span_to_lsp`) and REQUIRES the document text.
-/// Without text this fallback can only subtract the 1-based bias, which is
-/// exact on pure-ASCII lines and drifts when supplementary-plane chars
-/// (e.g. emoji, 1 char = 2 UTF-16 units) precede the span on its line.
-/// Callers must prefer the text-based path (`diagnostic_to_lsp` with
+/// X-11 (full audit 2026-08-05 §3.10, closed 0.36.82 by design): Mimi span
+/// columns are 1-indexed CHAR counts (lexer advances per char); LSP
+/// `character` is UTF-16 code units. The exact conversion walks the line's
+/// chars summing `len_utf16` (AU-LSP-3, `PositionMap::span_to_lsp`) and
+/// REQUIRES the document text. Without text this fallback can only subtract
+/// the 1-based bias, which is exact on pure-ASCII lines and drifts when
+/// supplementary-plane chars (e.g. emoji, 1 char = 2 UTF-16 units) precede
+/// the span on its line.
+///
+/// The residual lossiness is inherent to the no-text case: no algorithm can
+/// recover UTF-16 units from a bare Span without the source line. Production
+/// callers already prefer the text-based path (`diagnostic_to_lsp` with
 /// `Some(text)`); this exists solely for diagnostics whose source text
-/// cannot be recovered.
+/// cannot be recovered, and its documented lossy behavior is the bounded
+/// fallback rather than a silent miscompile.
 pub(crate) fn span_to_range(span: &Span) -> Value {
     serde_json::json!({
         "start": {

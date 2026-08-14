@@ -3907,6 +3907,9 @@ fn declaration_span(meta: crate::ast::AstNodeMeta, fallback: Span) -> Span {
 /// - FFI call (extern function calls)
 /// - Actor event emit (emit, send_event)
 /// Used to determine if a transition can be "silent" (no Generation increment).
+/// §4-#39 (closed 0.36.76): Defer / OnFailure / Parasteps bodies are included
+/// in the statement scan below, so a cross-boundary op inside those wrappers
+/// also prevents a silent transition.
 fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
     use crate::ast::{Expr, Stmt};
 

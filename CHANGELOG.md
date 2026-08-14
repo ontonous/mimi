@@ -7,6 +7,251 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.87 — Phase E：闭合 JSON parser 审计 TODO（已知语义分歧全部关闭）
+
+`runtime/mod.rs` 原保留 `TODO(#audit-wave2-json-parser-unify)`，指向手写
+parser 与 serde_json 的若干边缘分歧。经过 0.36.73 / 0.36.83 两轮收紧，
+原始登记的分歧已全部关闭：
+
+- 前导零 `01` / `-01` 拒绝；
+- 溢出指数 `1e999` 因非有限拒绝；
+- `inf` / `nan` 不会被 number 路径接受；
+- 未知转义与裸控制字符在 permissive / strict 字符串路径均拒绝；
+- strict validator 已作为 `mimi_is_valid_json` / `mimi_from_json` 的前置。
+
+结构上用 serde 完全替换手写 parser 仍属于 Wave-3 架构目标，但不再是
+audit-wave2 的开放 TODO 标记。本次移除该 TODO 及 `json_get_int` 的引用。
+
+### 0.36.86 — Phase E：按设计闭合 spawn/await 顺序求值台账（§9-#15 / B-8）
+
+台账 §9-#15 / B-8 记录 `spawn` / `await` 当前编译为顺序求值，`Op::Spawn`
+不发射。这是已知的并发运行时设计形状（Phase D / Wave-3），不是 0.1.6
+安全或正确性阻塞：
+
+- 当前语义等价于普通调用/求值，行为确定且不产生悬空并发；
+- 真正并发运行时需同步落地 `Op::Spawn` 发射、调度器、生命周期等，属于
+  结构性 Wave-3 工作。
+
+本次在 `compiler.rs` 的 spawn/await 编译分支补注释标记该设计决策。
+
+### 0.36.85 — Phase E：按设计闭合 match guard 恒真 CFG 建模台账（G-3）
+
+台账 G-3 记录 `cfg/resolved_lower.rs` 将 match guard 按恒真建模，不分叉
+控制流，消费路径高估。该方向是 fail-closed（安全方向），不是 0.1.6
+阻塞项：
+
+- 误把 guard-false 路径也计入消费只会更保守地拒绝，不会放行危险程序；
+- 精确的 guard-true / guard-false 分叉属于 1.x CFG 增强。
+
+本次在 `resolved_lower.rs` 的 lower_match guard 位置补注释说明设计决策。
+
+### 0.36.84 — Phase E：闭合未解析操作数 `is_int` 误报台账（§2-#20）
+
+台账 §2-#20 记录 `infer/access.rs` 与 `operator.rs` 的 `is_int` 对未解析
+`TypeVar` 返回 false，可能误报。长时间审计未复现用户可见假阳性。
+
+该行为按设计闭合：
+
+- `is_int` 只认具体 `i32` / `i64`；
+- 若 `TypeVar` 其后统一为整数，inference 会在用户可见调用点前解析；
+- 若仍保持未解析，拒绝 index/range 属于 fail-closed（比静默假定整数安全）。
+
+本次在 `src/core/helpers.rs::is_int` 补注释说明该契约。
+
+### 0.36.83 — Phase E：runtime JSON 字符串 token 拒绝未知转义/裸控制符（serde 对齐）
+
+`runtime/mod.rs` 的 permissive JSON 扫描器此前对字符串 token 过宽：
+- 未知转义（`"\q"`）被当作普通字符保留；
+- 裸控制字符（U+0000..U+001F）被当作普通字符接受。
+
+这会让直接 C ABI 访问器在 `json_get_*` 上比 VM / serde_json 更宽容。
+
+本次收紧：
+- `JsonParser::parse_string` 与 `json_get_inner` 的 key 解析均对未知转义
+  返回解析失败；
+- 未转义控制字符同样返回解析失败；
+- 合法转义（`\n`、`\t`、`\"` 等）保持不变。
+
+新增 `json_accessors_reject_unknown_escapes_and_raw_controls` 回归，
+直接覆盖 permissive `json_get_inner` 路径。
+
+### 0.36.82 — Phase E：按设计闭合 LSP 无文本 fallback 精确性台账（X-11）
+
+台账 X-11 🟡 指出 `lsp/position.rs` 的无文本回退把 char 列当 UTF-16，lossy。
+
+核对当前实现后确认这是不可消除的固有边界：
+
+- 精确转换必须扫描行文本并累加每个字符的 UTF-16 长度；
+- 若调用方未提供文本，Span 本身不携带足够信息还原 UTF-16 列；
+- 生产路径（diagnostic/state）都优先喂文本；`span_to_range` 只作为
+  无法取得源码文本时的兜底，且已文档化 lossy。
+
+该条目按设计闭合：不是“待修 bug”，而是有界 fallback 契约。本次补注释说明。
+
+### 0.36.81 — Phase E：闭合 `#[ignore] verify_unsatisfiable_requires` 台账（§11-#49）
+
+台账 §11-#49 记录 verifier 测试仍有一处旧 `mms{}` 合同写法未迁移。核对
+`src/tests/v1_2_verification.rs` 后确认早已改写：
+
+- 原测试使用 `mms { "requires: ..." }`，Mimi 并不从 `mms{}` 提取合同；
+- 当前版本改为顶层 `requires:` / `ensures:`，矛盾前置条件断言为 Failed；
+- 另在 verifier/tests.rs 也有顶层写法覆盖。
+
+该条为过时台账，本次补注释标记已闭合。
+
+### 0.36.80 — Phase E：闭合值位置 Ident 导入顺序解析台账（§5-#51）
+
+台账 §5-#51 与已闭合的 §4-#6 同源：值位置 ident 使用全函数目录短名猜测解析，
+不镜像 checker 导入顺序。0.36.70 已通过实测证明 loader 在合并导入模块时拒绝
+重复 bare item，因此用户无法构造“同名不同模块同时进入作用域”的导入顺序分歧；
+唯一短名匹配 + fail-closed ambiguity guard 已足够。
+
+本次仅在 `lower.rs` 对应注释中补充 §5-#51 closed 标记，无行为变更。
+
+### 0.36.79 — Phase E：闭合 std 私有 helper 跨 use 不可见台账（§1.6 机制）
+
+台账记录了 std 模块私有 helper 无法跨 `use` 对消费者可见的问题：当 pub
+函数体调用私有 helper 时，loader 只携带 pub 项，导致 `E0401`。
+
+该问题此前已通过“把私有 helper 内联/提升为 pub 共享函数”落地：
+
+- `strings.mimi`：`is_ws_char` 内联进 `trim_left` / `trim_right`
+  （`audit2_std_trim_left_right_dual` 双端守卫）；
+- `random.mimi`：`remove_at` 提升为 pub 自由函数 `random_remove_ith`
+  （0.36.65，`audit2_std_random_sample_shuffle_semantics_dual` 双端守卫）。
+
+具体的 audit 缺口已闭环；loader 是否引入“闭包传递私有项”是更广的架构特性，
+不阻塞 0.1.6 审计。本次在 stdlib 回归注释中标记该机制已闭合。
+
+### 0.36.78 — Phase E：闭合 cap/dyn/builtin 方法探测二次降低台账（R-5）
+
+台账 R-5 称：cap/dyn 方法探测会先降低 receiver 再回退，导致同一 AST 二次
+降低、伪 identity collision。核对 `lower.rs` 后确认已通过“先查 checked
+node type、后降低 receiver”修复：
+
+- `lower_dyn_method_call`：先用 `node_types` 判断 receiver 是否为 `dyn Trait`，
+  非 dyn 直接回退，不再预降 receiver；
+- `lower_cap_method_call`：先确认 receiver 为 Capability，非 cap 直接回退；
+- `lower_builtin_method_call`：先用 checked receiver type 查 builtin，
+  非 builtin 直接走真实 method 路径。
+
+三处都保留“降低后类型与 checked 类型一致”的二次校验。该条为过时台账。
+
+### 0.36.77 — Phase E：闭合 resolved 诊断顺序非确定性台账（§4-#43）
+
+台账 §4-#43 称 `resolved/mod.rs` 通过 HashMap 迭代产生诊断，顺序可能不确定。
+核对 `src/core/mod.rs` 后确认已修复：
+
+- `check_program` / `check_program_strict` 的所有错误返回路径都调用
+  `sort_diagnostics`；
+- 排序键为：源位置（start_line, start_col）→ message → code；
+- `core/resolved/tests.rs::check_program_diagnostics_are_source_sorted`
+  已回归钉死“多诊断必须按源码顺序输出”。
+
+该条为过时台账，本次补注释标记已闭合。
+
+### 0.36.76 — Phase E：闭合 `has_cross_boundary_ops` 漏 Defer/OnFailure/Parasteps 台账（§4-#39）
+
+台账 §4-#39 称 `has_cross_boundary_ops` 漏了 Defer / OnFailure / Parasteps，
+可能把“仅在这些包装块内发生跨边界操作”的 transition 误判为 silent。
+
+核对 `src/core/resolved/mod.rs` 当前实现后确认已经覆盖：
+
+```rust
+Stmt::Block(stmts)
+| Stmt::Arena(stmts)
+| Stmt::Unsafe(stmts)
+| Stmt::IeeeFloat(stmts)
+| Stmt::Defer(stmts)
+| Stmt::OnFailure(stmts)
+| Stmt::Parasteps(stmts) => stmts.iter().any(stmt_has_cross_boundary),
+```
+
+即这些包装块内的 `session_send` / `channel_send` / `emit` / FFI 调用等
+跨边界操作都会阻止 silent transition。该条为过时台账，本次仅补注释标记。
+
+### 0.36.75 — Phase E：闭合 async ensures body-result 类型台账（R-3 / §5-LOW）
+
+台账 `R-3 / §5-LOW` 记录：async 函数 `ensures` 的 `result` local 标成
+`Future<T>` 而不是 body 实际返回的 `T`。审计确认 lower.rs 已处理该点：
+
+- `body_result_type` 显式解包 `Future<T>`，给 async body 的尾/return 使用内层 `T`；
+- `Stmt::Ensures` 使用 `self.body_result` 插入 `result` local，与 body 结果类型一致；
+- 当前 parser 不再产生 `is_async: true` 的常规函数（`top_level.rs` 恒为 false，
+  async 由 ForeignTask/历史路径另行表达），该差异已不可由用户程序直接构造。
+
+故该条为过时台账，本次仅在代码注释中标记已闭合，不引入行为变更。
+
+### 0.36.74 — Phase E：闭合 Packed enum payload box 泄漏 TODO（L6 已实现）
+
+`src/codegen/registry/types.rs` 的 Packed enum 构造路径仍残留 Long TODO，
+写的是“该 box 永不释放，每个 boxed-enum 构造泄漏一次”。审计确认该 TODO
+已被 0.35.x 的 L6 单所有权生命周期实现关闭：
+
+- 本地消费：`simple.rs` enum_ctor 调用点通过 `register_heap_box` 登记 box，
+  作用域退出时 `free_heap_allocs` 释放；
+- 逃逸返回：`claim_returned_enum_box` 跳过 callee 侧释放，caller 通过
+  `HeapEntry::EnumBox`（按运行期 tag 条件释放）重新登记；
+- 已有双端回归覆盖 local/return/lambda 场景。
+
+本次将旧 TODO 压缩为已实现说明，并指向对应测试：
+`enum_packed_payload_box_no_leak_no_double_free_dual_backend` 与
+`lambda_returning_boxed_enum_dual_backend`。
+
+### 0.36.73 — Phase E：runtime JSON 数字解析拒绝前导零（serde 对齐）
+
+`runtime/mod.rs` 的手写 JSON parser 原先接受 `"01"` / `"-01"` 这类
+number token，而 serde_json / VM 端将其判为非法 JSON。这是 JSON parser
+unify TODO 中登记的具体分歧之一。
+
+本次在 `JsonParser::parse_number` 增加前导零拒绝：
+
+- `01`、`-01` → 非法 JSON
+- `0`、`-0.5`、`0e1` → 仍为合法 JSON
+
+并新增 `runtime_core_json_rejects_leading_zero_numbers` 回归，直接断言
+`mimi_is_valid_json` 行为。
+
+### 0.36.72 — Phase E：清理 `audit_fix_io` 过时 Result 形状对齐 TODO
+
+`io_fix_input_*` 上方残留 `TODO(#audit-wave2): full Result<string,string>
+shape alignment`，但该对齐已在 §8-#86 完成：checker、VM、codegen 三端一致将
+`input()` 定为 `string`，EOF 用空串哨兵，`input_line` 再基于空串返回 Err。
+
+本次删除过时 TODO，并更新注释指向已完成的形状对齐与现有测试职责。
+
+### 0.36.71 — Phase E：闭合 scope-aware nested-name TODO（checker 本身已合并同名嵌套调用）
+
+`lower.rs` 对分支块/闭包体内嵌套函数的裸名调用使用 NodeId 排序的确定性选择，
+并保留一个“未来做 scope-aware 嵌套名解析”的 TODO。审计确认：
+
+- checker 的裸名表本身按 bare name 注册，同名的嵌套 callable 在 checker 层
+  就共享同一签名/名称槽位；
+- 因此不存在 checker 层可镜像的 scope-aware 分发语义；
+- 后端按自己的非作用域表解析是既有语义，强制逐分支解析反而会过度约束；
+- `audit11_same_name_nested_helpers_in_disjoint_branches_compile` 已覆盖
+  同签名同名嵌套函数在不相交分支下的编译/VM 行为。
+
+结论：无需实现 scope-aware 嵌套名解析；将 TODO 更新为确定性选择即忠实语义，
+并保留回归锚点。
+
+### 0.36.70 — Phase E：闭合 import-order 镜像 TODO（loader 已拒绝重复项）
+
+`lower.rs` 值位置 Ident 解析长期保留一个 `TODO(#audit-wave2)`：说 checker 按
+import-order 解析裸名，而 catalog 近似只接受唯一短名匹配，可能有假阳性。
+
+实测确认用户层面无法构造该分歧：
+
+- 同时导入两个含同名 pub 函数的 std 模块（如 `std::strings` + `std::text`）
+  → loader 直接报 `duplicate item 'is_blank' found in modules ...`；
+- 用户文件自带函数与导入模块同名 → 同样报
+  `duplicate item 'count_lines' found in modules ...`。
+
+因此裸名多候选在进入 resolved lowering 前已被 loader 拒绝；保留唯一短名
+匹配的 fail-closed guard 是确定且安全的，不需要镜像服务端 import-order。
+
+本次同步清理 `lower.rs` 与 `audit_fix_lowering.rs` 中的过时 TODO 注释。
+
 ### 0.36.69 — Phase E：修复 `audit_h13_close_fd_still_closes_real_fds` 并行 fd 复用误报
 
 该测试在 `--test-threads=4` 下有偶发失败：`close_fd` 关闭测试 fd 后，

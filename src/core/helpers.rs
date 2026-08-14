@@ -347,6 +347,11 @@ pub(crate) fn is_trait_coercion(
 }
 
 pub(crate) fn is_int(t: &Type) -> bool {
+    // §2-#20 (closed 0.36.84 by design): an unresolved `TypeVar` intentionally
+    // returns false. This is fail-closed: if the variable later unifies to an
+    // integer, inference normally resolves it before user-visible `is_int`
+    // call sites; if it remains unresolved, an index/range error is safer
+    // than silently assuming an integer type.
     matches!(t.unlocated(), Type::Name(n, _) if n == "i32" || n == "i64")
 }
 

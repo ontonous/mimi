@@ -2367,7 +2367,11 @@ impl BytecodeCompiler {
 
             Expr::Spawn(inner) => {
                 // spawn(expr) — compile the inner expression as a closure and spawn.
-                // For now, compile as a regular call (concurrency runtime in Phase D).
+                // §9-#15 / B-8 (closed 0.36.86 by design): the current
+                // sequential fallback is the documented concurrency-runtime
+                // design shape (Phase D/Wave-3), not a 0.1.6 safety blocker.
+                // Full async support will emit `Op::Spawn` when the runtime
+                // lands.
                 let r = self.compile_expr(fc, inner)?;
                 let rd = fc.proto.alloc_reg();
                 fc.emit(Op::Mov { rd, rs: r });
@@ -2376,7 +2380,8 @@ impl BytecodeCompiler {
 
             Expr::Await(inner) => {
                 // await(expr) — for now, just evaluate the inner expression.
-                // Full async support in Phase D.
+                // §9-#15 / B-8 (closed 0.36.86 by design): see the spawn arm;
+                // sequential await matches the current Phase D design shape.
                 self.compile_expr(fc, inner)
             }
 

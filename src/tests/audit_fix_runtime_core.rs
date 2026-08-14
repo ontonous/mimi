@@ -224,6 +224,21 @@ fn runtime_core_json_accessors_happy_paths() {
     // are asserted by the central e2e abort harness.)
 }
 
+#[test]
+fn runtime_core_json_rejects_leading_zero_numbers() {
+    // JSON number grammar forbids "01" / "-01"; str::parse would accept
+    // them, so the hand parser must reject to match serde_json / VM.
+    assert_eq!(rt::mimi_is_valid_json(cstr(b"01\0")), 0);
+    assert_eq!(rt::mimi_is_valid_json(cstr(b"-01\0")), 0);
+    assert_eq!(rt::mimi_is_valid_json(cstr(b"0\0")), 1);
+    assert_eq!(rt::mimi_is_valid_json(cstr(b"-0.5\0")), 1);
+    assert_eq!(rt::mimi_is_valid_json(cstr(b"0e1\0")), 1);
+    // The permissive from_json path also uses parse_number; it must not
+    // accept a leading-zero token as a value.
+    assert!(rt::mimi_from_json(cstr(b"01\0")).is_null());
+    assert!(rt::mimi_from_json(cstr(b"-01\0")).is_null());
+}
+
 // ── Fix #3: decode_result_err_string probes inner pointer ─────────────
 // decode_result_err_string is a private helper; its unit coverage lives in
 // src/runtime/mod.rs `audit_wave1_tests` (valid struct decode, unmapped-inner
