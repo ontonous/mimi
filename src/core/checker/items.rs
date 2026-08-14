@@ -1405,20 +1405,13 @@ impl<'a> Checker<'a> {
                     // Add other params
                     for p in &method.params {
                         let ty = self.resolve_type(&p.ty);
-                        // SessionChan<S> params: seed residual from the declared
-                        // session body (mirrors check_func) so the scope-exit
-                        // E0425 check below can see them.
-                        if let Type::Name(n, args) = ty.unlocated() {
-                            if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
-                                if let Type::Name(sname, _) = args[0].unlocated() {
-                                    if let Some(body) = self.session_types.get(sname).cloned() {
-                                        let resolved =
-                                            crate::session::resolve(&body, &self.session_types)
-                                                .unwrap_or(body);
-                                        self.session_residuals.insert(p.name.clone(), resolved);
-                                    }
-                                }
-                            }
+                        // SessionChan<S> / SessionChan<dual S> params: seed residual from
+                        // the declared session body (mirrors check_func) so the
+                        // scope-exit E0425 check below can see them.
+                        if let Some(resolved) =
+                            crate::session::residual_from_chan_type(&ty, &self.session_types)
+                        {
+                            self.session_residuals.insert(p.name.clone(), resolved);
                         }
                         scopes[0].insert(p.name.clone(), ty);
                     }
@@ -1685,18 +1678,12 @@ impl<'a> Checker<'a> {
                     );
                     for p in &method.params {
                         let ty = self.resolve_type(&p.ty);
-                        // SessionChan<S> params: seed residual (mirrors check_func).
-                        if let Type::Name(n, args) = ty.unlocated() {
-                            if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
-                                if let Type::Name(sname, _) = args[0].unlocated() {
-                                    if let Some(body) = self.session_types.get(sname).cloned() {
-                                        let resolved =
-                                            crate::session::resolve(&body, &self.session_types)
-                                                .unwrap_or(body);
-                                        self.session_residuals.insert(p.name.clone(), resolved);
-                                    }
-                                }
-                            }
+                        // SessionChan<S> / SessionChan<dual S> params: seed
+                        // residual (mirrors check_func).
+                        if let Some(resolved) =
+                            crate::session::residual_from_chan_type(&ty, &self.session_types)
+                        {
+                            self.session_residuals.insert(p.name.clone(), resolved);
                         }
                         scopes[0].insert(p.name.clone(), ty);
                     }

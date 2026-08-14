@@ -1653,6 +1653,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 lowered.into_iter().map(Into::into).collect();
             return self.compile_builtin_call(name, &metadata);
         }
+        // 0.36.38: session_pair::<S>() — the typed PAIR form; the runtime
+        // shape is the same {lo, hi} tuple as the plain form, so delegate to
+        // the plain builtin dispatch (the type args are compile-time only).
+        if name == "session_pair" {
+            let mut lowered = Vec::with_capacity(args.len());
+            for arg in args {
+                lowered.push(self.compile_expr(arg, vars)?);
+            }
+            let metadata: Vec<BasicMetadataValueEnum<'ctx>> =
+                lowered.into_iter().map(Into::into).collect();
+            return self.compile_builtin_call(name, &metadata);
+        }
 
         // Monomorphized call: func::<Type>(args)
         // Build type_map from explicit type args

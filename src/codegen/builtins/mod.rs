@@ -3521,7 +3521,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             // 0.36.32: session_open::<S>() — a fresh pair's first endpoint as
             // an opaque i64 handle (residual enforcement is compile-time only).
             "session_open" => self.compile_session_open_endpoint(args),
-            "session_pair" => self.compile_session_open(args),
+            // 0.36.38: session_pair() / session_pair::<S>() — the pair as a
+            // {lo, hi} tuple VALUE (typed (i64,i64) / (SessionChan<S>,
+            // SessionChan<dual S>)).
+            "session_pair" => self.compile_session_pair_tuple(args),
             "actor_mailbox_depth" => {
                 self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth")
             }

@@ -1,17 +1,18 @@
 // MCDD real_world: Session Types — dual-endpoint runtime (v0.29.34)
 // Declares a linear session protocol and exercises send/recv/close
 // with actual channel communication (not just static order check).
-// session_pair() returns two cross-wired channels:
-//   pair[0] (lo) and pair[1] (hi) are cross-wired:
-//   send on [0] → recv on [1]; send on [1] → recv on [0].
+// 0.36.38: session_pair::<S>() returns the typed pair
+//   (SessionChan<S>, SessionChan<dual S>) — the lo end speaks S, the
+//   hi end speaks the dual: send on lo → recv on hi; send on hi →
+//   recv on lo. Both endpoints carry residuals, so the compile-time
+//   protocol proof spans the whole channel pair (the old
+//   `let pair = session_pair(); pair[i]` raw-i64 form is retired).
 
 session ClientProto = !i32 . ?i32 . end
 session ServerProto = dual(ClientProto)
 
 func main() -> i32 {
-    let pair = session_pair()
-    let ch0 = pair[0]
-    let ch1 = pair[1]
+    let (ch0, ch1) = session_pair::<ClientProto>()
 
     // Client sends 10 on ch0 → server receives on ch1
     session_send(ch0, 10)

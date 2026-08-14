@@ -8335,6 +8335,14 @@ fn build_canonical_function_signatures(
             "Type",
             "TypeInfo",
             "session_chan",
+            // v0.36.38: `dual X` — the session-protocol expression form used
+            // by the hi end of session_pair::<S>() (SessionChan<dual X>). It
+            // is an ANNOTATION identity only: the value type of a SessionChan
+            // never lowers its type arguments (opaque i64 handle), so "dual"
+            // never becomes a runtime type. Registered here so the type
+            // table can intern SessionChan<dual X> without demanding a user
+            // declaration.
+            "dual",
             // v0.34.10a (golden §7.6): quote!/ast_eval exchange AST values.
         ];
         BUILTIN_NOMINALS

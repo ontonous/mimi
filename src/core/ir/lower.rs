@@ -2512,7 +2512,10 @@ impl BodyLowerer<'_> {
                 }
             }
             if !type_arguments.is_empty()
-                && !matches!(site.callee.as_str(), "from_json" | "session_open")
+                && !matches!(
+                    site.callee.as_str(),
+                    "from_json" | "session_open" | "session_pair"
+                )
             {
                 return self.unsupported(node_id, "generic arguments on builtin call");
             }
@@ -2520,6 +2523,8 @@ impl BodyLowerer<'_> {
             // 0.36.32: session_open::<S>() carries the session name S; the
             // checker-finalized result is SessionChan<S> — validate S against
             // the SessionChan argument (mirrors from_json's payload check).
+            // 0.36.38: session_pair::<S>() — the checker-finalized result is
+            // (SessionChan<S>, SessionChan<dual S>); validate both ends.
             let type_arg_matches = if type_arguments.is_empty() {
                 // Plain call (`from_json(s)` / `session_open()`) — no explicit
                 // type args to validate against the checker-finalized result.
@@ -2538,14 +2543,46 @@ impl BodyLowerer<'_> {
                                     && arguments.len() == 1
                                     && arguments[0] == type_arguments[0]
                         ))
+            } else if site.callee == "session_pair" {
+                // (SessionChan<S>, SessionChan<dual S>) — both ends must
+                // carry the turbofish S (lo directly, hi inside `dual S`).
+                type_arguments.len() == 1
+                    && matches!(
+                        self.types.get(&result),
+                        Some(ResolvedType::Tuple(elems)) if elems.len() == 2
+                            && matches!(
+                                self.types.get(&elems[0]),
+                                Some(ResolvedType::Nominal { item, arguments, .. })
+                                    if item.as_str().ends_with("SessionChan")
+                                        && arguments.len() == 1
+                                        && arguments[0] == type_arguments[0]
+                            )
+                            && matches!(
+                                self.types.get(&elems[1]),
+                                Some(ResolvedType::Nominal { item, arguments, .. })
+                                    if item.as_str().ends_with("SessionChan")
+                                        && arguments.len() == 1
+                                        && matches!(
+                                            self.types.get(&arguments[0]),
+                                            Some(ResolvedType::Nominal {
+                                                item, arguments, ..
+                                            })
+                                                if item.as_str().ends_with("dual")
+                                                    && arguments.len() == 1
+                                                    && arguments[0] == type_arguments[0]
+                                        )
+                            )
+                    )
             } else {
                 true
             };
             if !type_arg_matches {
                 let callee_name = if site.callee == "from_json" {
                     "from_json"
-                } else {
+                } else if site.callee == "session_open" {
                     "session_open"
+                } else {
+                    "session_pair"
                 };
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),

@@ -1266,10 +1266,18 @@ impl<'a> Checker<'a> {
                     return Type::Name("SessionChan".into(), vec![]);
                 }
                 "session_pair" => {
+                    // 0.36.38: the plain form returns the two opaque handles
+                    // as a TUPLE (i64, i64) — the typed form (turbofish,
+                    // method.rs) returns (SessionChan<S>, SessionChan<dual S>)
+                    // with live residuals. Both share the {lo, hi} runtime
+                    // shape (send on lo → recv on hi).
                     for a in args {
                         self.infer_expr(a, scopes);
                     }
-                    return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
+                    return Type::Tuple(vec![
+                        Type::Name("i64".into(), vec![]),
+                        Type::Name("i64".into(), vec![]),
+                    ]);
                 }
 
                 "print" => {
@@ -2884,10 +2892,6 @@ impl<'a> Checker<'a> {
 
     // ── v0.29.19 Session Types order checking ─────────────────────────
 
-    fn session_chan_name(ty: &Type) -> Option<String> {
-        crate::session::session_from_chan_type(ty)
-    }
-
     /// T-H3: stable residual key for Ident / nested Field places (`a.b.c`).
     fn place_key(expr: &Expr) -> Option<String> {
         match expr.unlocated() {
@@ -2932,14 +2936,14 @@ impl<'a> Checker<'a> {
                 );
                 return None;
             }
-            // Initialize residual from SessionChan<S> annotation if present.
-            if let Some(sname) = Self::session_chan_name(&ty) {
-                if let Some(body) = self.session_types.get(&sname).cloned() {
-                    let resolved =
-                        crate::session::resolve(&body, &self.session_types).unwrap_or(body);
-                    self.set_residual(v, resolved.clone());
-                    return Some((Some(v.clone()), resolved));
-                }
+            // Initialize residual from SessionChan<S> annotation if present
+            // (0.36.38: SessionChan<dual X> — the hi end of session_pair::<S>()
+            // — resolves X and dualizes).
+            if let Some(resolved) =
+                crate::session::residual_from_chan_type(&ty, &self.session_types)
+            {
+                self.set_residual(v, resolved.clone());
+                return Some((Some(v.clone()), resolved));
             }
         }
         // Untracked endpoint: no order check (best-effort skeleton).
@@ -2960,6 +2964,13 @@ impl<'a> Checker<'a> {
         }
         if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
             let before = residual.clone();
+            // 0.36.38 echo: a re-check re-visit of the SAME call-site (Assign
+            // RHS expected-type re-check) must not advance the session twice;
+            // the first visit already validated and advanced.
+            if self.session_recorded_for_call(&residual).is_some() {
+                self.infer_expr(&args[1], scopes);
+                return Type::Name("unit".into(), vec![]);
+            }
             match crate::session::apply_action(&residual, crate::session::SessionAction::Send) {
                 Ok((next, expected_ty)) => {
                     if let Some(et) = expected_ty {
@@ -3012,6 +3023,18 @@ impl<'a> Checker<'a> {
             return Type::Name("unknown".into(), vec![]);
         }
         if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            // 0.36.38 echo: re-inference of the same recv call-site echoes the
+            // recorded payload type computed from the recorded BEFORE state
+            // (pure) — no second advancement.
+            if let Some(existing) = self.session_recorded_for_call(&residual) {
+                if let Ok((_, payload_ty)) = crate::session::apply_action(
+                    &existing.before,
+                    crate::session::SessionAction::Recv,
+                ) {
+                    return payload_ty.unwrap_or_else(|| Type::Name("i64".into(), vec![]));
+                }
+                return Type::Name("i64".into(), vec![]);
+            }
             let before = residual.clone();
             match crate::session::apply_action(&residual, crate::session::SessionAction::Recv) {
                 Ok((next, payload_ty)) => {
@@ -3052,6 +3075,11 @@ impl<'a> Checker<'a> {
             return Type::Name("unit".into(), vec![]);
         }
         if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            // 0.36.38 echo: re-inference of the same close call-site — the
+            // close was validated (End reached) on the first visit.
+            if self.session_recorded_for_call(&residual).is_some() {
+                return Type::Name("unit".into(), vec![]);
+            }
             let before = residual.clone();
             match crate::session::apply_action(&residual, crate::session::SessionAction::Close) {
                 Ok((next, _)) => {
@@ -3071,6 +3099,31 @@ impl<'a> Checker<'a> {
             self.infer_expr(&args[0], scopes);
         }
         Type::Name("unit".into(), vec![])
+    }
+
+    /// 0.36.38: re-inference of the SAME call-site (e.g. the Assign arm's
+    /// expected-type re-check of the RHS) must NOT advance the session twice.
+    /// If this exact call was already recorded and the CURRENT residual
+    /// exactly matches the recorded AFTER state, the visit is a pure echo (the
+    /// first visit already advanced the residual) — returns `Some(recorded)`.
+    /// If the residual moved AWAY from the recorded state a genuine second
+    /// execution happened (fail-closed TOOL-RESOLUTION-001 via
+    /// `record_session_action` collision). Returns `None` on first visit.
+    fn session_recorded_for_call(
+        &self,
+        current: &crate::ast::SessionType,
+    ) -> Option<crate::core::checker::flow::CheckedSessionAction> {
+        let key = self.current_call_expression.as_ref()?;
+        let owner = self.current_callable_owner.as_ref()?;
+        let existing = self.session_actions.get(owner)?.get(key)?.clone();
+        if &existing.after == current {
+            Some(existing)
+        } else {
+            // Genuine second execution: the residual is not where the first
+            // visit left it — let the caller's record path surface the
+            // collision error (fail-closed) instead of echoing.
+            None
+        }
     }
 
     fn record_session_action(
