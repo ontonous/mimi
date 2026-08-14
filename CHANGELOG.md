@@ -7,6 +7,22 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.16 — Phase B Protocol 定案草案起草（0.36.21+ 前置评审）+ 语法参考 guard 注记同步
+
+- **Protocol 定案草案（devdocs/v0.36/phase-b-protocol-verdict-draft.md）**：按
+  路线图裁决标准（更少双状态语义）对照两方案——(a) checker-only 静态投影
+  （现状确认，零运行时语义）vs (b) 接入消费端（interp 再造校验 = 双套判定可
+  分歧）。倾向 (a)；dyn Protocol 建议定案为稳定逃生舱（与 unsafe 同级，撤
+  spec "feature-gated" 未实现承诺）；§3.10 "statically generated language
+  interfaces" 承诺建议删（flow 已生成 StateId/EventId，protocol 无需第二套）。
+- **E2 强化复核（0.36.16）**：codegen 侧 protocol 拓扑表（transitions/states/
+  payloads，compile.rs:101-130 装入 codegen/mod.rs:428-431 字段）**无任何
+  消费者**——死存储，进一步坐实 "checker-only、零消费" 定位。
+- **语法参考注记（docs/syntax-reference.md）**：`defer { }`（任意出口 LIFO，
+  无 `defer failure` 表面）与 `on failure { }`（失败出口补偿，语句执行点登记）
+  加语义注记，与 spec §4.6（0.36.15 修正）对齐；docs 门禁复验绿。
+- 无代码变更（预研文档轮）；门禁全绿（docs + edge）。
+
 ### 0.36.15 — 语法重设计预研：scope-guard resolved 发射器 L1 修复（defer/on failure 双 harness 钉住）+ spec 表面修正
 
 - **L1 修复（生产路径）**：CLI `mimi build`（compile_checked，resolved 发射器）
