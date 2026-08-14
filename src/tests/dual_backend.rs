@@ -3697,6 +3697,141 @@ fn dual_method_read_face_kept() {
     );
 }
 
+// ─── 0.36.49 — legacy 转移面补全：隐式尾返回 cap 转移 + 方法实参 cap 转移 ──
+// 0.36.48 §4v.4 登记的两个 E0303 fail-closed 差距（p13/p14）在本切闭合：
+//   * p13 `func id(x: cap) -> cap { x }`——legacy 发射器在隐式尾返回前
+//     check_unconsumed_caps 把 x 当作泄漏（E0303）；语义上返回即转移，应只做
+//     簿记 consume，不发射运行期 cap_consume。
+//   * p14 `xs.take_away(v)`（v: cap）——legacy 方法路径从未像自由函数路径
+//     （simple.rs::compile_arg_values）那样收集并消费实参里的 cap 位置，导致
+//     合法方法实参转移在 main 出口被 E0303 误伤。
+// 负测试保持：返回前已消费仍 E0304；同一 cap 作为两个方法实参仍 E0304。
+
+#[test]
+fn dual_linear_cap_return_transfer_ok() {
+    // L1+L2: 隐式尾返回 cap 参数 = 转移给调用方。caller 必须 drop 返回句柄，
+    // 三后端等价（此前 legacy native E0303）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func id(x: cap FileReadCap) -> cap FileReadCap { x }
+func main() -> i32 {
+    let c = FileReadCap
+    let d = id(c)
+    drop(d)
+    println(1)
+    0
+}
+"#;
+    let expected = "1";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen cap return");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) cap return");
+    let unga = compile_and_run(src).expect("legacy codegen cap return");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) cap return");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm cap return");
+}
+
+#[test]
+fn dual_linear_cap_return_after_consume_rejected() {
+    // L2: 打开 return-transfer 不改变 fail-closed——先 drop(x) 再返回 x 仍是
+    // E0304（consumed more than once）。
+    let diags = check_source(
+        "cap FileReadCap; func f(x: cap FileReadCap) -> cap FileReadCap { drop(x); x }          func main() -> i32 { let c = FileReadCap; let d = f(c); drop(d); 0 }",
+    )
+    .expect_err("return after consume must remain E0304");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("'x'"),
+        "expected E0304 return-after-consume diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_cap_method_arg_transfer_ok() {
+    // L1+L2: `xs.take_away(v)` 的 v: cap 线性实参转移——自包含 trait/impl，
+    // 三后端等价（此前 legacy native E0303 on v）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+trait ListExt<T> {
+    func take_away(value: T) -> List<T>
+}
+impl<T> ListExt<T> for List<T> {
+    func take_away(value: T) -> List<T> {
+        let mut rv_result: List<T> = []
+        for rv_x in self {
+            if rv_x != value { push(rv_result, rv_x) }
+        }
+        rv_result
+    }
+}
+cap FileReadCap
+func main() -> i32 {
+    let xs: List<cap FileReadCap> = [FileReadCap, FileReadCap]
+    let v: cap FileReadCap = FileReadCap
+    let ns = xs.take_away(v)
+    drop(ns)
+    println(1)
+    0
+}
+"#;
+    let expected = "1";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen cap method arg");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) cap method arg");
+    let unga = compile_and_run(src).expect("legacy codegen cap method arg");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) cap method arg");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm cap method arg");
+}
+
+#[test]
+fn dual_linear_cap_method_arg_double_use_rejected() {
+    // L2: 方法实参转移打开后，第二次把同一 cap 传给另一个方法仍 E0304。
+    let src = r#"
+trait ListExt<T> {
+    func take_away(value: T) -> List<T>
+}
+impl<T> ListExt<T> for List<T> {
+    func take_away(value: T) -> List<T> {
+        let mut rv_result: List<T> = []
+        for rv_x in self {
+            if rv_x != value { push(rv_result, rv_x) }
+        }
+        rv_result
+    }
+}
+cap FileReadCap
+func main() -> i32 {
+    let xs: List<cap FileReadCap> = [FileReadCap]
+    let ys: List<cap FileReadCap> = [FileReadCap]
+    let v: cap FileReadCap = FileReadCap
+    let ns = xs.take_away(v)
+    let ms = ys.take_away(v)
+    drop(ns)
+    drop(ms)
+    0
+}
+"#;
+    let diags = check_source(&src).expect_err("second method use of cap must be E0304");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("'v'"),
+        "expected E0304 method double-use diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.36.46 — 元素级投影定向分析：`xs[0]` 头提取面（Phase C 剩余容器面）──
 // M9/0.36.25-26 的索引析构全面拒绝（E0304，fail-closed）在本切打开**唯一
 // 可无损证明健全的提取形状**——定向头提取 `let c = xs[0]`（非可弃线性容器

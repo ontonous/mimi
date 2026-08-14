@@ -711,9 +711,20 @@ pub struct CheckedProgram {
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
     callables: BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    /// 0.36.48: method-level generic names per (trait, method) (see flow.rs).
+    pub trait_method_generics: HashMap<(String, String), Vec<String>>,
 }
 
 impl CheckedProgram {
+    /// 0.36.48: number of method-level generic params declared by a trait
+    /// method (0 for plain methods like `is_empty`, 1 for `map<U>`).
+    pub fn trait_method_generic_count(&self, trait_name: &str, method_name: &str) -> usize {
+        self.trait_method_generics
+            .get(&(trait_name.to_string(), method_name.to_string()))
+            .map(|g| g.len())
+            .unwrap_or(0)
+    }
+
     #[cfg(test)]
     pub(crate) fn from_checked_file(file: &File) -> Result<Self, Vec<Diagnostic>> {
         Self::from_checked_file_base(file)
@@ -730,6 +741,7 @@ impl CheckedProgram {
             zonked_nested_func_types,
             zonked_expr_types,
             session_actions,
+            trait_method_generics,
             ..
         } = acc;
         let mut program = Self::from_checked_file_base(file)?;
@@ -920,6 +932,8 @@ impl CheckedProgram {
             return Err(errors);
         }
         program.callables = callables;
+
+        program.trait_method_generics = trait_method_generics;
 
         // ── Zonk Leak Detector (追加 F, architecture-amendment-1.0.md) ──
         // Final safety net: scan all function signatures for residual inference
@@ -1122,6 +1136,7 @@ impl CheckedProgram {
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
             callables: BTreeMap::new(),
+            trait_method_generics: HashMap::new(),
         })
     }
 

@@ -1271,6 +1271,52 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(None)
     }
 
+    /// 0.36.49 (Phase C): mirror of `simple.rs::collect_arg_cap_places` for
+    /// method-call arguments. The legacy method path never marked capability
+    /// arguments consumed, so linear value parameters (e.g. `xs.remove(v)` with
+    /// `v: cap`) left `v` registered and codegen demanded an extra `drop(v)` the
+    /// checker does not require.
+    fn collect_method_arg_cap_places(
+        arg: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        out: &mut Vec<String>,
+    ) {
+        match arg.unlocated() {
+            Expr::Ident(name) => {
+                if vars.contains_key(name) {
+                    out.push(name.clone());
+                }
+            }
+            Expr::NamedArg(_, value) => Self::collect_method_arg_cap_places(value, vars, out),
+            Expr::Tuple(values) => {
+                for v in values {
+                    Self::collect_method_arg_cap_places(v, vars, out);
+                }
+            }
+            Expr::List(values) => {
+                for v in values {
+                    Self::collect_method_arg_cap_places(v, vars, out);
+                }
+            }
+            Expr::SetLiteral(values) => {
+                for v in values {
+                    Self::collect_method_arg_cap_places(v, vars, out);
+                }
+            }
+            Expr::Record { fields, .. } => {
+                for field in fields {
+                    Self::collect_method_arg_cap_places(&field.value, vars, out);
+                }
+            }
+            Expr::Field(obj, _) => Self::collect_method_arg_cap_places(obj, vars, out),
+            Expr::Index(base, index) => {
+                Self::collect_method_arg_cap_places(base, vars, out);
+                Self::collect_method_arg_cap_places(index, vars, out);
+            }
+            _ => {}
+        }
+    }
+
     /// Compile a method call that takes `self` as its first argument.
     /// Struct `self` values are converted to a pointer, re-using the variable's
     /// alloca when available so that mutable actor fields can be mutated in place.
@@ -1288,6 +1334,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         compiled_args.push(obj_val);
         for (i, arg) in args.iter().enumerate() {
             let val = self.compile_expr(arg, vars)?;
+            // 0.36.49 (Phase C): method arguments are transferred just like
+            // free-function arguments when they contain capabilities. Mark all
+            // capability places consumed after compiling the value; the callee's
+            // own cap scopes take ownership.
+            let mut method_arg_caps = Vec::new();
+            Self::collect_method_arg_cap_places(arg, vars, &mut method_arg_caps);
+            for name in method_arg_caps {
+                if self.is_cap_var(&name) {
+                    self.consume_cap(&name)?;
+                }
+            }
             // A1: adjust integer arg width to match the function's declared param type.
             // Param 0 is self; user args start at index 1.
             let param_idx = i + 1;

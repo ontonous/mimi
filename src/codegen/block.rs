@@ -6,6 +6,16 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
+/// 0.36.48: bare uppercase placeholders in inferred type names ("List<T>") are
+/// substituted with the Mimi list-slot name "i64" (LLVM-layer elements are
+/// i64 slots regardless of nominal element type; map mono mangles as $T_i64).
+/// The `incompatible_msrv` allow mirrors `src/runtime/concurrency.rs`'s
+/// CONCURRENCY_HANDLES static (project runtime relies on 1.80+ features
+/// regardless of the lib `rust-version` pin).
+#[allow(clippy::incompatible_msrv)]
+pub(crate) static REGEX_SINGLE_UPPER: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\b[A-Z]\b").unwrap());
+
 use crate::error::{CompileError, MimiResult};
 
 use super::CodeGenerator;
@@ -588,7 +598,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 method_name,
                                             );
                                             if !impl_ret.is_empty() {
-                                                self.var_type_names.insert(name.clone(), impl_ret);
+                                                register_qualified_var_type(
+                                                    &mut self.var_type_names,
+                                                    name,
+                                                    impl_ret,
+                                                );
                                             }
                                         }
                                     } else if let Expr::Ident(flow_name) = obj.unlocated() {
@@ -648,7 +662,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 method_name,
                                             );
                                             if !impl_ret.is_empty() {
-                                                self.var_type_names.insert(name.clone(), impl_ret);
+                                                register_qualified_var_type(
+                                                    &mut self.var_type_names,
+                                                    name,
+                                                    impl_ret,
+                                                );
                                             }
                                         }
                                     } else {
@@ -657,7 +675,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         let impl_ret = self
                                             .infer_impl_method_return_type(&obj_type, method_name);
                                         if !impl_ret.is_empty() {
-                                            self.var_type_names.insert(name.clone(), impl_ret);
+                                            register_qualified_var_type(
+                                                &mut self.var_type_names,
+                                                name,
+                                                impl_ret,
+                                            );
                                         }
                                     }
                                 }
@@ -1940,6 +1962,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         self.inflate_variant_struct(val, decl_ty)?
                     } else {
+                        // 0.36.48: un-annotated `let cs = ns.chunks(2)` — register the
+                        // inferred List<...> shape so later `for c in cs` can resolve
+                        // the element type. Without it the chain variable's type was
+                        // lost (var_type_names empty): the outer for bound the element
+                        // as bare i64 and a nested `for x in c` failed with E0713
+                        // "for loop requires a list or range (got integer)".
+                        // `infer_object_type` renders the method result via the impl
+                        // signature (may carry generic names, e.g. "List<List<T>>" —
+                        // harmless: List's LLVM layout {i64, ptr} is T-independent and
+                        // try_convert_loop_elem lands on the struct branch).
+                        // "List<unknown>" is the raw-slot fallback (no element info —
+                        // registering it would still degrade iteration to i64), so it
+                        // is excluded.
+                        if let PatternKind::Variable(name) = &pat.kind {
+                            if !self.var_type_names.contains_key(name.as_str()) {
+                                let inferred = self.infer_object_type(init, vars);
+                                if inferred.starts_with("List<") && !inferred.contains("unknown") {
+                                    // 0.36.48: impl signatures render generic names
+                                    // ("List<T>"/"List<List<T>>"). Mimi list slots are
+                                    // i64 at the LLVM layer regardless of element type
+                                    // (map mono mangles as $T_i64), so a bare uppercase
+                                    // placeholder is substituted with the slot name i64 —
+                                    // keeping the registered shape concrete enough for
+                                    // method dispatch/mangling and for-loop element
+                                    // resolution, without pretending the element is
+                                    // anything more specific.
+                                    let concrete = REGEX_SINGLE_UPPER
+                                        .replace_all(&inferred, "i64")
+                                        .into_owned();
+                                    self.var_type_names.insert(name.clone(), concrete);
+                                }
+                            }
+                        }
                         val
                     };
                     self.compile_pattern_bind(pat, val, vars)?;
@@ -2255,7 +2310,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.infer_impl_method_return_type(&obj_type, method_name)
                                     };
                                     if !ret.is_empty() {
-                                        self.var_type_names.insert(name.clone(), ret);
+                                        register_qualified_var_type(
+                                            &mut self.var_type_names,
+                                            name,
+                                            ret,
+                                        );
                                     }
                                 }
                             }
@@ -2470,5 +2529,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         param_types
+    }
+}
+
+/// 0.36.48: Q3/Call-qualified registration of an inferred method-result type.
+/// Impl signatures render generic placeholders ("List<T>"/"List<List<T>>");
+/// Mimi list slots are i64 at the LLVM layer, so bare uppercase placeholders
+/// are substituted with "i64" to keep the registered shape concrete for method
+/// dispatch, mono-mangling and for-loop element resolution.
+pub(crate) fn register_qualified_var_type(
+    var_type_names: &mut HashMap<String, String>,
+    name: &str,
+    inferred: String,
+) {
+    if inferred.starts_with("List<") && !inferred.contains("unknown") {
+        // 0.36.48: List<...> 形状携带泛型占位符（"List<T>"）——裸大写占位符
+        // 替换为槽位名 i64 后登记（for 元素解析/方法分发/mono 命名连通）。
+        let concrete = REGEX_SINGLE_UPPER
+            .replace_all(&inferred, "i64")
+            .into_owned();
+        var_type_names.insert(name.to_string(), concrete);
+    } else if !inferred.is_empty() && !inferred.contains("unknown") {
+        // 非 List 形态保持原行为（原样登记非空串——string 方法返回/Result/
+        // Option/record 全依赖它）；"List<unknown>" 为原始槽位 fallback（无
+        // 元素信息，登记后仍退化 i64 迭代），等同不登记。
+        var_type_names.insert(name.to_string(), inferred);
     }
 }
