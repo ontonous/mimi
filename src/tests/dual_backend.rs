@@ -3503,6 +3503,159 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.42 — 泛型×线性单态化切片 4：if-let 容器义务消解的泛型镜像 ──────
+// 0.36.40/41 记录的"if-let 非穷举面"在本切打开其 **Option 中介面**：
+//   具体面（0.36.36）`if let Some(x) = o` 使 Option 义务消解——Some 路径绑定
+//   负载、None 变体零负载（no-else 也 CLEAN，probe_il4 实证）。泛型镜像：
+//   - scrutinee 整体包含恰一个 live 名（投影/调用位置 fail-closed）；
+//   - then 块绑定名黑盒处理（恰一次；臂内弃置 = 具体面 E0256 同款禁令）、
+//     then/else 块内不得再触容器名；
+//   - 零绑定模式（`if let _ = o`）= 整个容器弃置 → drop 门禁；
+//   - else / no-else 无 drop 门禁（None 无负载）→ transfer-only 会话也可
+//     if-let 转移情境；但臂内会话 action 仍受 builtin 篱笆（0.36.40 记录的
+//     会话限制：泛型体只转移值，协议动作留在具体调用方）→ E0432；
+//   - 非 Option 容器（List `[a]` / Result / 自定义枚举）fail-closed
+//     （concrete E0256/E0304 同款：不匹配余部义务不可静态表达）。
+// 健全性 = 切片 1 论证延续：Option-ness 是容器类型性质（固定于泛型签名，
+// 与 T 无关）——任意具体线性实例化下 if-let 消解行为 == 等价 concrete 副本。
+
+#[test]
+fn dual_generic_linear_iflet_option_ok() {
+    // L1+L2: `if let Some(x) = o`（带 else）——Some 绑定经泛型 sink 恰一次
+    // 消费；else 走 None 空负载路径。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func f<T>(o: Option<T>) -> i32 {
+    let mut n = 0
+    if let Some(x) = o { n = n + sink_g(x) } else { n = n + 0 }
+    n
+}
+func main() -> i32 {
+    let o = Some(FileReadCap)
+    let r = f(o)
+    println(r)
+    0
+}
+"#;
+    let expected = "1";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen if-let option ok");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) if-let option ok"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen if-let option ok");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) if-let option ok");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm if-let option ok");
+}
+
+#[test]
+fn dual_generic_linear_iflet_option_no_else_ok() {
+    // L1+L2: no-else 形态（None 路径静默消解——具体面 no-else 亦合法）。
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+func sink_g<T>(x: T) -> i32 { drop(x); 1 }
+func f<T>(o: Option<T>) -> i32 {
+    let mut n = 0
+    if let Some(x) = o { n = n + sink_g(x) }
+    n
+}
+func main() -> i32 {
+    let o = Some(FileReadCap)
+    let r = f(o)
+    println(r)
+    0
+}
+"#;
+    let expected = "1";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen if-let no-else ok");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) if-let no-else ok"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen if-let no-else ok");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) if-let no-else ok");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm if-let no-else ok");
+}
+
+#[test]
+fn dual_generic_linear_iflet_list_rejected() {
+    // L2: 非 Option 容器——`if let [a] = v`（List 模式）不匹配余部义务不可
+    // 静态表达 → E0432（concrete E0256/E0304 同款）。
+    let diags = check_source(
+        "cap FileReadCap; func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
+         func f<T>(v: List<T>) -> i32 { if let [a] = v { sink_g(a) } else { 0 } } \
+         func main() -> i32 { let l = [FileReadCap]; let r = f(l); println(r); 0 }",
+    )
+    .expect_err("if-let on List must stay fail-closed (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_iflet_abandon_rejected() {
+    // L2: then 块内绑定名被弃置（`let _d = x`）——别名转移后 _d 未处理 →
+    // E0432（具体面 E0256 同款禁令）。
+    let diags = check_source(
+        "cap FileReadCap; func wash<T>(o: Option<T>) -> i32 { \
+         if let Some(x) = o { let _d = x; 0 } else { 0 } } \
+         func main() -> i32 { let o = Some(FileReadCap); let r = wash(o); println(r); 0 }",
+    )
+    .expect_err("if-let binding abandonment must be rejected (E0432)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_generic_linear_iflet_session_action_rejected() {
+    // L2: 会话面——泛型体只转移值，协议动作留在具体调用方（builtin 篱笆，
+    // 0.36.40 记录）；if-let 臂内 session_send → E0432。
+    let diags = check_source(
+        "session Echo = !i32 . ?i32 . end; func attach<T>(x: T) -> T { x } \
+         func f<T>(o: Option<T>) -> i32 { \
+             if let Some(ch) = o { let d = attach(ch); session_send(d, 5); \
+                 let r = session_recv(d); session_close(d); println(r); 0 } else { 0 } \
+         } \
+         func main() -> i32 { let (ch0, ch1) = session_pair::<Echo>(); let o = Some(ch0); \
+         let r = f(o); let n = session_recv(ch1); session_send(ch1, n + 1); \
+         session_close(ch1); println(r); 0 }",
+    )
+    .expect_err("session protocol actions inside generic bodies stay E0432");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "expected E0432 diagnostic, got:\n{rendered}"
+    );
+}
+
 // ─── 0.36.41 — 泛型×线性单态化切片 3：match 臂残差分支级复位（会话元素面）──
 // 0.36.40 记录的两个未覆盖面在本切闭合其**会话面**：
 //   - match 臂残差从 match 入口状态独立分析（臂是互斥分支，非顺序）；合并时

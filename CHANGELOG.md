@@ -7,6 +7,35 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.42 — 泛型×线性单态化切片 4：if-let 容器义务消解的泛型镜像（L1/L2）
+
+- **背景**：0.36.40/41 记录的"if-let 非穷举面"——泛型体内 `if let Some(x) =
+  o` 整体 E0432。具体面（0.36.36）if-let 对 Option 已支持义务消解（Some 路径
+  绑定负载、None 变体零负载；**no-else 亦合法**，probe_il4 实证）——泛型面
+  缺镜像。
+- **机制**（`src/core/checker/linear_blackbox.rs` + `src/core/checker.rs`）：
+  - `Stmt::IfLet` 臂：scrutinee 整体包含恰一个 live 名（投影/调用位置
+    fail-closed）；then 块绑定名黑盒流动（恰一次；臂内弃置 = 具体面 E0256
+    同款禁令）；then/else 块内不得再触容器名；零绑定模式（`if let _ = o`）
+    = 整个容器弃置 → drop 门禁；
+  - **Option 中介面开关**：`blackbox_param_scrutinee_option` 由
+    `generic_linear_blackbox_sound` 按参数表面类型设置/恢复（容器类型性质
+    固定于泛型签名、与 T 无关 → 健全性论证延续）；else/no-else 无 drop 门禁
+    （None 零负载）——transfer-only 会话经 if-let 的值转移情境也合法（臂内
+    协议 action 仍受 0.36.40 builtin 篱笆 → E0432）；
+  - **非 Option 容器 fail-closed**：List `[a]` 模式 / Result / 自定义枚举不
+    匹配余部义务不可静态表达 → E0432（concrete E0256/E0304 同款）；
+  - 配套修复：`stmt_uses_name` 补 `Stmt::IfLet` 覆盖（与 0.36.40
+    expr_uses_name-Match 同类触碰检测孔）。
+- **挣绿**：`if let Some(x) = o { n = n + sink_g(x) }`（带/不带 else）双后端
+  1——具体面 0.36.36 义务解消的泛型镜像面正式闭合。
+- **健全性**：Option-ness = 容器类型性质（泛型签名固定，不依赖 T）→ 任意
+  具体线性实例化下 if-let 消解行为 == 等价 concrete 副本；容器消费恰一次
+  （then 绑定处理或 None 空负载）。
+- **回归**：正例 2 三 harness（else / no-else）+ 负例 3（List E0432 / 臂内
+  弃置 E0432 / 会话 action E0432）。全量 5410 绿；real_world 70/70（69
+  build+exec，flow_test_macros SKIP 为既有 VM-only 面）。
+
 ### 0.36.41 — 泛型×线性单态化切片 3：match 臂残差分支级复位（会话元素面，L1/L2）
 
 - **背景**：0.36.40 记录"匹配臂残差顺序共享"为未覆盖面——match 臂顺序分析，
