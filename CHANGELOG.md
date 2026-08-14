@@ -7,7 +7,20 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
-### 0.36.17 — 线性系统支柱预研启动：泛型×线性强制矩阵（M1-M10 探针复核）+ 索引读取 fail-open 缺口
+### 0.36.19 — Session 复杂 residual 双后端挣绿（roundtrip/分支合并/循环）+ 覆盖缺口闭合
+
+- **Session 双后端正例补齐（dual_backend +3，双 harness）**：此前双端 session
+  面仅 E0432 L2 拒绝 + real_world flow_session.mimi；0.36.19 起三种复杂形态经
+  legacy compile_and_run 与 checked_codegen_compile_and_run 双路径对 VM 断言
+  （与 0.36.15 guard 修复同一路径盲区纪律）：
+  `dual_session_residual_roundtrip`（42/84）、
+  `dual_session_residual_branch_merge`（分支 residual merge → 1）、
+  `dual_session_residual_loop_ops`（同端点循环 send/recv → 3）。
+  探针实证全部三后端逐字节一致；矩阵入
+  `devdocs/v0.36/phase-c-linearity-study.md` §4b。
+- 全量 5357 passed / 0 failed / 7 ignored；fmt + clippy + docs + edge 全绿。
+
+### 0.36.18 — 线性系统支柱预研启动：泛型×线性强制矩阵（M1-M10 探针复核）+ 索引读取 fail-open 缺口
 
 - **现状强制矩阵（探针全实测，devdocs/v0.36/phase-c-linearity-study.md）**：
   E0432 ×4（裸 cap / turbofish / SessionChan / List<cap> 泛型边界 H2）、E0256
