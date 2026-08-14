@@ -4132,3 +4132,33 @@ fn has_cross_boundary_ops_covers_wrapper_blocks() {
         body: Vec::new(),
     }]));
 }
+
+#[test]
+fn check_program_diagnostics_are_source_sorted() {
+    // The resolved IR pipeline uses HashMap-backed catalogs; the public
+    // check_program boundary must return source-ordered diagnostics so CLI
+    // and test output are deterministic across runs.
+    let file = parse("func b() -> i32 { undefined_b() }\nfunc a() -> i32 { undefined_a() }");
+    let errors = crate::core::check_program(&file).expect_err("expected multiple errors");
+    assert!(
+        errors.len() >= 2,
+        "expected multiple diagnostic entries, got: {:?}",
+        errors
+    );
+
+    let key = |d: &crate::diagnostic::Diagnostic| {
+        (
+            d.span.start_line,
+            d.span.start_col,
+            d.message.clone(),
+            d.code.clone(),
+        )
+    };
+    let keys: Vec<_> = errors.iter().map(key).collect();
+    let mut sorted_keys = keys.clone();
+    sorted_keys.sort();
+    assert_eq!(
+        keys, sorted_keys,
+        "check_program diagnostics must be source sorted"
+    );
+}

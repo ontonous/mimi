@@ -7,6 +7,172 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.69 — Phase E：修复 `audit_h13_close_fd_still_closes_real_fds` 并行 fd 复用误报
+
+该测试在 `--test-threads=4` 下有偶发失败：`close_fd` 关闭测试 fd 后，
+另一个并行测试线程可能立刻复用同一 fd 编号；随后测试用 `fcntl(F_GETFD)`
+检查时看到“仍打开”，误报为 close_fd 失效。单测单独运行从不失败，符合该竞态特征。
+
+修复：在 close 前记录原文件的 `(st_dev, st_ino)`；close 后用 `fstat` 检查：
+
+- `fstat` 返回 `EBADF` → 原 fd 确已关闭；
+- `fstat` 返回另一个文件身份 → 说明原 fd 已被并行线程合法复用，测试不误报；
+- `fstat` 返回同一文件身份 → 才是真正的 close_fd 失败。
+
+该改动不关闭也不修改可能已被其他线程占用的 fd，只做身份判断。
+
+### 0.36.68 — Phase E：comptime 折叠失败不再静默吞错，输出 warning
+
+`fold_comptime_items` 注释承诺“单个坏 `comptime` 声明降级为 eprintln! 警告”，
+但实际错误分支是 `Err(_) => Ok(())` 完全静默。若字节码侧 comptime 预折叠失败，
+调用方只能看到后续的 runtime-dependent 错误，原始失败原因被吞掉。
+
+本次在错误分支补上：
+
+```text
+warning: comptime folding failed (...); comptime values will be evaluated at runtime
+```
+
+行为仍保持“单个折叠失败不阻断整个 compilation”的既有策略，但不再掩盖根因。
+
+- **验证**：`cargo test --lib comptime -- --test-threads=2` 75 passed；
+  `audit_*`/dual comptime 用例无回归。
+
+### 0.36.67 — Phase E：清理过时 TODO / 台账噪音
+
+- `src/codegen/builtins/string/transform.rs`：移除 `.substring()` 方法形式
+  仍走 clamp 路径的过时 `TODO(#audit-wave2)`。实际代码自 2026-08-06 D-5 起
+  已将方法形式路由到 `str_substring_strict`，并有 `audit_1o_substring_method_strict_bounds`
+  双后端回归覆盖。
+- `src/tests/audit_fix_stdlib.rs`：
+  - 更新文件头：VM-only 测试不再普遍带 `TODO(#audit-wave2-codegen-side)`，
+    剩余个别 VM-only 用例由显式 dual companion 覆盖或有根因登记；
+  - 移除 `audit_stdlib_trim_left_right_whitespace_set` 上已过时的
+    `TODO(#audit-wave2-codegen-side)`（codegen 侧已由
+    `audit2_std_trim_left_right_dual` 覆盖）。
+
+纯注释/台账准确性整理，无运行语义变化。
+
+### 0.36.66 — Phase E：`?` 在 lambda 内不再 fail-closed，lowering 追踪内层 lambda owner
+
+此前 `Expr::Try` 的 `propagation_target` 始终取封闭函数 owner；在 lambda
+内部这会指向错误的调用者，因此 lowering 对 lambda 内 `?` 直接拒绝（E0830）。
+本次为 `BodyLowerer` 增加 `lambda_owners` 栈：
+
+- 进入 lambda 时压入 `{lambda_node}/callable`；
+- 退出时弹出；
+- lowering `?` 时取栈顶（即最内层 lambda）作为传播目标；
+- 普通函数路径保持原行为（无 lambda 栈时仍用函数 owner）。
+
+两端语义不变：`?` 的运行时契约仍是进程级错误退出（`mimi_try_exit` /
+VM 对应路径），但 resolved-body 不再人为拒绝 checker 已接受的合法 lambda
+内 `?`。
+
+- **验证**：`audit8_try_inside_lambda_fails_closed` 改为
+  `audit8_try_inside_lambda_still_lowers`，同时断言 `check_source` 通过、
+  VM 输出 `1`、native 输出 `1`。
+
+### 0.36.65 — Phase E：修复 `random.mimi` shuffle/random_sample 的 codegen SIGSEGV
+
+`audit_fix_stdlib.rs` 中登记的既有 codegen 缺陷被复现：`shuffle(xs)` 在
+native 后端直接 SIGSEGV，`random_sample` 也不可靠。根因是内联在
+`impl<T> RandomChoice<T> for List<T>` 泛型方法里的 remove-at 循环触发了
+codegen 的栈 alloca 别名问题：
+
+- `sh_rest = sh_kept` 使 `sh_rest` 指向 `sh_kept` 的栈内列表结构；
+- 下一轮迭代重新初始化 `sh_kept` 时，复用同一个 alloca，导致源列表
+  `sh_rest` 被新空列表覆盖，出现乱值或崩溃。
+
+修复方式：将 remove-at 循环提升为 `pub` 自由泛型函数
+`random_remove_ith`，由 `random_sample` / `shuffle` 调用。同一逻辑在自由
+泛型函数中经 native 与 VM 双端验证均正确；这也符合 std 模块 loader 只携带
+`pub` 项的既有约束。
+
+- **验证**：`audit2_std_random_sample_shuffle_semantics_dual` 现为 VM +
+  codegen 双端测试，输出 `3`，native 不再崩溃；`audit_stdlib_*` 14 tests
+  全绿。
+- **根因登记**：codegen 列表变量跨循环赋值时的 alloca 复用/别名问题仍
+  留在 codegen 层面，`std/random.mimi` 的先绕行不是对该根因的最终修复。
+
+### 0.36.64 — Phase E：audit_fix_stdlib 批量补齐 codegen 侧双后端守卫
+
+继续执行 Wave-1 遗留的“每个 stdlib 回归都应有 codegen 侧”纪律
+（wave1-review §6.1）。此前 `audit_fix_stdlib.rs` 中 8 个 stdlib 回归仍为
+VM-only，本次为以下场景补上 `audit2_compile_and_run_with_stdlib` native 断言：
+
+- `mymath.mimi`
+  - `gcd` 绝对值归一化
+  - `lcm` 溢出安全与绝对值
+  - `factorial` 13! 溢出守卫
+  - `try_pow_int` 负底数/溢出边界
+  - `random_exponential` 非法 λ 哨兵
+- `strings.mimi`
+  - `words` / `count_words` 空 token 过滤
+- `collections.mimi`
+  - `take` / `drop_n` 负数 n 守卫
+- `fs.mimi`
+  - `file_size` 按字节计数的 UTF-8 多字节文件
+  - `file_size` 缺失文件 Err
+- `result.mimi`
+  - `ResultExt::map` 在显式结果注解下重建 Err 载荷
+
+- **验证**：`audit_stdlib_*` 14 tests 全绿（VM + codegen 双端），未引入语义变化。
+- **剩余 TODO**：`random_sample/shuffle` 的 codegen 侧仍被既有 while-loop
+  泛型方法编译缺陷阻塞，已在源码注释中保留登记。
+
+### 0.36.63 — Phase E：物化裸 `let ref` 的 canonical Reference（V-1）
+
+审计遗留 `V-1`（一审 §16，Wave-3）：`let ref r = v` 若出现在非 arena 顶层，
+且 `r` 从未被使用，lowering 的 `reference_binding_type` 会在 Resolved
+TypeTable 中找不到 canonical Reference（该类型只在 ref 变量作为表达式出现时
+才被 intern），于是 fail-closed 报内部错误。合法程序 `let ref r = v; 0` 被拒。
+
+- **根因**：checker 已把 `let ref` 的变量类型建为 `Type::Ref`，但 Resolved
+  IR 的节点类型表只从“表达式类型”填充；未使用的 ref 绑定没有对应的表达式，
+  因此 Reference 未进入 `ResolvedTypeTable`。
+- **修复**：
+  - `NodeMeta` 新增临时 `ref_binding` 关联键（记录 `let ref` 初始化表达式）；
+  - `collect_stmt_meta` 为 `Stmt::Let{ ref_: true, init: Some(_), .. }` 设置该键；
+  - `build_canonical_function_signatures` 仿照 shared-binding 路径，用
+    初始化表达式的 checker-finalized 类型构造 `Type::Ref(None, T)` 并 intern
+    为 canonical Reference，同时写入对应 let 语句节点类型；
+  - 构造完成后清空临时键，保持与 expression/shared/type_operand 相同的边界纪律。
+- **回归**：解除 `fix3_ref_nonlinear_let_still_checks` 的 `#[ignore]`，裸
+  `let ref` 不再使用的情况下也能完整通过 checker + lowering。
+
+### 0.36.62 — Phase E：check_program 诊断出口统一按源码位置排序（§4-#43）
+
+审计遗留 `§4-#43`：Resolved IR 内部使用多个 `HashMap` 目录，早期在部分
+路径已排序（checker 出口、R-2 选择确定性），但 `check_program` 的公共出口
+没有统一排序。同一非法程序在不同运行/不同 Hash 种子下可能得到不同诊断顺序。
+
+- **修复**：`src/core/mod.rs` 新增 `sort_diagnostics`，并在
+  `check_program` / `check_program_strict` 的公共边界对所有 `Err(Vec<Diagnostic>)`
+  统一做源码位置排序；同位置按 message / code 稳定排序。
+  - 覆盖 `flow_check_*` 阶段错误与 `CheckedProgram::from_flow_acc` 后续阶段错误。
+- **新增回归**：`check_program_diagnostics_are_source_sorted`——构造两个
+  未解析函数错误，断言公共出口已是按 `(line, col, message, code)` 排序。
+- **影响**：仅改变错误输出顺序，不改变语义或诊断集合。
+
+### 0.36.61 — Phase E：修 cap/dyn/builtin 方法探测投机降低 receiver（R-5）
+
+审计遗留 `R-5`：`lower_expr` 对 `receiver.method(...)` 先尝试
+`lower_cap_method_call` / `lower_dyn_method_call` / `lower_builtin_method_call`
+。这些探测函数若以“先 `lower_expr(receiver)`、再判断类型”的方式实现，
+当 receiver 不是对应目标时，已降低的 receiver 会被丢弃，随后真实方法路径
+会再次降低同一 AST，可能造成重复语义身份/局部变量（伪 identity
+collision）。
+
+- **修复**：三个探测函数均改为先用 `expr_id(receiver)` 从
+  `node_types` 读取 checker 已定型的 receiver 类型，确认属于
+  cap / dyn / builtin 方法后才真正 `lower_expr(receiver)`；非目标 receiver
+  不再被投机降低。
+  - `lower_cap_method_call`
+  - `lower_dyn_method_call`
+  - `lower_builtin_method_call`
+- **新增/验证**：`core::ir::lower::tests` 52 passed，覆盖 actor/impl/内置/
+  transition 方法调用，均未出现重复身份回归。
+
 ### 0.36.60 — Phase E 查缺补漏：i64::MIN 基数拼写 + silent_transition 包裹块审计
 
 #### 1. i64::MIN 支持十六进制/二进制/八进制拼写

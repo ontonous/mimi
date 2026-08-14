@@ -182,6 +182,10 @@ pub struct NodeMeta {
     /// Ephemeral shared-binding kind and initializer correlation key used to
     /// materialize the binding's canonical ownership type.
     shared_binding: Option<(crate::ast::SharedKind, ExpressionTypeKey)>,
+    /// Ephemeral reference-binding initializer correlation key used to
+    /// materialize the binding's canonical Reference type even when the ref
+    /// local is never used (V-1).
+    ref_binding: Option<ExpressionTypeKey>,
     /// Ephemeral explicit type operand consumed while constructing canonical IR.
     type_operand: Option<Type>,
     /// Ephemeral ordered generic arguments consumed while constructing canonical IR.
@@ -819,6 +823,7 @@ impl CheckedProgram {
         for meta in program.node_meta.values_mut() {
             meta.expression_key = None;
             meta.shared_binding = None;
+            meta.ref_binding = None;
             meta.type_operand = None;
             meta.type_arguments.clear();
         }
@@ -5434,6 +5439,16 @@ fn collect_stmt_meta(
             meta.shared_binding = Some((*kind, expression_type_key(init)));
         }
     }
+    if let Stmt::Let {
+        ref_: true,
+        init: Some(init),
+        ..
+    } = stmt.unlocated()
+    {
+        if let Some(meta) = out.get_mut(&node_id) {
+            meta.ref_binding = Some(expression_type_key(init));
+        }
+    }
     match stmt.unlocated() {
         Stmt::Let { pat, ty, init, .. } => {
             collect_pattern_meta(
@@ -6468,6 +6483,7 @@ fn insert_node_meta(
             precision,
             expression_key: None,
             shared_binding: None,
+            ref_binding: None,
             type_operand: None,
             type_arguments: Vec::new(),
         },
@@ -8128,6 +8144,11 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
 );
 
+fn canonical_reference_binding_type(initializer: &ZonkedTy) -> Result<ZonkedTy, String> {
+    let ty = Type::Ref(None, Box::new(initializer.as_type().clone()));
+    ZonkedTy::from_resolved(ty).map_err(|error| error.to_string())
+}
+
 fn canonical_shared_binding_type(
     kind: crate::ast::SharedKind,
     initializer: &ZonkedTy,
@@ -8712,6 +8733,57 @@ fn build_canonical_function_signatures(
                     Err(error) => errors.push(Diagnostic::error(
                         format!(
                             "TOOL-RESOLUTION-001: shared binding '{}' type is not canonical: {error}",
+                            node_id.0
+                        ),
+                        program.node_meta[&node_id].origin.user_span(),
+                    )),
+                }
+            }
+
+            let ref_bindings = program
+                .node_meta
+                .iter()
+                .filter(|(node_id, _)| {
+                    node_id.0.starts_with(&owner_prefix)
+                        && !program.functions.keys().any(|nested| {
+                            nested != &function.node_id
+                                && node_id.0.starts_with(&format!("{}/", nested.0))
+                        })
+                })
+                .filter_map(|(node_id, meta)| {
+                    meta.ref_binding
+                        .as_ref()
+                        .map(|key| (node_id.clone(), key.clone()))
+                })
+                .collect::<Vec<_>>();
+            for (node_id, initializer_key) in ref_bindings {
+                let Some(initializer) = expression_types_by_key.get(&initializer_key) else {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: reference binding '{}' has no checker-finalized initializer type",
+                            node_id.0
+                        ),
+                        program.node_meta[&node_id].origin.user_span(),
+                    ));
+                    continue;
+                };
+                let binding = match canonical_reference_binding_type(initializer) {
+                    Ok(binding) => binding,
+                    Err(message) => {
+                        errors.push(Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {message}"),
+                            program.node_meta[&node_id].origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+                match types.intern_zonked(&binding, &capabilities, &mut resolve_name) {
+                    Ok(binding) => {
+                        node_types.insert(node_id, binding);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: reference binding '{}' type is not canonical: {error}",
                             node_id.0
                         ),
                         program.node_meta[&node_id].origin.user_span(),

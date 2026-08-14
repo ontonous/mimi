@@ -136,8 +136,11 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "V-1 known gap (devdocs/full-audit-2026-08-05.md §16): bare `let ref` outside arena has no checker-finalized canonical Reference; fail-closed at lowering (Wave-3 item — materialize canonical Reference at lowering). Tracked: devdocs/wave1-progress-roadmap-2026-08-05.md §6 Wave-3."]
 fn fix3_ref_nonlinear_let_still_checks() {
+    // V-1 (Wave-3 item, closed 0.36.63): bare `let ref` outside an arena is
+    // now materialized as a canonical Reference at resolved construction even
+    // when the ref local is never used, so this non-linear borrow keeps
+    // checking end-to-end.
     check_source(
         r#"
 func main() -> i32 {

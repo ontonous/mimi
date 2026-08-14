@@ -581,14 +581,14 @@ func main() -> i32 {
     assert_eq!(native.trim(), "3\n1\n3");
 }
 
-// ─── #8 — `?` inside a lambda fails closed ───────────────────────────────────
+// ─── #8 — `?` inside a lambda still lowers ───────────────────────────────────
 
 #[test]
-fn audit8_try_inside_lambda_fails_closed() {
-    // LOW→fail-closed: propagation_target was always the function owner; inside
-    // a lambda that is a wrong target and ResolvedLambda has no propagation
-    // contract. Lowering now rejects the construct instead of fabricating a
-    // target (E0830, documented; TODO(#audit-wave2) lifts it).
+fn audit8_try_inside_lambda_still_lowers() {
+    // 0.36.66: propagation_target now tracks the innermost lambda owner, so
+    // `?` inside a lambda lowers instead of failing closed (E0830). The
+    // runtime contract for `?` remains a process-level error exit on both
+    // backends; this test exercises the success path through VM and native.
     let src = r#"
 func may_fail(x: i32) -> Result<i32, i32> {
     if x > 0 { Ok(x) } else { Err(0) }
@@ -600,17 +600,17 @@ func main() -> i32 {
     0
 }
 "#;
-    let diagnostics = check_source(src)
-        .expect_err("? inside a lambda must fail closed at resolved-body lowering");
-    let rendered = diagnostics
-        .iter()
-        .map(|diagnostic| format!("{diagnostic}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        rendered.contains("E0830") && rendered.contains("lambda"),
-        "expected the fail-closed lambda propagation diagnostic, got:\n{rendered}"
-    );
+    check_source(src).expect("? inside a lambda should lower now");
+
+    let (v, out) = run_source_with_stdout(src);
+    assert_eq!(v, interp::Value::Int(0));
+    assert_eq!(out.trim(), "1", "VM lambda ? success path");
+
+    if !can_link() {
+        return;
+    }
+    let native = compile_and_run(src).unwrap_or_else(|e| panic!("codegen lambda ? failed: {}", e));
+    assert_eq!(native.trim(), "1", "codegen lambda ? success path");
 }
 
 #[test]

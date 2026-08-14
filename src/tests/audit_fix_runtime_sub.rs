@@ -157,6 +157,7 @@ fn audit_h13_close_fd_still_closes_real_fds() {
     // the VM share the same process (run_source runs in-process), so a fd
     // opened here is visible to the Mimi program. After close_fd the fd must
     // be gone (EBADF on a second close via fcntl).
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::AsRawFd;
     let path = std::env::temp_dir().join(format!("mimi_h13_{}.txt", std::process::id()));
     std::fs::write(&path, b"x").unwrap();
@@ -174,6 +175,8 @@ fn audit_h13_close_fd_still_closes_real_fds() {
     // "IO Safety violation: owned file descriptor already closed" abort of
     // the whole suite under --test-threads=4. With the fd held, no reuse is
     // possible; the single leaked fd is reclaimed on process exit.
+    let before_meta = file.metadata().expect("metadata before close");
+    let before_id = (before_meta.dev(), before_meta.ino());
     std::mem::forget(file);
 
     let src = format!(
@@ -191,18 +194,30 @@ func main() -> i32 {{
     );
 
     // The fd must now be closed: fcntl(F_GETFD) itself would return a valid
-    // descriptor otherwise. Verify via libc that it is EBADF.
-    // SAFETY: fcntl with a raw fd; the fd is not in use by this process
-    // anymore (the File was dropped).
-    let rc = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    assert_eq!(rc, -1, "fd {fd} must be closed after close_fd");
-    // SAFETY: errno access after a libc failure.
-    let err = std::io::Error::last_os_error().raw_os_error();
-    assert_eq!(
-        err,
-        Some(libc::EBADF),
-        "closed fd must report EBADF, got {err:?}"
-    );
+    // descriptor otherwise. The full suite runs tests in parallel, so another
+    // thread may legitimately reuse the just-freed descriptor number before
+    // this check. Distinguish that case by comparing the file identity: if
+    // the descriptor now names a different file, our close_fd did its job and
+    // we must not fail (or touch) the other thread's descriptor.
+    // SAFETY: fstat on a raw fd; we only read the result and never close the
+    // descriptor from this thread.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstat(fd, &mut st) };
+    if rc == -1 {
+        // SAFETY: errno access after a libc failure.
+        let err = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(
+            err,
+            Some(libc::EBADF),
+            "closed fd must report EBADF, got {err:?}"
+        );
+    } else {
+        let now_id = (st.st_dev as u64, st.st_ino as u64);
+        assert_ne!(
+            now_id, before_id,
+            "fd {fd} must be closed after close_fd; it still names the original file"
+        );
+    }
     let _ = std::fs::remove_file(&path);
 }
 

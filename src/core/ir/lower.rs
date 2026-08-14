@@ -177,6 +177,7 @@ fn lower_function_body_with_captures(
         capture_candidates: capture_ids,
         callable_captures: BTreeSet::new(),
         lambda_contexts: Vec::new(),
+        lambda_owners: Vec::new(),
         scopes: vec![capture_scope],
         nested_environments: BTreeMap::new(),
         transition_fails: input.transition_fails,
@@ -775,6 +776,7 @@ struct BodyLowerer<'a> {
     capture_candidates: BTreeSet<ResolvedLocalId>,
     callable_captures: BTreeSet<ResolvedLocalId>,
     lambda_contexts: Vec<LambdaCaptureContext>,
+    lambda_owners: Vec<NodeId>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
     nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
     transition_fails: bool,
@@ -1987,24 +1989,21 @@ impl BodyLowerer<'_> {
                 ResolvedExprKind::Map(lowered)
             }
             Expr::Try(value) => {
-                // Full audit 2026-08-05 (#8): propagation_target must be the
+                // Full audit 2026-08-05 (#8): propagation_target must name the
                 // callable the error propagates OUT of. Inside a lambda body
-                // `self.owner` is the enclosing function — a wrong target —
-                // and ResolvedLambda carries no propagation contract, so the
-                // correct target is not trivially derivable. The checker
-                // admits `?` in lambdas (infer/helpers.rs `infer_try_expr`),
-                // so fail closed here rather than fabricate a target.
-                // TODO(#audit-wave2): introduce lambda-level propagation and
-                // lift this restriction.
-                if !self.lambda_contexts.is_empty() {
-                    return Err(vec![ResolvedBodyError::new(
-                        node_id.clone(),
-                        "[E0830] error propagation (?) inside a lambda has no resolved-body propagation target; lowering fails closed rather than assigning the enclosing function owner",
-                    )]);
-                }
+                // `self.owner` is the enclosing function — a wrong target — so
+                // the lambda owner is tracked explicitly. The runtime contract
+                // for `?` remains a process-level error exit on both backends;
+                // the target is stored for resolved-body validation and future
+                // callable-local propagation semantics.
+                let propagation_target = self
+                    .lambda_owners
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| self.owner.clone());
                 ResolvedExprKind::Try {
                     value: Box::new(self.lower_expr(value, &format!("{role}.inner"))?),
-                    propagation_target: self.owner.clone(),
+                    propagation_target,
                 }
             }
             Expr::Cast(value, _) => {
@@ -2125,6 +2124,8 @@ impl BodyLowerer<'_> {
             owned: BTreeSet::new(),
             captures: BTreeSet::new(),
         });
+        self.lambda_owners
+            .push(NodeId(format!("{}/callable", node_id.0)));
         let lowered = (|| {
             let mut parameters = Vec::with_capacity(params.len());
             for (parameter, parameter_type) in params.iter().zip(parameter_types) {
@@ -2165,6 +2166,9 @@ impl BodyLowerer<'_> {
             .lambda_contexts
             .pop()
             .expect("lambda lowering installed a capture context");
+        self.lambda_owners
+            .pop()
+            .expect("lambda lowering installed a lambda owner");
         self.scopes.pop();
         let (parameters, body) = lowered?;
 
@@ -3587,13 +3591,18 @@ impl BodyLowerer<'_> {
         let Expr::Field(receiver, _method_name) = callee.unlocated() else {
             return Ok(None);
         };
-        // Tolerate receivers that cannot lower (actor names, flow states):
-        // those are not dyn values; the real method-call path handles them.
-        let Ok(receiver) = self.lower_expr(receiver, &format!("{role}.callee.inner")) else {
+        // R-5 / audit: pre-check the receiver type from the checked node type,
+        // not by lowering the receiver speculatively. Lowering it first and
+        // then falling back to the real method path lowers the same AST twice
+        // and can create duplicate semantic identities / locals.
+        let receiver_id = self.expr_id(receiver, &format!("{role}.callee.inner"))?;
+        // Tolerate receivers without a typed node (actor/flow names): they are
+        // not dyn values and the real method-call path handles them.
+        let Some(receiver_ty) = self.node_types.get(&receiver_id).cloned() else {
             return Ok(None);
         };
         let is_dyn = matches!(
-            self.types.get(&receiver.ty),
+            self.types.get(&receiver_ty),
             Some(ResolvedType::Trait {
                 kind: super::TraitTypeKind::Dynamic,
                 ..
@@ -3601,6 +3610,13 @@ impl BodyLowerer<'_> {
         );
         if !is_dyn {
             return Ok(None);
+        }
+        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        if receiver.ty != receiver_ty {
+            return Err(vec![ResolvedBodyError::new(
+                receiver_id,
+                "dyn method receiver lowered to a different type than the checked node type",
+            )]);
         }
         for argument in arguments {
             self.lower_expr(argument, &format!("{role}.argument"))?;
@@ -3680,12 +3696,27 @@ impl BodyLowerer<'_> {
         if !arguments.is_empty() {
             return Ok(None);
         }
-        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        // R-5 / audit: pre-check the receiver type before lowering; otherwise
+        // a non-capability receiver is lowered speculatively and again by the
+        // real method path below.
+        let receiver_id = self.expr_id(receiver, &format!("{role}.callee.inner"))?;
+        // Tolerate receivers without a typed node: if we cannot see a
+        // capability type, let the real method path handle the call.
+        let Some(receiver_ty) = self.node_types.get(&receiver_id).cloned() else {
+            return Ok(None);
+        };
         if !matches!(
-            self.types.get(&receiver.ty),
+            self.types.get(&receiver_ty),
             Some(ResolvedType::Capability(_))
         ) {
             return Ok(None);
+        }
+        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        if receiver.ty != receiver_ty {
+            return Err(vec![ResolvedBodyError::new(
+                receiver_id,
+                "capability method receiver lowered to a different type than the checked node type",
+            )]);
         }
         let kind = if method_name == "split" {
             // Capability split moves the receiver into the result tuple: the
@@ -4153,12 +4184,27 @@ impl BodyLowerer<'_> {
         let Expr::Field(receiver, method_name) = callee.unlocated() else {
             return Ok(None);
         };
-        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        // R-5 / audit: use the checked receiver type for builtin-method lookup
+        // before lowering. Avoids speculative lowering for any non-builtin
+        // method that should fall through to `lower_method_call`.
+        let receiver_id = self.expr_id(receiver, &format!("{role}.callee.inner"))?;
+        // Tolerate receivers without a typed node; only builtin methods with a
+        // known canonical receiver type are lowered here.
+        let Some(receiver_ty) = self.node_types.get(&receiver_id).cloned() else {
+            return Ok(None);
+        };
         let Some(method) =
-            crate::core::builtins::resolve_builtin_method(&receiver.ty, method_name, self.types)
+            crate::core::builtins::resolve_builtin_method(&receiver_ty, method_name, self.types)
         else {
             return Ok(None);
         };
+        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        if receiver.ty != receiver_ty {
+            return Err(vec![ResolvedBodyError::new(
+                receiver_id,
+                "builtin method receiver lowered to a different type than the checked node type",
+            )]);
+        }
         if !explicit_type_arguments.is_empty() {
             return self.unsupported(
                 node_id,
