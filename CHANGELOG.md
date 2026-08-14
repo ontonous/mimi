@@ -7,6 +7,35 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.41 — 泛型×线性单态化切片 3：match 臂残差分支级复位（会话元素面，L1/L2）
+
+- **背景**：0.36.40 记录"匹配臂残差顺序共享"为未覆盖面——match 臂顺序分析，
+  第二臂看到第一臂推进后的会话残差（E0414 AlreadyEnded 实证），跨臂协议无法
+  独立闭环。本切闭合：**臂是互斥分支（替代关系），非顺序**——每臂从 match
+  入口残差独立分析。
+- **机制**（`src/core/infer/match_.rs` `infer_match_expr`）：
+  - 臂循环前置 `pre_match_residuals` 快照；每臂：恢复到入口状态 → check_pattern
+    → **模式绑定 SessionChan 残差种子**（`seed_pattern_session_residuals`，收集
+    Variable/Constructor/Tuple/Array/Slice 叶，镜像 Let 绑定种子）→ guard → 臂体；
+  - 汇合：**仅比较入口已追踪端点**（臂局部引入的端点无续存义务、不参与汇合）——
+    任一臂缺键（别名转移后未续存）或残差互异 → E0425（fail-closed，镜像
+    `Stmt::If` 分支合并）；合并态 = 第一臂残差（作用域出口 E0425 继续兜底未
+    完成端点——臂内截断的协议经合并态在函数出口表面化）；
+  - 臂内订单检查闭环：`Some(d)` 的 d 经种子获得完整协议残差——`session_close(d)`
+    于 !i32 头 → E0414（此前按 untracked skeleton 静默放行）；臂内弃置 →
+    作用域出口 E0425。
+- **挣绿**：`flip<T>(o: Option<T>) -> Option<T>`（0.36.40 构造包装）+ 调用方
+  match 提取 + 每臂独立协议 = **"SessionChan 经 Option 提取"全协议端到端往返
+  （双后端 6）**——路线图"Option<T> 解包线性元素（会话面）"目标面闭合。
+- **健全性 = 既有契约的逐臂应用**：臂内订单检查为具体面既有契约；入口端点
+  跨臂一致 = 0.36.38 §4d 分支汇合不变量；臂局部端点不参与汇合（无续存义务）。
+  余面（已记录，非本切范围）：`if let`（If 合并对模式绑定会话仍 fail-closed）、
+  closure 臂、`xs[0]` 投影定向分析（E0432 维持）。
+- **回归**：正例 1 三 harness（session option extract 端到端往返）+ 负例 3
+  （臂内订单 E0414 / 臂内弃置 E0425 / 汇合发散 E0425）。全量 5405 绿
+  （0.36.40 11 项与既有 0.36.38 session 面全绿）；real_world 70/70
+  （69 build+exec，flow_test_macros SKIP 为既有 VM-only 面）。
+
 ### 0.36.40 — 泛型×线性单态化切片 2：结构化整体消费（元素级贯通，L1/L2）
 
 - **背景**：切片 1（0.36.39）只放行"整体值转移 / 显式 drop"的黑盒调体——

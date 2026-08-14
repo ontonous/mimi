@@ -65,6 +65,15 @@ impl<'a> Checker<'a> {
         let mut covered_variants: Vec<String> = Vec::new();
         let mut has_catchall = false;
         let mut result_ty: Option<Type> = None;
+        // 0.36.41: match arms are ALTERNATIVES — session residual analysis must
+        // start each arm from the match-ENTRY state (branch-level reset), not
+        // from the previous arm's advanced state. Each arm's residuals are
+        // captured and merged after the loop: function-scope endpoints (present
+        // at entry) must agree across every arm (divergent → E0425, mirrored
+        // on Stmt::If's branch merge); endpoints bound INSIDE an arm pattern
+        // are arm-local and are excluded from the merge.
+        let pre_match_residuals = self.session_residuals.clone();
+        let mut arm_residuals: Vec<HashMap<String, crate::ast::SessionType>> = Vec::new();
         for arm in arms {
             let (pattern_covered, is_catchall) =
                 self.pattern_covers_variants(&arm.pat, &subject_ty);
@@ -84,8 +93,14 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            self.session_residuals = pre_match_residuals.clone();
             scopes.push(HashMap::new());
             self.check_pattern(&arm.pat, &subject_ty, scopes);
+            // 0.36.41: seed residuals for SessionChan bindings introduced by
+            // the arm pattern (e.g. `Some(d)` where d: SessionChan<S>) — arm
+            // bodies then get full protocol-order checking, and abandonment is
+            // caught uniformly (E0425) instead of the untracked skeleton.
+            self.seed_pattern_session_residuals(&arm.pat, scopes);
             if let Some(guard) = &arm.guard {
                 let gt = self.infer_expr(guard, scopes);
                 if !is_bool(&gt) {
@@ -97,6 +112,7 @@ impl<'a> Checker<'a> {
             }
             let body_ty = self.infer_expr(&arm.body, scopes);
             scopes.pop();
+            arm_residuals.push(self.session_residuals.clone());
 
             match &result_ty {
                 None => result_ty = Some(body_ty),
@@ -114,6 +130,57 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+
+        // 0.36.41: match-arm residual merge — arms are alternatives, so the
+        // post-match continuation may only assume residuals every arm agrees
+        // on. Endpoints tracked at match entry are compared across all arms;
+        // any arm that lacks one (transferred away / dropped it) or advances
+        // it differently is a divergence → E0425 (fail-closed, mirrors the
+        // Stmt::If branch merge). The first arm's map is the merged state
+        // (like Stmt::If uses the then-branch after agreement).
+        if arms.len() > 1 {
+            for key in pre_match_residuals.keys() {
+                let mut seen: Option<(&crate::ast::SessionType, usize)> = None;
+                for (i, arm_r) in arm_residuals.iter().enumerate() {
+                    match arm_r.get(key) {
+                        Some(r) => {
+                            if let Some((s, si)) = seen {
+                                if s != r {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0425,
+                                        format!(
+                                            "session endpoint '{}' has divergent residuals across \
+                                             match arms: arm {} `{}` vs arm {} `{}`",
+                                            key,
+                                            i,
+                                            crate::session::fmt_session(r),
+                                            si,
+                                            crate::session::fmt_session(s),
+                                        ),
+                                    );
+                                }
+                            } else {
+                                seen = Some((r, i));
+                            }
+                        }
+                        None => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0425,
+                                format!(
+                                    "session endpoint '{}' is dropped or transferred away in \
+                                     match arm {}, while tracked at match entry",
+                                    key, i,
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            self.session_residuals = arm_residuals
+                .into_iter()
+                .next()
+                .unwrap_or(pre_match_residuals);
         }
 
         if !effective_variants.is_empty() && !has_catchall {
@@ -176,6 +243,58 @@ impl<'a> Checker<'a> {
         }
 
         result_ty.unwrap_or_else(|| Type::Name("unknown".into(), vec![]))
+    }
+
+    /// 0.36.41: seed session residuals for SessionChan bindings introduced by
+    /// an arm pattern (`Some(d)` where d : SessionChan<S>). `check_pattern`
+    /// already places each binding's full type in the scope; bindings whose
+    /// type is a session channel get their protocol residual seeded so the arm
+    /// body receives full order checking (and abandonment surfaces as E0425).
+    /// Mirrors the Let-binding seed in check_stmt.rs.
+    fn seed_pattern_session_residuals(
+        &mut self,
+        pat: &Pattern,
+        scopes: &mut [HashMap<String, Type>],
+    ) {
+        fn leaves<'p>(pat: &'p Pattern, out: &mut Vec<&'p Pattern>) {
+            match &pat.kind {
+                PatternKind::Variable(_) => out.push(pat),
+                PatternKind::Constructor(_, fields) => {
+                    for (_, p) in fields {
+                        leaves(p, out);
+                    }
+                }
+                PatternKind::Tuple(items)
+                | PatternKind::Array(items)
+                | PatternKind::Slice(items, _) => {
+                    for p in items {
+                        leaves(p, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut vs = Vec::new();
+        leaves(pat, &mut vs);
+        for p in vs {
+            if let PatternKind::Variable(name) = &p.kind {
+                let ty = match scopes.last().and_then(|m| m.get(name)) {
+                    Some(t) => t.clone(),
+                    None => continue,
+                };
+                if let Type::Name(n, args) = ty.unlocated() {
+                    if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
+                        if let Type::Name(sname, _) = args[0].unlocated() {
+                            if let Some(body) = self.session_types.get(sname).cloned() {
+                                let resolved = crate::session::resolve(&body, &self.session_types)
+                                    .unwrap_or(body);
+                                self.session_residuals.insert(name.clone(), resolved);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Determine which variants a pattern covers.
