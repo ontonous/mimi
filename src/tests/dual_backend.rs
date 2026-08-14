@@ -3221,6 +3221,127 @@ fn dual_generic_linear_cap_rejected() {
     );
 }
 
+// ============================================================
+// 0.36.19 (Phase C Session lowering 挣绿面): complex-residual dual
+// positives. Pre-0.36.19 the only dual session coverage was the L2 generic
+// rejection (E0432) + tests/real_world/flow_session.mimi via run_suite —
+// no in-suite dual POSITIVE exercised send/recv/close on both backends.
+// These pin the residual semantics: inline round-trip, branch-merge, and
+// loop (repeated ops on one endpoint) all behave byte-identically.
+
+#[test]
+fn dual_session_residual_roundtrip() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Echo = !i32 . ?i32 . end
+func main() -> i32 {
+    let pair = session_pair()
+    let ch0 = pair[0]
+    let ch1 = pair[1]
+    session_send(ch0, 42)
+    let n = session_recv(ch1)
+    session_send(ch1, n * 2)
+    let r = session_recv(ch0)
+    session_close(ch0)
+    session_close(ch1)
+    println(n)
+    println(r)
+    0
+}
+"#;
+    let expected = "42\n84";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) session roundtrip"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen session");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) session roundtrip");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm session roundtrip");
+}
+
+#[test]
+fn dual_session_residual_branch_merge() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Echo = !i32 . ?i32 . end
+func main() -> i32 {
+    let pair = session_pair()
+    let ch0 = pair[0]
+    let ch1 = pair[1]
+    let cond = 1
+    if cond > 0 {
+        session_send(ch0, 1)
+    } else {
+        session_send(ch0, 2)
+    }
+    let n = session_recv(ch1)
+    session_close(ch0)
+    session_close(ch1)
+    println(n)
+    0
+}
+"#;
+    let expected = "1";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session merge");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) session branch merge"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen session merge");
+    assert_eq!(
+        unga.trim(),
+        expected,
+        "legacy(codegen) session branch merge"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm session branch merge");
+}
+
+#[test]
+fn dual_session_residual_loop_ops() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session S = !i32 . end
+func main() -> i32 {
+    let pair = session_pair()
+    let ch0 = pair[0]
+    let ch1 = pair[1]
+    let mut i = 0
+    while i < 3 {
+        session_send(ch0, i)
+        i = i + 1
+    }
+    session_close(ch0)
+    let mut total: i64 = 0
+    let mut j = 0
+    while j < 3 {
+        total = total + session_recv(ch1)
+        j = j + 1
+    }
+    session_close(ch1)
+    println(total)
+    0
+}
+"#;
+    let expected = "3";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session loop");
+    assert_eq!(checked.trim(), expected, "resolved(codegen) session loop");
+    let unga = compile_and_run(src).expect("legacy codegen session loop");
+    assert_eq!(unga.trim(), expected, "legacy(codegen) session loop");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm session loop");
+}
+
 #[test]
 fn dual_generic_linear_session_rejected() {
     // E0432: same contract for SessionChan endpoints.
