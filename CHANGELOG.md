@@ -23,6 +23,20 @@
   8 ignored（含 0.36.24 gap 登记）；fmt + clippy + docs + edge 全绿。
 - 元素消费缺口（match/for/index/slice/字面量索引/元组字段）全 family fail-closed。
 
+### 0.36.31 — 元组别名解构修复：TOOL-RESOLUTION-001 → 合法受准解构（L1）
+
+- **修复（src/core/ir/lower.rs）**：`type Pair = (cap FileReadCap, i32)` 后
+  `let (c, n) = pr` 直接解构命名元组**此前在 resolved 层以内部不变量
+  TOOL-RESOLUTION-001 拒绝**（"tuple pattern shape disagrees with canonical
+  scrutinee type"——scrutinee 规范型是 Nominal 别名而非裸元组；0.35.19
+  CO-H2 纪律的反例）。修复：Tuple 模式形状检查穿透 Alias/Newtype 规范目标
+  （复用 instantiated_type_target，镜像 Array 臂对 List-nominal 的处理）。
+- **实证**：m5 check ✓、VM 7、native 7——双后端一致；0.36.30 §4g 受准面
+  （记录/元组解构）补双 harness 钉住。
+- **回归**：dual_container_destructure_tuple_alias（直解构 + 跨函数 + 非线
+  性三形态，三 harness）。全量 5361 passed / 0 failed / 8 ignored；fmt +
+  clippy + docs + edge 全绿。
+
 ### 0.36.30 — 元素级消费现状矩阵（Phase C 设计输入，文档轮）
 
 - **实测钉住**（phase-c §4g）：for 元素消费（m1，E0304+）、match Some 消费
