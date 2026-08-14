@@ -3470,6 +3470,54 @@ fn dual_linear_container_index_read_rejected() {
         .is_ok(),
         "whole-container move must stay legal"
     );
+
+    // 0.36.26: literal-list / tuple non-place extraction — `[a, b][0]`
+    // selects the indexed element, the pairing balances, and the rest leak.
+    let diags = check_source(
+        "cap FileReadCap; func main() -> i32 { \
+             let x = [FileReadCap, FileReadCap][0]; drop(x); 0 }",
+    )
+    .expect_err("literal-list extraction must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("element-level extraction"),
+        "expected E0304 literal-list diagnostic, got:\n{rendered}"
+    );
+
+    // Tuple field access on a linear tuple leaks the sibling atom.
+    let diags = check_source(
+        "cap FileReadCap; func main() -> i32 { \
+             let t = (FileReadCap, FileReadCap); let a = t.0; drop(a); 0 }",
+    )
+    .expect_err("tuple extraction must be rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304") && rendered.contains("element-level extraction"),
+        "expected E0304 tuple diagnostic, got:\n{rendered}"
+    );
+
+    // Single-element literal extraction = whole consumption (legal);
+    // non-linear containers untouched.
+    assert!(
+        check_source(
+            "cap FileReadCap; func main() -> i32 { \
+                 let x = [FileReadCap][0]; drop(x); 0 }",
+        )
+        .is_ok(),
+        "single-element literal extraction must stay legal"
+    );
+    assert!(
+        check_source("func main() -> i32 { let t = (1, 2); println(t.0); 0 }").is_ok(),
+        "non-linear tuple field access must stay legal"
+    );
 }
 
 #[test]
