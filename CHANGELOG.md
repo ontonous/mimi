@@ -7,6 +7,20 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.11 — Phase A 挣绿面收官核验（DoD 1–7 证据全部落地）
+
+- **逃逸面负测试（DoD #2 缺口补上）**：`flow_fault_nominal_escape_face_rejected`
+  —— 对名义 `StateId`/`EventId` 做字符串比较（`last_state == "..."` /
+  `unexpected_event == "..."`）一律 **E0202** 拒绝（正视 + 括号/拼接两种形态），
+  字符串编码的失败归属逃逸面保持零（`check_language_docs.py` 语义新鲜度门禁
+  继续钉住该反模式）；孪生 oracle：官方消费路径（对 StateId/EventId 变体的穷尽
+  `match` 判别）双后端逐字节一致。
+- **DoD 审计核验**（Phase A 收官的逐条证据台账，见 verdict §3 DoD 1–7）：DoD #1
+  名义 payload（吸收 + 显式路径双后端 oracle）、#2 字符串逃逸面全仓归零（grep +
+  门禁）、#3 recover 穷尽 match 缺失臂拒绝（0.36.5）、#4 错误 trace 双后端
+  oracle（0.36.7）、#5 二次 Fault 升级（0.36.6）、#6 吸收声明门（0.36.9）、
+  #7 union 直调闭环（0.36.10）。至此 Phase A DoD 全绿。
+
 ### 0.36.10 — recover/reset 直调声明可错结果变量（裁决 6 follow-up 闭环）
 
 - **union 结果变量直调 recover/reset（裁决 6 follow-up）**：`let u = Svc::div(a, 0)`
