@@ -7,6 +7,35 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.12 — Phase B 预研首项：单目标 flow 结果 match 静态分派（L1 修复）+ Protocol/Actor-mut 定位审计
+
+- **L1 修复（状态语义挣绿面首项）**：`let d = F::toggle(...)`（单目标
+  `-> Active`）后 `match d { Active { reading } => .. }` —— VM 正常取臂，native
+  报 `E0713: match arm variant lookup ... not found`（单目标结果是普通记录，
+  无 __MultiTarget 枚举可查 ordinal）。修复：`flow_result_static_state` 判定
+  （`owner_enum_of_scrutinee` 为 None 且类型为 `Result<S,...>`、S ∈ flow 状态）
+  后静态分派——静态态臂无条件取臂并按 `flow::{F}::{S}` 记录布局直接绑定字段，
+  非静态态臂为死代码（分派块必须写终结符，否则 LLVM LowerExpect 对空块段
+  错误——gdb 定位）；**不劫持 union**（`-> S | Fault` 有注册枚举，ordinal 路径
+  不变，flow_panic_absorption_* 回归全绿）。
+- **语义基线钉住（checker 为准）**：match 臂按 flow 状态命名空间解析；静态
+  结果态臂必须存在（缺失 = E0215）；其它状态臂合法但静态不可达。
+- **Protocol 定位审计（Phase B 预研）**：静态投影 = checker-only（E0406/E0404/
+  E0402 一致性强制，resolved 目录承载，interp/codegen **零运行时消费**——已有
+  形态即"正式降级"）；`dyn Protocol` experimental + `unsafe_cast_protocol` 逃生
+  舱（dual_backend 测试已存在）。**Actor mut 审计**：SD-5 现状 = 选项 (a)（简单
+  状态逃生舱，双后端写自由，marker 仅提示）；`runs Flow` 拒绝 mut 字段
+  （E0402）；lint 缺口登记（mut→Flow 迁移提示，0.36.21+）。预研文档：
+  `devdocs/v0.36/phase-b-state-semantics-study.md`。
+- **测试（flow_features +5，L1/L2）**：
+  `flow_result_single_target_match_dual_backend`（多臂+单臂双后端 3/7）、
+  `flow_result_single_target_match_missing_static_arm_rejected`（E0215）、
+  `flow_protocol_conformance_positive_dual_backend`（3 双后端）、
+  `flow_protocol_conformance_missing_state_rejected`（E0404）、
+  `actor_runs_flow_mut_business_field_rejected`（E0402）。
+  全量 **5349 passed / 0 failed / 7 ignored**；fmt + clippy -D warnings +
+  check_language_docs + check_edge_isolation 全绿。
+
 ### 0.36.11 — Phase A 挣绿面收官核验（DoD 1–7 证据全部落地）
 
 - **逃逸面负测试（DoD #2 缺口补上）**：`flow_fault_nominal_escape_face_rejected`

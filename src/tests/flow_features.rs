@@ -3191,6 +3191,166 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_result_single_target_match_dual_backend() {
+    // 0.36.12 (Phase B 状态语义, L1): a single-target flow result is a plain
+    // record (`d: Device::Active`), yet `match` over it accepts the flow's
+    // state-variant arms (arm naming the STATIC state + arms for other states).
+    // Previously the VM evaluated this but codegen errored E0713 ("enum
+    // variant not found in any registered enum type definition"). Now the
+    // static arm binds fields directly from the record; other arms are
+    // statically dead. Multi-arm and single-arm forms.
+    let src = r#"
+flow Device {
+    state Active { reading: i32 }
+    state Off { n: i32 }
+    transition toggle(Active) -> Off { return Off { n: self.reading } }
+    transition toggle(Off) -> Active { return Active { reading: self.n } }
+}
+
+func main() -> i32 {
+    let d = Device.toggle(Device.toggle(Active { reading: 3 }))
+    match d {
+        Active { reading } => { println(reading) }
+        Off { n } => { println(n) }
+    }
+    let e = Device.toggle(Device.toggle(Active { reading: 7 }))
+    match e {
+        Active { reading } => { println(reading) }
+    }
+    0
+}
+"#;
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), "3\n7", "vm match on single-target flow result");
+    let native = compile_and_run(src).expect("single-target flow-result match must codegen");
+    assert_eq!(
+        native.trim(),
+        "3\n7",
+        "native match on single-target flow result"
+    );
+}
+
+#[test]
+fn flow_result_single_target_match_missing_static_arm_rejected() {
+    // 0.36.12 (Phase B 状态语义, L2): the checker demands the arm naming the
+    // STATIC result state (E0215) — an impossible-arm-only match is rejected;
+    // the extra arms are tolerated once the static arm exists.
+    let src = r#"
+flow Device {
+    state Active { reading: i32 }
+    state Off { n: i32 }
+    transition toggle(Active) -> Off { return Off { n: self.reading } }
+    transition toggle(Off) -> Active { return Active { reading: self.n } }
+}
+
+func main() -> i32 {
+    let d = Device.toggle(Device.toggle(Active { reading: 3 }))
+    match d {
+        Off { n } => { println(n) }
+    }
+    0
+}
+"#;
+    let err = check_source(src).expect_err("missing static-state arm must be rejected");
+    let text = format!("{:?}", err);
+    assert!(
+        text.contains("E0215"),
+        "expected non-exhaustive E0215 (missing static 'Active' arm), got: {}",
+        text
+    );
+}
+
+#[test]
+fn flow_protocol_conformance_positive_dual_backend() {
+    // 0.36.12 (Phase B 预研/Protocol 定位): `impl Sensor` is a checker-verified
+    // static projection — a conforming flow runs normally on both backends
+    // (no runtime protocol semantics; the check is a compile-time topology
+    // obligation). Anchors the "静态投影 = checker-only" stance alongside the
+    // L1 fix this round.
+    let src = r#"
+protocol Sensor {
+    state Active { reading: i32 }
+    state Off
+}
+
+flow Device {
+    impl Sensor
+    state Active { reading: i32 }
+    state Off { n: i32 }
+    transition toggle(Active) -> Off { return Off { n: self.reading } }
+    transition toggle(Off) -> Active { return Active { reading: self.n } }
+}
+
+func main() -> i32 {
+    let d = Device.toggle(Device.toggle(Active { reading: 3 }))
+    match d {
+        Active { reading } => { println(reading) }
+        Off { n } => { println(n) }
+    }
+    0
+}
+"#;
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), "3", "vm protocol-conforming flow");
+    let native = compile_and_run(src).expect("protocol-annotated flow must codegen");
+    assert_eq!(native.trim(), "3", "native protocol-conforming flow");
+}
+
+#[test]
+fn flow_protocol_conformance_missing_state_rejected() {
+    // 0.36.12 (Phase B 预研/Protocol 定位, L2): the checker enforces the
+    // protocol's required state set on implementing flows (E0404) — the
+    // projection is not decorative.
+    let src = r#"
+protocol Sensor {
+    state Active { reading: i32 }
+    state Off
+}
+
+flow Device {
+    impl Sensor
+    state Active { reading: i32 }
+    transition toggle(Active) -> Off { return Off { n: self.reading } }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src).expect_err("protocol conformance must be enforced");
+    let text = format!("{:?}", err);
+    assert!(
+        text.contains("E0404"),
+        "expected E0404 (flow missing required protocol state), got: {}",
+        text
+    );
+}
+
+#[test]
+fn actor_runs_flow_mut_business_field_rejected() {
+    // 0.36.12 (Phase B 预研/Actor mut 定位, L2): SD-5 — plain actors may use
+    // `mut` as the simple-state escape hatch, but `actor Name runs FlowName`
+    // rejects mut business fields (E0402): state must be carried by the Flow.
+    let src = r#"
+flow Job {
+    state Idle { n: i32 }
+    transition start(Idle) -> Idle { return Idle { n: self.n + 1 } }
+}
+
+actor Runner runs Job {
+    mut scratch: i32 = 0
+}
+
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src).expect_err("runs-Flow actor mut field must be rejected");
+    let text = format!("{:?}", err);
+    assert!(
+        text.contains("E0402"),
+        "expected E0402 (runs-Flow actor mut field), got: {}",
+        text
+    );
+}
+
+#[test]
 fn transactional_persistent_draft_syntax_rejected_by_amendment_clause_3() {
     // @transactional was abolished by clause 3; the parser must reject it.
     // Non-transactional persistent-draft semantics (the faulting draft, not a
