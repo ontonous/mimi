@@ -7,6 +7,33 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.36 — 元素级消费候选 (1) 落地：match/if-let 容器义务消解（Option/Result，L2）
+
+- **设计**：§4g 两候选取 (1)"总元素消费满足容器义务"的首个切片——**穷举解构
+  消解容器义务**：match/if-let 对线性聚合容器（Option/Result）的分支要么绑定
+  载荷（其自身资源链继续）、要么无载荷——容器整体义务在解构点消解。载荷绑定
+  独立链不受影响（exactly-once 保持）；受准面从 split + 记录/元组解构扩展
+  到 match/if-let 解构。
+- **实现（src/core/cfg/resource_lower.rs）**：visit_expr 的 Match 臂与
+  visit_stmt 的 IfLet 臂在解构点对单一线性容器源发射 Drop（容器 id 消解）。
+  守卫（fail-closed）：
+  ①单一线性源（capability_places.len()==1 且该 place 恰一个资源 id）——
+  多源/投影歧义不变；
+  ②仅 Option/Result 聚合（List/Map/Set 保持阻塞，for 迭代面另立）；
+  ③**线性槽位 wildcard 搁浅检测**（pattern_strands_linear）：`Some(_)` 覆盖
+  线性载荷 → 拒（E0256 保持）；`Err(_)` 覆盖非线性 string 载荷 → 放行
+  （线性/非线性槽位区分，避免误伤）。
+  IfLet 的 Drop 键在 initializer 节点（resolved_lower 把 initializer hoist
+  进 CFG pre-header，语句节点无 CFG 点）。
+- **方块对照**（§4g）：match Option<cap>（Some 绑定 + None 空臂）E0256→✓；
+  match Result<cap,string>（Ok 绑定 + Err(_) 非线性通配）E0256→✓；if-let
+  Option<cap> E0256→✓；wildcard 搁浅负例保持拒绝。
+- **回归**：dual_linear_option_match_consumes_container（三 harness 印 42）、
+  dual_linear_result_match_nonlinear_wildcard_ok、dual_linear_iflet_option_
+  consumes_container、dual_linear_match_wildcard_strand_still_rejected
+  （两种搁浅形态 E0256 钉）。全量 5369 passed / 0 failed / 7 ignored；
+  fmt + clippy(-D warnings) + docs(31/31) + edge(6/6) 全绿。
+
 ### 0.36.35 — flow-state-in-container 原生 ABI 统一（Phase C 首项前置交付，L1）
 
 - **背景**：`Result<FlowState, E>` / `Option<FlowState>`（flow-state 装入
