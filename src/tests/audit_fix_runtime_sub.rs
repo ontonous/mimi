@@ -166,7 +166,15 @@ fn audit_h13_close_fd_still_closes_real_fds() {
         fd > 2,
         "test fd must be > 2 for the guard to pass, got {fd}"
     );
-    drop(file);
+    // 0.36.13: leak the fd on purpose instead of dropping it — the fd must
+    // stay OCCUPIED until the in-process Mimi close_fd runs. The old
+    // `drop(file)` freed the fd number early; a parallel test thread could
+    // then open a file that reused the same fd, and this test's in-process
+    // close_fd closed THAT test's owned fd out from under it — intermittent
+    // "IO Safety violation: owned file descriptor already closed" abort of
+    // the whole suite under --test-threads=4. With the fd held, no reuse is
+    // possible; the single leaked fd is reclaimed on process exit.
+    std::mem::forget(file);
 
     let src = format!(
         r#"
