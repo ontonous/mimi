@@ -3640,6 +3640,79 @@ func main() -> i32 {
     );
 }
 
+// 0.36.37: fails-transition `Result<T, (Source, E)>` matching through the
+// resolved slice. The legacy transition ABI returns Err with a heap POINTER to
+// a {i64, i64} handle pair (compile_try_rejected), NOT an inline tuple struct —
+// the resolved emitter previously loaded the inline tuple type from handle
+// memory, misreading both fields (garbage string/state pointers → SIGSEGV in
+// the Err((src, e)) arm of flow_order_system). It now decodes the pair per
+// element (inttoptr + load for struct/string, truncate for ints). Companion:
+// require_match_pattern now admits Tuple sub-patterns inside Constructor match
+// patterns, which moved `main`-style callers of fails transitions into the
+// resolved slice in the first place.
+#[test]
+fn dual_flow_fails_err_tuple_matching_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func validate_price(price: i32) -> Result<i32, string> {
+    if price <= 0 {
+        return Err("invalid price")
+    }
+    Ok(price)
+}
+
+flow Order {
+    state Pending { item: string, price: i32 }
+    state Paid { item: string, price: i32, txn: string }
+    state Shipped { item: string, tracking: string }
+    state Delivered { item: string }
+
+    transition pay(Pending, txn_id: string) -> Paid fails string {
+        let valid_price = validate_price(self.price)?
+        return Paid { item: self.item, price: valid_price, txn: txn_id }
+    }
+    transition ship(Paid) -> Shipped { return Shipped { item: self.item, tracking: "TRK-001" } }
+    transition deliver(Shipped) -> Delivered { return Delivered { item: self.item } }
+}
+
+func main() -> i32 {
+    let o0 = Pending { item: "book", price: 25 }
+    let pay_result = Order::pay(o0, "TXN-42")
+    match pay_result {
+        Ok(o1) => {
+            println(o1.txn)
+            let o2 = Order::ship(o1)
+            println(o2.tracking)
+            let o3 = Order::deliver(o2)
+            println(o3.item)
+        },
+        Err((src, e)) => {
+            println(e)
+            println(src.item)
+        },
+    }
+
+    let bad = Pending { item: "free", price: 0 }
+    let bad_result = Order::pay(bad, "TXN-99")
+    match bad_result {
+        Ok(o) => println(o.price),
+        Err((src, e)) => {
+            println(e)
+            println(src.price)
+        },
+    }
+    0
+}
+"#;
+    let expected = "TXN-42\nTRK-001\nbook\ninvalid price\n0";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm fails Err tuple");
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved slice fails Err tuple");
+    assert_eq!(resolved.trim(), expected, "resolved slice fails Err tuple");
+}
+
 // 0.36.36 candidate (1) — element-level consumption satisfies the container
 // obligation for match/if-let over linear aggregates (Option/Result): an
 // exhaustive destructure dissolves the container; payload bindings keep their
@@ -3754,6 +3827,169 @@ fn dual_linear_match_wildcard_strand_still_rejected() {
     assert!(
         rendered.contains("E0256"),
         "expected E0256 if-let strand rejection, got:\n{rendered}"
+    );
+}
+
+// 0.36.37: for-loop over List<cap> — the last §4g blocking shape. The loop
+// is an exhaustive element-wise deconstruction: the container obligation
+// dissolves at the loop statement (Drop at the pre-header) and the loop
+// variable is a FRESH per-iteration element obligation (Introduce at the
+// pattern Binding point, loop-carried), so the body consumption never trips
+// the E0304 backedge double-consume artifact.
+#[test]
+fn dual_linear_for_loop_list_consumes_elements() {
+    let src = r#"
+cap FileReadCap
+func sink(c: cap FileReadCap) -> i32 { drop(c); 1 }
+func main() -> i32 {
+    let v = [FileReadCap, FileReadCap, FileReadCap]
+    let mut n = 0
+    for x in v {
+        n = n + sink(x)
+    }
+    println(n)
+    0
+}
+"#;
+    let expected = "3";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm for-loop over List<cap>");
+    if can_link() {
+        let checked = checked_codegen_compile_and_run(src).expect("resolved for-loop");
+        assert_eq!(checked.trim(), expected, "resolved for-loop");
+        let legacy = compile_and_run(src).expect("legacy for-loop");
+        assert_eq!(legacy.trim(), expected, "legacy for-loop");
+    }
+}
+
+#[test]
+fn dual_linear_for_loop_strand_still_rejected() {
+    // The loop variable binds a FRESH linear element each iteration; a body
+    // that never consumes it strands every element — per-iteration E0256
+    // (diverging loop-carried path + return path), fail-closed like the
+    // 0.36.36 `Some(_)` wildcard.
+    let diags = check_source(
+        "cap FileReadCap; \
+         func main() -> i32 { \
+             let v = [FileReadCap, FileReadCap] \
+             for x in v { println(\"hi\") } \
+             0 }",
+    )
+    .expect_err("unconsumed loop element must strand (fail-closed)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256"),
+        "expected E0256 strand rejection, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_for_loop_wildcard_still_rejected() {
+    // `for _ in v` over a linear container: the wildcard strands every
+    // element, so the container obligation stays unsolved (E0256 on v).
+    let diags = check_source(
+        "cap FileReadCap; \
+         func main() -> i32 { \
+             let v = [FileReadCap, FileReadCap] \
+             for _ in v { println(\"hi\") } \
+             0 }",
+    )
+    .expect_err("wildcard loop element must strand (fail-closed)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'v'"),
+        "expected E0256 on container 'v', got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_for_loop_post_use_rejected() {
+    // The dissolve consumes the container at the loop; a later use is a
+    // use-after-move (E0304), mirroring the whole-container semantics.
+    let diags = check_source(
+        "cap FileReadCap; \
+         func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func main() -> i32 { \
+             let v = [FileReadCap, FileReadCap] \
+             for x in v { sink(x) } \
+             drop(v) \
+             0 }",
+    )
+    .expect_err("reusing a dissolved container must be E0304");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 post-loop use, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_for_loop_early_exit_stays_rejected() {
+    // An early `break`/`return` abandons the not-yet-iterated elements at
+    // runtime (the VM iterates the list by index; unvisited handles are
+    // never closed), so such a loop is NOT an exhaustive deconstruction —
+    // the container obligation stays unsolved (E0256 on v). 0.36.37 keeps
+    // this fail-closed; element-level accounting for early exits is a later
+    // slice.
+    let diags = check_source(
+        "cap FileReadCap; \
+         func sink(c: cap FileReadCap) -> i32 { drop(c); 1 } \
+         func main() -> i32 { \
+             let v = [FileReadCap, FileReadCap] \
+             for x in v { \
+                 if false { break } \
+                 sink(x) \
+             } \
+             0 }",
+    )
+    .expect_err("early-exit loop over a linear container must stay fail-closed");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'v'"),
+        "expected E0256 on container 'v' with early exit, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn dual_linear_whilelet_option_container_stays_rejected() {
+    // while-let re-evaluates its initializer every round and NEVER consumes
+    // the container binding (runtime semantics), so dissolving the container
+    // would falsely accept a runtime-infinite loop. The container obligation
+    // stays unsolved (E0256 on the container); the loop variable still gets
+    // per-iteration tracking so the body consumption is artifact-free.
+    let diags = check_source(
+        "cap FileReadCap; \
+         func sink(c: cap FileReadCap) -> i32 { drop(c); 5 } \
+         func main() -> i32 { \
+             let mut o: Option<cap FileReadCap> = Some(FileReadCap) \
+             while let Some(x) = o { sink(x) } \
+             0 }",
+    )
+    .expect_err("while-let must not dissolve its container (fail-closed)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0256") && rendered.contains("'o'"),
+        "expected E0256 on container 'o', got:\n{rendered}"
     );
 }
 
