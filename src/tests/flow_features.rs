@@ -3112,6 +3112,85 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_fault_nominal_escape_face_rejected() {
+    // 0.36.11 (Phase A 挣绿面收官, DoD #2): the nominal StateId/EventId are
+    // first-class enums — the string-compare escape faces (comparing
+    // last_state / unexpected_event against a string literal) that the 0.36.3
+    // redesign removed must stay type errors (E0202), never silent
+    // string-typing. The nominal alternative — exhaustive match on the
+    // StateId/EventId variants — is the only legal consumer (DoD #3), and is
+    // dual-backend byte-identical (twin oracle).
+    let escape_src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active) -> Active | Fault {
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let u = Svc::crash(a)
+    match u {
+        Active { value } => { println(value) }
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
+            if last_state == ("Active") { println(1) }
+            if unexpected_event == ("panic:" + "E0801") { println(2) }
+            println(unexpected_event)
+        }
+    }
+    0
+}
+"#;
+    let result = check_source(escape_src);
+    let err = result.expect_err("string-compare escape faces must be type errors");
+    let text = format!("{:?}", err);
+    assert!(
+        text.contains("E0202"),
+        "string-compare on nominal StateId/EventId should be E0202, got: {}",
+        text
+    );
+
+    // Twin: the nominal discrimination path compiles and prints identically
+    // on both backends — the escape-face rejection must not break the legal
+    // consumer.
+    let nominal_src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+    transition crash(Active) -> Active | Fault {
+        return Active { value: self.value }
+    }
+}
+
+func main() -> i32 {
+    let a = Active { value: 7 }
+    let u = Svc::crash(a)
+    match u {
+        Active { value } => { println(value) }
+        Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
+            match last_state {
+                Active => { println("Active") }
+            }
+            match unexpected_event {
+                Panic { code: _ } => { println("panic") }
+            }
+        }
+    }
+    0
+}
+"#;
+    let (_, vm_out) = run_source_bytecode_with_stdout(nominal_src);
+    let native = compile_and_run(nominal_src).expect("nominal discrimination must codegen");
+    assert_eq!(
+        vm_out.trim(),
+        native.trim(),
+        "nominal StateId/EventId discrimination must be dual-backend identical (vm {:?} / native {:?})",
+        vm_out,
+        native
+    );
+}
+
+#[test]
 fn transactional_persistent_draft_syntax_rejected_by_amendment_clause_3() {
     // @transactional was abolished by clause 3; the parser must reject it.
     // Non-transactional persistent-draft semantics (the faulting draft, not a
