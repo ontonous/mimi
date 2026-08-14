@@ -23,6 +23,20 @@
   8 ignored（含 0.36.24 gap 登记）；fmt + clippy + docs + edge 全绿。
 - 元素消费缺口（match/for/index/slice/字面量索引/元组字段）全 family fail-closed。
 
+### 0.36.27 — 语法重设计预演：删除 `T?` 后缀别名（`?` 三义 → 两义，破坏性）
+
+- **删除（src/parser/parse_type.rs）**：`Type := PostfixType { '?' }` 产生式
+  移除——`T?` ≡ Option<T> 字面别名是全语料零用例的死语义（spec/stdlib/
+  docs/tests 全仓仅 1 处 parser 测试锚点，已改写为无后缀复合类型 span
+  覆盖）；`?` 三义（try / optional-chain `?.` / nullable 后缀）收敛为两义。
+  `?` 出现在类型位置现在给出迁移诊断（"write Option<T> instead"）。
+- **回归**：postfix_question_marker_is_removed_alias_with_migration_note
+  （i32?/List<i32?> 拒绝 + Option<i32> 照常）；nested_composite 测试改写。
+  CLI 实证：`let x: i32? = 5` → 友好解析错误；Option<T> + match 照常（VM 5）。
+- **门禁**：全量 5359 passed / 0 failed / 8 ignored（含 0.36.24 gap 登记）；
+  fmt + clippy + docs + edge 全绿。try `?`/`?.` 专组均在套件内保持绿。
+- 迁移注记：`T?` → `Option<T>`（零存量迁移量）。
+
 ### 0.36.25 — M9 门禁补全：线性容器 slice 读取 fail-open → fail-closed（L2）
 
 - **补全（src/core/cfg/resource_lower.rs）**：M9 门禁（0.36.22 索引读取
