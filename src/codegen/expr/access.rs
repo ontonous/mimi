@@ -566,6 +566,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Err(format!("[E0707] cannot access field on type '{}'", obj_type).into())
                 }
             }
+            BasicValueEnum::IntValue(iv) => {
+                // Legacy Result/Option paths may carry a record payload as a
+                // ptrtoint-encoded i64 (e.g. `Ok(flow_state)` from a
+                // fails-transition). Recover the heap struct before field
+                // access so `match r { Ok(s) => s.data }` works in the legacy
+                // emitter too, not only in the resolved slice.
+                if let Some(&BasicTypeEnum::StructType(sty)) = self.type_llvm.get(base) {
+                    let ptr = self
+                        .builder
+                        .build_int_to_ptr(
+                            iv,
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "record_i64_ptr",
+                        )
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("record i64 inttoptr: {}", e))
+                        })?;
+                    let loaded = self
+                        .builder
+                        .build_load(BasicTypeEnum::StructType(sty), ptr, "record_i64_struct")
+                        .map_err(|e| CompileError::LlvmError(format!("record i64 load: {}", e)))?;
+                    let alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(sty), "rec_i64_tmp")?;
+                    self.build_store(alloca, loaded)?;
+                    Ok(alloca)
+                } else {
+                    Err(format!(
+                        "field access requires a struct or actor type, got {}",
+                        obj_val.get_type()
+                    )
+                    .into())
+                }
+            }
             _ => {
                 if std::env::var("MIMI_VERBOSE").is_ok() {
                     eprintln!(

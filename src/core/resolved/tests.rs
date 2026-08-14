@@ -4102,3 +4102,33 @@ func main() -> i32 { 0 }
             && diagnostic.message.contains("f")
     }));
 }
+
+#[test]
+fn has_cross_boundary_ops_covers_wrapper_blocks() {
+    let name = |n: &str| Expr::Ident(n.to_string());
+    let emit_call = Stmt::Expr(Expr::Call(Box::new(name("emit")), vec![]));
+
+    // Defer / OnFailure / Parasteps must not hide cross-boundary operations.
+    assert!(super::has_cross_boundary_ops(&[Stmt::Defer(vec![
+        emit_call.clone()
+    ])]));
+    assert!(super::has_cross_boundary_ops(&[Stmt::OnFailure(vec![
+        emit_call.clone()
+    ])]));
+    assert!(super::has_cross_boundary_ops(&[Stmt::Parasteps(vec![
+        emit_call.clone()
+    ])]));
+    assert!(super::has_cross_boundary_ops(&[Stmt::Pinned {
+        expr: Expr::Literal(crate::ast::Lit::Int(0)),
+        var: None,
+        body: vec![emit_call.clone()],
+    }]));
+
+    // Empty wrappers remain non-cross-boundary (no all-true regressions).
+    assert!(!super::has_cross_boundary_ops(&[Stmt::Defer(Vec::new())]));
+    assert!(!super::has_cross_boundary_ops(&[Stmt::Pinned {
+        expr: Expr::Literal(crate::ast::Lit::Int(0)),
+        var: None,
+        body: Vec::new(),
+    }]));
+}

@@ -1010,6 +1010,45 @@ func main() -> i32 { 0 }
     );
 }
 
+// P-10 follow-up: i64::MIN is not decimal-only. Hex/binary/octal spellings of
+// the same magnitude must also fold into `i64::MIN` in both expression and
+// negative-pattern positions.
+#[test]
+fn audit2_pm_i64_min_radix_spellings_parse_and_match() {
+    // Negative-pattern spellings are parser-level: integer literal patterns
+    // are currently typed i32 by the checker, so an i64 subject is not needed
+    // here. The parse assertion pins that each base form folds to `i64::MIN`
+    // instead of overflowing.
+    let pattern_src = r#"
+func pick(v: i64) -> i32 {
+    match v {
+        -0x8000000000000000 => 1
+        -0b1000000000000000000000000000000000000000000000000000000000000000 => 2
+        -0o1000000000000000000000 => 3
+        _ => 0
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let msgs = parse_diag_messages(pattern_src);
+    assert!(
+        msgs.is_empty(),
+        "radix i64::MIN patterns must parse, got: {:?}",
+        msgs
+    );
+
+    // Expression spellings must also evaluate to the same i64::MIN value.
+    let expr_src = r#"
+func main() -> i64 {
+    let a = -0x8000000000000000
+    let b = -0b1000000000000000000000000000000000000000000000000000000000000000
+    let c = -0o1000000000000000000000
+    if a == -9223372036854775808 && b == a && c == a { 42 } else { 0 }
+}
+"#;
+    assert_eq!(run_source_result(expr_src), Ok(interp::Value::Int(42)));
+}
+
 // ═══════════════════════════════════════════════════════════════
 // P-11 — hard keywords rejected at expression position
 // ═══════════════════════════════════════════════════════════════

@@ -1388,12 +1388,17 @@ impl BodyLowerer<'_> {
                             })?
                             .insert("result".into(), local_id.clone());
                     } else {
+                        // R-3 / §5-LOW: contract `result` is the *body* result,
+                        // not the caller-facing signature result. For async
+                        // functions the signature is `Future<T>` while the body
+                        // produces `T`; using the body result keeps ensures
+                        // contracts consistent with tail/return lowering.
                         self.insert_local(
                             "result".into(),
                             ResolvedLocal {
                                 id: local_id.clone(),
                                 display_name: "result".into(),
-                                ty: self.signature.result.clone(),
+                                ty: self.body_result.clone(),
                                 mutable: false,
                                 origin: result_origin,
                             },

@@ -1852,6 +1852,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let state_ty = self.flow_state_llvm_type(&state_name);
                         val = self.wrap_multi_target_value(val, tag, state_ty)?;
                     }
+                    // 0.36.59 (Phase E): tail wrapper blocks that contain an
+                    // explicit `return` (e.g. `ieee_float { return B { ... } }`
+                    // in a fails transition) must wrap the returned target as
+                    // Ok just like every other return path. Missing this made
+                    // native treats a successful transition as Rejected/Err.
+                    if self.in_fails_transition {
+                        val = self.compile_ok_constructor(vec![val])?;
+                    }
                     let ret_type = self
                         .current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
