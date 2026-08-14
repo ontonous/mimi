@@ -851,14 +851,88 @@ impl<'a> ActionEmitter<'a> {
                 self.visit_block(body, false);
             }
             ResolvedStmtKind::WhileLet {
-                initializer, body, ..
+                pattern,
+                initializer,
+                body,
+                ..
             }
             | ResolvedStmtKind::For {
+                pattern,
                 iterable: initializer,
                 body,
                 ..
             } => {
                 self.visit_expr(initializer, None);
+                // 0.36.37: a for/while-let loop over a linear container is an
+                // exhaustive, element-wise deconstruction — candidate (1)
+                // extended from match/if-let (0.36.36). Per-iteration element
+                // Introductions at the pattern Binding point (loop-carried, so
+                // the backedge fixed-point pass sees the element FRESH — the
+                // body's consumption never trips the E0304 "moved after
+                // consumed" artifact), and the container obligation dissolves
+                // at the loop statement. Fail-closed guards mirror
+                // match/if-let: a stranding wildcard (`for _ in v` over a
+                // linear element) and any early exit in the body
+                // (`break`/`return` — at runtime the not-yet-iterated
+                // elements are abandoned) keep the container obligation
+                // unsolved → E0256.
+                if let Some(container_place) = self.linear_loop_container(initializer, pattern) {
+                    // Container dissolve: ONLY builtin sequence containers
+                    // (List/Map/Set) in for-loops are exhaustive element-wise
+                    // deconstructions — the VM iterates the container and
+                    // every element is visited exactly once (when the body
+                    // consumes it; the per-iteration obligation enforces
+                    // that). A while-let over Option/Result re-evaluates its
+                    // initializer every round and NEVER consumes the
+                    // container binding (runtime semantics — `while let
+                    // Some(x) = o` re-reads o), so dissolving the container
+                    // there would falsely accept a runtime-infinite loop:
+                    // the container obligation stays unsolved (E0256).
+                    // Early exits (`break`/`return`) also block the dissolve:
+                    // at runtime the not-yet-iterated elements are abandoned.
+                    if self.linear_sequence_container(&initializer.ty)
+                        && !self.block_has_early_exit(body, true)
+                    {
+                        self.emit_consumes(
+                            CanonicalActionKind::Drop,
+                            vec![container_place],
+                            &statement.node_id,
+                            &statement.origin,
+                        );
+                    }
+                    // 0.36.37: per-iteration element obligation — the loop
+                    // variable binds a FRESH element every iteration, so the
+                    // body must consume each one. Keyed on the pattern
+                    // Binding point inside the loop body — loop-carried, so
+                    // the Introduce resets the fact before the body runs on
+                    // every fixed-point pass and a body consumption
+                    // (`sink(x)`) never trips the E0304 backedge
+                    // double-consume artifact. A body that skips the
+                    // consumption (continue/conditionals/early break) leaves
+                    // the element Available at the loop-carried diverging
+                    // sink or the return path → E0256. Emitted even when the
+                    // container dissolve is blocked (early exits): the
+                    // container obligation then stays unsolved (E0256 on the
+                    // container — the not-yet-iterated elements leak at
+                    // runtime), and the element obligation still reports the
+                    // current element independently.
+                    let mut bindings = Vec::new();
+                    self.linear_bindings(pattern, &mut bindings);
+                    for local in bindings {
+                        let target = self.place_from_local(&local);
+                        self.push_action(
+                            &pattern.node_id,
+                            &pattern.origin,
+                            ActionDraft {
+                                kind: CanonicalActionKind::Introduce,
+                                resource: self.resource_for_local(&local),
+                                source: Some(target.clone()),
+                                target: Some(target),
+                                loan: None,
+                            },
+                        );
+                    }
+                }
                 // Audit 2026-08-05 (wave-2, G-4): the for/while-let iterable
                 // is evaluated EXACTLY ONCE before the loop (hoisted into the
                 // CFG pre-header), so its anonymous temporary borrows end at
@@ -1256,6 +1330,190 @@ impl<'a> ActionEmitter<'a> {
                         .is_some_and(|pattern| self.pattern_strands_linear(pattern))
             }
             ResolvedPatternKind::Binding { .. } | ResolvedPatternKind::Literal(_) => false,
+        }
+    }
+
+    /// 0.36.37: a for/while-let loop over a linear container is an
+    /// exhaustive, element-wise deconstruction — the container obligation can
+    /// dissolve at the loop statement (candidate (1) extended from
+    /// match/if-let). The guard mirrors `linear_match_container` and adds the
+    /// builtin container nominals (List/Map/Set): single linear source,
+    /// single owned identity, no linear-stranding wildcard in the pattern.
+    fn linear_loop_container(
+        &self,
+        iterable: &ResolvedExpr,
+        pattern: &ResolvedPattern,
+    ) -> Option<Place> {
+        let ty = &iterable.ty;
+        if !self.is_linear(ty) || self.is_droppable_type(ty) {
+            return None;
+        }
+        let is_aggregate = match self.types.get(ty) {
+            Some(ResolvedType::Option(_)) | Some(ResolvedType::Result { .. }) => true,
+            // builtin container nominals are linear exactly when an argument
+            // is (H2 recursion) — kept here for shape affinity with the
+            // 0.36.36 match guard.
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) if matches!(
+                item.as_str(),
+                "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set"
+            ) && arguments.iter().any(|argument| self.is_linear(argument)) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !is_aggregate {
+            return None;
+        }
+        if self.pattern_strands_linear(pattern) {
+            return None;
+        }
+        let places = self.capability_places(iterable);
+        if places.len() != 1 {
+            return None;
+        }
+        if self.resources_for_place(&places[0]).len() != 1 {
+            return None;
+        }
+        Some(places[0].clone())
+    }
+
+    /// 0.36.37: builtin sequence container nominals (List/Map/Set) with linear
+    /// arguments — the only shapes whose for-loops exhaustively deconstruct
+    /// the container at runtime (VM iterates the container once, taking each
+    /// element). Option/Result while-let re-evaluates its initializer without
+    /// consuming the binding, so it is NOT dissolvable.
+    fn linear_sequence_container(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Nominal { item, arguments, .. })
+                if matches!(
+                    item.as_str(),
+                    "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set"
+                ) && arguments.iter().any(|argument| self.is_linear(argument))
+        )
+    }
+
+    /// 0.36.37: does the loop body contain an early exit that would abandon
+    /// not-yet-iterated elements? `break` exits the loop mid-iteration (the
+    /// remaining elements are never consumed at runtime); `return` exits the
+    /// function. `continue` is safe — the loop still visits every element and
+    /// a skipped element consumption is caught by the per-iteration element
+    /// obligation (E0256). A `break` inside a NESTED loop targets the nested
+    /// loop only (`count_breaks = false` there), but a `return` escapes
+    /// everything.
+    fn block_has_early_exit(&mut self, block: &ResolvedBlock, count_breaks: bool) -> bool {
+        block
+            .statements
+            .iter()
+            .any(|statement| self.stmt_has_early_exit(statement, count_breaks))
+    }
+
+    fn stmt_has_early_exit(&mut self, statement: &ResolvedStmt, count_breaks: bool) -> bool {
+        match &statement.kind {
+            ResolvedStmtKind::Break(_) => count_breaks,
+            ResolvedStmtKind::Return { .. } => true,
+            ResolvedStmtKind::Continue => false,
+            // Nested loops own their breaks; only a return inside their
+            // bodies escapes THIS loop. Their condition/iterable expressions
+            // still evaluate in this loop's context — an expression-embedded
+            // break there targets this loop.
+            ResolvedStmtKind::While {
+                condition, body, ..
+            } => {
+                self.expr_has_early_exit(condition, count_breaks)
+                    || self.block_has_early_exit(body, false)
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            }
+            | ResolvedStmtKind::For {
+                iterable: initializer,
+                body,
+                ..
+            } => {
+                self.expr_has_early_exit(initializer, count_breaks)
+                    || self.block_has_early_exit(body, false)
+            }
+            ResolvedStmtKind::Loop(body) => self.block_has_early_exit(body, false),
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr_has_early_exit(initializer, count_breaks)
+                    || self.block_has_early_exit(then_block, count_breaks)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|block| self.block_has_early_exit(block, count_breaks))
+            }
+            ResolvedStmtKind::Bind { initializer, .. } => initializer
+                .as_ref()
+                .is_some_and(|value| self.expr_has_early_exit(value, count_breaks)),
+            ResolvedStmtKind::Expr(value)
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => self.expr_has_early_exit(value, count_breaks),
+            ResolvedStmtKind::Assign { value, .. } => self.expr_has_early_exit(value, count_breaks),
+            ResolvedStmtKind::Pinned { value, body, .. } => {
+                self.expr_has_early_exit(value, count_breaks)
+                    || self.block_has_early_exit(body, count_breaks)
+            }
+            ResolvedStmtKind::Scope { body, .. } => self.block_has_early_exit(body, count_breaks),
+            ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::Math(_)
+            | ResolvedStmtKind::NestedCallable(_) => false,
+        }
+    }
+
+    fn expr_has_early_exit(&mut self, expression: &ResolvedExpr, count_breaks: bool) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.expr_has_early_exit(condition, count_breaks)
+                    || self.block_has_early_exit(then_block, count_breaks)
+                    || self.block_has_early_exit(else_block, count_breaks)
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.expr_has_early_exit(scrutinee, count_breaks)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|guard| self.expr_has_early_exit(guard, count_breaks))
+                            || self.expr_has_early_exit(&arm.body, count_breaks)
+                    })
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => self.block_has_early_exit(block, count_breaks),
+            ResolvedExprKind::Comprehension {
+                iterable,
+                guard,
+                value,
+                ..
+            } => {
+                self.expr_has_early_exit(iterable, count_breaks)
+                    || guard
+                        .as_ref()
+                        .is_some_and(|guard| self.expr_has_early_exit(guard, count_breaks))
+                    || self.expr_has_early_exit(value, count_breaks)
+            }
+            _ => {
+                let mut found = false;
+                self.for_each_expr_child(expression, |this, child| {
+                    if this.expr_has_early_exit(child, count_breaks) {
+                        found = true;
+                    }
+                });
+                found
+            }
         }
     }
 

@@ -4082,16 +4082,163 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                             "extract payload field {field_idx}: {e}"
                                         ))
                                     })?;
-                                // For built-in Err, the payload at index 2 is an i64
-                                // ptrtoint handle. Deep-eval 2026-08-09: decode per
-                                // the binding's DECLARED type — Flow Err tuples are
-                                // {i64,i64} (source + error, both ptrtoint-encoded),
-                                // but plain Result<string,string> (and Result<T,
-                                // custom-enum>) store a heap {ptr,i64} string struct
-                                // / {i32,i64} enum. The old hard-coded {i64,i64}
-                                // misdecoded string Err handles (string bytes read as
-                                // two i64s) and concat then failed with
-                                // "resolved numeric conversion {i64,i64} → {ptr,i64}".
+                                // For built-in Err, the payload at index 2 is an
+                                // opaque handle per the PRODUCER's ABI. Two
+                                // conventions exist side by side:
+                                //   - fails-transition flow errors
+                                //     Result<T, (Source, E)> (compile_try_rejected):
+                                //     a heap POINTER to a {i64, i64} handle pair
+                                //     (each field ptrtoint'd / widened to i64);
+                                //   - plain Err payloads (Result<string,string>,
+                                //     Result<T, custom-enum>): a heap {ptr,i64}
+                                //     string struct / {i32,i64} enum handle whose
+                                //     target type is the binding's declared type.
+                                // 0.36.37: decode the tuple-handle convention
+                                // per element (struct → inttoptr + load, pointer →
+                                // inttoptr, int → truncate) and bind the element
+                                // patterns directly — loading the inline tuple
+                                // struct type from handle memory misread both
+                                // fields (garbage string/state pointers → SIGSEGV
+                                // in flow_order_system's Err((src, e)) arm).
+                                if variant_name.as_str() == "Err"
+                                    && matches!(payload_val, BasicValueEnum::IntValue(_))
+                                    && matches!(sub_pattern.kind, ResolvedPatternKind::Tuple(_))
+                                {
+                                    let i64_ty = self.generator.context.i64_type();
+                                    let pair_ty = self.generator.context.struct_type(
+                                        &[
+                                            BasicTypeEnum::IntType(i64_ty),
+                                            BasicTypeEnum::IntType(i64_ty),
+                                        ],
+                                        false,
+                                    );
+                                    let pair_ptr = self
+                                        .generator
+                                        .builder
+                                        .build_int_to_ptr(
+                                            payload_val.into_int_value(),
+                                            self.generator
+                                                .context
+                                                .ptr_type(inkwell::AddressSpace::default()),
+                                            "err_tuple_ptr",
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "inttoptr err tuple: {e}"
+                                            ))
+                                        })?;
+                                    let pair = self
+                                        .generator
+                                        .builder
+                                        .build_load(pair_ty, pair_ptr, "err_tuple_pair")
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "load err tuple pair: {e}"
+                                            ))
+                                        })?
+                                        .into_struct_value();
+                                    if let ResolvedPatternKind::Tuple(elems) = &sub_pattern.kind {
+                                        for (ei, elem) in elems.iter().enumerate() {
+                                            let handle = self
+                                                .generator
+                                                .builder
+                                                .build_extract_value(
+                                                    pair,
+                                                    ei as u32,
+                                                    &format!("err_pair_field_{ei}"),
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "extract err pair field {ei}: {e}"
+                                                    ))
+                                                })?
+                                                .into_int_value();
+                                            let elem_llvm = self.lower_type(&elem.ty)?;
+                                            let elem_val: BasicValueEnum<'ctx> = match elem_llvm
+                                            {
+                                                BasicTypeEnum::StructType(_)
+                                                | BasicTypeEnum::ArrayType(_) => {
+                                                    let elem_ptr = self
+                                                        .generator
+                                                        .builder
+                                                        .build_int_to_ptr(
+                                                            handle,
+                                                            self.generator.context.ptr_type(
+                                                                inkwell::AddressSpace::default(),
+                                                            ),
+                                                            &format!("err_elem_{ei}_ptr"),
+                                                        )
+                                                        .map_err(|e| {
+                                                            CompileError::LlvmError(format!(
+                                                                "inttoptr err elem {ei}: {e}"
+                                                            ))
+                                                        })?;
+                                                    self.generator
+                                                        .builder
+                                                        .build_load(
+                                                            elem_llvm,
+                                                            elem_ptr,
+                                                            &format!("err_elem_{ei}_val"),
+                                                        )
+                                                        .map_err(|e| {
+                                                            CompileError::LlvmError(format!(
+                                                                "load err elem {ei}: {e}"
+                                                            ))
+                                                        })?
+                                                }
+                                                BasicTypeEnum::PointerType(_) => {
+                                                    let elem_ptr = self
+                                                        .generator
+                                                        .builder
+                                                        .build_int_to_ptr(
+                                                            handle,
+                                                            elem_llvm.into_pointer_type(),
+                                                            &format!("err_elem_{ei}_ptr"),
+                                                        )
+                                                        .map_err(|e| {
+                                                            CompileError::LlvmError(format!(
+                                                                "inttoptr err elem {ei}: {e}"
+                                                            ))
+                                                        })?;
+                                                    BasicValueEnum::PointerValue(elem_ptr)
+                                                }
+                                                BasicTypeEnum::IntType(it) => {
+                                                    if it.get_bit_width() < 64 {
+                                                        self.generator
+                                                            .builder
+                                                            .build_int_truncate(
+                                                                handle,
+                                                                it,
+                                                                &format!("err_elem_{ei}_trunc"),
+                                                            )
+                                                            .map_err(|e| {
+                                                                CompileError::LlvmError(format!(
+                                                                    "trunc err elem {ei}: {e}"
+                                                                ))
+                                                            })?
+                                                            .into()
+                                                    } else {
+                                                        handle.into()
+                                                    }
+                                                }
+                                                _ => {
+                                                    return Err(CompileError::Unsupported(
+                                                        format!(
+                                                            "flow Err tuple element {ei} has an unsupported decoded LLVM type"
+                                                        ),
+                                                    ))
+                                                }
+                                            };
+                                            self.bind_pattern(
+                                                callable_body,
+                                                elem,
+                                                elem_val,
+                                                frame,
+                                            )?;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 let decoded_val = if variant_name.as_str() == "Err"
                                     && matches!(payload_val, BasicValueEnum::IntValue(_))
                                 {

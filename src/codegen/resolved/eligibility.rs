@@ -1156,7 +1156,9 @@ fn require_expr(
     }
 }
 
-/// Match arm patterns: only literals, wildcards, and simple bindings.
+/// Match arm patterns: only literals, wildcards, simple bindings, and
+/// constructor patterns (recursively: constructor fields may contain tuples
+/// — 0.36.37, `Err((src, e))` — mirroring `require_binding_pattern`).
 fn require_match_pattern(
     owner: &NodeId,
     pattern: &ResolvedPattern,
@@ -1175,10 +1177,16 @@ fn require_match_pattern(
             }
             Ok(())
         }
+        ResolvedPatternKind::Tuple(sub_patterns) => {
+            for sub_pattern in sub_patterns {
+                require_match_pattern(owner, sub_pattern)?;
+            }
+            Ok(())
+        }
         _ => Err(UnsupportedResolvedNode::new(
             owner,
             &pattern.node_id,
-            "only literal, wildcard, binding, and constructor match patterns are in the resolved native slice",
+            "only literal, wildcard, binding, constructor, and tuple match patterns are in the resolved native slice",
         )),
     }
 }

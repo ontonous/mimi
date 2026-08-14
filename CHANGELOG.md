@@ -7,6 +7,49 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.37 — for 迭代 List<cap> 元素消费：周期语义 + 容器义务消解（L1/L2）
+
+- **背景**：§4g 矩阵最后一块阻塞面——`for x in v { sink(x) }`（List<cap>）
+  此前三错误阻塞（E0304 "x moved after consumed" 循环 backedge 重复消费假象
+  + E0256 v 于 for 分歧路径/return 路径）。
+- **设计**：for 循环 = 穷举逐元素解构（候选取 (1) 从 match/if-let 扩展）。
+  两套独立机制：
+  ①**容器义务消解**：对 builtin 序列名义容器（List/Map/Set，含线性实参）在
+  循环语句点发射 Drop（pre-header，仅一次）——容器义务由循环整体消解；
+  ②**逐次元素义务**：循环变量在 pattern Binding 点（body 入口，环路载点）
+  逐次 Introduce——每次固定点扫描都从 Available 起步，body 内消费
+  （sink(x)）绝不再触发 backedge E0304 假象；body 跳过消费（continue/
+  条件分发/提前 break）→ 元素 Available 于 loop-carried 分歧 sink → E0256。
+- **守卫（fail-closed）**：与 0.36.36 同精神——线性槽位 wildcard
+  （`for _ in v`）搁浅 → 容器义务不解消（E0256 v）；**提前退出**（body 含
+  break/return）不解消（运行时未迭代元素被放弃）→ E0256 v；嵌套循环内的
+  break 归内层（仅 return 穿透）；while-let 初始值逐轮重求值且**不消费容器
+  绑定**（运行时语义——消解将误收无限循环）→ 容器保持阻塞，仅逐次元素
+  记账生效。
+- **方块对照**（§4g）：`for x in v { sink(x) }`（List<cap>）E0304+E0256×2
+  → ✅ 受准（三 harness 印 3）；负例保持：元素未消费 E0256（双路径）、
+  wildcard E0256 v、循环后复用 E0304、提前 break/return E0256 v、while-let
+  Option<cap> E0256 o。
+- **回归**：dual_linear_for_loop_list_consumes_elements（三 harness 印 3）、
+  dual_linear_for_loop_strand_still_rejected、dual_linear_for_loop_wildcard_
+  still_rejected、dual_linear_for_loop_post_use_rejected、dual_linear_for_
+  loop_early_exit_stays_rejected、dual_linear_whilelet_option_container_stays_
+  rejected。全量全绿（门禁见下条）。
+- **顺带修复（real_world 门禁回归，L1）**：`tests/real_world/flow_order_system.mimi`
+  自基线起 `mimi build` 失败（legacy E0700 "field access … got i64"）——main 的
+  `Err((src, e))`（Constructor + Tuple 子模式）此前不被 resolved slice 的
+  `require_match_pattern` 接纳 → 落入 legacy → match 臂 flow-state 载荷以裸
+  i64 绑定 → 字段访问崩溃。本次两处修复：
+  ①`require_match_pattern`（eligibility.rs）接纳 **Tuple 子模式**（镜像
+  `require_binding_pattern`）→ main 进入 resolved slice；
+  ②resolved `emit_match` 的 Err 臂新增 **{i64,i64} handle-pair 解码**——legacy
+  fails-transition 的 `Result<T, (Source, E)>` 把 Err 载荷编码为堆上
+  `{i64,i64}` 句柄对（compile_try_rejected 约定），而非内联元组结构体；此前
+  resolved 侧按内联元组 load 误读两字段（SIGSEGV/垃圾指针），现逐元素
+  inttoptr+load（struct/string 载荷；int 元素截断）。real_world 套件恢复
+  31/31；新回归测试 dual_flow_fails_err_tuple_matching_native（VM + checked
+  双 harness 印 TXN-42/TRK-001/book/invalid price/0）。
+
 ### 0.36.36 — 元素级消费候选 (1) 落地：match/if-let 容器义务消解（Option/Result，L2）
 
 - **设计**：§4g 两候选取 (1)"总元素消费满足容器义务"的首个切片——**穷举解构
