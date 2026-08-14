@@ -3366,6 +3366,76 @@ func main() -> i32 {
 
 // 0.36.28: `x?.to_string()` where x is a plain i32 — the callee-shape error
 // must not mask the `?.` receiver validation (E0224 first, then E0223).
+// 0.36.31: tuple-alias destructure — `type Pair = (cap, i32); let (c, n) = pr`
+// aborted the resolved layer with TOOL-RESOLUTION-001 (nominal-alias scrutinee
+// vs raw-tuple pattern). Now lowers through the alias target; the sanctioned
+// whole-consumption destructure (Phase C §4g) is dual-harness pinned.
+#[test]
+fn dual_container_destructure_tuple_alias() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+cap FileReadCap
+type Pair = (cap FileReadCap, i32)
+func main() -> i32 {
+    let pr: Pair = (FileReadCap, 7)
+    let (c, n) = pr
+    drop(c)
+    println(n)
+    0
+}
+"#;
+    let expected = "7";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen destructure");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) tuple-alias destructure"
+    );
+    let unga = compile_and_run(src).expect("legacy codegen destructure");
+    assert_eq!(
+        unga.trim(),
+        expected,
+        "legacy(codegen) tuple-alias destructure"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm tuple-alias destructure");
+
+    // Through a function boundary (bare-tuple return type) the shape already
+    // worked; now also usable directly on the alias.
+    let cross = r#"
+cap FileReadCap
+type Pair = (cap FileReadCap, i32)
+func unpack(p: Pair) -> Pair { p }
+func main() -> i32 {
+    let pr: Pair = (FileReadCap, 7)
+    let (c, n) = unpack(pr)
+    drop(c)
+    println(n)
+    0
+}
+"#;
+    let checked = checked_codegen_compile_and_run(cross).expect("resolved codegen cross-fn");
+    assert_eq!(
+        checked.trim(),
+        expected,
+        "resolved(codegen) cross-fn destructure"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(cross);
+    assert_eq!(vm.trim(), expected, "vm cross-fn destructure");
+
+    // Non-linear tuple alias is equally destructurable.
+    assert!(
+        check_source(
+            "type P = (i32, i32); \
+             func main() -> i32 { let pr: P = (1, 2); let (a, b) = pr; println(a + b); 0 }",
+        )
+        .is_ok(),
+        "non-linear tuple alias destructure must stay legal"
+    );
+}
+
 #[test]
 fn dual_optional_chain_misuse_diagnostics_not_masked() {
     let diags = check_source("func main() -> i32 { let x = 5; let y = x?.to_string(); 0 }")

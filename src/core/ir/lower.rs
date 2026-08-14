@@ -4197,11 +4197,40 @@ impl BodyLowerer<'_> {
                     Some(ResolvedType::Tuple(elements)) if elements.len() == patterns.len() => {
                         elements.clone()
                     }
+                    // 0.36.31: destructure THROUGH tuple aliases — `type Pair =
+                    // (cap, i32)`; `let (c, n) = pr` previously aborted the
+                    // resolved layer with TOOL-RESOLUTION-001 ("tuple pattern
+                    // shape disagrees with canonical scrutinee type" — the
+                    // scrutinee canon is the Nominal alias, not the tuple).
+                    // Resolve the alias/newtype canonical target first
+                    // (mirrors the Array arm's List-nominal handling).
                     _ => {
-                        return Err(vec![ResolvedBodyError::new(
-                            node_id.clone(),
-                            "tuple pattern shape disagrees with canonical scrutinee type",
-                        )])
+                        let through_alias = self
+                            .instantiated_type_target(&node_id, &ty)
+                            .ok()
+                            .flatten()
+                            .and_then(|(kind, target)| {
+                                matches!(kind, ResolvedTypeKind::Alias | ResolvedTypeKind::Newtype)
+                                    .then_some(target)
+                            });
+                        match through_alias
+                            .and_then(|target| self.types.get(&target))
+                            .and_then(|resolved| match resolved {
+                                ResolvedType::Tuple(elements)
+                                    if elements.len() == patterns.len() =>
+                                {
+                                    Some(elements.clone())
+                                }
+                                _ => None,
+                            }) {
+                            Some(elements) => elements,
+                            None => {
+                                return Err(vec![ResolvedBodyError::new(
+                                    node_id.clone(),
+                                    "tuple pattern shape disagrees with canonical scrutinee type",
+                                )])
+                            }
+                        }
                     }
                 };
                 ResolvedPatternKind::Tuple(self.lower_pattern_list(
