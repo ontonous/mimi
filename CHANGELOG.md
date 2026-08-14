@@ -7,6 +7,36 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.35 — flow-state-in-container 原生 ABI 统一（Phase C 首项前置交付，L1）
+
+- **背景**：`Result<FlowState, E>` / `Option<FlowState>`（flow-state 装入
+  容器槽位）此前无任何后端能编译：legacy 发射器自身双表示分裂——容器载荷槽
+  boxed-ptr（结构体装箱后 ptrtoint 进 i64 槽）vs 直接构造的状态值被拍平成
+  i64——match 两臂无法统一（E0200 "cannot unify ptr with i64"）；resolved
+  片 eligibility 门拒绝 `state:Flow::State` 名义 → 全函数落 legacy → 同一
+  E0200。VM 正常（印 2）——三路不一致，0.36.20 项登记的 Phase C 差距。
+- **修复**：
+  ①resolved 片 eligibility 门接受 `state:` 名义（镜像 0.36.32 的 SessionChan
+  豁免——不透明 i64/记录结构布局由发射器侧提供，无需声明目录）；
+  ②**nominal 解析钩子**：`llvm_type_for_resolved_with`（types.rs）新增
+  `&mut dyn FnMut(&ResolvedTypeId) -> Option<BasicTypeEnum>` 参数，Nominal 臂
+  先咨询钩子；递归（Result/Option 槽位下钻、Tuple/List 元素）全程透传——
+  容器嵌套载荷与原位值共享同一布局。发射器 lower_type 注册 state:
+  钩子（读 legacy type_defs 的 "flow::Flow::State" 记录 → 结构体），修掉
+  双表示分裂（boxed-ptr vs flatten-i64 归一律到同一记录结构体）。
+- **端到端**：Result<Zero,string> match（Ok 提取 vs Err 回退构造）与
+  Option<Zero> match（Some 提取 vs None 回退构造）在 VM/resolved 双后端
+  一致印 2/6；legacy 纯路径仍拒绝该形态（E0200 或后续 transition overload
+  错误）——已登记 legacy 遗留差距，生产（per-function dispatch）因该形态
+  eligible 永不落入。
+- **回归**：dual_flow_state_in_container_native（原
+  dual_flow_state_in_container_native_gap 摘除 #[ignore] 转正：VM +
+  checked_codegen 印 2 + legacy reject 边界钉）+ 新增
+  dual_flow_state_in_option_container_native（Option 形态对称三断言）。
+  ignored 计数 8→7（首个 0.36.36 窗口项提前交付摘牌）。全量 5365 passed /
+  0 failed / 7 ignored；fmt + clippy(-D warnings) + docs(31/31) + edge(6/6)
+  全绿。
+
 ### 0.36.32-34 — SessionChan 类型化端点构造面落地：session_open::<S>()（L1+L2）
 
 - **背景**：0.36.23 曾判定 Session 构造面"死面"——`session_pair()` 只给

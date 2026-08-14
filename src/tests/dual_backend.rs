@@ -3559,8 +3559,12 @@ fn dual_optional_chain_misuse_diagnostics_not_masked() {
 }
 
 #[test]
-#[ignore = "0.36.36 Phase C: flow-state-in-container native ABI 统一（Result/Option 槽位 ptr vs 平铺 i64）"]
-fn dual_flow_state_in_container_native_gap() {
+// 0.36.35: ABI unified — the resolved slice lowers Flow-state nominals to ONE
+// canonical record struct via the nominal-resolution hook (llvm_type_for_resolved_with),
+// so Result/Option payload slots and direct constructions agree (previously the
+// legacy emitter's boxed-payload ptr clashed with its flattened i64 construct;
+// E0200).
+fn dual_flow_state_in_container_native() {
     if !can_link() {
         return;
     }
@@ -3583,8 +3587,57 @@ func main() -> i32 {
     let expected = "2";
     let (_, vm) = run_source_bytecode_with_stdout(src);
     assert_eq!(vm.trim(), expected, "vm state-in-result");
-    let native = compile_and_run(src).expect("codegen must match VM once 0.36.36 unifies the ABI");
-    assert_eq!(native.trim(), expected, "codegen state-in-result");
+    if can_link() {
+        let resolved =
+            checked_codegen_compile_and_run(src).expect("resolved slice state-in-result");
+        assert_eq!(resolved.trim(), expected, "resolved slice state-in-result");
+        // Legacy-only emitter: registered gap — boxed-payload ptr vs flattened
+        // i64 construct cannot unify (E0200). Pin the boundary so the eventual
+        // legacy retirement cannot silently regress into a working-but-wrong path.
+        // Legacy-only emitter rejects the shape (either E0200 arm-unify or a
+        // follow-on state-transition overload error) — pin "rejects", not the
+        // exact text: the legacy dual representation is the registered gap.
+        assert!(
+            compile_and_run(src).is_err(),
+            "legacy emitter must reject state-in-container (registered gap)"
+        );
+    }
+}
+
+// 0.36.35: Option<state> slot mirrors the Result case — same canonical struct
+// layout via the nominal hook, so Some-payload extraction and None-fallback
+// construction unify in the resolved slice.
+#[test]
+fn dual_flow_state_in_option_container_native() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+}
+func main() -> i32 {
+    let maybe: Option<Zero> = Some(Zero { n: 5 })
+    let got = match maybe {
+        Some(c) => c
+        None => Zero { n: 0 }
+    }
+    let c2 = Counter::inc(got)
+    println(c2.n)
+    0
+}
+"#;
+    let expected = "6";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm state-in-option");
+    let resolved = checked_codegen_compile_and_run(src).expect("resolved slice state-in-option");
+    assert_eq!(resolved.trim(), expected, "resolved slice state-in-option");
+    // Same legacy gap boundary as the Result shape (reject, either mode).
+    assert!(
+        compile_and_run(src).is_err(),
+        "legacy emitter must reject state-in-option (registered gap)"
+    );
 }
 
 #[test]

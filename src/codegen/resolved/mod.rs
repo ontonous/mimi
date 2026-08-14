@@ -30,7 +30,7 @@ use self::eligibility::{
     eligible_function_ids_with_stats, require_resolved_native_program, DispatchStats,
     UnsupportedResolvedNode,
 };
-use self::types::llvm_type_for_resolved;
+use self::types::{llvm_type_for_resolved, llvm_type_for_resolved_with};
 
 pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
     require_resolved_native_program(program).is_ok()
@@ -402,8 +402,43 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
     /// Lower a ResolvedTypeId to an LLVM type, with fallback for
     /// user-defined record Nominal types that types.rs doesn't handle.
+    /// 0.36.35: nominal-resolution hook for Flow-state record layouts —
+    /// resolves 'state:Flow::State' against the legacy type_defs record
+    /// ("flow::Flow::State"), so container payloads (Result/Option slots)
+    /// get the SAME struct as top-level state values.
+    fn state_nominal_llvm_type(&self, id: &ResolvedTypeId) -> Option<BasicTypeEnum<'ctx>> {
+        let ResolvedType::Nominal { item, .. } = self.program.resolved_types().get(id)? else {
+            return None;
+        };
+        let item_str = item.as_str();
+        let state_path = item_str.strip_prefix("state:")?;
+        let flow_type_name = format!("flow::{state_path}");
+        let td = self.generator.type_defs.get(&flow_type_name).or_else(|| {
+            state_path
+                .rsplit("::")
+                .next()
+                .and_then(|short| self.generator.type_defs.get(short))
+        })?;
+        let crate::ast::TypeDefKind::Record(fields) = &td.kind else {
+            return None;
+        };
+        let mut field_types = Vec::with_capacity(fields.len());
+        for field in fields {
+            field_types.push(self.generator.llvm_type_for(&field.ty)?);
+        }
+        Some(BasicTypeEnum::StructType(
+            self.generator.context.struct_type(&field_types, false),
+        ))
+    }
+
     fn lower_type(&self, id: &ResolvedTypeId) -> Result<BasicTypeEnum<'ctx>, CompileError> {
-        match llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), id) {
+        let mut nominal_hook = |id: &ResolvedTypeId| self.state_nominal_llvm_type(id);
+        match llvm_type_for_resolved_with(
+            self.generator.context,
+            self.program.resolved_types(),
+            id,
+            &mut nominal_hook,
+        ) {
             Ok(ty) => Ok(ty),
             Err(_) => {
                 // 0.32.14: Newtype is transparent — lower to the inner type.
