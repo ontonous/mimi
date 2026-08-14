@@ -53,6 +53,8 @@ fn expr_uses_name(e: &Expr, names: &[String]) -> bool {
                         || expr_uses_name(&a.body, names)
                 })
         }
+        Expr::Lambda { body, .. } => body.iter().any(|s| stmt_uses_name(s, names)),
+        Expr::NamedArg(_, value) => expr_uses_name(value, names),
         Expr::Block(stmts) => stmts.iter().any(|s| stmt_uses_name(s, names)),
         Expr::If {
             cond, then_, else_, ..
@@ -575,6 +577,14 @@ fn stmt_flow(
         Stmt::Let {
             init: Some(e), pat, ..
         } => {
+            // 切片 5：闭包绑定的线性义务在定义点结算——后续调用只传闭包标识符
+            // （`mapT(xs, c)`），那时无法再检查体；弃置参数体在此同款拒绝。
+            if let Expr::Lambda { params, body, .. } = e.unlocated() {
+                let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                if !linear_blackbox_body(body, &param_names, allow_drop, checker) {
+                    return Err(());
+                }
+            }
             if !state.any_uses(e) {
                 return Ok(state);
             }
@@ -924,6 +934,55 @@ fn expr_flow(
 
 /// 调用 = 向"线性安全接收者"转移。返回 `Ok(true)` 当返回值携带被转移的值
 /// （接收者 transfer-模式：调体每条路径 return 该参数）。
+/// 整体转移-out：每个 live 名必须作为恰一个实参的"完整反应"进入该调用
+/// （构造包装 / 方法实参 / 可调用值调用共用）。实参本身可以是转移链
+/// （`Some(attach(x))` / `out.push(f(x))` 的内层调用）→ 递归处理；
+/// 返回值携带被包装的值（构造面）/ 由具体面在各自 site 追踪（可调用面）。
+fn transfer_wrapped_args(
+    args: &[Expr],
+    state: &mut FlowState,
+    allow_drop: bool,
+    checker: &mut Checker<'_>,
+) -> Result<bool, ()> {
+    let mut wrapped_any = false;
+    for n in state.live.clone() {
+        let matching: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| expr_uses_name(a, std::slice::from_ref(&n)))
+            .map(|(i, _)| i)
+            .collect();
+        if matching.len() != 1 {
+            return Err(()); // 未进入 / 多实参 → 弃值或重复借用
+        }
+        let arg = &args[matching[0]];
+        let mut sub = FlowState {
+            live: vec![n.clone()],
+            consumed: Vec::new(),
+        };
+        match arg.unlocated() {
+            Expr::Call(c2, a2) => {
+                let _ = call_transfer(c2, a2, &mut sub, allow_drop, checker)?;
+            }
+            Expr::Match(s2, arms2) => {
+                sub = match_flow(s2, arms2, sub, allow_drop, checker)?;
+            }
+            _ => {
+                if !expr_whole_contains(arg, &n, checker) {
+                    return Err(());
+                }
+                sub.live.clear();
+            }
+        }
+        if !sub.live.is_empty() {
+            return Err(()); // 实参未完全反应 → 弃值
+        }
+        state.consume(&n);
+        wrapped_any = true;
+    }
+    Ok(wrapped_any)
+}
+
 fn call_transfer(
     callee: &Expr,
     args: &[Expr],
@@ -953,7 +1012,31 @@ fn call_transfer(
             return Err(());
         }
     }
-    // 接收者必须是已声明函数（非 builtin / 非方法链）。
+    // Lambda 字面量实参 = 匿名"臂"（切片 5 高阶直通）：参数名逐一 live 黑盒
+    // 结算体——每次出现都检查（不管实参本身是否触碰 live 名字）；弃置参数
+    // 体（`fn(x: T) { 0 }`）在具体面 = 元素泄漏 → 泛型面同款拒绝。
+    for arg in args {
+        if let Expr::Lambda { params, body, .. } = arg.unlocated() {
+            let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            if !linear_blackbox_body(body, &param_names, allow_drop, checker) {
+                return Err(());
+            }
+        }
+    }
+    // 方法调用：`receiver.method(args)`（解析为 Call(Field(receiver, _), args)）。
+    // 接收者 ∈ live / 已消费 → 线性接收者方法面未开（容器方法 = 余面）→
+    // fail-closed；接收者非线性 → 实参中触碰 live 的名字逐一带整体转移。
+    if let Expr::Field(receiver, _) = callee.unlocated() {
+        if expr_uses_name(receiver, &state.live)
+            || state
+                .consumed
+                .iter()
+                .any(|n| expr_uses_name(receiver, std::slice::from_ref(n)))
+        {
+            return Err(());
+        }
+        return transfer_wrapped_args(args, state, allow_drop, checker);
+    }
     let Expr::Ident(callee_name) = callee.unlocated() else {
         return Err(());
     };
@@ -961,47 +1044,11 @@ fn call_transfer(
         return Err(()); // builtin 非线性感知 → fail-closed
     }
     let Some(param_tys) = checker.funcs.get(callee_name).cloned() else {
-        // 数据构造器包装（`Some(x)` / `Ok(v)`）：构造值 = 整体值；每个 live
-        // 名必须作为恰一个实参的"完整反应"进入——实参本身可以是转移链
-        // （`Some(attach(x))`）→ 递归处理；返回值携带被包装的值（调用方按
-        // 构造类型具体追踪）。
-        let mut wrapped_any = false;
-        for n in state.live.clone() {
-            let matching: Vec<usize> = args
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| expr_uses_name(a, std::slice::from_ref(&n)))
-                .map(|(i, _)| i)
-                .collect();
-            if matching.len() != 1 {
-                return Err(()); // 未进入 / 多实参 → 弃值或重复借用
-            }
-            let arg = &args[matching[0]];
-            let mut sub = FlowState {
-                live: vec![n.clone()],
-                consumed: Vec::new(),
-            };
-            match arg.unlocated() {
-                Expr::Call(c2, a2) => {
-                    let _ = call_transfer(c2, a2, &mut sub, allow_drop, checker)?;
-                }
-                Expr::Match(s2, arms2) => {
-                    sub = match_flow(s2, arms2, sub, allow_drop, checker)?;
-                }
-                _ => {
-                    if !expr_whole_contains(arg, &n, checker) {
-                        return Err(());
-                    }
-                    sub.live.clear();
-                }
-            }
-            if !sub.live.is_empty() {
-                return Err(()); // 实参未完全反应 → 弃值
-            }
-            state.consume(&n);
-            wrapped_any = true;
-        }
-        return Ok(wrapped_any);
+        // 数据构造器包装（`Some(x)` / `Ok(v)`）/ 可调用值调用（`f(x)`）：
+        // 每个 live 名必须作为恰一个实参的"完整反应"进入——实参本身可以是
+        // 转移链（`Some(attach(x))`）→ 递归处理；构造包装的返回值携带被包装
+        // 的值，可调用值的返回值由具体面在各目的 site 追踪。
+        return transfer_wrapped_args(args, state, allow_drop, checker);
     };
     // 每个 live 名字必须作为实参移入可信接收者：
     //   - 具体参数位置：callee 自身名字级分析全权追踪 → 恒可信（但返回值
