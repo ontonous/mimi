@@ -3503,6 +3503,145 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm turbofish pass-through");
 }
 
+// ─── 0.36.43 — 元素析构记账修复：E0304 错误路径状态污染（RESOURCE-LINEAR-001）──
+// M9/0.36.25-26 的索引析构拒绝（`v[0]` / `v[1..]` / `(a,b).0` 在非线性容器上
+// 的 E0304）纯属诊断——但后续 lowering 仍把被拒投影配对进绑定/调用/drop：
+// `let x = v[0]` 制造 v→x 伪转移 → `drop(x)` 释放容器的身份 → 合法 `drop(v)`
+// 撞 RESOURCE-LINEAR-001 double-drop 调试信号（在测试内 = panic）。
+// 修复：reject 时把被拒投影的 canonical place 记入 rejected_extraction_places，
+// 消费漏斗（capability_places）与 Drop 臂过滤；Bind 臂以 last_visit_rejected
+// 守卫整体跳过配对并清除绑定局部上的幻影所有权；`drop(v[0])` 在 Drop 臂就地
+// 拒绝（Drop 不访问表达式）。被拒代码本就无效——这些过滤是纯错误路径卫生，
+// 对合法程序零影响。
+// 本组测试的 PASS 本身就证明无 ICE（mimi_assert 在测试内 = panic）。
+
+#[test]
+fn resource_index_extraction_drop_no_ice() {
+    // L2: `let x = v[0]; drop(x); drop(v)` — 提取被 E0304 拒绝，之后两个 drop
+    // 都必须是干净的单次消费诊断（此前 drop(v) 撞 RESOURCE-LINEAR-001）。
+    let diags = check_source(
+        "cap FileReadCap; func concrete(v: List<cap FileReadCap>) -> i32 { \
+         let x = v[0]; drop(x); drop(v); 1 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = concrete(l); \
+         println(r); 0 }",
+    )
+    .expect_err("index extraction + later drops must not ICE (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("dropped twice"),
+        "RESOURCE-LINEAR-001 double-drop signal leaked into diagnostics:\n{rendered}"
+    );
+}
+
+#[test]
+fn resource_drop_index_extraction_no_ice() {
+    // L2: `drop(v[0]); drop(v)` — Drop 臂携带 resolved place（无表达式访问），
+    // 0.36.43 起就地拒绝元素析构投影；后续 drop(v) 不得双消费。
+    let diags = check_source(
+        "cap FileReadCap; func concrete(v: List<cap FileReadCap>) -> i32 { \
+         drop(v[0]); drop(v); 1 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = concrete(l); \
+         println(r); 0 }",
+    )
+    .expect_err("drop of element projection must not ICE (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("dropped twice"),
+        "RESOURCE-LINEAR-001 double-drop signal leaked into diagnostics:\n{rendered}"
+    );
+}
+
+#[test]
+fn resource_tuple_projection_extraction_no_ice() {
+    // L2: 元组投影 `(a, b).0` 经 let 绑定——同样被拒后不得污染后续消费。
+    let diags = check_source(
+        "cap FileReadCap; func concrete(t: (cap FileReadCap, cap FileReadCap)) -> i32 { \
+         let x = t.0; drop(x); drop(t); 1 } \
+         func main() -> i32 { let t = (FileReadCap, FileReadCap); let r = concrete(t); \
+         println(r); 0 }",
+    )
+    .expect_err("tuple projection + later drops must not ICE (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("dropped twice"),
+        "RESOURCE-LINEAR-001 double-drop signal leaked into diagnostics:\n{rendered}"
+    );
+}
+
+#[test]
+fn resource_index_extraction_alone_still_rejected() {
+    // L2: 拒绝本身保持——`let x = v[0]` 单独（无后续 drop）依旧 E0304。
+    let diags = check_source(
+        "cap FileReadCap; func concrete(v: List<cap FileReadCap>) -> i32 { \
+         let x = v[0]; drop(x); 1 } \
+         func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = concrete(l); \
+         println(r); 0 }",
+    )
+    .expect_err("index extraction alone must stay rejected (E0304)");
+    let rendered = diags
+        .iter()
+        .map(|d| format!("{}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0304"),
+        "expected E0304 diagnostic, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn resource_linear_container_whole_drop_still_ok() {
+    // L2+正例哨兵: 合法整体消费不受错误路径卫生影响——`drop(v)` 整体仍然干净。
+    let src = "cap FileReadCap; func sink(v: List<cap FileReadCap>) -> i32 { drop(v); 1 } \
+               func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = sink(l); \
+               println(r); 0 }";
+    assert!(
+        check_source(src).is_ok(),
+        "whole-container drop must stay legal"
+    );
+    let expected = "1";
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm whole-container drop");
+    if can_link() {
+        let built = compile_and_run(src).expect("codegen whole-container drop");
+        assert_eq!(
+            built.trim(),
+            expected,
+            "legacy(codegen) whole-container drop"
+        );
+        let checked = checked_codegen_compile_and_run(src).expect("resolved codegen whole drop");
+        assert_eq!(
+            checked.trim(),
+            expected,
+            "resolved(codegen) whole-container drop"
+        );
+    }
+}
+
 // ─── 0.36.42 — 泛型×线性单态化切片 4：if-let 容器义务消解的泛型镜像 ──────
 // 0.36.40/41 记录的"if-let 非穷举面"在本切打开其 **Option 中介面**：
 //   具体面（0.36.36）`if let Some(x) = o` 使 Option 义务消解——Some 路径绑定
