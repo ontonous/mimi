@@ -23,6 +23,20 @@
   8 ignored（含 0.36.24 gap 登记）；fmt + clippy + docs + edge 全绿。
 - 元素消费缺口（match/for/index/slice/字面量索引/元组字段）全 family fail-closed。
 
+### 0.36.28 — 诊断次序修复：`?.` 接收者校验不被 callee 形状错误掩埋（L2）
+
+- **修复（src/core/infer/call.rs）**：infer_call_expr 的非函数 callee 分支此前
+  **短路发射** E0223（"callee must be a function name"）后即返回，从不递归推断
+  callee 表达式——`x?.to_string()`（x 为 i32）只报 E0223，掩埋了 OptionalChain
+  接收者校验（E0224 "?. requires Option or Result receiver"）。现在先 `infer_expr
+  (callee)` 再报 E0223：根因与形状错误同时显形。
+- **边界守恒**：普通非函数 callee（`x(1)`）仍只报 E0223（单错，回归钉住）；
+  T? 删除后 `Type::Option` AST 变体留作内部惰性表示（无 surface 构造点，
+  后续清理排 Phase D）。
+- **回归**：dual_optional_chain_misuse_diagnostics_not_masked（双报 + 单报
+  两形态）。全量 5360 passed / 0 failed / 8 ignored；fmt + clippy + docs +
+  edge 全绿。
+
 ### 0.36.27 — 语法重设计预演：删除 `T?` 后缀别名（`?` 三义 → 两义，破坏性）
 
 - **删除（src/parser/parse_type.rs）**：`Type := PostfixType { '?' }` 产生式
