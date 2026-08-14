@@ -7,6 +7,19 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.20 — cap split/借用线性边界复核（全 fail-closed，挣绿确认）+ 0.36.21 窗口前装填
+
+- **split 边界矩阵（探针实测，phase-c-linearity-study.md §4c）**：只 drop 一个
+  原子 = E0256；整体 drop 组合 cap = ✓ 双后端；split 后用原 c = E0304；
+  通配符丢弃原子 = E0304 + §1.3 红线专用诊断（无静默泄漏）；**view/mutate 借入
+  split 原子 = 转移语义**（借入即消费，返回后再 drop = E0304）——cap 无借出
+  (loan) 面，保守 fail-closed，无双后端分歧。
+- **定案输入**：cap 参数一律转移；Phase C 选项 = 保持现状（倾向）vs 引入
+  view 借出（与 flow state 对齐）——登记 1.x 评估。
+- 0.36.21 正式窗口前装填：Protocol 定案草案（0.36.16）已就绪——
+  §6.5 feature-gated 表述 + §3.10 接口承诺处置 = 窗口首项。
+- 门禁全绿（fmt + docs + edge）；无代码变更（预研探针轮）。
+
 ### 0.36.19 — Session 复杂 residual 双后端挣绿（roundtrip/分支合并/循环）+ 覆盖缺口闭合
 
 - **Session 双后端正例补齐（dual_backend +3，双 harness）**：此前双端 session
