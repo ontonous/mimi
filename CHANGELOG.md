@@ -7,6 +7,27 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.114 — Phase E：clippy 全 targets 零警告收口
+
+将 clippy 检查范围扩展到全部 targets 后，发现测试代码中 1 处
+`clippy::needless_borrow`：
+
+- `dual_backend.rs` 里 `check_source(&src)` 改为 `check_source(src)`；
+- 测试语义不变，回归 `dual_linear_cap_method_arg_double_use_rejected`
+  通过。
+
+修复后 `cargo clippy --all-targets -- -D warnings` 输出零警告。
+
+### 0.36.113 — Phase E：clippy 全lib零警告收口
+
+`cargo clippy --lib -- -D warnings` 暴露 1 处 `clippy::ptr_arg`：
+
+- `sort_diagnostics` 参数 `&mut Vec<Diagnostic>` 改为 `&mut [Diagnostic]`；
+- 调用点 `&mut errors` 自动借用到 slice，无需其他改动；
+- 排序逻辑与行为不变，`check_program_diagnostics_are_source_sorted` 回归通过。
+
+修复后 `cargo clippy --lib -- -D warnings` 输出零警告。
+
 ### 0.36.112 — Phase E：0.1.6 全面查缺补漏/代码审查收尾
 
 本轮完成全量验证与台账收口：

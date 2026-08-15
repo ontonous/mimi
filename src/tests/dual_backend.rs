@@ -3825,7 +3825,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let diags = check_source(&src).expect_err("second method use of cap must be E0304");
+    let diags = check_source(src).expect_err("second method use of cap must be E0304");
     let rendered = diags
         .iter()
         .map(|d| format!("{}", d))
