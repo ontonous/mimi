@@ -246,6 +246,7 @@ impl LspServer {
         let mut def_line: Option<usize> = None;
         let mut def_col: Option<usize> = None;
         let lines: Vec<&str> = text.lines().collect();
+        let non_code = crate::lsp::util::non_code_byte_ranges(text);
 
         // First, find the definition location
         if let Some(file) = self.parse_with_recovery(text) {
@@ -315,12 +316,18 @@ impl LspServer {
             }
         }
 
-        // Find all usages in text.
+        // Find all usages in code regions.
         // AU-LSP-2 (full audit 2026-08-05): byte-safe whole-word scan — the
         // old loop advanced `start` by 1 byte (panicking mid-char on
         // multi-byte identifiers) and indexed chars by byte offset.
+        // A6: same `non_code_byte_ranges` discipline as rename — comments and
+        // string literals are not reference sites.
         for (i, line_text) in lines.iter().enumerate() {
+            let line_non_code = non_code.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
             for abs_pos in crate::lsp::util::find_word_occurrences(line_text, word.as_str()) {
+                if crate::lsp::util::byte_in_non_code(line_non_code, abs_pos) {
+                    continue;
+                }
                 // Skip definition location if we already added it
                 if let Some(dl) = def_line {
                     if i == dl && (def_col == Some(abs_pos)) {
@@ -647,6 +654,7 @@ impl LspServer {
         let mut def_line: Option<usize> = None;
         let mut def_col: Option<usize> = None;
         let lines: Vec<&str> = text.lines().collect();
+        let non_code = crate::lsp::util::non_code_byte_ranges(text);
 
         // Find definition location
         if let Some(file) = self.parse_with_recovery(text) {
@@ -713,8 +721,13 @@ impl LspServer {
 
         // Find all usages as Text highlights.
         // AU-LSP-2: byte-safe whole-word scan (same fix as compute_references).
+        // A6: comments and string literals are not highlight sites.
         for (i, line_text) in lines.iter().enumerate() {
+            let line_non_code = non_code.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
             for abs_pos in crate::lsp::util::find_word_occurrences(line_text, word.as_str()) {
+                if crate::lsp::util::byte_in_non_code(line_non_code, abs_pos) {
+                    continue;
+                }
                 // Skip definition location
                 if let (Some(dl), Some(dc)) = (def_line, def_col) {
                     if i == dl && dc == abs_pos {

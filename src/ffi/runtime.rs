@@ -1152,6 +1152,29 @@ mod tests {
     }
 
     #[test]
+    fn shared_c_api_get_ptr_copy_survives_handle_release() {
+        let value = Arc::new(RwLock::new(Value::Int(7)));
+        let id = with_shared_table(|table| table.create(Arc::clone(&value)));
+        assert!(id > 0);
+
+        // get_ptr returns a heap copy owned by the caller.
+        let ptr = mimi_shared_get_ptr(id);
+        assert!(!ptr.is_null());
+        mimi_shared_release(id);
+
+        // The copy remains readable after the handle is gone.
+        // SAFETY: ptr was returned by mimi_shared_get_ptr as a heap-allocated
+        // copy; the caller owns it and has not freed it yet.
+        unsafe {
+            assert!(matches!(&*ptr, Value::Int(7)));
+        }
+        mimi_value_free(ptr);
+
+        // Releasing an already-released handle is a no-op.
+        mimi_shared_release(id);
+    }
+
+    #[test]
     fn shared_c_api_invalid_handle() {
         assert!(mimi_shared_get_ptr(9999).is_null());
         // Release on invalid handle should be a no-op and not panic.

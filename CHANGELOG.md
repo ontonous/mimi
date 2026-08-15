@@ -7,6 +7,164 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.99 — Phase E：修正 C header `mimi_shared_get_ptr` 生命周期描述（§12-#65 部分闭合）
+
+台账 §12-#65 指出 C header 对 `mimi_shared_get_ptr` 注释为“返回指针仅在
+handle 存活期间有效”，但 runtime 实际返回**堆拷贝**，由调用方用
+`mimi_value_free` 释放：
+
+- handle 销毁后指针仍可安全读取；
+- 旧注释会诱导调用方错误地随 handle 一起释放或过早释放。
+
+本次修正：
+
+- `c_header.rs` 注释改为“返回堆分配拷贝，调用方拥有并需 `mimi_value_free`”；
+- `test_header_contains_runtime_api_declarations` 增加注释断言；
+- 新增 `shared_c_api_get_ptr_copy_survives_handle_release`，验证 release
+  后拷贝仍可读，随后由调用方释放。
+
+### 0.36.98 — Phase E：document highlight 排除非代码区 + inlay 深入块容器
+
+本次在同一批 LSP 消费端继续收敛：
+
+1. **document highlight**
+   `compute_document_highlight` 的使用扫描此前与 `compute_references` 一致，
+   未排除注释/字符串；现复用 `non_code_byte_ranges`，注释/字符串中的同名
+   单词不再产生 Text 高亮。新增
+   `document_highlight_excludes_comments_strings` 回归。
+
+2. **inlay hints 递归**
+   `collect_hints_from_block` 原先只递归 If/While/For/IfLet/WhileLet/
+   IeeeFloat，`Block` / `Loop` / `Arena` / `Unsafe` / `Defer` /
+   `OnFailure` / `Parasteps` / `Pinned` 内的 let 类型提示与参数提示会
+   静默缺失。本次补齐这些块容器递归，并新增
+   `inlay_hints_recurses_into_block_wrappers` 回归（嵌套 block/loop 中的
+   let 均产生提示）。
+
+### 0.36.97 — Phase E：references 排除注释/字符串引用位（A6 消费端改进）
+
+`compute_references` 的使用扫描此前依赖整词字节扫描，但未套用
+`non_code_byte_ranges`，导致注释和字符串字面量中的同名文本也被当作引用
+位置返回。
+
+本次在 usage scan 中复用与 rename / code lens 相同的 SourceScanner 区域
+纪律：
+
+- 注释、字符串、块注释中的同名文本不再出现在 references 结果；
+- 定义位置跳过逻辑保持不变；
+- 新增 `references_exclude_comments_strings` 回归：只有真实调用行进入结果。
+
+### 0.36.96 — Phase E：code lens 引用计数迁移到 AST（A6 关键消费端闭合）
+
+A6 债务的 code lens 计数消费端此前仍是文本扫描（尽管已整词 + 排除非代码区）。
+本次新增 `lsp/symbols.rs::count_ast_references`，用 AST 递归遍历统计：
+
+- `Expr::Ident` / `Type::Name` / 构造器 / record 类型名 / turbofish 等；
+- 覆盖 func/type/trait/actor/impl/flow/protocol/session 等顶层结构；
+- 天然不含注释、字符串、文档文本。
+
+`compute_code_lens` 四个计数位置（func/type/trait/actor）均已切换到 AST，
+保留 `+1` 维持历史“定义 + 引用”显示口径。旧的文本计数函数降为
+`#[cfg(test)]` 仅作 SourceScanner 路径单测。
+
+新增 `code_lens_ast_reference_count_excludes_comments_strings`，同时验证：
+- 注释/字符串中的同名文本不计入；
+- 函数体调用计入；
+- 类型注解与构造器中的类型名计入。
+
+### 0.36.95 — Phase E：补强 LSP 引用计数回归（字符串/块注释排除）
+
+扩展 `audit2_tool_count_text_references_whole_word`：
+
+- 行注释中的 `foo` 不计入；
+- 字符串字面量中的 `foo` 不计入；
+- 块注释中的 `foo` 不计入；
+- 整词边界与一行多出现仍保持。
+
+该回归钉死 0.36.89 的 `non_code_byte_ranges` 排除契约。
+
+### 0.36.94 — Phase E：闭合 unification 逃逸口边界 TODO（v0.31-type-engine）
+
+`core/unification.rs` 保留 `TODO(#v0.31-type-engine)`，提议把 `_` / `Any`
+逃逸口的统一限制到顶层推断边界，并增加 E0431 边界泄漏检查。
+
+审计后按设计闭合该 TODO：
+
+- `_` 只会由 parser 在 let-init 位置产生；
+- `Any` 已从用户语法移除（golden §2.4），只服务内部 artifact 路径；
+- 未复现用户可见的逃逸穿过函数调用/字段访问边界；
+- E0431 仍保留作为未来发现边界泄漏时的错误码。
+
+本次把 TODO 改为设计说明，不做未验证的新限制（避免假拒绝）。
+
+### 0.36.92 — Phase E：文档化 codegen list 元素 struct box 所有权/泄漏契约（§6-#68）
+
+台账 §6-#68 记录 `struct_to_i64` 对列表元素 struct box 使用
+`malloc_or_abort` 但不注册到 `heap_allocs`，存在长期存活泄漏。
+
+审计确认该泄漏是当前列表所有权模型的**有意折衷**：
+
+- 列表 data 缓冲区的所有权已有 scope-exit 回收和返回移交；
+- 元素级 struct box 不属于单一 scope，注册到 `heap_allocs` 会在返回
+  /in-place 修改列表时造成 use-after-free 或 double-free 风险；
+- 当前模型以进程终止回收为代价换取 codegen 正确性，与
+  `from_json` list 的注释一致。
+
+该条仍保持打开（Wave-3 列表所有权模型），但本次为两处 `struct_to_i64`
+补上明确的审计归属与折衷说明，避免未来误注册导致更严重内存错误。
+
+### 0.36.91 — Phase E：闭合 nested mutate place 写回 TODO（M3）
+
+`interp/bytecode/compiler.rs` 的 TODO(M3) 记录：nested field place（如
+`o.inner.value`）作为 mutate 实参时，单层 Field writeback 覆盖不到，会
+静默丢弃。旧注释还称 checker 未做 mutate-arg place 验证。
+
+核对当前代码后该条为**过时台账**：
+
+- Q5（0.34.25c）已让 checker 拒绝 nested mutate place（E0434）；
+- `flow_features::mutate_nested_place_rejected_q5` 回归覆盖；
+- 因此不存在可被接受的 nested place 进入后端并静默丢失的路径。
+
+本次把 TODO(M3) 注释改为闭合说明，并指出后端只实现被 checker 允许的
+单层 `Field(Ident, _)` 形状。
+
+### 0.36.90 — Phase E：删除 VM 未使用的 `field_index` 骨架 TODO
+
+`interp/bytecode/compiler.rs` 中 `field_index` 方法只有一个占位实现
+（`todo: resolve from CheckedProgram type definitions; return 0`），且全仓库
+没有任何调用点。该骨架是早期 bytecode 布局遗留，保留只会误导读者以为
+字段索引参与编译。
+
+本次删除该方法及 TODO。
+
+### 0.36.89 — Phase E：LSP 引用计数排除注释/字符串内容（A6 部分改进）
+
+继续收敛 `lsp/symbols.rs::count_text_references`：
+
+- 0.36.88 已改为整词扫描；
+- 本次复用 `non_code_byte_ranges`，让 code lens 的引用计数不再把注释和
+  字符串字面量里的同名文本当作代码引用；
+- 与 rename 使用同一套 SourceScanner 区域纪律，跨行注释/多行字符串也能正确跳过。
+
+新增/更新 `audit2_tool_count_text_references_whole_word` 断言：注释中的
+`foo` 不计入。
+
+### 0.36.88 — Phase E：LSP 引用计数改为整词扫描（A6 部分改进）
+
+`lsp/symbols.rs::count_text_references`（code lens 引用计数）原先用
+`line.contains(name)` 逐行子串匹配：
+
+- `foo` 会把 `foobar` 也算进去；
+- 一行内多次出现只算 1 次。
+
+本次改为复用 `find_word_occurrences` 的整词扫描：
+
+- 尊重标识符边界，`foo` 不再匹配 `foobar`；
+- 一行内多次出现分别计数；
+- 仍保留文本扫描的 A6 债务剩余（注释/字符串仍会被计数），已注释说明。
+
+新增 `audit2_tool_count_text_references_whole_word` 回归。
+
 ### 0.36.87 — Phase E：闭合 JSON parser 审计 TODO（已知语义分歧全部关闭）
 
 `runtime/mod.rs` 原保留 `TODO(#audit-wave2-json-parser-unify)`，指向手写

@@ -4902,6 +4902,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .build_ptr_to_int(raw_ptr, i64_ty, "str_to_i64");
                 }
                 // Non-string struct: heap-allocate, store, return pointer.
+                // §6-#68 (audit, still open): this allocation is deliberately
+                // not registered in `heap_allocs` because list element boxes
+                // are not single-scope-owned and the current list ownership
+                // model does not track element lifetimes. Registering them
+                // would risk freeing still-reachable elements or double-freeing
+                // on returned/mutated lists; the process-level reclaim at
+                // termination keeps codegen correct at the cost of a long-lived
+                // leak. See `call/method.rs` from_json list note.
                 let struct_ty = sv.get_type();
                 let size = self
                     .generator

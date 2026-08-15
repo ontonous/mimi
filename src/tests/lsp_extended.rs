@@ -1794,3 +1794,87 @@ fn lsp_rename_scope_aware_parameter() {
 }
 
 // ===================== End Regression Tests =====================
+
+#[test]
+fn code_lens_ast_reference_count_excludes_comments_strings() {
+    let server = LspServer::new();
+    let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 {\n    // helper\n    let s = \"helper\"\n    helper()\n    helper()\n}";
+    let lenses = server.compute_code_lens(text, "file:///test.mimi");
+    let titles: Vec<&str> = lenses
+        .iter()
+        .filter_map(|l| l["command"]["title"].as_str())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t == &"3 references"),
+        "helper should count definition + 2 AST calls (comments/strings excluded), got: {:?}",
+        titles
+    );
+    assert!(
+        titles.iter().any(|t| t == &"1 reference"),
+        "main should still count only its definition, got: {:?}",
+        titles
+    );
+    // A type reference should be found both in a type annotation and in a
+    // constructor expression, plus its definition.
+    let type_text = "type Point { x: i32 }\nfunc make() -> Point { Point { x: 1 } }";
+    let lenses = server.compute_code_lens(type_text, "file:///test.mimi");
+    let titles: Vec<&str> = lenses
+        .iter()
+        .filter_map(|l| l["command"]["title"].as_str())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t == &"3 references"),
+        "Point should have definition + annotation + constructor, got: {:?}",
+        titles
+    );
+}
+
+#[test]
+fn references_exclude_comments_strings() {
+    let server = LspServer::new();
+    let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() -> i32 {\n    // add\n    let s = \"add\"\n    add(1, 2)\n}";
+    let refs = server.compute_references(text, 0, 5, "file:///test.mimi", false);
+    let locations = refs
+        .iter()
+        .filter_map(|r| r["range"]["start"]["line"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        locations,
+        vec![4],
+        "only the real call site should be reported (comments/strings excluded): {:?}",
+        refs
+    );
+}
+
+#[test]
+fn document_highlight_excludes_comments_strings() {
+    let server = LspServer::new();
+    let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() -> i32 {\n    // add\n    let s = \"add\"\n    add(1, 2)\n}";
+    let highlights = server.compute_document_highlight(text, 0, 5);
+    let lines = highlights
+        .iter()
+        .filter_map(|h| h["range"]["start"]["line"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![0, 4],
+        "highlight should include the definition and the real call, excluding comments/strings: {:?}",
+        highlights
+    );
+}
+
+#[test]
+fn inlay_hints_recurses_into_block_wrappers() {
+    let server = LspServer::new();
+    let text = "func main() -> i32 {\n    {\n        let a = 42\n    }\n    loop {\n        let b = 7\n    }\n    0\n}\n";
+    let hints = server.compute_inlay_hints(text);
+    let lines = hints
+        .iter()
+        .filter_map(|h| h["position"]["line"].as_u64())
+        .collect::<Vec<_>>();
+    assert!(
+        lines.contains(&2) && lines.contains(&5),
+        "nested block/loop let hints should be produced: {:?}",
+        hints
+    );
+}

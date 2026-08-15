@@ -3589,13 +3589,11 @@ impl BytecodeCompiler {
                     // The field is passed by value, but the callee's final
                     // parameter value must be RecordSet back into the payload
                     // slot on return (previously silently dropped).
-                    // TODO(M3): only single-level Field(Ident, _) places get a
-                    // writeback. A nested place (`mutate self.a.b` / `o.inner.value`
-                    // → Field(Field(_))) matches neither the Ident arm above nor
-                    // this arm, so its mutation is SILENTLY DROPPED (both backends
-                    // agree — not an L1 break, but silent data loss). The checker
-                    // does no mutate-arg place validation. Tracked by
-                    // flow_features::mutate_nested_field_writeback_gap_m3 (#[ignore]).
+                    // M3 (closed 0.36.91): nested mutate places are rejected by
+                    // the checker (E0434, `mutate_nested_place_rejected_q5`) so
+                    // no backend writeback can be silently dropped. This arm
+                    // intentionally implements the only accepted shape,
+                    // single-level `Field(Ident, _)`.
                     if let Some(Expr::Field(obj, field)) =
                         effective_args.get(pi as usize).map(|a| a.unlocated())
                     {
@@ -5716,11 +5714,6 @@ impl BytecodeCompiler {
             }
             _ => false,
         }
-    }
-
-    fn field_index(&self, _field: &str) -> u16 {
-        // TODO: resolve from CheckedProgram type definitions.
-        0
     }
 
     /// Collect free variables from a block (variables used but not defined locally).

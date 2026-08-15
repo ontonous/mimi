@@ -45,7 +45,7 @@ impl CHeaderGenerator {
         writeln!(header, "MimiHandle mimi_shared_retain(MimiHandle handle);")?;
         writeln!(header, "/** Release a shared handle (decrement reference count). Removed from table at zero. */")?;
         writeln!(header, "void mimi_shared_release(MimiHandle handle);")?;
-        writeln!(header, "/** Get a raw pointer to the inner value. Pointer valid only while handle alive. Returns NULL if invalid. */")?;
+        writeln!(header, "/** Get a heap-allocated copy of the inner value. The caller owns the returned pointer and must free it with mimi_value_free. Returns NULL if the handle is invalid. */")?;
         writeln!(header, "void* mimi_shared_get_ptr(MimiHandle handle);")?;
         writeln!(
             header,
@@ -719,6 +719,10 @@ mod tests {
         assert!(header.contains("mimi_shared_release"));
         assert!(header.contains("mimi_shared_get_ptr"));
         assert!(header.contains("mimi_shared_create"));
+        assert!(
+            header.contains("heap-allocated copy"),
+            "mimi_shared_get_ptr header comment must not promise handle-lifetime validity"
+        );
 
         // Value API
         assert!(header.contains("mimi_value_free"));
