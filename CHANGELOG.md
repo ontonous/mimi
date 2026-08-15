@@ -7,7 +7,27 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.115 — Phase F：0.1.6 终测报告 + 文档重锚（quad-final）
+
+0.1.6 终测与文档重锚收口：
+
+- **全量门禁**：`cargo test --lib` 5473 passed / 0 failed / 6 ignored；
+  `cargo test --test real_world` + `--test real_world_cli` 31 + 1 passed；
+  6 项 ASAN/工具 ignored 复跑 6 passed；`cargo fmt --check` 0 diff；
+  `cargo clippy --all-targets -- -D warnings` 0 警告；语言文档门禁与
+  edge isolation 门禁全绿。
+- **dispatch 基线完整 report**：`scripts/dispatch_stat.py report` 跑完
+  128 个语料条目，120 成功 / 8 跳过（FFI 外部依赖 fixture +
+  interpreter-only `flow_test_macros`），无超时；聚合
+  total=5832 / eligible=4228 / legacy=1604 / fallback=0.275034294。
+- **文档重锚**：golden syntax-reference 与 language-support.toml 版本统一为
+  0.1.6-dev；spec §3.10 Session residual 已闭环表述替换旧 experimental；
+  README.md / README.zh.md / AGENTS 版本表同步 0.1.6-dev 终测状态。
+- **新增交付**：`devdocs/v0.36/quad-final-0.36.114.md`（终测报告）、
+  `devdocs/v0.36/known-boundaries-0.1.6.md`（Wave-3 / 0.2 / 1.x 已知边界固化）。
+
 ### 0.36.114 — Phase E：clippy 全 targets 零警告收口
+
 
 将 clippy 检查范围扩展到全部 targets 后，发现测试代码中 1 处
 `clippy::needless_borrow`：

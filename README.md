@@ -4,9 +4,9 @@
 
 **A Flow-first, Typestate-Oriented system programming language**
 
-[![Version](https://img.shields.io/badge/version-0.1.5--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.6--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4500%2B-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-5400%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -419,7 +419,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Status & Key References
 
-**Current**: 0.1.6-dev. 0.1.5 shipped (2026-08-13): performance mainline (trap-cost reduction + VM perf R1/R3/R4/R5) + external-review closeout (4C+13H+10M) + DX quality secondary line — see `devdocs/v0.35/README.md`. 0.1.6 (0.36.x) pivots to **core deep closure** — see `devdocs/v0.36/README.md`. As of 0.36.54, the four pillar track records — failure attribution, state semantics, linear system, and syntax redesign — have all reached **定案 + 挣绿**; Phase E/F reinforcement and re-freeze remain next.
+**Current**: 0.1.6-dev. 0.1.5 shipped (2026-08-13): performance mainline (trap-cost reduction + VM perf R1/R3/R4/R5) + external-review closeout (4C+13H+10M) + DX quality secondary line — see `devdocs/v0.35/README.md`. 0.1.6 (0.36.x) pivots to **core deep closure** — see `devdocs/v0.36/README.md`. As of 0.36.114, the four pillar track records — failure attribution, state semantics, linear system, and syntax redesign — have all reached **定案 + 挣绿**; Phase E reinforcement and Phase F final review are complete, with the 0.1.6 quad-final evidence in `devdocs/v0.36/quad-final-0.36.114.md` and known/deferred boundaries in `devdocs/v0.36/known-boundaries-0.1.6.md`.
 
 ### Key References
 
@@ -427,6 +427,8 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 |----------|------|
 | [`devdocs/v0.35/README.md`](devdocs/v0.35/README.md) | 0.1.5 roadmap: performance mainline + DX quality secondary (authoritative for 0.1.5) |
 | [`devdocs/v0.36/README.md`](devdocs/v0.36/README.md) | 0.1.6 roadmap: core deep closure, pillar-by-pillar "redesign → anchor → earn green" |
+| [`devdocs/v0.36/quad-final-0.36.114.md`](devdocs/v0.36/quad-final-0.36.114.md) | 0.1.6 quad-final report: full gates + dispatch baseline + doc re-anchor |
+| [`devdocs/v0.36/known-boundaries-0.1.6.md`](devdocs/v0.36/known-boundaries-0.1.6.md) | 0.1.6 known/deferred boundaries (Wave-3 / 0.2 / 1.x) |
 | [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 golden document: semantic rulings + sprint plan (authoritative for 0.1.4) |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | Authoritative roadmap (31 requirements, exit conditions) |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | Architecture Amendment: 13 clauses + 10 invariants (supersedes white paper) |
@@ -445,7 +447,7 @@ Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurre
 | Version | Highlight |
 |---------|-----------|
 | **0.1.5** | **Shipped (2026-08-13)**. Performance mainline: trap-cost reduction (SD-9 chain-end convergence + cold weights, dsp O1 3.97×→1.04× at C -O2 parity), resolved dispatch coverage extension (fallback 0.3027→0.2735), VM perf R1/R3/R4/R5 (RUN dsp 8.9s→4.7s), external-review closeout (4C+13H+10M), zombie-keyword removal (80→67), dual-backend unification U1/U2/U3/U5, perf gate in CI. Quality secondary: resolve→zonk migration (31 sites), parser panic audit, LSP Span/Origin migration, trivia-ization of `desc:`/`rule:`/`mms{}`, actor runs_flow three-layer integration, flow_order fails-transition SIGSEGV fix, error message CO-H2 precise span. Known out-of-scope (native dsp ≤1.15×, RUN dsp ≤1s) registered 0.2/1.x. See `devdocs/v0.35/README.md`. |
-| **0.1.6-dev** | **Current**. Core deep closure (Deep over Broad): pillar-by-pillar "redesign → anchor → earn green" — failure attribution (Fault nominalization), state semantics (Actor mut), abstraction (Protocol/Session), linear system (generics×linear + Session lowering), syntax redesign. Edge capabilities decoupled. As of 0.36.54 the four core pillars/syntax redesign have reached **定案 + 挣绿**; Phase E/F remain for reinforcement and re-freeze. See `devdocs/v0.36/README.md`. |
+| **0.1.6-dev** | **Current**. Core deep closure (Deep over Broad): pillar-by-pillar "redesign → anchor → earn green" — failure attribution (Fault nominalization), state semantics (Actor mut), abstraction (Protocol/Session), linear system (generics×linear + Session lowering), syntax redesign. Edge capabilities decoupled. As of 0.36.114 the four core pillars/syntax redesign have reached **定案 + 挣绿**; Phase E/F reinforcement and final re-verification are complete. See `devdocs/v0.36/README.md`, `devdocs/v0.36/quad-final-0.36.114.md`, and `devdocs/v0.36/known-boundaries-0.1.6.md`. |
 | **0.1.4** | **Shipped (2026-08-08)**. Syntax freeze + semantic rulings + language self-consistency (golden document): become/stay removal (ADR-001, sole terminal `return State {}`), multi-target stable tagged-union ABI (ADR-002), `'a` removal (ADR-004), `do` wrapper removal (keywords 81→80), and/or/not soft keywords, if-let/for-destructuring, `ieee_float {}`, single-direction numeric coercion, View/Mutate closure. Doc-sync campaign closed the four verdicts across spec/pre-0.1/support/syntax-reference; trivia-ization of `desc:`/`rule:`/`mms{}` registered for 0.1.5. Phase G (architecture freeze): ADR-005~008, dispatch gate (fallback 0.3027, eligible 3783), contracts + stdlib module bodies on resolved slice, view/mutate borrow ABI, verifier engine isolation (E0439), ABI layout freeze (native-abi-1 §7/§8), pre-0.1 rename, 0.minor=major strategy, O1 default optimization. RC gates green (5287 lib). |
 | **0.1.3** | Bytecode VM becomes the sole interpreter: tree-walker (24,976 LOC) + ResolvedInterpreter (4,375 lines) deleted, `--legacy` removed, FFI/Actor/quote fully on bytecode. |
 | **0.1.2** | Codegen full migration: `raw_ast()` privatized (3 permanent consumers), gap filling, performance baseline. |

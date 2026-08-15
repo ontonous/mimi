@@ -4,9 +4,9 @@
 
 **Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.5--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.6--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4500%2B-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-5400%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -419,7 +419,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## 状态与关键文档
 
-**当前版本**：0.1.5-dev。0.1.4 已发布（语法冻结 + 语义裁决 + Phase G 架构冻结 + O1 默认优化）。0.1.5 主线为性能优化（trap 成本消减），质量次线见 `devdocs/v0.35/README.md`。下一站：0.1.6（0.36.x）转入**核心深度闭环**——见 `devdocs/v0.36/README.md`。
+**当前版本**：0.1.6-dev。0.1.5 已发布（2026-08-13）：性能主线（trap 成本消减 + VM perf R1/R3/R4/R5）+ 外审收口（4C+13H+10M）+ DX 质量次线，详见 `devdocs/v0.35/README.md`。0.1.6（0.36.x）为**核心深度闭环**——见 `devdocs/v0.36/README.md`。截至 0.36.114，失败归属、状态语义、线性系统、语法重设计四支柱均已“定案 + 挣绿”；Phase E 加固与 Phase F 复核已完成，0.1.6 终测见 `devdocs/v0.36/quad-final-0.36.114.md`，已知边界/延后见 `devdocs/v0.36/known-boundaries-0.1.6.md`。
 
 ### 关键文档
 
@@ -427,6 +427,8 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 |------|------|
 | [`devdocs/v0.35/README.md`](devdocs/v0.35/README.md) | 0.1.5 路线图：性能主线 + DX 质量次线（0.1.5 权威） |
 | [`devdocs/v0.36/README.md`](devdocs/v0.36/README.md) | 0.1.6 路线图：核心深度闭环，逐支柱"重设计 → 锚定 → 挣绿" |
+| [`devdocs/v0.36/quad-final-0.36.114.md`](devdocs/v0.36/quad-final-0.36.114.md) | 0.1.6 终测报告：全量门禁 + dispatch 基线 + 文档重锚 |
+| [`devdocs/v0.36/known-boundaries-0.1.6.md`](devdocs/v0.36/known-boundaries-0.1.6.md) | 0.1.6 已知边界/已知延后（Wave-3 / 0.2 / 1.x 固化） |
 | [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 黄金文档：语义裁决 + sprint 规划（0.1.4 权威） |
 | [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | 权威路线图（31 项 requirement，退出条件） |
 | [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | 架构修正案：13 条款 + 10 不变量（优先于白皮书） |
@@ -444,8 +446,8 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 里程碑 |
 |------|--------|
-| **0.1.5-dev** | **当前**。性能主线：trap 成本消减（O1 默认基线）、resolved 覆盖扩展（strings/collections 模块体、合约守卫发射）、O1 正确性切片。质量次线：resolve→zonk 迁移（31 处）、parser panic 审计、LSP Span/Origin 迁移、`desc:`/`rule:`/`mms{}` trivia 化、actor runs_flow 三层集成、flow_order fails transition SIGSEGV 修复。详见 `devdocs/v0.35/README.md`。 |
-| **0.1.6** | **规划中**。核心深度闭环（Deep over Broad）：逐支柱"重设计 → 锚定 → 挣绿"——失败归属（Fault nominal 化）、状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session lowering）、语法重设计。边缘能力解耦隔离。0.36.x 可拉 100+ sprints。详见 `devdocs/v0.36/README.md`。 |
+| **0.1.5** | **已发布（2026-08-13）**。性能主线：trap 成本消减（SD-9 链式末端收敛 + cold 权重，dsp O1 3.97×→1.04×）、resolved 覆盖扩展（fallback 0.3027→0.2735）、VM perf R1/R3/R4/R5、外审收口（4C+13H+10M）、僵尸关键字裁撤（80→67）、双后端统一 U1/U2/U3/U5、性能门禁。质量次线：resolve→zonk 迁移（31 处）、parser panic 审计、LSP Span/Origin 迁移、`desc:`/`rule:`/`mms{}` trivia 化、actor runs_flow 三层集成、flow_order fails transition SIGSEGV 修复、错误消息 CO-H2 精确 span。详见 `devdocs/v0.35/README.md`。 |
+| **0.1.6-dev** | **当前**。核心深度闭环（Deep over Broad）：逐支柱"重设计 → 锚定 → 挣绿"——失败归属（Fault nominal 化）、状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session lowering）、语法重设计。边缘能力解耦隔离。截至 0.36.114，四支柱均已“定案 + 挣绿”，终测报告与已知边界清单已落 `devdocs/v0.36/`。详见 `devdocs/v0.36/README.md`。 |
 | **0.1.4** | **已发布（2026-08-08）**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。Phase G（架构冻结）：ADR-005~008、dispatch 门禁（fallback 0.3027，eligible 3783）、contracts + stdlib 模块函数体进 resolved slice、view/mutate 借用 ABI、verifier 引擎隔离（E0439）、ABI 布局冻结（native-abi-1 §7/§8）、pre-0.1 更名、0.minor=大版本战略、O1 默认优化。RC 门禁全绿（5287 lib）。 |
 | **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
 | **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |

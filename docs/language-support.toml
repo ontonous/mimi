@@ -1,7 +1,7 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "0.1.5-dev (internal sprint 0.35.X)"
+implementation_version = "0.1.6-dev (internal sprint 0.36.X)"
 
 # ⚠ 2026-08-02：本文件由 0.31.36 落后状态在 0.34.5 刷新版本号。
 # 与实现冲突时以 devdocs/v0.34/golden-document.md 与
@@ -135,7 +135,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test session_ -- --test-threads=1"
-evidence = "0.34 §4.1 分层标注：checker 线性诊断 [stable]（E0425 scope-exit residual / E0426 use-after-alias / E0304 double-close / E0427 protocol-conformance×linearity，endpoint 作参数消费 residual，分支 partial-consume 拒绝，typed residual 追踪）；codegen residual lowering [experimental]（native 后端未完全 lower session residual，checker 线性为权威）；高级 Session [experimental]（recursive/dynamic participants/delegation/multiparty/cross-version residual upgrade）。不因 codegen residual 未闭合而整体降级。0.31.12: typed session residual — E0425 scope exit check (non-end residual rejected), E0426 use-after-alias (let b = a consumes a), alias residual transfer, branch merge consistency. 0.31.13: session endpoint as function arg consumes residual, double-close (E0304), branch partial consume (E0425). 0.31.14 追加 A: protocol conformance × linearity (payload downgrade E0427). Remaining: codegen residual lowering, cross-turn exactly-once, Fault path resource cleanup."
+evidence = "0.34 §4.1 分层标注：checker 线性诊断 [stable]（E0425 scope-exit residual / E0426 use-after-alias / E0304 double-close / E0427 protocol-conformance×linearity，endpoint 作参数消费 residual，分支 partial-consume 拒绝，typed residual 追踪）；codegen residual lowering 已闭环（0.36.19 分支/循环残差、0.36.38 typed 双端、0.36.41 match 臂残差复位；resolved/legacy/native 三 harness 双后端等价）；保留：cross-turn exactly-once、Fault 路径 resource cleanup、高级 Session [experimental]（recursive/dynamic participants/delegation/multiparty/cross-version residual upgrade）。0.31.12: typed session residual — E0425 scope exit check (non-end residual rejected), E0426 use-after-alias (let b = a consumes a), alias residual transfer, branch merge consistency. 0.31.13: session endpoint as function arg consumes residual, double-close (E0304), branch partial consume (E0425). 0.31.14 追加 A: protocol conformance × linearity (payload downgrade E0427). Remaining: cross-turn exactly-once, Fault path resource cleanup, advanced Session."
 
 [[support]]
 requirement = "RESOURCE-LINEAR-001"
