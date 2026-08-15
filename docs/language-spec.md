@@ -507,11 +507,10 @@ Any Session program that cannot prove residual completeness must be rejected.
 
 **`[experimental]` — not yet closed:**
 
-- codegen residual lowering (the native backend does not yet fully lower session residuals; the checker linearity above is authoritative);
 - cross-turn exactly-once and Fault-path resource cleanup;
 - recursive protocols, dynamic participants, delegation, multiparty Session, and cross-version residual upgrade.
 
-Minimum dual-end linear Session is a 1.0 core goal; any unclosed item blocks RC. The stable checker linearity is not downgraded by the experimental codegen residual lowering — the two layers are tracked separately (0.34 §4.1 ruling).
+Minimum dual-end linear Session is a 1.0 core goal; any unclosed item blocks RC. Codegen residual lowering is now covered by dual-backend regression for roundtrip, branch-merge, loop, typed-pair, and match-arm residual forms (0.36.19 / 0.36.38 / 0.36.41); the remaining experimental items are listed above.
 
 ### 3.11 Resources and State `[stable]`
 
