@@ -1,11 +1,15 @@
 # Changelog
 
-## [Unreleased] — 0.1.6-dev
+## [0.1.6] — 2026-08-16
 
-> 0.1.6 开发进行中：核心深度闭环（Deep over Broad）——失败归属（Fault nominal）、
-> 状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session
-> lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
-> `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
+> **核心深度闭环（Deep over Broad）——逐支柱"重设计 → 锚定 → 挣绿"已发布**。
+> 0.1.6 里程碑：失败归属（Fault nominal）、状态语义（Actor mut）、抽象
+> （Protocol/Session）、线性系统（泛型×线性 + Session lowering）、语法重设计
+> （Phase D 定案）；四支柱均"定案 + 挣绿"，Phase E 加固与 Phase F 终测/文档重锚
+> 完成。全量门禁：5474 lib + 31+1 real_world/cli 全绿、clippy --all-targets 零警告、
+> fmt 0 diff、dispatch 基线 120 成功 / 8 跳过；终测报告
+> `devdocs/v0.36/quad-final-0.36.114.md`，已知边界
+> `devdocs/v0.36/known-boundaries-0.1.6.md`。
 
 ### 0.36.115 — Phase F：0.1.6 终测报告 + 文档重锚（quad-final）
 
