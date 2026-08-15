@@ -419,7 +419,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## 状态与关键文档
 
-**当前版本**：0.1.6-dev。0.1.5 已发布（2026-08-13）：性能主线（trap 成本消减 + VM perf R1/R3/R4/R5）+ 外审收口（4C+13H+10M）+ DX 质量次线，详见 `devdocs/v0.35/README.md`。0.1.6（0.36.x）为**核心深度闭环**——见 `devdocs/v0.36/README.md`。截至 0.36.114，失败归属、状态语义、线性系统、语法重设计四支柱均已“定案 + 挣绿”；Phase E 加固与 Phase F 复核已完成，0.1.6 终测见 `devdocs/v0.36/quad-final-0.36.114.md`，已知边界/延后见 `devdocs/v0.36/known-boundaries-0.1.6.md`。
+**当前版本**：0.1.6。0.1.6 已发布（2026-08-16）：核心深度闭环，失败归属、状态语义、抽象、线性系统、语法重设计四支柱均已“定案 + 挣绿”；详见 `devdocs/v0.36/README.md`、`devdocs/v0.36/quad-final-0.36.114.md` 与 `devdocs/v0.36/known-boundaries-0.1.6.md`。0.1.7（0.37.x）转入**深度可用性与高压可靠性 + Wave-3 结构性战役**——见 `devdocs/v0.37/README.md`。
 
 ### 关键文档
 
@@ -447,7 +447,8 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 | 版本 | 里程碑 |
 |------|--------|
 | **0.1.5** | **已发布（2026-08-13）**。性能主线：trap 成本消减（SD-9 链式末端收敛 + cold 权重，dsp O1 3.97×→1.04×）、resolved 覆盖扩展（fallback 0.3027→0.2735）、VM perf R1/R3/R4/R5、外审收口（4C+13H+10M）、僵尸关键字裁撤（80→67）、双后端统一 U1/U2/U3/U5、性能门禁。质量次线：resolve→zonk 迁移（31 处）、parser panic 审计、LSP Span/Origin 迁移、`desc:`/`rule:`/`mms{}` trivia 化、actor runs_flow 三层集成、flow_order fails transition SIGSEGV 修复、错误消息 CO-H2 精确 span。详见 `devdocs/v0.35/README.md`。 |
-| **0.1.6-dev** | **当前**。核心深度闭环（Deep over Broad）：逐支柱"重设计 → 锚定 → 挣绿"——失败归属（Fault nominal 化）、状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session lowering）、语法重设计。边缘能力解耦隔离。截至 0.36.114，四支柱均已“定案 + 挣绿”，终测报告与已知边界清单已落 `devdocs/v0.36/`。详见 `devdocs/v0.36/README.md`。 |
+| **0.1.6** | **已发布（2026-08-16）**。核心深度闭环（Deep over Broad）：逐支柱"重设计 → 锚定 → 挣绿"——失败归属（Fault nominal 化）、状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session lowering）、语法重设计。边缘能力解耦隔离。截至 0.36.114，四支柱均已“定案 + 挣绿”，终测报告与已知边界清单已落 `devdocs/v0.36/`。详见 `devdocs/v0.36/README.md`。 |
+| **0.1.7** | **规划中**。深度可用性与高压可靠性 + Wave-3 结构性战役：核心特性深度可用与高压承载、编译器后端统一、真实结构化并发运行时、堆内存即时确定性释放。详见 `devdocs/v0.37/README.md`。 |
 | **0.1.4** | **已发布（2026-08-08）**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。Phase G（架构冻结）：ADR-005~008、dispatch 门禁（fallback 0.3027，eligible 3783）、contracts + stdlib 模块函数体进 resolved slice、view/mutate 借用 ABI、verifier 引擎隔离（E0439）、ABI 布局冻结（native-abi-1 §7/§8）、pre-0.1 更名、0.minor=大版本战略、O1 默认优化。RC 门禁全绿（5287 lib）。 |
 | **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
 | **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |
