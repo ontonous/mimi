@@ -4,6 +4,11 @@
 // Every test runs the SAME Mimi source through both the
 // interpreter (mimi run) and the LLVM codegen (mimi build),
 // then asserts the outputs are identical.
+//
+// Three-engine equivalence matrix (legacy/resolved/VM by feature) is a
+// Wave-3 infrastructure goal (closed for 0.1.6 by design): the shipped
+// 0.1.6 evidence base is this dual-backend differential suite plus the
+// bytecode equivalence smoke tests.
 // ============================================================
 
 use super::*;

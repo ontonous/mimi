@@ -2,6 +2,11 @@
 //! Findings: devdocs/full-audit-2026-08-05.md (2026-08-05 full audit).
 //! Discipline: each fix must carry a regression test here; L1 divergences
 //! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via compile_and_run).
+//!
+//! §9-#10 (closed 0.36.111 by adjudication): i32 literal fold wrap-vs-trap is
+//! deferred to the width-model A1 family (§16 V-6 ruling). The exact-value
+//! tests below keep dual-backend parity without forcing either folding
+//! semantics.
 use super::*;
 
 /// Local harness: run bytecode with stdout capture, returning the Result too

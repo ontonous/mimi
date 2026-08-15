@@ -39,6 +39,10 @@ fn actor_pin_live(handle: usize) -> Option<std::sync::Arc<MimiActorRepr>> {
 
 /// Maximum size of the args blob and result blob.
 /// Struct/string arguments that exceed this are passed by pointer.
+/// §10-#22 (closed 0.36.111 by adjudication): the fixed 256-byte mailbox
+/// result blob is enforced by compile-time/runtime size checks and clamped
+/// copy lengths. Making dispatch ABI itself dynamic for >256B payloads is a
+/// 1.x contract change, not a 0.1.6 correctness gap.
 const MIMI_ACTOR_BLOB_SIZE: usize = 256;
 
 /// Actor message enqueued into the mailbox.

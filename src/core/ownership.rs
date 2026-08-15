@@ -45,6 +45,12 @@ impl Place {
     }
 
     pub fn conflicts_with(&self, other: &Self) -> bool {
+        // G-5 residual (closed 0.36.107 by design): deref projections are
+        // treated as overlapping with every other place. We cannot yet walk
+        // through the pointee's shape to distinguish `*p.a` from `*p.b`;
+        // conservatively reporting overlap keeps E0415 fail-closed at the
+        // cost of a possible false positive, which is safer than a missed
+        // aliased borrow.
         if self.projections.contains(&PlaceProjection::Deref)
             || other.projections.contains(&PlaceProjection::Deref)
         {

@@ -1570,8 +1570,9 @@ pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
 /// the caller must hold the weak reference being upgraded for the duration
 /// of the call. The two-phase CAS below (weak increment first, then strong
 /// CAS) is ABA-safe ONLY for a live allocation; a dangling call RMWs freed
-/// memory before any count check can reject it. Standard Arc-class boundary;
-/// no cheaper hardening exists without a handle registry on the hot path.
+/// memory before any count check can reject it. §10-#26 (closed 0.36.109 by
+/// design): standard Arc-class boundary; no cheaper hardening exists without
+/// a handle registry on the hot path.
 #[no_mangle]
 pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
     if ptr.is_null() {

@@ -442,7 +442,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Always pack using the (possibly inflated) struct's own type —
                 // inflate already rewrote Err to the full Result layout.
-                // §6-#68 (audit, still open): see the twin site in
+                // §6-#68 (closed 0.36.105 by design): see the twin site in
                 // `resolved/mod.rs` — this box is intentionally not registered
                 // for scope-exit freeing because list element ownership is not
                 // modelled; long-lived lists leak by documented design until

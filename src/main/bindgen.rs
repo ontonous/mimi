@@ -2,6 +2,12 @@
 //!
 //! Takes a `.mimi` file with `extern "C"` declarations and generates
 //! binding code for C, C++, Rust, Go, Node.js, Python, and Java.
+//!
+//! §12-#57 (closed 0.36.102 by design): the generator consumes
+//! `checked_component_input` + shared `resolved_extern_funcs` /
+//! `resolved_type_defs` rather than reading raw AST per backend. Full
+//! `ComponentIr` adoption remains a Wave-3 architecture goal; for 0.1.6 this
+//! is already fail-loud at the component boundary and not a correctness blocker.
 
 use std::fs;
 use std::path::Path;
