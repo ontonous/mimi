@@ -21,9 +21,9 @@
 
 | 门禁 | 命令 | 结果 | 耗时 |
 |------|------|------|------|
-| lib 全量 | `LLVM_SYS_181_PREFIX=… cargo test --lib -- --test-threads=4` | **5473 passed / 0 failed / 6 ignored** | 118.61s |
-| real_world 集成 | `cargo test --test real_world -- --test-threads=4` | **31 passed / 0 failed** | 58.67s |
-| real_world CLI 全语料 | `cargo test --test real_world_cli -- --test-threads=4` | **1 passed / 0 failed** | 120.96s |
+| lib 全量 | `LLVM_SYS_181_PREFIX=… cargo test --lib -- --test-threads=4` | **5474 passed / 0 failed / 6 ignored** | 115.20s |
+| real_world 集成 | `cargo test --test real_world -- --test-threads=4` | **31 passed / 0 failed** | 54.85s |
+| real_world CLI 全语料 | `cargo test --test real_world_cli -- --test-threads=4` | **1 passed / 0 failed** | 117.29s |
 | ASAN/工具 6 项 ignored | `cargo test --lib -- --ignored --test-threads=4` | **6 passed / 0 failed** | 0.15s |
 | fmt | `cargo fmt --check` | ✅ 0 diff | — |
 | clippy | `cargo clippy --all-targets -- -D warnings` | ✅ 0 warnings | 22.88s（增量复跑 0.06s） |
@@ -45,9 +45,10 @@
   - interpreter-only fixture（`tests/real_world/flow_test_macros.mimi`）
 - 聚合：`total_functions=5832`，`eligible=4228`，`legacy_fallback=1604`，
   `fallback_rate=0.27503429355281206`
-- 对 0.2 legacy 退役的起点基线：本报告 JSON 已落 `/tmp/dispatch_report.json`
-  （若需入仓，可执行 `scripts/dispatch_stat.py generate` 更新
-  `devdocs/v0.34/golden/dispatch-baseline.json`）
+- 对 0.2 legacy 退役的起点基线：本报告 JSON 快照已随仓库保存为
+  `devdocs/v0.36/dispatch-report-0.36.114.json`；如需更新正式基线，
+  可执行 `scripts/dispatch_stat.py generate` 刷新
+  `devdocs/v0.34/golden/dispatch-baseline.json`
 
 > 说明：本报告为 `report` 模式（不做回退率对比）。跳过集均为非生产语料或
 > interpreter-only 契约，不是 resolved/legacy 静默回退。
@@ -71,6 +72,9 @@
   `SESSION-LINEAR-001` 证据更新为已闭环的 triple-harness Session residual 矩阵。
 - **README 系列**：README.md / README.zh.md 的版本徽标、状态段落、版本历史表
   同步为 0.1.6-dev，并指向本报告与 known-boundaries。
+- **production 路径证据**：新增 `dual_production_checked_path_smoke`，对
+  `compile_checked` 生产路径与 VM、E2E native 三方对拍；fully tracked 于
+  `src/tests/dual_backend.rs`。
 - **AGENTS 版本表**：0.1.6 行更新为“Phase A–D 已定案 + 挣绿；Phase E/F 终测
   与文档重锚完成”。
 
