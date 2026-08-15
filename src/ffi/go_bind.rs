@@ -2,6 +2,11 @@
 //!
 //! Generates a `.go` file with `import "C"` and CGO directives.
 //!
+//! Go callback ABI user-data root (closed 0.36.106 by design): the current
+//! per-slot mutex snapshot is the accepted 0.1.6 mitigation; replacing global
+//! callback slots with an ABI that carries user-data through the C function
+//! pointer is a Wave-3 root solution and not a 0.1.6 blocker.
+//!
 //! Usage:
 //!   mimi emit-go-bindings path/to/pkg.mimi -o bindings.go
 //!

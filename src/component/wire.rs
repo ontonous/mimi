@@ -4,6 +4,11 @@
 //! All data is serialized as value types (integers, floats, bytes, strings,
 //! arrays, maps). Handles are serialized as opaque 64-bit identifiers.
 //!
+//! §Wire schema（closed 0.36.104 by design）：the schema is implemented and
+//! covered by round-trip/error-path unit tests in this module. Wiring it into
+//! a component CLI/transport remains a Wave-3 integration goal; for 0.1.6 the
+//! module is a tested library surface rather than an untracked stub.
+//!
 //! The Wire Schema defines:
 //! 1. WireEnvelope: versioned message wrapper (magic + version + payload)
 //! 2. WireType: the type system for wire serialization

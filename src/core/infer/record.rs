@@ -20,7 +20,9 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> T
              possible self-referencing type parameter",
             MAX_SUBST_DEPTH
         );
-        return ty.clone();
+        // §2-#17 (closed 0.36.110): keep symmetry with access.rs — return the
+        // poison type rather than silently falling back to `ty.clone()`.
+        return Type::TyErr;
     }
     let next = depth + 1;
     match ty {
@@ -370,5 +372,36 @@ impl<'a> Checker<'a> {
             }
         }
         Type::Name("Set".into(), vec![elem_ty])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "exceeded max depth")]
+    fn record_substitution_depth_limit_fails_loud_in_debug() {
+        let mut ty: Type = Type::Name("i32".into(), vec![]);
+        for _ in 0..40 {
+            ty = Type::Option(Box::new(ty));
+        }
+        let _ = substitute_type_params(&ty, &HashMap::new());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn record_substitution_depth_limit_poisons_instead_of_silent_clone() {
+        let mut ty: Type = Type::Name("i32".into(), vec![]);
+        for _ in 0..40 {
+            ty = Type::Option(Box::new(ty));
+        }
+        let result = substitute_type_params(&ty, &HashMap::new());
+        assert!(
+            matches!(result, Type::TyErr),
+            "depth limit must poison, got: {:?}",
+            result
+        );
     }
 }

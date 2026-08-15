@@ -7,6 +7,175 @@
 > lowering）、语法重设计，逐支柱"重设计 → 锚定 → 挣绿"。路线见
 > `devdocs/v0.36/README.md`，哲学锚见 `devdocs/v0.36/philosophy-anchor.md`。
 
+### 0.36.112 — Phase E：0.1.6 全面查缺补漏/代码审查收尾
+
+本轮完成全量验证与台账收口：
+
+- 全量 `cargo test --lib`：**5473 passed / 0 failed / 6 ignored**；
+- `--ignored` 的 6 项 ASAN 回归单独运行也全部通过；
+- `cargo fmt --check`、`check_language_docs.py`、`check_edge_isolation.py`
+  全绿；
+- 工作树干净。
+
+审计台账中已修/已按设计闭合/已按裁决延后项均已落到代码注释与 CHANGELOG；
+0.1.6 不再有未记录的活缺口。Wave-3 结构项继续作为后续路线保留。
+
+### 0.36.111 — Phase E：按裁决收尾宽度模型与 actor dispatch ABI 台账（§9-#10、§10-#22）
+
+两项均已有明确裁决，本次补齐台账闭合标注：
+
+- §9-#10（i32 字面量折叠 wrap-vs-trap）：按 §16 V-6 裁决归入宽度模型 A1
+  族，测试改为 exact-value 家族保持双后端一致性；
+- §10-#22（actor dispatch 固定 256B）：编译期/运行期 size check + N-4
+  钳制已诚实拒绝超限；>256B 动态化是 dispatch ABI 契约变更，按冻结纪律
+  延至 1.x。
+
+`audit_fix_vm.rs` 补 §9-#10 闭合说明；`runtime/actor.rs` 补 §10-#22
+闭合说明。
+
+### 0.36.110 — Phase E：闭合 access/record 替换深度上限静默回退（§2-#17）
+
+§2-#17 后半项：access 侧 `substitute_type_params` 超过 `MAX_SUBST_DEPTH`
+后静默返回 `ty.clone()`，release 下可能弱化类型推断而不报错。
+
+本次将 access 与 record 两处统一改为返回 `Type::TyErr`（poison）：
+
+- debug 构建仍由 `mimi_debug_assert!` 立即 ICE，提供可定位的编译器缺陷信号；
+- release 构建不再静默弱化，`TyErr` 会沿类型流传播为显式类型错误；
+- 新增两个回归：debug 断言 panic；release 断言返回 `TyErr`。
+
+### 0.36.109 — Phase E：按设计闭合 future/RC Arc 固有边界台账（§10-#23/#26）
+
+§10-#23/#26 记录 weak-retain 无法防御完全释放的悬垂调用，以及 RC 竞态依赖
+调用方纪律。当前实现已有：
+
+- future `mimi_future_free` 先 retain 拒绝再写 header，彻底移除 UAF write；
+- RC weak_retain/upgrade 采用 CAS + Acquire/Release 两阶段，对存活对象
+  ABA-safe；
+- release 下溢/悬垂调用仍只能通过“调用方必须持有引用”这一 Arc-class
+  前置约定拒绝；裸指针热路径没有 handle registry，任何更低成本的
+  `Weak<T>` 兼容实现都必须保留相同读取即触达的原则。
+
+该条按设计闭合到 Arc 固有边界，不视为 0.1.6 可消除缺陷。`future.rs` 与
+`runtime/mod.rs` 补审计闭合标注。
+
+### 0.36.108 — Phase E：按证据闭合 shadow_mte“死模块/零尺寸 UB”台账（§10-shadow_mte）
+
+台账登记 `shadow_mte.rs` 为死模块且 size-0 layout alloc 可能 UB。核对
+当前实现后该登记已过时：
+
+- 模块不是死代码：interp/codegen builtins 均注册 `shadow_alloc` /
+  `shadow_tag` / `shadow_check` / `shadow_free`；
+- `tests/real_world/flow_shadow_memory.mimi` 与 `flow_features` 均有
+  双后端/解释器回归；
+- size=0 分配不 deref，`Layout::from_size_align` 与同 layout `dealloc`
+  合法；
+- 新增 `shadow_alloc_zero_size_is_safe` 回归，覆盖 alloc/tag/check/free
+  全路径。
+
+因此该条按证据闭合，更新模块头部状态说明。
+
+### 0.36.107 — Phase E：按设计闭合 G-5 残留（Deref place 冲突近似）
+
+台账 G-5 后半项为 `Place::conflicts_with` 对 Deref place 无视 base 一律
+返回 true，可能产生 E0415 误报。该行为是有意的保守近似：
+
+- 当前无法从 place 形状可靠判断 `*p.a` 与 `*p.b` 是否指向同一对象；
+- 一律重叠是 fail-closed 方向：宁可误报，也不漏掉潜在的 aliased borrow；
+- 发散函数前半项已由既有修复闭合。
+
+该条按设计闭合，`core/ownership.rs` 补注释。
+
+### 0.36.106 — Phase E：按设计闭合 Go 回调 ABI user-data 根本解台账（Wave-3）
+
+台账登记“Go 回调 ABI user-data 根本解”为 Wave-3 项。当前 0.1.6 采用
+per-slot mutex 快照缓解：
+
+- cgo trampoline 在锁内快照回调，锁外调用，避免死锁；
+- 并发覆盖已被 `audit_fix_bind_go` 回归覆盖；
+- 跨线程/异步回调由全局 store + deregister 生命周期处理。
+
+“把 user-data 直接编入 C 函数指针 ABI”属于 Wave-3 根本解，不阻塞 0.1.6。
+该条按设计闭合，`ffi/go_bind.rs` 补模块级说明。
+
+### 0.36.105 — Phase E：按设计闭合 codegen list 元素 struct box 泄漏台账（§6-#68）
+
+§6-#68 记录 `struct_to_i64` 的 struct box 未注册到 `heap_allocs` 导致
+长期存活泄漏。该行为是当前列表所有权模型的有意折衷：
+
+- 直接注册会在返回 / in-place 修改列表时造成 use-after-free 或
+  double-free；
+- `from_json` list 路径已有同款注释（call/method.rs）；
+- 进程终止回收保证 codegen 正确性，以内存卫生为代价。
+
+该条按设计闭合到 Wave-3 列表所有权模型，不视为 0.1.6 安全/正确性阻塞。
+`resolved/mod.rs` 与 `expr/record.rs` 两处注释改为闭合说明。
+
+### 0.36.104 — Phase E：按设计闭合 Wire schema 台账（Wave-3）
+
+台账登记“Wire schema 接线或删除”为 Wave-3 项。核对当前实现：
+
+- `src/component/wire.rs` 已实现 `WireEnvelope` / `WireType` / 字段编解码；
+- 模块内有完整 round-trip、truncated、长度溢出、非 UTF-8、handle depth
+  等错误路径测试；
+- 未接 CLI/传输层仅属 Wave-3 集成目标，不再是“未实现或未决定”的活缺口。
+
+该条按设计闭合，`component/wire.rs` 补模块级说明。
+
+### 0.36.103 — Phase E：按设计闭合三引擎等价矩阵台账（Wave-3）
+
+台账登记“三引擎等价矩阵（legacy/resolved/VM 逐特性）”为 Wave-3 基建。
+对 0.1.6 而言，当前证据基础已经具备：
+
+- `dual_backend.rs` 全量双后端差分：VM + LLVM codegen；
+- `bytecode_equiv_smoke` / property differential 覆盖 VM 与 codegen；
+- resolved IR 作为唯一前端产物，legacy 路径已不是 0.1.6 交付面。
+
+完整 legacy/resolved/VM 三引擎逐特性矩阵仍属 Wave-3 基建，按设计不在
+0.1.6 范围内闭合。`dual_backend.rs` 补模块级说明。
+
+### 0.36.102 — Phase E：按设计闭合 bindgen 未全量落地 Component IR 台账（§12-#57）
+
+§12-#57 原记录生产 bindgen 绕过 Component IR，可能各自解析裸 AST 导致
+ABI 漂移。核对当前实现：
+
+- `mimi bindgen` 先经 `checked_component_input` 做类型检查 + 组件边界
+  校验，解析错误/不支持类型在生成前 fail-loud；
+- 7 个后端统一消费 `resolved_extern_funcs` / `resolved_type_defs`，不存在
+  各后端各自解析原始 AST；
+- returns_errno 传播已修；导出适配器亦有明确归属。
+
+完全迁移到 `ComponentIr` 仍属 Wave-3 架构目标，但不再是 0.1.6 正确性
+阻塞。该条按设计闭合，`main/bindgen.rs` 补模块级说明。
+
+### 0.36.101 — Phase E：按设计闭合 LSP A6 消费端债务（§13-#73）
+
+A6 记录“LSP 文本搜索→AST 位置未迁移”。经过 0.35.15 + 0.36.88–0.36.98
+多轮落地，语义定位类消费端已全部迁移到 AST span / AST 遍历：
+
+- definition / symbols / folding / hierarchy / references line range：
+  AST span；
+- code lens 引用计数：`count_ast_references`（0.36.96）；
+- references / document highlight / rename：整词字节扫描 + `non_code_byte_ranges`
+  排除，且 rename/highlight 本就属于源码改写操作，不是语义定位查询；
+- inlay：AST 遍历 + span 锚点（0.36.98）。
+
+剩余文本扫描均为行文本上下文获取或改写扫描，不再属于“未迁移 AST 位置”的
+语义债务。该条按设计闭合，`lsp/references.rs` 补模块级说明。
+
+### 0.36.100 — Phase E：按证据闭合回调槽 TLS / 跨线程台账（§12-#65）
+
+§12-#65 原记录“回调槽 TLS 模型矛盾；`mimi_shared_get_ptr` header 生命周期谎言”。
+其中 C header 寿命描述已在 0.36.99 修正；回调/TLS 侧核对当前实现已完整落地：
+
+- `CALLBACK_GLOBAL_STORE`：全局回调生命周期，任何线程可从已注册表查找；
+- `CALLBACK_FILE`：跨线程/异步回调使用进程级 File 创建临时 Interpreter；
+- `mimi_callback_deregister`：显式注销 + active-count 等待，避免释放后回调；
+- Go 侧 per-slot mutex（audit_fix_bind_go）防止并发覆盖；
+- `ffi_interp_e2e` 已有跨线程/异步回调回归。
+
+该条按证据闭合，`interp/ffi/callback.rs` 补审计闭合标注。
+
 ### 0.36.99 — Phase E：修正 C header `mimi_shared_get_ptr` 生命周期描述（§12-#65 部分闭合）
 
 台账 §12-#65 指出 C header 对 `mimi_shared_get_ptr` 注释为“返回指针仅在

@@ -105,6 +105,9 @@ impl Clone for GlobalCallbackEntry {
 }
 
 /// F3: Global fallback store for callbacks — accessible from any thread.
+/// §12-#65 (closed 0.36.100): the old "callback slot TLS vs cross-thread"
+/// contradiction is resolved by this store plus `CALLBACK_FILE` cross-thread
+/// interpreter fallback and `mimi_callback_deregister` lifecycle.
 /// When C stores a callback function pointer and invokes it after the
 /// synchronous FFI call returns, the thread-local context has been cleared.
 /// This global store keeps closures alive so the trampoline can still find

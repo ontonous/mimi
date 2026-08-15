@@ -1,3 +1,11 @@
+//! Definition, references, highlight and rename position features.
+//!
+//! A6 (closed 0.36.101 by design): semantic positioning now uses AST spans
+//! (definitions, references, hierarchy, inlay, code lens). Remaining text
+//! scans are only the rename/highlight replacement scans, which are
+//! whole-word and filtered through `non_code_byte_ranges`; they are not
+//! unresolved semantic-position debt.
+
 use serde_json::Value;
 
 use crate::ast::{Item, PatternKind, Stmt};

@@ -2,14 +2,14 @@
 // v0.29.44 — Software Shadow Memory Tagging (MTE simulation)
 // White-paper section 4.2: "软件层面的影子内存（Shadow Memory）"
 //
-// ⚠️ DEAD CODE — 架构修正案条款废止（0.31.22 Spec 修正）
-// Shadow MTE 已被废止。原因：
-// 1. 软件 MTE 性能开销过大（每次 alloc/free 都需要 HashMap 查找）
-// 2. 硬件 MTE（ARM MTE）是更好的选择，但需要硬件支持
-// 3. 与统一分配器（mimi_alloc/mimi_free）冲突
+// ⚠️ 注意：架构修正案（0.31.22 Spec 修正）将 Shadow MTE 排除出默认安全建议，
+// 但该底层接口仍被 bytecode builtins / codegen builtins 与真实世界测试
+// `tests/real_world/flow_shadow_memory.mimi` 使用。
 //
-// 此模块保留为历史参考，不再维护。所有 mimi_shadow_* 函数已废弃。
-// 清理排入后续 sprint（删除整个模块）。
+// §10-shadow_mte（closed 0.36.108 by design）：不是死模块，仍是可选低层
+// 工具接口；size-0 layout 由 `Layout::from_size_align` + `alloc`/`dealloc`
+// 合法处理（零大小分配不 deref，free 使用同一重建 layout），回归测试
+// `shadow_alloc_zero_size_is_safe` 覆盖该边界。
 //
 // This module owns the thread-local `SHADOW_MAP` and all `mimi_shadow_*`
 // extern "C" entry points (alloc / tag / check / free / dump).
@@ -156,4 +156,21 @@ pub extern "C" fn mimi_shadow_dump() -> *const std::ffi::c_char {
             .map(|c| c.as_ptr())
             .unwrap_or(std::ptr::null())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_alloc_zero_size_is_safe() {
+        let label = std::ffi::CString::new("zero").unwrap();
+        let ptr = mimi_shadow_alloc(0, 1, label.as_ptr());
+        assert!(!ptr.is_null());
+        assert_eq!(mimi_shadow_check(ptr, 1), 1);
+        assert_eq!(mimi_shadow_tag(ptr, 2), 0);
+        assert_eq!(mimi_shadow_check(ptr, 2), 1);
+        mimi_shadow_free(ptr);
+        assert_eq!(mimi_shadow_check(ptr, 2), 0);
+    }
 }

@@ -171,10 +171,10 @@ pub extern "C" fn mimi_future_alloc(result_size: u64) -> *mut std::ffi::c_void {
 /// write. The old code stored the freed-intent first, so a double-free
 /// WROTE to the already-freed header (UAF write) before the refcount could
 /// reject it — every other future API has the retain precheck; free was the
-/// exception. Standard Arc-class boundary remains: a double-free of a FULLY
-/// deallocated pointer still touches freed memory to read the refcount (no
-/// live registry exists for bare pointers), but it is now a rejected read,
-/// never a write.
+/// exception. §10-#23 (closed 0.36.109 by design): standard Arc-class
+/// boundary remains — a double-free of a FULLY deallocated pointer still
+/// touches freed memory to read the refcount (no live registry exists for
+/// bare pointers), but it is now a rejected read, never a write.
 #[no_mangle]
 pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
