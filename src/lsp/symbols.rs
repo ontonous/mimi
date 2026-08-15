@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ast::{Item, TypeDefKind};
+use crate::ast::{Block, Expr, Item, Pattern, Stmt, Type, TypeDefKind};
 use crate::lsp::LspServer;
 
 /// Percent-encode a file path segment for use in a file:// URI.
@@ -315,7 +315,519 @@ pub(crate) fn ws_symbol(name: &str, kind: u32, uri: &str, line: usize, container
     obj
 }
 
-/// Count how many times a name appears in text (simple substring match on each line)
+/// Count how many times a name appears in code regions of text.
+///
+/// Kept only for unit-testing the text/`SourceScanner` fallback path. The
+/// production code lenses now use `count_ast_references` (A6, 0.36.96).
+#[cfg(test)]
 pub(crate) fn count_text_references(text: &str, name: &str) -> usize {
-    text.lines().filter(|l| l.contains(name)).count()
+    if name.is_empty() {
+        return 0;
+    }
+    let non_code = crate::lsp::util::non_code_byte_ranges(text);
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let line_non_code = non_code.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+            crate::lsp::util::find_word_occurrences(line, name)
+                .into_iter()
+                .filter(|pos| !crate::lsp::util::byte_in_non_code(line_non_code, *pos))
+                .count()
+        })
+        .sum()
+}
+
+// --- A6: AST-based reference counting for code lenses -------------------
+
+/// Count AST identifier occurrences of `name` (excluding each declaration's
+/// own name field). Callers add the definition occurrence when they want the
+/// historical "definition + references" lens count.
+pub(crate) fn count_ast_references(file: &crate::ast::File, name: &str) -> usize {
+    let mut count = 0;
+    for item in &file.items {
+        visit_item_for_refs(item, name, &mut count);
+    }
+    count
+}
+
+fn visit_block_for_refs(block: &Block, name: &str, count: &mut usize) {
+    for stmt in block {
+        visit_stmt_for_refs(stmt, name, count);
+    }
+}
+
+fn visit_stmt_for_refs(stmt: &Stmt, name: &str, count: &mut usize) {
+    match stmt.unlocated() {
+        Stmt::Located { stmt, .. } => visit_stmt_for_refs(stmt, name, count),
+        Stmt::Let { pat, ty, init, .. } => {
+            visit_pattern_for_refs(pat, name, count);
+            if let Some(ty) = ty {
+                visit_type_for_refs(ty, name, count);
+            }
+            if let Some(expr) = init {
+                visit_expr_for_refs(expr, name, count);
+            }
+        }
+        Stmt::Return(Some(expr))
+        | Stmt::Expr(expr)
+        | Stmt::Break(Some(expr))
+        | Stmt::Drop(expr) => {
+            visit_expr_for_refs(expr, name, count);
+        }
+        Stmt::Return(None) | Stmt::Break(None) | Stmt::Continue | Stmt::Ellipsis => {}
+        Stmt::If { cond, then_, else_ } => {
+            visit_expr_for_refs(cond, name, count);
+            visit_block_for_refs(then_, name, count);
+            if let Some(else_) = else_ {
+                visit_block_for_refs(else_, name, count);
+            }
+        }
+        Stmt::IfLet {
+            pat,
+            init,
+            then_,
+            else_,
+        } => {
+            visit_pattern_for_refs(pat, name, count);
+            visit_expr_for_refs(init, name, count);
+            visit_block_for_refs(then_, name, count);
+            if let Some(else_) = else_ {
+                visit_block_for_refs(else_, name, count);
+            }
+        }
+        Stmt::While { cond, body } => {
+            visit_expr_for_refs(cond, name, count);
+            visit_block_for_refs(body, name, count);
+        }
+        Stmt::WhileLet { pat, init, body } => {
+            visit_pattern_for_refs(pat, name, count);
+            visit_expr_for_refs(init, name, count);
+            visit_block_for_refs(body, name, count);
+        }
+        Stmt::For {
+            var,
+            iterable,
+            body,
+        } => {
+            visit_pattern_for_refs(var, name, count);
+            visit_expr_for_refs(iterable, name, count);
+            visit_block_for_refs(body, name, count);
+        }
+        Stmt::Loop(body)
+        | Stmt::Block(body)
+        | Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
+        | Stmt::Defer(body)
+        | Stmt::OnFailure(body)
+        | Stmt::Parasteps(body) => visit_block_for_refs(body, name, count),
+        Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) | Stmt::Invariant(expr, _) => {
+            visit_expr_for_refs(expr, name, count);
+        }
+        Stmt::Math(exprs) => {
+            for expr in exprs {
+                visit_expr_for_refs(expr, name, count);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            visit_expr_for_refs(target, name, count);
+            visit_expr_for_refs(value, name, count);
+        }
+        Stmt::SharedLet { ty, init, .. } => {
+            if let Some(ty) = ty {
+                visit_type_for_refs(ty, name, count);
+            }
+            visit_expr_for_refs(init, name, count);
+        }
+        Stmt::Pinned { expr, body, .. } => {
+            visit_expr_for_refs(expr, name, count);
+            visit_block_for_refs(body, name, count);
+        }
+        Stmt::Func(func) => visit_func_for_refs(func, name, count),
+    }
+}
+
+fn visit_pattern_for_refs(pat: &Pattern, name: &str, count: &mut usize) {
+    match &pat.kind {
+        crate::ast::PatternKind::Wildcard | crate::ast::PatternKind::Variable(_) => {}
+        crate::ast::PatternKind::Literal(_) => {}
+        crate::ast::PatternKind::Constructor(ctor, fields) => {
+            if ctor == name {
+                *count += 1;
+            }
+            for (_, pat) in fields {
+                visit_pattern_for_refs(pat, name, count);
+            }
+        }
+        crate::ast::PatternKind::Tuple(pats) | crate::ast::PatternKind::Array(pats) => {
+            for pat in pats {
+                visit_pattern_for_refs(pat, name, count);
+            }
+        }
+        crate::ast::PatternKind::Slice(pats, rest) => {
+            for pat in pats {
+                visit_pattern_for_refs(pat, name, count);
+            }
+            if let Some(rest) = rest {
+                visit_pattern_for_refs(rest, name, count);
+            }
+        }
+    }
+}
+
+fn visit_type_for_refs(ty: &Type, name: &str, count: &mut usize) {
+    match ty.unlocated() {
+        Type::Located { ty, .. } => visit_type_for_refs(ty, name, count),
+        Type::Name(n, args) => {
+            if n == name {
+                *count += 1;
+            }
+            for arg in args {
+                visit_type_for_refs(arg, name, count);
+            }
+        }
+        Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Option(inner)
+        | Type::CBuffer(inner)
+        | Type::Shared(inner)
+        | Type::Weak(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner) => {
+            visit_type_for_refs(inner, name, count);
+        }
+        Type::Result(ok, err) => {
+            visit_type_for_refs(ok, name, count);
+            visit_type_for_refs(err, name, count);
+        }
+        Type::Tuple(items) => {
+            for item in items {
+                visit_type_for_refs(item, name, count);
+            }
+        }
+        Type::Func(params, ret) | Type::ExternFunc(params, ret) => {
+            for param in params {
+                visit_type_for_refs(param, name, count);
+            }
+            visit_type_for_refs(ret, name, count);
+        }
+        Type::Cap(n) | Type::CapAtom(n) => {
+            if n == name {
+                *count += 1;
+            }
+        }
+        Type::Newtype(n, inner) => {
+            if n == name {
+                *count += 1;
+            }
+            visit_type_for_refs(inner, name, count);
+        }
+        Type::Array(inner, _) => visit_type_for_refs(inner, name, count),
+        Type::Slice(inner) => visit_type_for_refs(inner, name, count),
+        Type::ImplTrait(traits) | Type::DynTrait(traits) => {
+            *count += traits.iter().filter(|t| *t == name).count();
+        }
+        Type::Nothing | Type::Infer | Type::TypeVar(_) | Type::TyErr => {}
+        Type::ForAll(_, body) => visit_type_for_refs(body, name, count),
+    }
+}
+
+fn visit_expr_for_refs(expr: &Expr, name: &str, count: &mut usize) {
+    match expr.unlocated() {
+        Expr::Located { expr, .. } => visit_expr_for_refs(expr, name, count),
+        Expr::Ident(ident) => {
+            if ident == name {
+                *count += 1;
+            }
+        }
+        Expr::Literal(_) => {}
+        Expr::Binary(_, lhs, rhs) | Expr::Index(lhs, rhs) => {
+            visit_expr_for_refs(lhs, name, count);
+            visit_expr_for_refs(rhs, name, count);
+        }
+        Expr::Unary(_, e)
+        | Expr::Try(e)
+        | Expr::Spawn(e)
+        | Expr::Await(e)
+        | Expr::QuoteInterpolate(e)
+        | Expr::TypeOf(e)
+        | Expr::Old(e)
+        | Expr::OptionalChain(e, _) => {
+            visit_expr_for_refs(e, name, count);
+        }
+        Expr::Call(callee, args) => {
+            visit_expr_for_refs(callee, name, count);
+            for arg in args {
+                visit_expr_for_refs(arg, name, count);
+            }
+        }
+        Expr::Field(e, _) | Expr::TupleIndex(e, _) => visit_expr_for_refs(e, name, count),
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            for item in items {
+                visit_expr_for_refs(item, name, count);
+            }
+        }
+        Expr::Comprehension {
+            expr,
+            var: _,
+            iter,
+            guard,
+        } => {
+            visit_expr_for_refs(expr, name, count);
+            visit_expr_for_refs(iter, name, count);
+            if let Some(guard) = guard {
+                visit_expr_for_refs(guard, name, count);
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            visit_expr_for_refs(scrutinee, name, count);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    visit_expr_for_refs(guard, name, count);
+                }
+                visit_expr_for_refs(&arm.body, name, count);
+            }
+        }
+        Expr::Record { ty, fields } => {
+            if let Some(ty) = ty {
+                if ty == name {
+                    *count += 1;
+                }
+            }
+            for field in fields {
+                visit_expr_for_refs(&field.value, name, count);
+            }
+        }
+        Expr::Block(block) | Expr::Quote(block) | Expr::Comptime(block) | Expr::Arena(block) => {
+            visit_block_for_refs(block, name, count)
+        }
+        Expr::If { cond, then_, else_ } => {
+            visit_expr_for_refs(cond, name, count);
+            visit_block_for_refs(then_, name, count);
+            if let Some(else_) = else_ {
+                visit_block_for_refs(else_, name, count);
+            }
+        }
+        Expr::Lambda { params, ret, body } => {
+            for param in params {
+                visit_type_for_refs(&param.ty, name, count);
+                if let Some(default) = &param.default_value {
+                    visit_expr_for_refs(default, name, count);
+                }
+            }
+            if let Some(ret) = ret {
+                visit_type_for_refs(ret, name, count);
+            }
+            visit_block_for_refs(body, name, count);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            visit_expr_for_refs(target, name, count);
+            if let Some(start) = start {
+                visit_expr_for_refs(start, name, count);
+            }
+            if let Some(end) = end {
+                visit_expr_for_refs(end, name, count);
+            }
+        }
+        Expr::Turbofish(callee, type_args, args) => {
+            if callee == name {
+                *count += 1;
+            }
+            for ty in type_args {
+                visit_type_for_refs(ty, name, count);
+            }
+            for arg in args {
+                visit_expr_for_refs(arg, name, count);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                visit_expr_for_refs(key, name, count);
+                visit_expr_for_refs(value, name, count);
+            }
+        }
+        Expr::NamedArg(_, value) => visit_expr_for_refs(value, name, count),
+        Expr::Cast(value, ty) => {
+            visit_expr_for_refs(value, name, count);
+            visit_type_for_refs(ty, name, count);
+        }
+        Expr::TypeInfo(ty) => visit_type_for_refs(ty, name, count),
+    }
+}
+
+fn visit_func_for_refs(func: &crate::ast::FuncDef, name: &str, count: &mut usize) {
+    for param in &func.params {
+        visit_type_for_refs(&param.ty, name, count);
+        if let Some(default) = &param.default_value {
+            visit_expr_for_refs(default, name, count);
+        }
+    }
+    if let Some(ret) = &func.ret {
+        visit_type_for_refs(ret, name, count);
+    }
+    visit_block_for_refs(&func.body, name, count);
+}
+
+fn visit_item_for_refs(item: &Item, name: &str, count: &mut usize) {
+    match item {
+        Item::Func(func) => visit_func_for_refs(func, name, count),
+        Item::Module(module) => {
+            for item in &module.items {
+                visit_item_for_refs(item, name, count);
+            }
+        }
+        Item::Type(ty) => match &ty.kind {
+            TypeDefKind::Alias(t) | TypeDefKind::Newtype(t) => visit_type_for_refs(t, name, count),
+            TypeDefKind::Record(fields) | TypeDefKind::Union(fields) => {
+                for field in fields {
+                    visit_type_for_refs(&field.ty, name, count);
+                }
+            }
+            TypeDefKind::Enum(variants) => {
+                for variant in variants {
+                    match &variant.payload {
+                        None => {}
+                        Some(crate::ast::VariantPayload::Tuple(tys)) => {
+                            for ty in tys {
+                                visit_type_for_refs(ty, name, count);
+                            }
+                        }
+                        Some(crate::ast::VariantPayload::Record(fields)) => {
+                            for field in fields {
+                                visit_type_for_refs(&field.ty, name, count);
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        Item::Actor(actor) => {
+            if let Some(flow) = &actor.runs_flow {
+                if flow == name {
+                    *count += 1;
+                }
+            }
+            for field in &actor.fields {
+                visit_type_for_refs(&field.ty, name, count);
+                if let Some(init) = &field.init {
+                    visit_expr_for_refs(init, name, count);
+                }
+            }
+            for method in &actor.methods {
+                visit_func_for_refs(method, name, count);
+            }
+        }
+        Item::Cap(cap) => {
+            if let Some(combined) = &cap.combined_with {
+                if combined == name {
+                    *count += 1;
+                }
+            }
+        }
+        Item::Trait(trait_def) => {
+            for method in &trait_def.methods {
+                for param in &method.params {
+                    visit_type_for_refs(&param.ty, name, count);
+                    if let Some(default) = &param.default_value {
+                        visit_expr_for_refs(default, name, count);
+                    }
+                }
+                if let Some(ret) = &method.ret {
+                    visit_type_for_refs(ret, name, count);
+                }
+            }
+        }
+        Item::Impl(impl_def) => {
+            for ty in &impl_def.trait_args {
+                visit_type_for_refs(ty, name, count);
+            }
+            for ty in &impl_def.type_args {
+                visit_type_for_refs(ty, name, count);
+            }
+            if impl_def.trait_name == name {
+                *count += 1;
+            }
+            if impl_def.type_name == name {
+                *count += 1;
+            }
+            for method in &impl_def.methods {
+                visit_func_for_refs(method, name, count);
+            }
+        }
+        Item::ExternBlock(block) => {
+            for func in &block.funcs {
+                for param in &func.params {
+                    visit_type_for_refs(&param.ty, name, count);
+                }
+                if let Some(ret) = &func.ret {
+                    visit_type_for_refs(ret, name, count);
+                }
+                if let Some(requires) = &func.requires {
+                    visit_expr_for_refs(requires, name, count);
+                }
+                if let Some(ensures) = &func.ensures {
+                    visit_expr_for_refs(ensures, name, count);
+                }
+            }
+        }
+        Item::Const { ty, value, .. } => {
+            if let Some(ty) = ty {
+                visit_type_for_refs(ty, name, count);
+            }
+            visit_expr_for_refs(value, name, count);
+        }
+        Item::Flow(flow) => {
+            if let Some(fault) = &flow.fault_type {
+                visit_type_for_refs(fault, name, count);
+            }
+            for state in &flow.states {
+                if let Some(fields) = &state.payload {
+                    for field in fields {
+                        visit_type_for_refs(&field.ty, name, count);
+                    }
+                }
+            }
+            for transition in &flow.transitions {
+                for param in &transition.params {
+                    visit_type_for_refs(&param.ty, name, count);
+                    if let Some(default) = &param.default_value {
+                        visit_expr_for_refs(default, name, count);
+                    }
+                }
+                if let Some(fails) = &transition.fails {
+                    visit_type_for_refs(fails, name, count);
+                }
+                if let Some(body) = &transition.body {
+                    visit_block_for_refs(body, name, count);
+                }
+            }
+        }
+        Item::Protocol(protocol) => {
+            for state in &protocol.states {
+                if let Some(ty) = &state.payload_type {
+                    visit_type_for_refs(ty, name, count);
+                }
+            }
+        }
+        Item::Session(session) => visit_session_type_for_refs(&session.body, name, count),
+    }
+}
+
+fn visit_session_type_for_refs(session: &crate::ast::SessionType, name: &str, count: &mut usize) {
+    match session.unlocated() {
+        crate::ast::SessionType::Located { session, .. } => {
+            visit_session_type_for_refs(session, name, count)
+        }
+        crate::ast::SessionType::Send(ty, cont) | crate::ast::SessionType::Recv(ty, cont) => {
+            visit_type_for_refs(ty, name, count);
+            visit_session_type_for_refs(cont, name, count);
+        }
+        crate::ast::SessionType::Dual(cont) => visit_session_type_for_refs(cont, name, count),
+        crate::ast::SessionType::Name(n) => {
+            if n == name {
+                *count += 1;
+            }
+        }
+        crate::ast::SessionType::End => {}
+    }
 }

@@ -1,7 +1,6 @@
 use serde_json::Value;
 
 use crate::ast::{Item, Stmt};
-use crate::lsp::symbols::count_text_references;
 use crate::lsp::LspServer;
 use crate::verifier::VerifStatus;
 
@@ -20,9 +19,12 @@ impl LspServer {
                     // `func {name}` substring scan (which landed on the
                     // first mention, e.g. a call site or comment).
                     let def_line = f.meta.span.start_line.saturating_sub(1);
+                    // A6 (0.36.96): AST occurrence count replaces the text scan
+                    // for code lenses; +1 keeps the historical "definition +
+                    // references" display count.
                     lenses.push(code_lens_value(
                         def_line,
-                        count_text_references(text, &f.name),
+                        crate::lsp::symbols::count_ast_references(&file, &f.name) + 1,
                     ));
 
                     // Add verification status lens if function has contracts
@@ -74,7 +76,7 @@ impl LspServer {
                     let def_line = t.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
-                        count_text_references(text, &t.name),
+                        crate::lsp::symbols::count_ast_references(&file, &t.name) + 1,
                     ));
                 }
                 Item::Trait(t) => {
@@ -83,7 +85,7 @@ impl LspServer {
                     let def_line = t.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
-                        count_text_references(text, &t.name),
+                        crate::lsp::symbols::count_ast_references(&file, &t.name) + 1,
                     ));
                 }
                 Item::Impl(i) => {
@@ -109,7 +111,7 @@ impl LspServer {
                     let def_line = a.meta.span.start_line.saturating_sub(1);
                     lenses.push(code_lens_value(
                         def_line,
-                        count_text_references(text, &a.name),
+                        crate::lsp::symbols::count_ast_references(&file, &a.name) + 1,
                     ));
                 }
                 _ => {}

@@ -149,6 +149,28 @@ impl LspServer {
                 Stmt::IeeeFloat(body) => {
                     self.collect_hints_from_block(body, text, hints, func_params, current_func);
                 }
+                Stmt::Block(body)
+                | Stmt::Loop(body)
+                | Stmt::Arena(body)
+                | Stmt::Unsafe(body)
+                | Stmt::Defer(body)
+                | Stmt::OnFailure(body)
+                | Stmt::Parasteps(body) => {
+                    self.collect_hints_from_block(body, text, hints, func_params, current_func);
+                }
+                Stmt::Pinned { expr, body, .. } => {
+                    self.collect_param_hints(expr, text, hints, func_params, current_func);
+                    self.collect_hints_from_block(body, text, hints, func_params, current_func);
+                }
+                Stmt::Func(func) => {
+                    self.collect_hints_from_block(
+                        &func.body,
+                        text,
+                        hints,
+                        func_params,
+                        current_func,
+                    );
+                }
                 _ => {}
             }
         }

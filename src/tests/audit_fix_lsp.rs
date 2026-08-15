@@ -592,3 +592,17 @@ fn audit2_tool_span_to_range_fallback_aligns_with_text_path() {
     assert_eq!(fallback["start"]["character"], 4);
     assert_eq!(fallback["end"]["character"], 8);
 }
+
+// --- A6 (partial): code-lens reference counter uses whole-word semantics ---
+
+#[test]
+fn audit2_tool_count_text_references_whole_word() {
+    use crate::lsp::symbols::count_text_references;
+    let text = "func foo() -> i32 { foo() }\nlet foobar = foo + foo\n// foo in comment\nlet s = \"foo\"\n/* foo */\n";
+    // `foo` must not match `foobar`, comments/string contents are excluded,
+    // and multiple occurrences on one line count individually.
+    assert_eq!(count_text_references(text, "foo"), 4);
+    assert_eq!(count_text_references(text, "foobar"), 1);
+    assert_eq!(count_text_references("", "foo"), 0);
+    assert_eq!(count_text_references("anything", ""), 0);
+}

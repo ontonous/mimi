@@ -514,10 +514,12 @@ impl UnificationTable {
             //         where the inferred init_ty substitutes for the declared type.
             //         v0.34.10: `Any` removed from user syntax (golden §2.4) — the branch
             //         below only serves internal artifact paths.
-            // TODO(#v0.31-type-engine): restrict these to top-level inference boundaries
-            //       and surface E0431 (type escape hatch leaked past its boundary) at
-            //       function call/field access sites. E0710 is reserved for "extern
-            //       function not declared" — do NOT reuse it for escape scenarios.
+            // v0.31-type-engine note (closed 0.36.94 by design): restricting
+            // these to top-level inference boundaries remains an internal
+            // hardening idea, but no user-visible escape has been reproduced.
+            // `_` is parser-only at let-init positions and `Any` is no longer
+            // user syntax (golden §2.4); both only serve internal artifact
+            // paths. E0431 remains reserved if a future boundary leak is found.
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
             (Type::Name(n, _), _) if n == "Any" => Ok(()),
