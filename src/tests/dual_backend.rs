@@ -19465,3 +19465,41 @@ fn ref_annotated_binding_check_and_parity() {
         "annotated arena ref binding parity",
     );
 }
+
+#[test]
+fn dual_production_checked_path_smoke() {
+    // Phase E/F evidence: the production `compile_checked` path (same as
+    // `mimi build`) is exercised on a representative program and must agree
+    // with both VM and the legacy/native E2E harness. This is not a new
+    // language feature; it locks the checked production path into the
+    // dual-backend evidence base.
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+        type Pair { a: i32, b: i32 }
+        func add(p: Pair) -> i32 { p.a + p.b }
+        func main() -> i32 {
+            let p = Pair { a: 20, b: 22 }
+            println(add(p))
+            0
+        }
+    "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected production-path smoke source:\n{}",
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
+    let (_interp_val, interp_out) = run_source_with_stdout(src);
+    let native_out = compile_and_run(src).expect("native codegen via E2E harness");
+    let checked_out =
+        checked_codegen_compile_and_run(src).expect("production compile_checked native codegen");
+    assert_eq!(interp_out.trim(), "42");
+    assert_eq!(native_out.trim(), "42");
+    assert_eq!(checked_out.trim(), "42");
+}

@@ -11,7 +11,7 @@
 
 0.1.6 终测与文档重锚收口：
 
-- **全量门禁**：`cargo test --lib` 5473 passed / 0 failed / 6 ignored；
+- **全量门禁**：`cargo test --lib` 5474 passed / 0 failed / 6 ignored；
   `cargo test --test real_world` + `--test real_world_cli` 31 + 1 passed；
   6 项 ASAN/工具 ignored 复跑 6 passed；`cargo fmt --check` 0 diff；
   `cargo clippy --all-targets -- -D warnings` 0 警告；语言文档门禁与
@@ -19,7 +19,10 @@
 - **dispatch 基线完整 report**：`scripts/dispatch_stat.py report` 跑完
   128 个语料条目，120 成功 / 8 跳过（FFI 外部依赖 fixture +
   interpreter-only `flow_test_macros`），无超时；聚合
-  total=5832 / eligible=4228 / legacy=1604 / fallback=0.275034294。
+  total=5832 / eligible=4228 / legacy=1604 / fallback=0.275034294；
+  JSON 快照已存 `devdocs/v0.36/dispatch-report-0.36.114.json`。
+- **生产路径证据**：新增 `dual_production_checked_path_smoke`，把
+  `compile_checked` 生产路径与 VM、E2E native 三方对拍纳入双后端证据面。
 - **文档重锚**：golden syntax-reference 与 language-support.toml 版本统一为
   0.1.6-dev；spec §3.10 Session residual 已闭环表述替换旧 experimental；
   README.md / README.zh.md / AGENTS 版本表同步 0.1.6-dev 终测状态。
