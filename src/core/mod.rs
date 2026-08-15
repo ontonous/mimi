@@ -89,7 +89,7 @@ pub fn check_program_strict(file: &File) -> Result<CheckedProgram, Vec<Diagnosti
 /// diagnostics in different orders across runs. Sort by source position
 /// first, then message/code, to keep CLI and test output deterministic while
 /// preserving conventional source-order reporting.
-fn sort_diagnostics(errors: &mut Vec<Diagnostic>) {
+fn sort_diagnostics(errors: &mut [Diagnostic]) {
     errors.sort_by(|a, b| {
         a.span
             .start_line
