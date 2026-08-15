@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] — 0.1.7-dev
+
+> 0.1.7 开发进行中：深度可用性与高压可靠性 + Wave-3 结构性战役——核心特性深度
+> 可用与高压承载、编译器后端统一（Resolved Lowering 全量覆盖，Legacy Codegen 单向
+> 退役）、真实结构化并发运行时、堆内存即时确定性释放。路线见
+> `devdocs/v0.37/README.md`，高压规范见 `devdocs/v0.37/high-stress-testing-spec.md`，
+> 可用性宣言见 `devdocs/v0.37/usability-dx-manifesto.md`。
+
 ## [0.1.6] — 2026-08-16
 
 > **核心深度闭环（Deep over Broad）——逐支柱"重设计 → 锚定 → 挣绿"已发布**。
