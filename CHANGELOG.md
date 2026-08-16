@@ -8,6 +8,581 @@
 > `devdocs/v0.37/README.md`，高压规范见 `devdocs/v0.37/high-stress-testing-spec.md`，
 > 可用性宣言见 `devdocs/v0.37/usability-dx-manifesto.md`。
 
+### 0.37.106 — build-race 便捷门禁 + nested-spawn 文档
+- Makefile 新增 `make test-build-race`
+  - 只跑 `stress_parallel_mimi_build_no_archive_race`
+  - 单独验证并发 `mimi build` 不再共享 archive
+- readme/04-concurrency §4.1 补充 nested-spawn 上下文说明
+  - 专用 nested-spawn 线程也视为 worker 上下文
+  - 深层链式/二叉 fan-out 不会回排有界 pool
+
+### 0.37.105 — 并发 mimi build archive 竞态回归测试
+- 新增 `tests/stress/build_concurrency.rs`
+  - `stress_parallel_mimi_build_no_archive_race`
+  - 同一输出目录下并行启动 4 个 `mimi build`
+  - 全部构建成功且 4 个 binary 输出 `race-ok`
+- 固定 0.37.103 的 per-build runtime archive 修复，防止回归
+- `make test-stress` 将自动覆盖该路径
+
+### 0.37.104 — AtomicBool CAS 自旋锁进入 real_world 语料
+- 新增 `tests/real_world/concurrency_atomic_bool_spinlock.mimi`
+  - 4 个 parasteps worker × 20 次锁内递增，校验 80
+  - AtomicBool CAS 自旋拿锁 + AtomicI64 计数 + store 放锁
+- VM 与 compiled binary 均通过
+- `make test-dispatch-zero`：151 语料，聚合 fallback_rate=0.0000
+
+### 0.37.103 — mimi build 使用每次构建独立的 runtime archive 路径
+- 修复并发 `mimi build` 共享同一个 `libmimi_runtime.a` 导致的
+  flaky 构建失败：
+  - `failed to map object file: memory map must have a non-zero length`
+  - `failed to open object file: No such file or directory`
+- runtime archive 改到 per-build `tmp_dir` 下，多个进程不再互相覆盖
+- 4 路并发 `mimi build` 同一输出目录验证全部成功
+- real_world_cli 不再因并发/残留 archive 偶发失败
+
+### 0.37.102 — 扩展 nested-spawn 覆盖：二叉 fanout + real_world 语料
+- `tests/stress/real_spawn.rs` 新增：
+  - `stress_native_nested_spawn_fanout_smoke`：深度 6，2^6 叶子，校验 64
+  - `stress_native_nested_spawn_fanout_heavy`：深度 10，2^10 叶子，校验 1024
+- native fanout heavy 约 94ms，验证嵌套 spawn 可二叉发散且无 pool 回压死锁
+- 新增 `tests/real_world/concurrency_nested_spawn.mimi`
+  - outer → inner 两层嵌套 spawn
+  - VM 输出 44，compiled binary 输出 44
+
+### 0.37.101 — 修复深层嵌套 spawn 链死锁 + 原生回归压力
+- **根因**：从专用 nested-spawn 线程再次 `spawn` 时未标记 `IN_WORKER`，
+  深链会重新排队回有界 Worker Pool；当所有 pool worker 都在 await 子任务时
+  互相等待 → 死锁
+- **修复**：`src/runtime/future.rs` 中 dedicated nested-spawn 线程同样标记
+  `IN_WORKER = true`，后续嵌套 spawn 继续使用专用线程
+- 新增：
+  - `stress_native_nested_spawn_chain_smoke`：16 层，输出 16
+  - `stress_native_nested_spawn_chain_heavy`：128 层，输出 128，约 17ms
+- 该回归测试在修复前 native 二叉会 hang；修复后通过
+
+### 0.37.100 — 原生 AtomicBool CAS 自旋锁压力测试
+- `tests/stress/real_spawn.rs` 新增：
+  - `stress_native_atomic_bool_lock_smoke`：8 workers × 50 次锁内递增，校验 400
+  - `stress_native_atomic_bool_lock_heavy`：32 workers × 500 次，校验 16000
+- worker 用 `atomic_bool_compare_exchange(flag, false, true)` 自旋拿锁，
+  `atomic_bool_store(flag, false)` 放锁，`AtomicI64` 计总数
+- native heavy 约 12.7ms，验证 AtomicBool CAS 在高竞争下无丢失更新
+
+### 0.37.99 — Flow Event Storm 重载提升至 5,000 转移
+- `stress_flow_event_storm_heavy` 从 2,000 → 5,000 次连续 Flow 转移
+- 保持 `mimi run` 路径，验证 VM 下线性 Flow 链的 5k 深度可用性
+- heavy 门禁在 `make test-stress-heavy` 中验证
+
+### 0.37.98 — channel_send 断开可观测性
+- `mimi_channel_send` 不再静默吞掉 mpsc `send` 错误
+- 当 receiver 已 drop 时输出
+  `[mimi runtime] channel send: channel disconnected: ...`
+- 与 `channel_recv` 的 H12 断开日志对称
+- `make test-stress` 仍 57 passed
+
+### 0.37.97 — AtomicI64/AtomicBool CAS 双后端等价测试
+- `src/tests/dual_backend.rs` 新增：
+  - `dual_atomic_i64_compare_exchange`
+  - `dual_atomic_bool_compare_exchange`
+- 分别覆盖成功/失败 CAS 与值保持路径
+- VM 与 resolved codegen+LLVM native 双后端输出一致
+- `cargo test --lib "tests::dual_backend::dual_atomic"` 8 passed
+
+### 0.37.96 — Component IR 补注册 Map→JSON 运行时导出
+- `src/component/gen.rs` 新增：
+  - `mimi_map_to_json_i64`
+  - `mimi_map_to_json_string`
+  - `mimi_map_to_json_bool`
+  - `mimi_map_to_json_f64`
+  - `mimi_map_to_json_f64_serde`
+- 消除 dogfood 构建中在 mimichat 出现 5 次
+  `get_runtime_fn("mimi_map_to_json_*") not in Component IR registry` 警告
+- `make test-dogfood` check/test/build/run 全绿且无 registry 警告
+
+### 0.37.95 — syntax-reference 标注 quote/protocol Phase E 判死注记
+- `docs/syntax-reference.md` §5.3 / §6：
+  - `quote` / `quote!` / `$(...)` 标注 0.1.7 Phase E 已裁决删除
+  - `protocol` 声明 / `impl P` 标注 0.1.7 Phase E 已裁决删除
+- 当前 parser 仍兼容，删除提交属于 0.1.7 收尾
+- 与 feature-design-review #1/#2 保持一致
+
+### 0.37.94 — 原生 AtomicI64 CAS 竞争压力测试
+- `tests/stress/real_spawn.rs` 新增 `stress_native_atomic_i64_cas_smoke` / `heavy`
+  - 8 个 parasteps workers × 50 次 CAS，校验 400
+  - 32 workers × 500 次 CAS，校验 16000
+- worker 使用 `load` + `compare_exchange` 自旋无锁递增共享计数器
+  - 高压下不丢更新，native 重载约 9ms
+- 与 AtomicI32 fetch-add / Mutex 互斥保护互补：覆盖 AtomicI64 CAS 竞争路径
+
+### 0.37.93 — AtomicBool compare_exchange 内置原语补齐
+- runtime 新增 `mimi_atomic_bool_compare_exchange(handle, expected, desired) -> i32`
+- checker / bytecode VM / resolved codegen / component export 全链路接入
+  `atomic_bool_compare_exchange`
+- 入参接受 bool 或 0/1 i32，成功返回 1，失败返回 0
+- 新增 `tests/real_world/concurrency_atomic_bool_compare_exchange.mimi`
+  - 成功/失败两条路径，VM 与 compiled binary 均通过
+- readme/04-concurrency AtomicBool 方法表补 `compare_exchange`
+
+### 0.37.92 — AtomicI64 compare_exchange 内置原语补齐
+- runtime 新增 `mimi_atomic_i64_compare_exchange(handle, expected, desired) -> i32`
+- checker / bytecode VM / resolved codegen / component export 全链路接入
+  `atomic_i64_compare_exchange`
+- 与 AtomicI32 CAS 语义一致：成功返回 1，失败返回 0
+- 新增 `tests/real_world/concurrency_atomic_i64_compare_exchange.mimi`
+  - 成功/失败两条路径，VM 与 compiled binary 均通过
+- readme/04-concurrency AtomicI64 方法表补 `compare_exchange`
+
+### 0.37.91 — spec §7.4 出清：ffi slice/slice_mut/buffer 判死移除
+- `docs/language-spec.md`：
+  - `ffi slice<T>` / `ffi slice_mut<T>` / `ffi buffer<T>` 标记 **REMOVED (0.1.7)**
+  - 注释从「未实现（0.2 评估）」升级为「已判死删除（0.1.7 Phase E）」
+- 保留 `ffi view/mutate/owned/shared/weak/handle/str/owned_str/c_str` 稳定面
+- 后续 Phase E 继续处理 quote / Protocol / Effect lattice / 影子内存
+
+### 0.37.90 — 原生 10,000 spawn/await 循环重载
+- 新增 `stress_native_spawn_await_tenk`
+  - `for i in range(0, 10000)` 内 `spawn id(i)` + `await`
+  - 校验 `0+...+9999 = 49995000`
+  - native 运行约 93ms
+- 与 10k Channel worker 互补：覆盖 spawn+await 单任务高频路径
+
+### 0.37.89 — 原生 10,000 Channel worker 并发达 Phase C DoD 量级
+- 新增 `stress_native_channel_workers_tenk`
+  - `mimi build` + native 执行
+  - 循环内生成 10,000 个 `spawn send_id(ch, i)` 任务
+  - 主线程接收 10,000 个值并校验 `0+...+9999 = 49995000`
+- 有界 Worker Pool 下 native 运行仅需约 15ms，无死锁/丢消息
+- Phase C DoD：「10,000 并发 Task + Channel 传递」已有直接重载证据
+
+### 0.37.88 — Makefile 增加 real_world / real_world_cli 便捷门禁
+- `make test-realworld`：`cargo test --test real_world`（4 threads）
+- `make test-realworld-cli`：`cargo test --test real_world_cli`（1 thread）
+- 与 stress/dispatch/dogfood 目标并列，便于本地按需跑双后端真实语料
+
+### 0.37.87 — AtomicI32 compare_exchange 进入 real_world 语料
+- 新增 `tests/real_world/concurrency_atomic_compare_exchange.mimi`
+  - 成功 CAS 返回 1，失败 CAS 返回 0，值保持 9
+  - 45/45 eligible，0% fallback
+- `make test-dispatch-zero`：148 语料，聚合 fallback_rate=0.0000
+
+### 0.37.86 — AtomicI64 进入 real_world 语料
+- 新增 `tests/real_world/concurrency_atomic_i64.mimi`
+  - store/load/fetch_add/drop 全链路
+  - 45/45 eligible，0% fallback
+- `make test-dispatch-zero`：147 语料，聚合 fallback_rate=0.0000
+
+### 0.37.85 — AtomicBool 进入 real_world 语料
+- 新增 `tests/real_world/concurrency_atomic_bool.mimi`
+  - atomic_bool_new(false) → store(true) → load 校验
+  - 45/45 eligible，0% fallback
+- `make test-dispatch-zero`：146 语料，聚合 fallback_rate=0.0000
+
+### 0.37.84 — 原生 Mutex 互斥保护压力进入 stress 套件
+- `tests/stress/real_spawn.rs` 新增 native Mutex 用例
+  - `stress_native_mutex_protected_smoke`：8 workers × 50 次 protected inc，校验 400
+  - `stress_native_mutex_protected_heavy`：32 workers × 500 次，校验 16000
+- 每个 worker 通过 `mutex_lock/get/set/unlock` 更新同一 `Mutex<i64>`
+- parasteps join 后读取最终值，验证互斥且无丢失更新
+
+### 0.37.83 — 原生 Atomic fetch-add 并发压力进入 stress 套件
+- `tests/stress/real_spawn.rs` 新增 native 原子递增用例
+  - `stress_native_atomic_fetch_add_smoke`：8 workers × 100 次，校验 800
+  - `stress_native_atomic_fetch_add_heavy`：32 workers × 1000 次，校验 32000
+- parasteps 块尾 join 后读取并校验 `AtomicI32`
+- smoke 与 heavy 均通过，验证真线程下的 fetch-add 原子性
+
+### 0.37.82 — 原生 parasteps + Channel 高压重载进入 stress 套件
+- `tests/stress/real_spawn.rs` 新增 native 路径用例（真正走 `mimi build` 编译）
+  - `stress_native_parasteps_channel_smoke`：8 个 spawn 发送，校验 sum=28
+  - `stress_native_parasteps_channel_heavy`：64 个 spawn 发送，校验 sum=2016
+- 与既有 `real_world_cli` 的 build+exec 不同，该用例可在 stress 套件里直接跑
+- 验证：smoke 与 heavy 均通过
+
+### 0.37.81 — readme/04-concurrency 补完 Channel/Mutex/Atomic 内置原语文档
+- 新增第 5 节「并发原语」
+  - Channel：`channel_new/send/recv/try_recv/drop`
+  - Mutex：`mutex_new/lock/get/set/unlock/drop`
+  - Atomic：`AtomicI32/AtomicI64/AtomicBool` 常用原语
+- 每类附可直接运行的 `func main` 示例
+- 后续章节号顺延修复（On Failure / Parasteps+On Failure / 共享状态 / 并发模式）
+
+### 0.37.80 — channel_try_recv 进入 real_world 语料
+- 新增 `tests/real_world/concurrency_channel_try_recv.mimi`
+  - 空 Channel 上 `channel_try_recv` 返回 `-1`
+  - send 后 `try_recv` 取回 `7`
+  - 44/44 eligible，0% fallback
+- `make test-dispatch-zero`：145 语料，聚合 fallback_rate=0.0000
+
+### 0.37.79 — parasteps 结构化并发 + Channel 管线进入 real_world 语料
+- 新增 `tests/real_world/concurrency_parasteps_channel.mimi`
+  - `parasteps` 内 spawn 两个任务向共享 `Channel<i64>` 发送
+  - 块结束隐式 join 后，主线程从 Channel 接收并校验 `1+2 == 3`
+  - 44/44 eligible，0% fallback
+- `make test-dispatch-zero`：144 语料，聚合 fallback_rate=0.0000
+
+### 0.37.78 — clippy --all-targets -D warnings 清零 + worker_loop 简化
+- `src/runtime/future.rs`：去掉 `let was_worker = ...` / `let _ = was_worker` 的
+  unit 值样板，`IN_WORKER.with` 直接执行 poll + release 并恢复线程标记
+- `src/codegen/expr.rs`：把 guarded `unwrap()` 改为带语义说明的 `expect()`，
+  满足 unwrap_used 策略
+- 验证：
+  - `cargo clippy --all-targets -- -D warnings`：0 error
+  - `cargo test --lib`：5481 passed
+  - `make test-stress`：53 passed；`make test-stress-heavy`：16 passed
+
+### 0.37.77 — std::errors 语料扩展覆盖 JSON/Collection/Math/Net 字符串载荷
+- `tests/real_world/std_errors.mimi` 增加：
+  - `Json(ParseError("bad"))`
+  - `Collection(IndexOutOfBounds(1, 4))`
+  - `Math(DivisionByZero)`
+  - `Net(ConnectionFailed("refused"))`
+- 全部走 `app_error_to_string` 并在 compiled binary 与 VM 双后端校验
+- `make test-dispatch-zero`：143 语料，聚合 fallback_rate=0.0000
+
+### 0.37.76 — Channel + 真实 spawn 协作进入 real_world dispatch 语料
+- 新增 `tests/real_world/concurrency_channel_workers.mimi`
+  - 4 个真实 spawn 任务通过 `Channel<i64>` 回传数据
+  - 主线程统一接收并校验 `0+1+2+3 == 6`
+  - 44/44 eligible，0% fallback
+- `make test-dispatch-zero`：143 语料，聚合 fallback_rate=0.0000
+
+### 0.37.75 — 自定义枚举 string 载荷加入 real_world dispatch 固定回归
+- 新增 `tests/real_world/custom_enum_string_payload.mimi`
+  - `Label("hello")` / `Count(7)` 两种载荷均按 enum ABI 正确解码
+  - 45/45 eligible，0% fallback
+- `make test-dispatch-zero`：142 语料，聚合 fallback_rate=0.0000
+
+### 0.37.74 — resolved 自定义枚举单字符串载荷：按 enum 装箱 ABI 解码
+
+- 真实 CLI 全量回归发现 `std::errors` 编译产物把 `Fs(NotFound("x"))` 显示成乱码
+- 根因：自定义枚举单字段若为 string，构造侧按 compact enum ABI 将
+  `{ptr,len}` 装箱为堆指针存入 i64 payload；但 resolved 的 ctor 绑定
+  复用了 `convert_list_elem_i64`，把该指针误当裸 C 字符串处理
+- 修复：单字段自定义枚举解码时检测到 string shape，改为 inttoptr + load
+  恢复 `{ptr,len}` 结构
+- 连带修复：`std_collections.mimi` 编译二进制从 exit 160 恢复为 0
+- 验证：
+  - `real_world_cli_suite` 全量通过（此前 2 个 codegen 失败）
+  - `cargo test --lib`：5481 passed
+  - `make test-stress`：53 passed；`make test-stress-heavy`：16 passed
+  - `make test-dispatch-zero`：fallback_rate=0.0000
+  - `make test-dogfood`：全绿
+
+### 0.37.73 — stress 并发规模上探：1000 spawn/await heavy 用例
+- 新增 `stress_concurrency_scale_thousand`
+  - 一次程序内 1000 个真实 spawn + 1000 个 await，校验总和 `499500`
+- `make test-stress-heavy`：16 heavy 全通过（含 1000 规模 Task 并发）
+- Worker pool 在千级任务下保持稳定
+
+### 0.37.72 — parasteps 结构化并发进入 real_world dispatch 语料
+
+- 新增 `tests/real_world/concurrency_parasteps.mimi`
+  - 在 parasteps 内 spawn 两个任务，块尾 join 前校验两个结果
+  - 44/44 eligible，0% fallback
+- `make test-dispatch-zero`：141 语料，聚合 fallback_rate=0.0000
+
+### 0.37.71 — 真实 Task 轻量调度器首片：有界 Worker Pool + 嵌套专用线程
+
+- `mimi_spawn_future` 不再为每个 Future 新建一个独立 OS 线程
+  - 顶层 spawn 提交到全局有界 Worker Pool（`available_parallelism` 上限 8）
+  - 池内 Worker 复用，减少高并发 spawn 的线程数与 pthread 栈开销
+- 嵌套 spawn 安全策略：池内任务再 spawn 时走专用线程，避免“所有 worker
+  阻塞 await 子任务而子任务排不到 worker”的死锁
+- 新增回归 `bounded_pool_nested_spawn_does_not_deadlock`
+- 结果：
+  - `cargo test --lib`：5481 passed
+  - `make test-stress`：53 passed / 0 failed
+  - `make test-stress-heavy`：15 heavy 全通过（含 500 spawn/await、500 channel worker）
+  - `make test-dispatch-zero`：聚合 fallback_rate=0.0000
+  - `make test-dogfood`：全绿
+
+### 0.37.70 — std::errors 进入 resolved slice：支持同一类型的多个 `From` 重载
+
+- 此前 `funcs` 只用 `类型_方法` 作键，两个 `impl From<X, AppError> for AppError`
+  会互相覆盖，触发 E0252/E0402，导致 `std::errors` 无法检查通过
+- 现在 impl 方法槽键改为：无泛型实例时保持历史 `Type_method`（如 `List_head`）；
+  有具体 trait 参数时追加稳定后缀（如 `AppError_from_From<FsError,AppError>`）
+- 同步修复 checker 的 trait 签名比较：先对 `From<T,U>` 的 `T/U` 代入具体 impl
+  args，再比较返回/参数类型，避免把 `From<FsError,AppError>` 的 `from(_: FsError)`
+  与 `From<MyError,AppError>` 的 `from(_: MyError)` 误判为重复
+- `std::errors` 改用标准 `std::strings::to_string`，进入 resolved module 白名单
+- 新增真实语料 `tests/real_world/std_errors.mimi`：54/54 eligible
+- 验证：
+  - `make test-dispatch-zero`：140 语料，聚合 fallback_rate=0.0000
+  - `cargo test --lib`：5480 passed
+  - `make test-stress`：53 passed / 0 failed
+  - `make test-dogfood`：全绿
+
+### 0.37.69 — resolved 返回归属探针纳入 Slot，修复 Records 深层返回内存泄漏
+
+- `heap_probe_candidates` 此前只扫描 `HeapEntry::Ptr`，跳过 `HeapEntry::Slot`
+  - `let a = "... " + "..."` 会把 concat 的临时 `Ptr` 注册转成 `a` 变量槽的
+    `Slot`；返回所有权探针看不到它，于是把返回容器里的字符串判为“未拥有”
+    并再 heap-copy 一份
+  - 因为返回路径 `drain_heap_scope` 不会释放原 Slot，每次调用都泄漏原始字符串
+- 现在 `heap_probe_candidates` 也把 `Slot` 对应的结构体指针字段加载进候选集
+  - 返回 `Record<List<string>>` / 嵌套 Record / `List<List<string>>` 时，
+    字符串数据指针能命中已注册槽位，不再发生“复制后漏原串”
+- 结果：
+  - `stress_soak_resolved_heap_record_string_list_return_ownership_smoke` 通过
+  - `stress_soak_resolved_nested_heap_record_string_list_return_ownership_smoke` 通过
+  - `stress_soak_resolved_list_of_string_list_return_ownership_smoke` 通过
+  - `make test-stress`：53 passed / 15 ignored，0 failed
+  - `make test-dispatch-zero`：聚合 fallback_rate=0.0000
+  - `make test-dogfood`：全绿
+  - `cargo test --lib`：5480 passed
+
+### 0.37.68 — future await 由固定旋转上限改为 Condvar 阻塞等待
+
+- `mimi_await_future` 旧的实现是在 `completed` 上 `yield_now` 旋转，
+  超过 1_000_000 次直接 `process::abort()`
+  - 高压/长时任务下只要调度稍慢就会误杀进程，违反 0.1.7 高压可靠性目标
+- 改为全局 `AWAIT_LOCK` + `AWAIT_CONDVAR`：
+  - `mimi_await_future` 在锁内检查原子 completed，未完成则 `condvar.wait`
+  - `mimi_future_set_completed` 在同一把锁内 CAS 并 `notify_all`
+  - 单一 condvar 不引入 per-future 堆分配，保持 Valgrind clean
+- 新增回归 `future_await_blocks_until_completion_without_spin_abort`
+- 门禁：
+  - 所有 `spawn` 相关单测 45 个通过
+  - `e2e_valgrind_spawn_basic` / `e2e_valgrind_spawn_multiple` 通过
+  - `cargo test --lib` 5480 passed
+
+### 0.37.66 — loader impl 去重键纳入 trait 参数
+
+- 修复模块合并时多个 `impl From<A, Target> for Target` / `impl From<B, Target> for Target`
+  被误判为同一个 `impl:From:Target` 重复项的问题
+- `item_name` 对 `Item::Impl` 的 dedup key 从 `(trait, type)` 扩展为
+  `(trait, trait_args, type)`，例如：
+  `impl:From:FsError,AppError:AppError` 与
+  `impl:From:JsonError,AppError:AppError` 不再冲突
+- 同步修改 `src/loader/flow.rs` 的同一 dedup 逻辑
+- loader 测试 45 个全部通过
+
+### 0.37.67 — DynamicAnyPack 进入 resolved native slice，std::set/maps Any 包装全开
+
+- `resolve eligibility.require_conversion` 接受 `CheckedConversionKind::DynamicAnyPack`
+  - resolved emitter 早已实现 concrete → Any 的 i64/ptr box ABI（窄整数 sext 到 i64），
+    只是 eligibility 未放行导致 Any 包装函数在 dispatch 统计中被判 fallback
+- `tests/real_world/std_set.mimi` 加入 `insert` / `contains` / `remove` Any 包装，55/55
+- `tests/real_world/std_maps.mimi` 改为 `std::maps` 包装 + Any：
+  `set` / `get` / `get_or_default` / `to_list` / `remove`，73/73
+- dispatch 139 语料聚合 fallback_rate=0.0000
+- `cargo test --lib` 5479 passed
+
+### 0.37.65 — `std::fs` 进入 resolved module 白名单 + StatResult/ExecResult 布局
+
+- 修复 `std::fs` 的 resolved 盲区根因：`builtin:type:StatResult`（以及同类
+  `ExecResult`）此前未在 resolved eligibility/types 中登记为内置 record
+  - `src/codegen/resolved/eligibility.rs` 接受 `ExecResult` / `StatResult`
+  - `src/codegen/resolved/types.rs` 补齐 LLVM 布局：
+    - `ExecResult { exit_code: i32, stdout: string, stderr: string }`
+    - `StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }`
+  - `std::fs` 的三个 `StatResult` 相关函数（`stat` / `file_size` /
+    `string_file_size`）由 legacy fallback 转为 resolved
+- 默认 module-body 白名单加入 `fs`
+- `tests/real_world/std_fs.mimi` 改为真实 `use std::fs`，覆盖
+  `write` / `read` / `exists` / `stat` 包装函数
+- dispatch 语料维持 139，`std_fs` eligible=61/61 fallback=0；
+  聚合 fallback_rate=0.0000；dogfood 全绿；`cargo test --lib` 5479 passed
+
+### 0.37.64 — `std::set` resolved 自递归修复 + 进入 module 白名单
+
+- 修复 resolved native 下 `SetExt` 方法的自递归 trampoline：
+  - `std::set` 的合成 impl 函数（`Set_size` / `Set_insert` / ...）其函数体
+    是 `self.size()` / `self.insert(...)`，resolved ProtocolMethod 把该调用
+    再次指向同一个 `Set_xxx` 符号，生成 `Set_size -> Set_size -> ...` 自递归
+  - 现在协议方法解析对内置 `Set` 方法直接调用 `mimi_set_*` runtime，
+    与 legacy `compile_set_method` 的内置优先级一致
+  - 覆盖 `size` / `len` / `is_empty` / `contains` / `insert` / `remove` /
+    `to_list`，含 i64→i32 截断、bool 比较、list struct 组装
+- eligibility 接受 `ContainerErase`：typed `Set<T>`/`List<T>` 传给 bare
+  `Set`/`List` 参数只改变类型 id、不改变 LLVM 布局，resolved emitter 已按
+  identity 处理
+- 默认 module-body 白名单加入 `set`
+- `tests/real_world/std_set.mimi` 改为真实 `use std::set`，覆盖非 Any 包装面
+  `size` / `is_empty` / `to_list`；Any 包装面（insert/contains/remove）仍由
+  DynamicAnyPack 迁移负责
+- 门禁：dispatch 语料维持 139，`std_set` eligible=55/55 fallback=0，
+  聚合 fallback_rate=0.0000；dogfood 全绿；`cargo test --lib` 5479 passed
+
+### 0.37.63 — `std::testing` 进入 resolved module 白名单 + 独立语料
+
+- 默认 module-body 白名单加入 `testing`，`std::testing` 断言函数进入
+  resolved native 切片
+- 新增 `tests/real_world/std_testing.mimi`，覆盖
+  `assert_true` / `assert_false` / `assert_eq_int` / `assert_ne_int` /
+  `assert_eq_string` / `assert_eq_bool` / `assert_approx_eq_float`
+- dispatch 语料 138→139，`std_testing` eligible=50/50 fallback=0；
+  聚合 fallback_rate 维持 0.0000
+
+### 0.37.62 — `std::array` / `std::json` / `std::maps` 进入 resolved module 白名单
+
+- 默认 module-body 白名单加入 `array`、`json`、`maps`；对应标准库模块函数
+  进入 resolved native 切片
+- `tests/real_world/std_maps.mimi` 改为实际 `use std::maps` 并覆盖
+  `new` / `size` / `has_key` / `remove` 等非 Any 包装函数；故意避开
+  `get`/`set` 的 `Any` 参数转换面（DynamicAnyPack 后续独立迁移）
+- `tests/real_world/std_json.mimi` 追加 `use std::json` 头，模块函数随语料
+  进入 resolved 检查
+- 新增 `tests/real_world/std_array.mimi`，覆盖 `array_new` /
+  `array_set` / `array_get` / `array_reverse` / `array_concat` /
+  `array_contains`
+- dispatch 语料 137→138，`std_array` 59/59、`std_json` 65/65、
+  `std_maps` 73/73 全部 zero fallback；聚合 fallback_rate 维持 0.0000
+
+### 0.37.61 — `std::text` 进入 resolved module 白名单 + 独立语料
+
+- 在 `to_float` i32 修复与 0.37.59 字符串所有权修复的双重闭环后，
+  `std::text` 的模块函数（含 `TextExt for string` impl）已可全部走
+  resolved native 切片
+- `src/codegen/resolved/eligibility.rs` 默认 module-body 白名单加入 `text`
+- 新增独立语料 `tests/real_world/std_text.mimi`，覆盖：
+  `is_blank` / `is_numeric` / `slugify` / `indent_text` / `wrap_text` /
+  `camel_to_snake`；其中 `camel_to_snake` 同时锁住 0.37.59 的
+  `"" + cts_ch` 原生加固
+- dispatch 语料 136→137，`std_text` eligible=57/57 fallback=0；聚合
+  fallback_rate 维持 0.0000
+
+### 0.37.60 — `std::random` 进入 resolved module 白名单 + `to_float` i32 直接整型转换
+
+- 修复 native `to_float` 对 i32/i16 等窄整型的错误路径：此前所有 IntValue
+  都走 `mimi_any_to_float(i64)` 的 Any 句柄启发式，i32 直接传给 i64 签名
+  产生非法 LLVM IR，负 i32 还会被当作 usize 句柄输出超大 float
+  - 现在 i64 仍走 Any 启发式；i32 及更窄整型改为 `sitofp` 直接转换，与
+    Bytecode VM 的 `Value::Int → as f64` 语义对齐
+  - `emit_any_to_int` / `emit_any_to_float` 增加统一 i64 参数提升，确保任何
+    宽度的整型句柄调用都不会生成签名不匹配 IR
+- 根因闭环：`std::random` 的 `random_int` / `random_choice` 等函数此前因
+  `mimi_any_to_float(i32)` IR 非法被 resolved per-function verify 拒绝，
+  导致 generic impl 的 `List_random_choice` 在链接期 undefined
+- `src/codegen/resolved/eligibility.rs` 默认 module-body 白名单加入 `random`；
+  `std::random` 全套模块函数进入 resolved native 切片
+- 新增独立语料 `tests/real_world/std_random.mimi`，覆盖：
+  `random_bool` / `random_int` / `random_float` / `random_choice` /
+  `random_sample` / `shuffle` / `random_remove_ith`；
+  eligible=53/53 fallback=0
+- 新增 Rust 回归 `e2e_resolved_to_float_promotes_i32_handle`，锁定
+  `to_float(7)` 与 `to_float(-3)` 的 native resolved 输出
+- 门禁：dispatch 语料 135→136，聚合 fallback_rate=0.0000；dogfood 4 工程
+  全绿；`cargo test --lib` 5479 passed
+
+### 0.37.59 — resolved native 字符串所有权修复 + `std::text` camel_to_snake 原生加固
+
+- 修复 resolved native codegen 在循环内字符串临时值生命周期错误：
+  - `w = w + ch` / f-string / string-returning call 赋给局部变量时，不再把
+    新堆串保留在“本次循环体”堆作用域末尾释放；改为把所有权转移到变量槽
+    （函数根作用域），避免 `free_heap_allocs` 提前释放刚存入变量的字符串
+  - `let ch = str_char_at(...)` 等 string-temp binding 同样执行所有权转移
+  - `w = ch` 这类字符串变量到变量的赋值改为深拷贝目标数据，避免目标与
+    per-iteration 堆槽位别名而在循环体退出后被释放
+- 回归：新增 `e2e_native_string_build_loop_ownership`，覆盖 `w = w + ch`
+  循环拼串与 `w = ch` 取末字符；`checked_codegen_compile_and_run` 验证
+  native resolved slice 行为
+- `std/text.mimi` `camel_to_snake` 原生加固：大写开新词时使用
+  `"" + cts_ch` 建立独立堆字符串，替代直接别名循环局部的 `cts_ch`
+  （`FooBar` → `foo_bar`、`HelloWorld` → `hello_world`；`mimi run` 与原生
+  binary 输出一致）
+- 门禁：`make test-dispatch-zero` 135 条语料聚合 fallback_rate=0.0000；
+  `make test-dogfood` 4 工程全绿；`cargo test --lib flow_` 411 passed 与
+  `cargo test --lib dual_` 999 passed
+
+### 0.37.58 — `std::iter` 进入 resolved module 白名单 + 独立语料
+
+- `src/codegen/resolved/eligibility.rs` 默认 module-body 白名单加入 `iter`，
+  `std::iter` 模块函数进入 resolved native 切片
+- 新增 `tests/real_world/std_iter.mimi` 独立语料，覆盖：
+  `iter_range` / `iter_zip` / `iter_enumerate` / `iter_take` /
+  `iter_drop` / `iter_chain` / `iter_repeat` / `iter_reversed` /
+  `iter_count` / `iter_unique`
+- dispatch 语料 134→135，`std_iter` eligible=54/54 fallback=0；聚合
+  fallback_rate 维持 0.0000
+
+### 0.37.57 — stress 原生多客户端 TCP echo 回归锁
+
+- `tests/stress/mod.rs` 新增 `build_and_run_native` helper：构建 Mimi 原生
+  binary 并运行；专门用于真实线程并发与阻塞 I/O 场景（`mimi run` 的 bytecode
+  VM 仍按设计顺序执行 spawn/await，不适合服务器/客户端并发用例）
+- 新增 `tests/stress/net_concurrency.rs::stress_native_multi_client_tcp_echo`：
+  将 mimichat-modern 的并发多客户端 TCP echo 形状沉淀为独立 stress 回归，
+  原生 binary 验证 3 客户端与 server 内部 3 个 echo handler 全部成功
+- 该压力用例覆盖：嵌套 spawn、Channel 就绪同步、并发 socket 生命周期与
+  多 task await
+
+### 0.37.56 — mimichat-modern 并发多客户端 TCP echo 服务态
+
+- mimichat-modern net 服务态从单 echo 升级为并发多客户端：
+  - `server_echo` 用 `Channel<i64>` 对外广播监听就绪信号
+  - 接受 3 个连接后，为每个 client socket `spawn echo_handler(client)`
+  - 一个 server task 内部再派生多个 echo handler，验证真实线程并发
+  - 主流程同时 `spawn` 3 个 `client_echo`，全部 `await` 后检查 4 个 task 结果
+- 原生 binary 运行输出 `net: 0/0/0/0`，证明并发网络 task 全部成功
+- 该扩展作为 Phase C「真实结构化并发运行时」的 dogfood 承压切片：
+  嵌套 spawn、Channel 就绪同步、多路并发 socket 生命周期均由 real-thread
+  runtime 完成
+
+### 0.37.55 — Flow EventId 裸变体作用域收紧 + mimichat-modern TCP 服务态
+
+- dogfood 新证据：在 Flow transition 名为 `accept` 时，普通函数里的网络
+  builtin `accept(fd)` 被误编译为 Flow 的 EventId 枚举构造器（struct 值参与
+  `if client < 0`），native build 报误导性 E0700「lt requires same numeric types」
+- 根因：每个 Flow transition 都是 EventId 变体；legacy codegen 的
+  `nominal_variant_enum` 无作用域回退会在普通函数编译期把同名变体当作裸构造器
+- 修复：
+  - Flow StateId/EventId 裸变体构造只在 Flow transition body 编译期间生效
+    （`current_flow_name` 非空）
+  - `compile_flow` 结束后清空 `current_flow_name` / `current_persistent_fields`
+    / `current_from_state`，避免 Flow 编译状态泄漏到后续普通函数
+- 新增 Rust 回归测试：`e2e_flow_transition_named_accept_does_not_shadow_builtin_accept`
+- mimichat-modern 扩展为真实 TCP 服务态：`server_echo` / `client_echo` 基于
+  `use std::net` 包装层（`tcp_listen` / `tcp_accept` / `tcp_connect` /
+  `tcp_send` / `tcp_recv`），通过 `spawn` + `await` 在原生 binary 中完成一次
+  echo 往返；`make test-dogfood` 与 `make test-dispatch-zero` 保持全绿
+- `src/codegen/resolved/eligibility.rs` 的默认 module-body 白名单加入 `net`，
+  `std::net` 包装函数进入 resolved native 切片；mimichat-modern dispatch 从
+  55/71 提升到 71/71，继续零回退
+- 新增独立语料 `tests/real_world/std_net.mimi`：`std::net` 全套 wrapper
+  进入真实世界回归集，dispatch 语料 133→134，`std_net` 61/61 零回退
+
+### 0.37.54 — Flow transition body 本地 List 显式注解 resolved 支持修复
+
+- mimichat-modern dogfood 暴露：Flow transition 内 `let xs: List<string> = []`
+  被 resolved typed-body lowering 以 TOOL-RESOLUTION-001 拒绝
+- resolved 构建现在会持久化 transition 拥有的全部显式类型注解，与普通函数
+  行为对齐；local annotation / checked conversion 可进入 type_operands 表
+- mimichat-modern 恢复真实 `List<string> transcript` 状态字段，通过
+  `join` / `accept` 拷贝传递，成为该修复的活体回归用例
+- 新增 Rust 回归测试 `flow_transition_local_list_annotation_resolved`
+
+### 0.37.53 — mimichat-modern dogfood 工程落地（Phase D 扩展载体首片）
+
+- 新增手写现代 dogfood 工程 `projects/mimichat-modern`：
+  - Flow `ChatSession`：加入/收消息/离开的状态机切片
+  - Actor `RoomService`：房间与服务计数状态
+  - 真实线程 `Channel<i64>` worker：`spawn send_id(ch, id)` / `await`
+  - 大 payload `ChatMessage` 记录（含 `List<string>` flags）
+- `make test-dogfood` 扩至 4 个工程：taskq + ledger + mimichat +
+  mimichat-modern，check/test/build/run 全绿
+- `scripts/dispatch_stat.py` 语料扩至 133 条；mimichat-modern
+  53/53 全部 resolved，聚合 fallback_rate=0.0000
+
+### 0.37.52 — mimichat 真实工程回归纳入 dogfood + dispatch 零回退语料
+
+- `projects/mimichat`（v0.28 时代 61 项测试 / 230 个函数）加入
+  `make test-dogfood`：check / test / build / 原生运行全绿
+- `scripts/dispatch_stat.py` 语料加入 `projects/mimichat/src`：
+  230/230 全部走 resolved，`legacy_fallback=0`
+- 全语料扩至 132 条，聚合 fallback_rate=0.0000
+- 作用：既保住 v0.28 真实工程的长期可编译回归，也为旧工程与 0.1.7
+  新 dogfood 工程建立同一套零回退/可运行门禁
+
+### 0.37.51 — E0256/E0304 资源来源诊断（Phase D 可用性切片 1）
+
+- `ResourceFact` 现在携带 `introduced_span`：线性资源在 `let`/绑定引入时记录来源位置
+- E0256（未消费/可能未消费）与 E0304（消费后再次移动/重复消费/use-after-move）
+  自动附带 `note: resource 'x' introduced here` 来源锚点
+- CFG join 传播来源位置：资源跨分支合并后仍可指回最初引入点
+- 新增回归断言：E0256 必须带 introduced-note，避免未来回归丢来源
+
 ### 0.37.50 — 并发原语名义类型化（Phase C 切片 1）+ dogfood dispatch 语料接入
 
 - 并发原语从裸 `i64` handle 升级为名义类型（运行时表示仍为 i64）：
@@ -15,14 +590,21 @@
   - 工厂/操作 builtin 在 checker 侧返回并消费对应名义类型
   - 新增 handle family 交叉使用检查：`atomic_i32_load(channel_new())`、
     `mutex_get(mutex_new(0))` 等混用现在于 `mimi check` 阶段报 E0242
+  - 新增 value slot 类型检查：`atomic_i32_store(a, "x")`、
+    `channel_send(c, true)`、`mutex_set(g, true)` 等载荷类型错误同样 E0242
   - `AtomicI64` 与 `Channel` 的 i64 数据面保持不变；MutexGuard 的线性深整合
     仍按计划留到 0.1.8（Phase C 范围铁律）
-  - resolved native slice 将新名义类型降为 opaque i64，双后端等价保持
+  - resolved native slice 将新名义类型降为 opaque i64，eligibility 同步放行
+    新名义类型使并发原语程序保持零 legacy 回退；双后端等价保持
+  - 新增 `tests/real_world/concurrency_nominal.mimi`：显式
+    `AtomicI32` / `Mutex<i64>` / `Channel<i64>` 参数与调用
 - `scripts/dispatch_stat.py` 语料纳入两个 0.1.7 dogfood 工程：
   - `projects/mimi-taskq/src/main.mimi`
   - `projects/mimi-ledger/src/main.mimi`
-  - `make test-dispatch-zero` 全语料 130 条，聚合 fallback_rate=0.0000
+  - `make test-dispatch-zero` 全语料 131 条，聚合 fallback_rate=0.0000
 - 新增 checker 正/负测试：合法名义类型表面可编译，跨 handle family 混用拒绝
+- `tests/stress/real_spawn.rs` 的 channel worker 源码同步迁移到
+  `Channel<i64>` 参数，`make test-stress` 52 项冒烟全绿
 - 全量 `dual_` 999 项通过，`make test-dogfood` 通过
 
 ### 0.37.49 — 特性设计评估复盘落档 + 0.1.7 排期增补 + 0.1.8 规划锚定

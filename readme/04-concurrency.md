@@ -240,6 +240,14 @@ parasteps "同时加载用户数据" {
 let future = spawn async_func(args);
 ```
 
+> **实现说明（0.37.71+）**：`spawn` 默认提交到有界 Worker Pool，复用线程而非
+> 每个 Future 新建一个 OS 线程。若某个池内任务内部再次 `spawn`，子任务会自动
+> 落到专用线程，避免所有 worker 都在等待子任务时产生池内死锁。
+>
+> **嵌套线程上下文（0.37.101+）**：专用 nested-spawn 线程同样被视为 worker
+> 上下文；从其中再次 spawn 仍走专用线程。因此深层链式嵌套与二叉 fan-out
+> 都不会重新排入有界 pool 导致死锁（`stress_native_nested_spawn_*` 覆盖）。
+
 ### 4.2 await
 
 `await` 等待 Future 完成：
@@ -271,11 +279,72 @@ parasteps {
 }
 ```
 
+## 5. 并发原语
+
+Mimi 内置一组轻量并发原语。这些原语以 i64 handle 为运行时表示，但在类型系统中
+使用名义类型（`AtomicI32`、`AtomicI64`、`AtomicBool`、`Mutex<T>`、`Channel<T>`）。
+
+### 5.1 Channel
+
+- `channel_new()` -> `Channel<T>`：创建有界消息通道
+- `channel_send(ch, value)`：向通道发送一个 i64
+- `channel_recv(ch)` -> `T`：阻塞接收
+- `channel_try_recv(ch)` -> `i64`：非阻塞接收；空通道返回 `-1`
+- `channel_drop(ch)`：释放通道
+
+```mimi
+func main() -> i32 {
+    let ch = channel_new()
+    channel_send(ch, 7)
+    let v = channel_recv(ch)
+    let empty = channel_try_recv(ch)   // -1
+    channel_drop(ch)
+    if v == 7 && empty == -1 { 0 } else { 1 }
+}
+```
+
+### 5.2 Mutex
+
+- `mutex_new(initial)` -> `Mutex<T>`：创建互斥锁并保存初始 i64
+- `mutex_lock(m)` -> guard：加锁
+- `mutex_get(guard)` -> `T`：读取受保护值
+- `mutex_set(guard, value)`：写入受保护值
+- `mutex_unlock(guard)`：解锁
+- `mutex_drop(m)`：释放互斥锁
+
+```mimi
+func main() -> i32 {
+    let m = mutex_new(0)
+    let g = mutex_lock(m)
+    mutex_set(g, 42)
+    let v = mutex_get(g)
+    mutex_unlock(g)
+    mutex_drop(m)
+    if v == 42 { 0 } else { 1 }
+}
+```
+
+### 5.3 Atomic
+
+- `AtomicI32`：`atomic_i32_new / load / store / fetch_add / compare_exchange / drop`
+- `AtomicI64`：`atomic_i64_new / load / store / fetch_add / compare_exchange / drop`
+- `AtomicBool`：`atomic_bool_new / load / store / compare_exchange / drop`
+
+```mimi
+func main() -> i32 {
+    let a = atomic_i32_new(5)
+    let old = atomic_i32_fetch_add(a, 3)
+    let v = atomic_i32_load(a)
+    atomic_i32_drop(a)
+    if old == 5 && v == 8 { 0 } else { 1 }
+}
+```
+
 ---
 
-## 5. On Failure 补偿
+## 6. On Failure 补偿
 
-### 5.1 基本用法
+### 6.1 基本用法
 
 `on failure` 注册补偿操作，在失败时按 LIFO 逆序执行：
 
@@ -300,7 +369,7 @@ func booking() -> Result<(), string> {
 3. `cancel_seat(seat)` 执行
 4. 错误向上传播
 
-### 5.2 补偿栈
+### 6.2 补偿栈
 
 补偿块注册到当前作用域的补偿栈：
 
@@ -323,7 +392,7 @@ func process() -> Result<(), string> {
 }
 ```
 
-### 5.3 补偿失败处理
+### 6.3 补偿失败处理
 
 补偿块本身失败时，错误累积为 `CompositeError`：
 
@@ -342,9 +411,9 @@ func process() -> Result<(), string> {
 
 ---
 
-## 6. Parasteps + On Failure
+## 7. Parasteps + On Failure
 
-### 6.1 并行补偿
+### 7.1 并行补偿
 
 parasteps 内部的 spawn 有独立的补偿栈：
 
@@ -366,7 +435,7 @@ func process() -> Result<(), string> {
 }
 ```
 
-### 6.2 完整示例：并行事务
+### 7.2 完整示例：并行事务
 
 ```mimi
 func parallel_booking() -> Result<(), string> {
@@ -393,9 +462,9 @@ func parallel_booking() -> Result<(), string> {
 
 ---
 
-## 7. 共享状态与并发安全
+## 8. 共享状态与并发安全
 
-### 7.1 shared 跨线程
+### 8.1 shared 跨线程
 
 ```mimi
 func main() -> i32 {
@@ -417,7 +486,7 @@ func main() -> i32 {
 }
 ```
 
-### 7.2 local_shared 限制
+### 8.2 local_shared 限制
 
 ```mimi
 // local_shared 不能跨 parasteps 边界
@@ -441,9 +510,9 @@ parasteps {
 
 ---
 
-## 8. 并发模式示例
+## 9. 并发模式示例
 
-### 8.1 并行数据处理
+### 9.1 并行数据处理
 
 ```mimi
 func process_data(data: List<i32>) -> List<i32> {
@@ -458,7 +527,7 @@ func process_data(data: List<i32>) -> List<i32> {
 }
 ```
 
-### 8.2 超时控制
+### 9.2 超时控制
 
 ```mimi
 func fetch_with_timeout(url: string) -> Result<string, string> {
@@ -469,7 +538,7 @@ func fetch_with_timeout(url: string) -> Result<string, string> {
 }
 ```
 
-### 8.3 重试逻辑
+### 9.3 重试逻辑
 
 ```mimi
 func retry<T>(f: func() -> T, max_retries: i32) -> T {
