@@ -21,7 +21,7 @@ const ACTOR_MAILBOX_BLOB_CAPACITY: u64 = 256;
 impl<'ctx> CodeGenerator<'ctx> {
     /// ABI slot size for actor mailbox packing: natural type size, rounded up
     /// to 8-byte alignment so mixed scalar/struct args stay aligned.
-    fn actor_abi_slot_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+    pub(in crate::codegen) fn actor_abi_slot_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
         let size = self.llvm_type_size_bytes(ty).max(1);
         size.div_ceil(8) * 8
     }
@@ -35,7 +35,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// that 8-byte accounting — overlapping writes + wrong-sized reads. The
     /// registry-backed `llvm_type_for` resolves named records/enums to their
     /// real struct layout.
-    fn actor_abi_type_for(&self, ty: &crate::ast::Type) -> BasicTypeEnum<'ctx> {
+    pub(in crate::codegen) fn actor_abi_type_for(
+        &self,
+        ty: &crate::ast::Type,
+    ) -> BasicTypeEnum<'ctx> {
         self.llvm_type_for(ty)
             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
     }

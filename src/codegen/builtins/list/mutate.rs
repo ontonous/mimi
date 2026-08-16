@@ -319,166 +319,250 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                     BasicValueEnum::PointerValue(buf)
                 } else {
-                    // Heap-copy the struct so the list element remains valid
-                    // after the current stack frame is torn down.
-                    //
-                    // D-4 (2026-08-06): `{i1, {ptr,i64}}` — an Option<string>
-                    // (or Result<_,string>-shaped) element — does NOT match the
-                    // is_string_struct test above (field 1 is a struct, not an
-                    // int), so it used to land here and copy the outer struct
-                    // only, aliasing the inner string pointer with the source.
-                    // When the source's string was subsequently freed (e.g. a
-                    // per-loop-iteration temporary inside an `if` arm), the list
-                    // element dangled → use-after-free at display / double-free.
-                    // Deep-copy the inner string payload for this shape.
-                    let is_option_string = fields.len() == 2
+                    // A plain nested list value arriving as a struct (rather
+                    // than through a pointer) must also deep-copy its data
+                    // array. Without this, `push(rows, row)` in a loop would
+                    // alias `row`'s buffer; later freeing the loop-local `row`
+                    // would leave `rows` dangling (0.37.30 nested-list push).
+                    let is_list_struct = fields.len() == 2
                         && matches!(
                             fields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                         )
-                        && matches!(
-                            fields[1],
-                            BasicTypeEnum::StructType(st) if {
-                                let inner = st.get_field_types();
-                                inner.len() == 2
-                                    && matches!(inner[0], BasicTypeEnum::PointerType(_))
-                                    && matches!(
-                                        inner[1],
-                                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                                    )
-                            }
-                        );
-                    if is_option_string {
-                        let disc = self
-                            .builder
-                            .build_extract_value(sv, 0, "push_opt_disc")
-                            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
-                            .into_int_value();
-                        let payload = self
-                            .builder
-                            .build_extract_value(sv, 1, "push_opt_payload")
-                            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
-                            .into_struct_value();
-                        let raw_ptr = self
-                            .builder
-                            .build_extract_value(payload, 0, "push_opt_str_data")
-                            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
-                            .into_pointer_value();
-                        // Allocate the outer struct up front so both arms share
-                        // one heap block (the list slot then owns exactly one
-                        // allocation per element, no branch-local leak).
-                        let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-                        let size_val = i64_ty.const_int(size, false);
-                        let heap_ptr = self.malloc_or_abort(size_val, "push_opt_struct")?;
-                        let disc_is_some = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc,
-                                self.context.bool_type().const_int(0, false),
-                                "push_opt_is_some",
-                            )
-                            .map_err(|e| CompileError::LlvmError(format!("opt disc cmp: {}", e)))?;
-                        let parent = self
-                            .builder
-                            .get_insert_block()
-                            .and_then(|bb| bb.get_parent())
-                            .ok_or_else(|| {
-                                CompileError::LlvmError("push_opt outside function".into())
-                            })?;
-                        let some_bb = self.context.append_basic_block(parent, "push_opt_some");
-                        let none_bb = self.context.append_basic_block(parent, "push_opt_none");
-                        let store_bb = self.context.append_basic_block(parent, "push_opt_store");
-                        self.builder
-                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("opt br: {}", e)))?;
-                        // Some: deep-copy the string payload.
-                        self.builder.position_at_end(some_bb);
-                        let strlen_fn = self.get_runtime_fn("strlen")?;
+                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    if is_list_struct {
                         let len = self
                             .builder
-                            .build_call(
-                                strlen_fn,
-                                &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
-                                "push_opt_strlen",
-                            )
-                            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                            .try_as_basic_value_opt()
-                            .ok_or("strlen returned void")?
+                            .build_extract_value(sv, 0, "push_list_val_len")
+                            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
                             .into_int_value();
-                        let alloc_size = self
+                        let data = self
                             .builder
-                            .build_int_add(len, i64_ty.const_int(1, false), "push_opt_alloc_size")
-                            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                        let buf = self.malloc_or_abort(alloc_size, "push_opt_str")?;
+                            .build_extract_value(sv, 1, "push_list_val_data")
+                            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+                            .into_pointer_value();
+                        let bytes = self
+                            .builder
+                            .build_int_mul(len, i64_ty.const_int(8, false), "push_list_val_bytes")
+                            .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+                        let new_data = self.malloc_or_abort(bytes, "push_list_val_data")?;
                         let memcpy_fn = self.get_runtime_fn("memcpy")?;
                         self.builder
                             .build_call(
                                 memcpy_fn,
                                 &[
-                                    BasicMetadataValueEnum::PointerValue(buf),
-                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
-                                    BasicMetadataValueEnum::IntValue(len),
+                                    BasicMetadataValueEnum::PointerValue(new_data),
+                                    BasicMetadataValueEnum::PointerValue(data),
+                                    BasicMetadataValueEnum::IntValue(bytes),
                                 ],
-                                "push_opt_memcpy",
+                                "push_list_val_memcpy",
                             )
-                            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
-                        let i8_int_ty = self.context.i8_type();
-                        let null_pos = self
-                            .gep()
-                            .build_in_bounds_gep(
-                                BasicTypeEnum::IntType(i8_int_ty),
-                                buf,
-                                &[len],
-                                "push_opt_nul",
-                            )
-                            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                        self.builder
-                            .build_store(null_pos, i8_int_ty.const_int(0, false))
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        let copied_payload = self
+                            .map_err(|e| CompileError::LlvmError(format!("memcpy: {}", e)))?;
+                        let list_ty = self.list_struct_type();
+                        let new_list = self
                             .builder
-                            .build_insert_value(payload, buf, 0, "push_opt_pay0")
-                            .map_err(|e| CompileError::LlvmError(format!("pay insert: {}", e)))?
+                            .build_insert_value(list_ty.get_undef(), len, 0, "push_list_val_len")
+                            .map_err(|e| CompileError::LlvmError(format!("insert: {}", e)))?
                             .into_struct_value();
-                        let some_val = {
-                            let d0 = self
-                                .builder
-                                .build_insert_value(sty.const_zero(), disc, 0, "po_d0")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("disc insert: {}", e))
-                                })?;
-                            self.builder
-                                .build_insert_value(d0, copied_payload, 1, "po_pay")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("pay insert: {}", e))
-                                })?
-                        };
-                        self.builder
-                            .build_store(heap_ptr, some_val)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        self.builder
-                            .build_unconditional_branch(store_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
-                        // None: store the zero value.
-                        self.builder.position_at_end(none_bb);
-                        self.builder
-                            .build_store(heap_ptr, sty.const_zero())
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        self.builder
-                            .build_unconditional_branch(store_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
-                        // Continue emission at the merge point.
-                        self.builder.position_at_end(store_bb);
-                        BasicValueEnum::PointerValue(heap_ptr)
-                    } else {
+                        let new_list = self
+                            .builder
+                            .build_insert_value(new_list, new_data, 1, "push_list_val_data")
+                            .map_err(|e| CompileError::LlvmError(format!("insert: {}", e)))?
+                            .into_struct_value();
                         let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                         let size_val = i64_ty.const_int(size, false);
-                        let heap_ptr = self.malloc_or_abort(size_val, "push_struct_val")?;
+                        let heap_ptr = self.malloc_or_abort(size_val, "push_list_box")?;
                         self.builder
-                            .build_store(heap_ptr, sv)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                            .build_store(heap_ptr, new_list)
+                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                         BasicValueEnum::PointerValue(heap_ptr)
+                    } else {
+                        // Heap-copy the struct so the list element remains valid
+                        // after the current stack frame is torn down.
+                        //
+                        // D-4 (2026-08-06): `{i1, {ptr,i64}}` — an Option<string>
+                        // (or Result<_,string>-shaped) element — does NOT match the
+                        // is_string_struct test above (field 1 is a struct, not an
+                        // int), so it used to land here and copy the outer struct
+                        // only, aliasing the inner string pointer with the source.
+                        // When the source's string was subsequently freed (e.g. a
+                        // per-loop-iteration temporary inside an `if` arm), the list
+                        // element dangled → use-after-free at display / double-free.
+                        // Deep-copy the inner string payload for this shape.
+                        let is_option_string = fields.len() == 2
+                            && matches!(
+                                fields[0],
+                                BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                            )
+                            && matches!(
+                                fields[1],
+                                BasicTypeEnum::StructType(st) if {
+                                    let inner = st.get_field_types();
+                                    inner.len() == 2
+                                        && matches!(inner[0], BasicTypeEnum::PointerType(_))
+                                        && matches!(
+                                            inner[1],
+                                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                                        )
+                                }
+                            );
+                        if is_option_string {
+                            let disc = self
+                                .builder
+                                .build_extract_value(sv, 0, "push_opt_disc")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("extract error: {}", e))
+                                })?
+                                .into_int_value();
+                            let payload = self
+                                .builder
+                                .build_extract_value(sv, 1, "push_opt_payload")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("extract error: {}", e))
+                                })?
+                                .into_struct_value();
+                            let raw_ptr = self
+                                .builder
+                                .build_extract_value(payload, 0, "push_opt_str_data")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("extract error: {}", e))
+                                })?
+                                .into_pointer_value();
+                            // Allocate the outer struct up front so both arms share
+                            // one heap block (the list slot then owns exactly one
+                            // allocation per element, no branch-local leak).
+                            let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                            let size_val = i64_ty.const_int(size, false);
+                            let heap_ptr = self.malloc_or_abort(size_val, "push_opt_struct")?;
+                            let disc_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc,
+                                    self.context.bool_type().const_int(0, false),
+                                    "push_opt_is_some",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt disc cmp: {}", e))
+                                })?;
+                            let parent = self
+                                .builder
+                                .get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError("push_opt outside function".into())
+                                })?;
+                            let some_bb = self.context.append_basic_block(parent, "push_opt_some");
+                            let none_bb = self.context.append_basic_block(parent, "push_opt_none");
+                            let store_bb =
+                                self.context.append_basic_block(parent, "push_opt_store");
+                            self.builder
+                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(format!("opt br: {}", e)))?;
+                            // Some: deep-copy the string payload.
+                            self.builder.position_at_end(some_bb);
+                            let strlen_fn = self.get_runtime_fn("strlen")?;
+                            let len = self
+                                .builder
+                                .build_call(
+                                    strlen_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                                    "push_opt_strlen",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("strlen error: {}", e))
+                                })?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            let alloc_size = self
+                                .builder
+                                .build_int_add(
+                                    len,
+                                    i64_ty.const_int(1, false),
+                                    "push_opt_alloc_size",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("add error: {}", e))
+                                })?;
+                            let buf = self.malloc_or_abort(alloc_size, "push_opt_str")?;
+                            let memcpy_fn = self.get_runtime_fn("memcpy")?;
+                            self.builder
+                                .build_call(
+                                    memcpy_fn,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(buf),
+                                        BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                        BasicMetadataValueEnum::IntValue(len),
+                                    ],
+                                    "push_opt_memcpy",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("memcpy error: {}", e))
+                                })?;
+                            let i8_int_ty = self.context.i8_type();
+                            let null_pos = self
+                                .gep()
+                                .build_in_bounds_gep(
+                                    BasicTypeEnum::IntType(i8_int_ty),
+                                    buf,
+                                    &[len],
+                                    "push_opt_nul",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("gep error: {}", e))
+                                })?;
+                            self.builder
+                                .build_store(null_pos, i8_int_ty.const_int(0, false))
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("store error: {}", e))
+                                })?;
+                            let copied_payload = self
+                                .builder
+                                .build_insert_value(payload, buf, 0, "push_opt_pay0")
+                                .map_err(|e| CompileError::LlvmError(format!("pay insert: {}", e)))?
+                                .into_struct_value();
+                            let some_val = {
+                                let d0 = self
+                                    .builder
+                                    .build_insert_value(sty.const_zero(), disc, 0, "po_d0")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("disc insert: {}", e))
+                                    })?;
+                                self.builder
+                                    .build_insert_value(d0, copied_payload, 1, "po_pay")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("pay insert: {}", e))
+                                    })?
+                            };
+                            self.builder.build_store(heap_ptr, some_val).map_err(|e| {
+                                CompileError::LlvmError(format!("store error: {}", e))
+                            })?;
+                            self.builder
+                                .build_unconditional_branch(store_bb)
+                                .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+                            // None: store the zero value.
+                            self.builder.position_at_end(none_bb);
+                            self.builder
+                                .build_store(heap_ptr, sty.const_zero())
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("store error: {}", e))
+                                })?;
+                            self.builder
+                                .build_unconditional_branch(store_bb)
+                                .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+                            // Continue emission at the merge point.
+                            self.builder.position_at_end(store_bb);
+                            BasicValueEnum::PointerValue(heap_ptr)
+                        } else {
+                            let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                            let size_val = i64_ty.const_int(size, false);
+                            let heap_ptr = self.malloc_or_abort(size_val, "push_struct_val")?;
+                            self.builder.build_store(heap_ptr, sv).map_err(|e| {
+                                CompileError::LlvmError(format!("store error: {}", e))
+                            })?;
+                            BasicValueEnum::PointerValue(heap_ptr)
+                        }
                     }
                 }
             }

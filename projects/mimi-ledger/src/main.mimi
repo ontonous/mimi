@@ -1,0 +1,100 @@
+// mimi-ledger: compact dogfood for Flow + Session + contracts + linearity.
+//
+// Flow: account Active -> Frozen -> Active lifecycle.
+// Session: one-shot linear audit channel carrying the account id back out.
+// Contracts: balances and deposits are range checked at runtime.
+
+func open_id(seed: i32) -> i32 {
+    requires: seed >= 0
+    ensures: result > 0
+    seed * 31 + 7
+}
+
+func deposit(balance: i32, amount: i32) -> i32 {
+    requires: balance >= 0
+    requires: amount > 0
+    ensures: result > balance
+    balance + amount
+}
+
+func withdraw(balance: i32, amount: i32) -> i32 {
+    requires: balance >= amount
+    requires: amount > 0
+    ensures: result == balance - amount
+    balance - amount
+}
+
+flow Account {
+    state Active { id: i32, balance: i32 }
+    state Frozen { id: i32, balance: i32 }
+
+    transition freeze(Active) -> Frozen {
+        return Frozen { id: self.id, balance: self.balance }
+    }
+    transition unfreeze(Frozen) -> Active {
+        return Active { id: self.id, balance: self.balance }
+    }
+}
+
+session Audit = !i32 . ?i32 . end
+
+func main() -> i32 {
+    println("mimi-ledger v0.1.0 — Flow + Session + Contracts + Linear dogfood")
+
+    let id = open_id(1)
+    let mut balance = deposit(0, 100)
+    balance = withdraw(balance, 30)
+    let a0 = Active { id: id, balance: balance }
+    println("active balance: " + to_string(a0.balance))
+
+    let f0 = Account::freeze(a0)
+    println("frozen id: " + to_string(f0.id))
+    let a1 = Account::unfreeze(f0)
+    println("unfrozen balance: " + to_string(a1.balance))
+
+    let (auditor, ledger) = session_pair::<Audit>()
+    session_send(auditor, id)
+    let observed = session_recv(ledger)
+    session_send(ledger, observed + 1)
+    let total = session_recv(auditor)
+    session_close(auditor)
+    session_close(ledger)
+    println("audit total: " + to_string(total))
+    0
+}
+
+func test_flow_roundtrip() {
+    let a = Active { id: 1, balance: 50 }
+    let f = Account::freeze(a)
+    let u = Account::unfreeze(f)
+    if u.balance != 50 {
+        println("flow failed")
+        return
+    }
+    println("flow-ok")
+}
+
+func test_session_roundtrip() {
+    let (a, b) = session_pair::<Audit>()
+    session_send(a, 3)
+    let x = session_recv(b)
+    session_send(b, x + 4)
+    let y = session_recv(a)
+    session_close(a)
+    session_close(b)
+    if x != 3 || y != 7 {
+        println("session failed")
+        return
+    }
+    println("session-ok")
+}
+
+func test_contracts() {
+    let bal = deposit(0, 10)
+    let out = withdraw(bal, 4)
+    if out != 6 {
+        println("contract failed")
+        return
+    }
+    println("contract-ok")
+}

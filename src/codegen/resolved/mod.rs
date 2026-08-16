@@ -18,10 +18,10 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::core::ir::{ContractKind, ResolvedFStringPart};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
-    CheckedConversion, CheckedConversionKind, CheckedProgram, FunctionTypeAbi, NodeId,
-    PrimitiveType, ResolvedBlock, ResolvedBody, ResolvedCallee, ResolvedConstValue, ResolvedExpr,
-    ResolvedExprKind, ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind,
-    ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    CheckedConversion, CheckedConversionKind, CheckedProgram, FunctionTypeAbi, MethodId, NodeId,
+    PrimitiveType, ResolvedBlock, ResolvedBody, ResolvedCall, ResolvedCallee, ResolvedConstValue,
+    ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocalId, ResolvedPattern,
+    ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
@@ -31,6 +31,13 @@ use self::eligibility::{
     UnsupportedResolvedNode,
 };
 use self::types::{llvm_type_for_resolved, llvm_type_for_resolved_with};
+
+/// Mailbox blob capacity in bytes. MUST stay in sync with
+/// `MIMI_ACTOR_BLOB_SIZE` in `src/runtime/actor.rs`.
+const RESOLVED_ACTOR_BLOB_CAPACITY: u64 = 256;
+
+/// Future data region offset; must stay in sync with `src/runtime/future.rs`.
+const RESOLVED_FUTURE_DATA_OFFSET: u64 = 16;
 
 pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
     require_resolved_native_program(program).is_ok()
@@ -117,6 +124,15 @@ struct ResolvedFrame<'ctx> {
 struct LoopContext<'ctx> {
     header: inkwell::basic_block::BasicBlock<'ctx>,
     exit: inkwell::basic_block::BasicBlock<'ctx>,
+}
+
+/// Enumeration used by `emit_try` to distinguish builtin Result/Option from
+/// custom Ok/Err enum values.
+#[derive(Clone, Copy)]
+enum TryInnerKind {
+    ResolvedBuiltinResult,
+    ResolvedBuiltinOption,
+    CustomEnum,
 }
 
 struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
@@ -728,6 +744,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // data pointer; resolved returns may hand back `.rodata` literals, so
         // probe live heap registrations and heap-copy anything not owned.
         let value = self.generator.claim_resolved_string_return(value)?;
+        // Heap-field records may contain String leaves pointing at .rodata
+        // literals. Transform those leaves to owned heap copies so the
+        // caller's scope-exit free is always safe.
+        let return_type_id = self
+            .program
+            .callable(&callable.owner)
+            .map(|c| c.signature.result.clone());
+        let value = self.ensure_returned_heap_strings_owned(value, result_type, return_type_id)?;
         // Deep-eval 2026-08-09 (demos/07 custom Res segv): same claim for
         // custom-enum-shaped returns ({i32 tag, i64 payload}): the payload
         // box of boxed variants must survive the callee's scope-exit free —
@@ -1392,6 +1416,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     value,
                     frame,
                 )?;
+                // Heap-field records may contain String leaves pointing at
+                // .rodata literals. Make them owned before claiming pointer
+                // leaves for the deterministic drop.
+                let return_type_id = self
+                    .program
+                    .callable(&frame.owner)
+                    .map(|c| c.signature.result.clone());
+                let value = if let Some(value) = value {
+                    Some(self.ensure_returned_heap_strings_owned(
+                        value,
+                        result_type,
+                        return_type_id,
+                    )?)
+                } else {
+                    None
+                };
+                // Claim the heap pointers embedded in the returned value so
+                // the deterministic drop below frees only non-escaping local
+                // allocations. This prevents freeing a list/string data
+                // buffer that the caller is about to read.
+                if let Some(value) = value {
+                    let return_type_id = self
+                        .program
+                        .callable(&frame.owner)
+                        .map(|c| c.signature.result.clone());
+                    self.claim_returned_heap_pointers(value, result_type, return_type_id)?;
+                }
+                // Deterministic drop on every early return: emit path-specific
+                // frees for all function-local heap scopes before the ret.
+                // The scopes are not popped here; end_function_heap_scope
+                // balances bookkeeping after the function body finishes.
+                self.generator.flush_heap_scopes_to_boundary()?;
                 self.generator.build_return(
                     value
                         .as_ref()
@@ -1445,6 +1501,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .loop_stack
                     .last()
                     .ok_or_else(|| CompileError::Unsupported("break outside loop".into()))?;
+                // Deterministic drop on break: free the current loop body's
+                // heap allocations before leaving the iteration.
+                self.generator.emit_frees_for_top_scope()?;
                 self.generator.build_br(loop_ctx.exit)?;
                 Ok(None)
             }
@@ -1453,6 +1512,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .loop_stack
                     .last()
                     .ok_or_else(|| CompileError::Unsupported("continue outside loop".into()))?;
+                // Deterministic drop on continue: free the current loop body's
+                // heap allocations before jumping back to the loop header.
+                self.generator.emit_frees_for_top_scope()?;
                 self.generator.build_br(loop_ctx.header)?;
                 Ok(None)
             }
@@ -1599,10 +1661,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<(), CompileError> {
         match &pattern.kind {
             ResolvedPatternKind::Wildcard => Ok(()),
-            ResolvedPatternKind::Binding {
-                local,
-                by_reference: None,
-            } => {
+            ResolvedPatternKind::Binding { local, .. } => {
                 let metadata = body.locals.get(local).ok_or_else(|| {
                     CompileError::Unsupported(format!(
                         "resolved binding local '{}' is absent",
@@ -1658,6 +1717,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .locals
                     .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
                 Ok(())
+            }
+            ResolvedPatternKind::Constructor { variant, fields } => {
+                // 0.37.3: newtype constructor bindings (`let UserId(v) = u`)
+                // bind the scrutinee directly — same semantics as newtype
+                // constructor patterns in match arms.
+                if self.is_newtype_variant(variant) {
+                    for (_, sub_pattern) in fields {
+                        self.bind_pattern(body, sub_pattern, value, frame)?;
+                    }
+                    return Ok(());
+                }
+                return Err(CompileError::Unsupported(format!(
+                    "resolved pattern '{}' escaped resolved native eligibility",
+                    pattern.node_id.0
+                )));
             }
             ResolvedPatternKind::Tuple(sub_patterns) => {
                 let BasicValueEnum::StructValue(struct_val) = value else {
@@ -1996,14 +2070,44 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator
                     .compile_binop(binary_op(*op), left, right, Some(binop_i32_ctx))
             }
-            ResolvedExprKind::Unary { op, operand } => {
-                let value = self.emit_expr(operand, frame)?;
-                self.emit_unary(*op, value)
-            }
+            ResolvedExprKind::Unary { op, operand } => match op {
+                // 0.37.x: borrow shared/mutable expressions produce a pointer
+                // to the operand's storage (or a temporary alloca for an
+                // rvalue). This enables `let ref` / `&mut` locals in the
+                // resolved slice.
+                ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable => {
+                    if let ResolvedExprKind::Load(place) = &operand.kind {
+                        let entry = self.root_place(frame, place, false)?;
+                        return Ok(BasicValueEnum::PointerValue(entry.storage));
+                    }
+                    let inner = self.emit_expr(operand, frame)?;
+                    let slot = self
+                        .generator
+                        .build_alloca(inner.get_type(), "borrow_tmp")?;
+                    self.generator.build_store(slot, inner)?;
+                    Ok(BasicValueEnum::PointerValue(slot))
+                }
+                // Dereference of a reference pointer loads through the
+                // pointer value.
+                ResolvedUnaryOp::Dereference => {
+                    let ptr = self.emit_expr(operand, frame)?;
+                    let pv = ptr.into_pointer_value();
+                    let target_ty = self.lower_type(&expression.ty)?;
+                    self.generator
+                        .build_load(target_ty, pv, "deref_load")
+                        .map_err(|e| CompileError::LlvmError(format!("deref load: {e}")))
+                }
+                _ => {
+                    let value = self.emit_expr(operand, frame)?;
+                    self.emit_unary(*op, value)
+                }
+            },
             ResolvedExprKind::Cast { value, conversion } => {
                 let value = self.emit_expr(value, frame)?;
                 self.apply_conversion(value, conversion)
             }
+            ResolvedExprKind::Spawn(value) => self.emit_spawn(value, frame),
+            ResolvedExprKind::Await(value) => self.emit_await(value, &expression.ty, frame),
             ResolvedExprKind::Call(call) => {
                 // 0.36.15 L1: `exit(...)` is the explicit fault-propagation
                 // call — run registered `on failure` compensations (LIFO)
@@ -2089,6 +2193,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     arguments.push(BasicMetadataValueEnum::from(value));
                 }
                 match &call.callee {
+                    ResolvedCallee::ActorMethod { actor, method } => {
+                        return self.emit_actor_method_call(
+                            call, &arguments, actor, method, expression, frame,
+                        );
+                    }
                     ResolvedCallee::Function(owner) => {
                         let symbol = self.callable_symbol(owner)?.to_string();
                         let callee =
@@ -2139,11 +2248,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 let result = self
                                     .generator
                                     .track_enum_box_return_lifetime(&symbol, result)?;
-                                // B9 (audit): when the callee returns a Mimi
-                                // closure, register its env so the caller's
-                                // scope exit releases it. The callee (legacy
-                                // or resolved emitter) already claimed the env
-                                // on its side — ownership transfers here.
+                                // Heap-return ownership: resolved calls need
+                                // caller-side tracking for String, List, and
+                                // heap-field Record results. Register every
+                                // pointer leaf so `free_heap_allocs` at the
+                                // caller's scope exit releases it once.
                                 if !matches!(
                                     self.program.resolved_types().get(&call.result),
                                     Some(ResolvedType::Function {
@@ -2151,8 +2260,50 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         ..
                                     })
                                 ) {
+                                    let result_ty = self.lower_type(&call.result)?;
+                                    // Top-level List<string> needs per-element
+                                    // ownership: the data array is registered as
+                                    // a StringListData heap entry so each string
+                                    // data pointer is freed before the array.
+                                    if matches!(
+                                        self.program.resolved_types().get(&call.result),
+                                        Some(ResolvedType::Nominal {
+                                            item,
+                                            arguments,
+                                            ..
+                                        }) if item.as_str() == "builtin:type:List"
+                                            && arguments.len() == 1
+                                            && matches!(
+                                                self.program
+                                                    .resolved_types()
+                                                    .get(&arguments[0]),
+                                                Some(ResolvedType::Primitive(
+                                                    PrimitiveType::String
+                                                ))
+                                            )
+                                    ) {
+                                        let BasicValueEnum::StructValue(sv) = result else {
+                                            return Ok(result);
+                                        };
+                                        let BasicTypeEnum::StructType(list_ty) = result_ty else {
+                                            return Ok(result.into());
+                                        };
+                                        self.generator
+                                            .register_returned_string_list(sv, list_ty)?;
+                                        return Ok(result);
+                                    }
+                                    self.track_returned_heap_pointers(
+                                        result,
+                                        result_ty,
+                                        Some(call.result.clone()),
+                                    )?;
                                     return Ok(result);
                                 }
+                                // B9 (audit): when the callee returns a Mimi
+                                // closure, register its env so the caller's
+                                // scope exit releases it. The callee (legacy
+                                // or resolved emitter) already claimed the env
+                                // on its side — ownership transfers here.
                                 let sv = match result {
                                     BasicValueEnum::StructValue(sv) => sv,
                                     other => return Ok(other),
@@ -2176,6 +2327,35 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 }
                                 Ok(result)
                             })
+                    }
+                    ResolvedCallee::Constructor(variant_id) => {
+                        // 0.37.2: user-defined newtype and enum variant
+                        // constructor expressions. Newtypes are value-identity
+                        // wrappers; enum variants reuse the resolved custom
+                        // enum ctor ({i32 tag, i64 payload}).
+                        if self.is_newtype_variant(variant_id) {
+                            if call.arguments.len() != 1 {
+                                return Err(CompileError::Unsupported(format!(
+                                    "newtype constructor '{}' expects 1 argument, got {}",
+                                    self.lookup_variant_name(variant_id)?,
+                                    call.arguments.len()
+                                )));
+                            }
+                            let value = self.emit_expr(&call.arguments[0].value, frame)?;
+                            return self.apply_conversion(value, &call.arguments[0].conversion);
+                        }
+                        let variant_name = self.lookup_variant_name(variant_id)?;
+                        // 0.37.2 safety: emit_custom_enum_ctor currently
+                        // supports zero/one-payload enum variants. Multi-field
+                        // variants must fall back to the legacy enum ctor path
+                        // rather than emitting a wrong single-payload struct.
+                        if call.arguments.len() > 1 {
+                            return Err(CompileError::Unsupported(format!(
+                                "multi-field enum constructor '{}' is not yet in resolved native slice",
+                                variant_name
+                            )));
+                        }
+                        return self.emit_custom_enum_ctor(&variant_name, call, expression, frame);
                     }
                     ResolvedCallee::Builtin(builtin_id) => {
                         let mut name = builtin_id.as_str();
@@ -2295,6 +2475,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     )));
                                 }
                             }
+                        }
+                        // 0.37.x: reduce(list, fn, init) requires the resolved
+                        // emitter to drive the closure loop; the legacy
+                        // compile_builtin_call does not implement this
+                        // compile-time intrinsic.
+                        if name == "reduce" && call.arguments.len() == 3 {
+                            return self.emit_resolved_reduce(call, &arguments, frame);
                         }
                         // 0.35.23 deep-eval (mimi-log main): read_lines_each
                         // takes a closure — the legacy compile_read_lines_each
@@ -2946,10 +3133,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 ))
                             })
                     }
-                    _ => Err(CompileError::Unsupported(format!(
-                        "resolved callee {:?} escaped resolved native eligibility at '{}'",
-                        call.callee, expression.node_id.0
-                    ))),
                 }
             }
             ResolvedExprKind::If {
@@ -2957,7 +3140,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 then_block,
                 else_block,
             } => self.emit_if(expression, condition, then_block, else_block, frame, false),
-            ResolvedExprKind::Block(block) => {
+            ResolvedExprKind::Block(block) | ResolvedExprKind::Comptime(block) => {
                 // A nested block expression: emit inline and return its value.
                 let value = self.emit_block(
                     &self
@@ -4449,7 +4632,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             | CheckedConversionKind::AliasUnwrap
             | CheckedConversionKind::NewtypeWrap
             | CheckedConversionKind::NewtypeUnwrap
-            | CheckedConversionKind::ContainerErase => Ok(value),
+            | CheckedConversionKind::ContainerErase
+            // Ownership annotations are runtime-transparent: shared/weak
+            // values share the target's LLVM representation.
+            | CheckedConversionKind::OwnershipWrap
+            | CheckedConversionKind::OwnershipDowngrade
+            | CheckedConversionKind::OwnershipRead => Ok(value),
             CheckedConversionKind::NumericWiden | CheckedConversionKind::NumericNarrowChecked => {
                 // K-4 复核（2026-08-07）：NumericNarrowChecked 只来自显式 cast
                 // （lower.rs checked_explicit_conversion，仅 Expr::Cast 调用），
@@ -5280,9 +5468,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
         // Fallback: scan the type table for a matching type.
         for (id, ty) in self.program.resolved_types().iter() {
-            if id.as_str() == display || format!("{ty:?}") == display {
+            let nominal_matches = matches!(ty, ResolvedType::Nominal { item, .. } if item.as_str() == display
+                    || item.as_str().strip_prefix("type:") == Some(display));
+            if id.as_str() == display
+                || id
+                    .as_str()
+                    .strip_prefix("type:")
+                    .is_some_and(|name| name == display)
+                || nominal_matches
+                || format!("{ty:?}") == display
+            {
                 return self.lower_type(id);
             }
+        }
+        // 0.37.36: List<T> display names (e.g. "List<i32>") can appear in
+        // record field metadata. The resolved list ABI is always {i64, ptr},
+        // independent of the element type.
+        if display.starts_with("List<") && display.ends_with('>') {
+            return Ok(BasicTypeEnum::StructType(self.generator.list_struct_type()));
         }
         Err(CompileError::Unsupported(format!(
             "cannot resolve type display '{display}' to LLVM type"
@@ -5373,6 +5576,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let mut current_type = base_entry.llvm_type;
         for projection in &place.projections {
             match projection {
+                // 0.37.x: `*ref` deref projection resolves through the
+                // pointer stored in the reference local.
+                crate::core::ir::ResolvedProjection::Deref { ty } => {
+                    let ptr_ty = self
+                        .generator
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default());
+                    let target_ptr = self
+                        .generator
+                        .build_load(
+                            BasicTypeEnum::PointerType(ptr_ty),
+                            current_ptr,
+                            "deref_place_ptr",
+                        )?
+                        .into_pointer_value();
+                    current_ptr = target_ptr;
+                    current_type = self.lower_type(ty)?;
+                }
                 crate::core::ir::ResolvedProjection::Tuple { index, ty: _ } => {
                     let BasicTypeEnum::StructType(struct_type) = current_type else {
                         return Err(CompileError::Unsupported(
@@ -5611,11 +5832,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .build_struct_gep(struct_type, current_ptr, field_index, "rec_field_gep")
                         .map_err(|e| CompileError::LlvmError(format!("field gep: {e}")))?;
                     current_type = self.lower_type(ty)?;
-                }
-                other => {
-                    return Err(CompileError::Unsupported(format!(
-                        "projection {other:?} escaped resolved native eligibility"
-                    )))
                 }
             }
         }
@@ -5897,8 +6113,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // Body
         self.generator.builder.position_at_end(body_bb);
         self.loop_stack.push(LoopContext { header, exit });
+        // 0.37.30: deterministic per-iteration drop for loop-body locals.
+        self.generator.push_heap_scope();
         self.emit_block(body, loop_body, frame)?;
         self.loop_stack.pop();
+        if !self.current_block_terminated() {
+            self.generator.free_heap_allocs()?;
+        } else {
+            self.generator.drain_heap_scope();
+        }
         if !self.current_block_terminated() {
             self.generator.build_br(header)?;
             // C1c (0.35.41): disable aggressive unrolling of serial-chain hot
@@ -5932,8 +6155,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // Header: unconditional entry to body (infinite loop)
         self.generator.builder.position_at_end(header);
         self.loop_stack.push(LoopContext { header, exit });
+        // 0.37.30: deterministic per-iteration drop for loop-body locals.
+        self.generator.push_heap_scope();
         self.emit_block(body, loop_body, frame)?;
         self.loop_stack.pop();
+        if !self.current_block_terminated() {
+            self.generator.free_heap_allocs()?;
+        } else {
+            self.generator.drain_heap_scope();
+        }
         if !self.current_block_terminated() {
             self.generator.build_br(header)?;
             self.generator.cap_loop_unroll()?;
@@ -6072,10 +6302,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // Body
         self.generator.builder.position_at_end(body_bb);
         self.loop_stack.push(LoopContext { header, exit });
+        // 0.37.30: deterministic per-iteration drop for loop-body locals.
+        self.generator.push_heap_scope();
         self.emit_block(body, loop_body, frame)?;
         self.loop_stack.pop();
 
         // Increment and loop back
+        if !self.current_block_terminated() {
+            self.generator.free_heap_allocs()?;
+        } else {
+            self.generator.drain_heap_scope();
+        }
         if !self.current_block_terminated() {
             let current = self
                 .generator
@@ -6237,10 +6474,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator.build_store(elem_storage, elem_val)?;
 
         self.loop_stack.push(LoopContext { header, exit });
+        // 0.37.30: deterministic per-iteration drop for loop-body locals.
+        self.generator.push_heap_scope();
         self.emit_block(body, loop_body, frame)?;
         self.loop_stack.pop();
 
         // Increment idx and loop back.
+        if !self.current_block_terminated() {
+            self.generator.free_heap_allocs()?;
+        } else {
+            self.generator.drain_heap_scope();
+        }
         if !self.current_block_terminated() {
             let cur_idx = self
                 .generator
@@ -7022,11 +7266,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let i64_ty = self.generator.context.i64_type();
 
-        // Determine if the inner type is Result (3 fields) or Option (2 fields).
-        let is_result = matches!(
-            self.program.resolved_types().get(&value.ty),
-            Some(ResolvedType::Result { .. })
-        );
+        // Determine whether the inner type is a built-in Result/Option or a
+        // custom Ok/Err enum (Res-style).
+        let inner_kind = match self.program.resolved_types().get(&value.ty) {
+            Some(ResolvedType::Result { .. }) => TryInnerKind::ResolvedBuiltinResult,
+            Some(ResolvedType::Option(_)) => TryInnerKind::ResolvedBuiltinOption,
+            Some(ResolvedType::Nominal { .. })
+                if self.custom_try_enum_error_ordinal(&value.ty).is_ok() =>
+            {
+                TryInnerKind::CustomEnum
+            }
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "try inner type is not Result, Option, or Ok/Err enum".into(),
+                ))
+            }
+        };
 
         // Emit the inner expression → struct value.
         let inner_val = self.emit_expr(value, frame)?;
@@ -7041,7 +7296,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             }
             _ => {
                 return Err(CompileError::Unsupported(
-                    "try inner value is not a struct (Result/Option)".into(),
+                    "try inner value is not a struct (Result/Option/enum)".into(),
                 ))
             }
         };
@@ -7061,18 +7316,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .build_extract_value(sv, 1, "try_payload")
             .map_err(|e| CompileError::LlvmError(format!("try payload extract: {e}")))?;
 
-        // For Result: extract error value (field 2).
-        let err_val = if is_result {
-            self.generator
-                .builder
-                .build_extract_value(sv, 2, "try_err_val")
-                .map_err(|e| CompileError::LlvmError(format!("try err extract: {e}")))?
-        } else {
-            // Option None: use 0 as the error code.
-            BasicValueEnum::IntValue(i64_ty.const_zero())
+        let (err_disc, is_custom) = match inner_kind {
+            TryInnerKind::ResolvedBuiltinResult => (0u32, false),
+            TryInnerKind::ResolvedBuiltinOption => (0u32, false),
+            TryInnerKind::CustomEnum => {
+                let ordinal = self.custom_try_enum_error_ordinal(&value.ty)?;
+                (ordinal, true)
+            }
         };
+        let err_disc_val = disc.get_type().const_int(err_disc as u64, false);
+        let is_err = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, disc, err_disc_val, "try_is_err")
+            .map_err(|e| CompileError::LlvmError(format!("try compare: {e}")))?;
 
-        // Branch: disc == 0 → err_bb, else → ok_bb.
+        // Branch: err → err_bb, else → ok_bb.
         let function = self.current_function()?;
         let ok_bb = self
             .generator
@@ -7083,49 +7342,3375 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .context
             .append_basic_block(function, "try_err");
 
-        let zero = disc.get_type().const_int(0, false);
-        let is_err = self
-            .generator
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, disc, zero, "try_is_err")
-            .map_err(|e| CompileError::LlvmError(format!("try compare: {e}")))?;
         self.generator.build_cond_br(is_err, err_bb, ok_bb)?;
 
-        // Err path: call mimi_try_exit(err_val) → unreachable.
+        // ── Err path ──
         self.generator.builder.position_at_end(err_bb);
-        let try_exit_fn = self.generator.get_runtime_fn("mimi_try_exit")?;
-        let err_int = match err_val {
-            BasicValueEnum::IntValue(iv) => {
-                // Ensure i64.
-                if iv.get_type().get_bit_width() < 64 {
+        if is_custom {
+            // Custom Ok/Err enums follow the real `?` semantics: propagate
+            // the Err variant as the current function's return value.
+            if !self.defer_scopes.is_empty() || !self.comp_scopes.is_empty() {
+                return Err(CompileError::Unsupported(
+                    "custom enum try with active defer/on-failure scopes".into(),
+                ));
+            }
+            let enum_ty = self.lower_type(&value.ty)?;
+            let struct_ty = enum_ty.into_struct_type();
+            let mut result = struct_ty.get_undef();
+            result = self
+                .generator
+                .builder
+                .build_insert_value(
+                    result,
+                    disc.get_type().const_int(err_disc as u64, false),
+                    0,
+                    "try_err_tag",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("try err tag insert: {e}")))?
+                .into_struct_value();
+            result = self
+                .generator
+                .builder
+                .build_insert_value(result, payload, 1, "try_err_payload")
+                .map_err(|e| CompileError::LlvmError(format!("try err payload insert: {e}")))?
+                .into_struct_value();
+            let ret_val: BasicValueEnum<'ctx> = result.into();
+            self.generator.build_return(Some(&ret_val))?;
+        } else {
+            // Built-in Result/Option: runtime exit on Err/None (legacy-compatible
+            // codegen path; the VM uses return-early for builtin errors).
+            let try_exit_fn = self.generator.get_runtime_fn("mimi_try_exit")?;
+            // For Result, the error slot is field 2; Option has no error slot.
+            let err_val = if matches!(inner_kind, TryInnerKind::ResolvedBuiltinResult) {
+                self.generator
+                    .builder
+                    .build_extract_value(sv, 2, "try_err_val")
+                    .map_err(|e| CompileError::LlvmError(format!("try err extract: {e}")))?
+            } else {
+                BasicValueEnum::IntValue(i64_ty.const_zero())
+            };
+            let err_int = match err_val {
+                BasicValueEnum::IntValue(iv) => {
+                    // Ensure i64.
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.generator
+                            .builder
+                            .build_int_z_extend(iv, i64_ty, "try_err_zext")
+                            .map_err(|e| CompileError::LlvmError(format!("try err zext: {e}")))?
+                    } else {
+                        iv
+                    }
+                }
+                _ => i64_ty.const_zero(),
+            };
+            self.generator
+                .builder
+                .build_call(
+                    try_exit_fn,
+                    &[inkwell::values::BasicMetadataValueEnum::IntValue(err_int)],
+                    "try_exit_call",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("try_exit call: {e}")))?;
+            // mimi_try_exit is noreturn — emit unreachable.
+            self.generator
+                .builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("try unreachable: {e}")))?;
+        }
+
+        // ── Ok path: position at ok_bb, recover payload. ──
+        self.generator.builder.position_at_end(ok_bb);
+        let target_llvm_ty = self.lower_type(result_ty)?;
+        if is_custom {
+            self.coerce_from_i64(payload.into_int_value(), target_llvm_ty)
+        } else {
+            self.coerce_to(payload, target_llvm_ty)
+        }
+    }
+
+    /// Return the sorted variant ordinal of the `Err` variant in a custom
+    /// two-variant `Ok`/`Err` enum.
+    fn custom_try_enum_error_ordinal(&self, id: &ResolvedTypeId) -> Result<u32, CompileError> {
+        let ResolvedType::Nominal { item, .. } = self
+            .program
+            .resolved_types()
+            .get(id)
+            .ok_or_else(|| CompileError::Unsupported("custom try: missing type".into()))?
+        else {
+            return Err(CompileError::Unsupported(
+                "custom try type is not Nominal".into(),
+            ));
+        };
+        let item_str = item.as_str();
+        let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+        let td = self
+            .program
+            .type_defs()
+            .values()
+            .find(|td| {
+                (td.qualified_name == type_name || td.qualified_name == item_str)
+                    && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Enum)
+            })
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!("custom try enum '{type_name}' not found"))
+            })?;
+        let mut variant_names: Vec<&str> =
+            td.variants.iter().map(|(name, _)| name.as_str()).collect();
+        variant_names.sort();
+        variant_names
+            .iter()
+            .position(|name| *name == "Err")
+            .map(|index| index as u32)
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "custom try enum '{type_name}' has no Err variant"
+                ))
+            })
+    }
+
+    /// Recover a value encoded as i64 (the custom enum payload slot) into a
+    /// concrete LLVM type. Mirrors the inverse of `coerce_to_i64`.
+    fn coerce_from_i64(
+        &self,
+        payload: inkwell::values::IntValue<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match target {
+            BasicTypeEnum::IntType(int_ty) => {
+                let bw = int_ty.get_bit_width();
+                if bw < 64 {
                     self.generator
                         .builder
-                        .build_int_z_extend(iv, i64_ty, "try_err_zext")
-                        .map_err(|e| CompileError::LlvmError(format!("try err zext: {e}")))?
+                        .build_int_truncate(payload, int_ty, "try_payload_trunc")
+                        .map(|v| v.into())
+                        .map_err(|e| CompileError::LlvmError(format!("try trunc: {e}")))
+                } else if bw == 64 {
+                    Ok(BasicValueEnum::IntValue(payload))
                 } else {
-                    iv
+                    self.generator
+                        .builder
+                        .build_int_z_extend(payload, int_ty, "try_payload_zext")
+                        .map(|v| v.into())
+                        .map_err(|e| CompileError::LlvmError(format!("try zext: {e}")))
                 }
             }
-            _ => i64_ty.const_zero(),
+            BasicTypeEnum::FloatType(float_ty) => self
+                .generator
+                .builder
+                .build_bit_cast(payload, float_ty, "try_payload_float_bits")
+                .map(|v| v.into())
+                .map_err(|e| CompileError::LlvmError(format!("try float bitcast: {e}"))),
+            BasicTypeEnum::PointerType(ptr_ty) => self
+                .generator
+                .builder
+                .build_int_to_ptr(payload, ptr_ty, "try_payload_ptr")
+                .map(|v| v.into())
+                .map_err(|e| CompileError::LlvmError(format!("try inttoptr: {e}"))),
+            BasicTypeEnum::StructType(sty) => {
+                // Struct payloads are stored by pointer in the i64 slot
+                // (strings/records are heap-boxed by the enum ctor).
+                let ptr_ty = self
+                    .generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default());
+                let box_ptr = self
+                    .generator
+                    .builder
+                    .build_int_to_ptr(payload, ptr_ty, "try_payload_box")
+                    .map_err(|e| CompileError::LlvmError(format!("try inttoptr box: {e}")))?;
+                self.generator.build_load(
+                    BasicTypeEnum::StructType(sty),
+                    box_ptr,
+                    "try_payload_box_load",
+                )
+            }
+            _ => Err(CompileError::Unsupported(
+                "custom try payload type cannot be recovered from i64 slot".into(),
+            )),
+        }
+    }
+
+    /// Emit an actor method call through the mailbox runtime. The resolved
+    /// slice treats actor handles as opaque pointers; the first call argument
+    /// is the implicit `self` handle, followed by the user-facing arguments.
+    /// The remaining arguments are packed into the same fixed-size `i8`
+    /// blob used by the legacy actor call site.
+    fn emit_actor_method_call(
+        &mut self,
+        _call: &ResolvedCall,
+        arguments: &[BasicMetadataValueEnum<'ctx>],
+        actor: &NodeId,
+        method: &MethodId,
+        _expression: &ResolvedExpr,
+        _frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ty = self.generator.context.i8_type();
+        let i32_ty = self.generator.context.i32_type();
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+
+        // Resolve the actor name / method name.
+        let actor_type = actor
+            .0
+            .strip_prefix("actor:")
+            .ok_or_else(|| CompileError::Unsupported(format!("invalid actor id '{}'", actor.0)))?;
+        let method_name = method.as_str().rsplit("::").next().ok_or_else(|| {
+            CompileError::Unsupported(format!("invalid method id '{}'", method.as_str()))
+        })?;
+        let method_key = format!("{actor_type}::{method_name}");
+        let method_id = *self
+            .generator
+            .actor_method_ids
+            .get(&method_key)
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!("unknown actor method '{method_key}'"))
+            })?;
+        let actor_def = self.generator.actor_defs.get(actor_type).ok_or_else(|| {
+            CompileError::Unsupported(format!("unknown actor type '{actor_type}'"))
+        })?;
+        let method_def = actor_def
+            .methods
+            .iter()
+            .find(|m| m.name == method_name)
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "actor '{actor_type}' has no method '{method_name}'"
+                ))
+            })?;
+        let method_params: Vec<crate::ast::Type> =
+            method_def.params.iter().map(|p| p.ty.clone()).collect();
+        let method_ret = method_def.ret.clone();
+
+        // The first argument is the actor handle. It must be a pointer.
+        let Some(BasicMetadataValueEnum::PointerValue(handle_ptr)) = arguments.first() else {
+            return Err(CompileError::Unsupported(
+                "actor method call: first argument is not an actor handle pointer".into(),
+            ));
         };
+
+        // Arguments blob + result blob.
+        let blob_array = i8_ty.array_type(RESOLVED_ACTOR_BLOB_CAPACITY as u32);
+        let args_blob = self.generator.build_alloca(blob_array, "actor_args_blob")?;
+        let result_blob = self
+            .generator
+            .build_alloca(blob_array, "actor_result_blob")?;
+
+        let mut blob_offset: u64 = 0;
+        for (slot_index, arg) in arguments.iter().enumerate().skip(1) {
+            let arg_basic: BasicValueEnum<'ctx> = match *arg {
+                BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "actor method argument has unsupported LLVM metadata kind".into(),
+                    ))
+                }
+            };
+            let param_ty = method_params
+                .get(slot_index - 1)
+                .map(|t| self.generator.actor_abi_type_for(t));
+            let store_ty = param_ty.unwrap_or_else(|| arg_basic.get_type());
+            let slot_size = self.generator.actor_abi_slot_size(store_ty);
+            let offset = i64_ty.const_int(blob_offset, false);
+            let gep =
+                self.generator
+                    .build_in_bounds_gep(i8_ty, args_blob, &[offset], "actor_arg_gep")?;
+            let cast_ptr = self
+                .generator
+                .builder
+                .build_bit_cast(gep, ptr_ty, &format!("actor_arg_cast_{}", slot_index))
+                .map_err(|e| CompileError::LlvmError(format!("actor arg bitcast: {e}")))?
+                .into_pointer_value();
+
+            match (arg_basic, store_ty) {
+                (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(t)) => {
+                    let stored = if iv.get_type().get_bit_width() < t.get_bit_width() {
+                        if iv.get_type().get_bit_width() == 1 {
+                            self.generator
+                                .builder
+                                .build_int_z_extend(
+                                    iv,
+                                    t,
+                                    &format!("actor_arg_zext_{}", slot_index),
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("actor arg zext: {e}"))
+                                })?
+                        } else {
+                            self.generator
+                                .builder
+                                .build_int_s_extend(
+                                    iv,
+                                    t,
+                                    &format!("actor_arg_sext_{}", slot_index),
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("actor arg sext: {e}"))
+                                })?
+                        }
+                    } else if iv.get_type().get_bit_width() > t.get_bit_width() {
+                        self.generator
+                            .builder
+                            .build_int_truncate(iv, t, &format!("actor_arg_trunc_{}", slot_index))
+                            .map_err(|e| CompileError::LlvmError(format!("actor arg trunc: {e}")))?
+                    } else {
+                        iv
+                    };
+                    self.generator.build_store(cast_ptr, stored)?;
+                }
+                (BasicValueEnum::FloatValue(fv), BasicTypeEnum::FloatType(_)) => {
+                    self.generator.build_store(cast_ptr, fv)?;
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::PointerType(_)) => {
+                    self.generator.build_store(cast_ptr, pv)?;
+                }
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_st)) => {
+                    self.generator.build_store(cast_ptr, sv)?;
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
+                    let fields = st.get_field_types();
+                    let is_string_shape = fields.len() == 2
+                        && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                    if is_string_shape {
+                        let wrapped = self.generator.wrap_c_string(pv)?;
+                        self.generator.build_store(cast_ptr, wrapped)?;
+                    } else {
+                        return Err(CompileError::Unsupported(
+                            "actor method pointer-to-struct argument is not yet supported".into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(CompileError::Unsupported(format!(
+                        "actor method argument {slot_index} cannot be packed ({store_ty:?})"
+                    )));
+                }
+            }
+            blob_offset += slot_size;
+        }
+
+        let args_size = i64_ty.const_int(blob_offset, false);
+        let args_blob_i8ptr = self
+            .generator
+            .builder
+            .build_bit_cast(args_blob, ptr_ty, "actor_args_blob_i8")
+            .map_err(|e| CompileError::LlvmError(format!("actor args bitcast: {e}")))?
+            .into_pointer_value();
+        let result_blob_i8ptr = self
+            .generator
+            .builder
+            .build_bit_cast(result_blob, ptr_ty, "actor_result_blob_i8")
+            .map_err(|e| CompileError::LlvmError(format!("actor result bitcast: {e}")))?
+            .into_pointer_value();
+
+        let call_fn = self.generator.get_runtime_fn("mimi_actor_call")?;
         self.generator
             .builder
             .build_call(
-                try_exit_fn,
-                &[inkwell::values::BasicMetadataValueEnum::IntValue(err_int)],
-                "try_exit_call",
+                call_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(*handle_ptr),
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(method_id as u64, false)),
+                    BasicMetadataValueEnum::PointerValue(args_blob_i8ptr),
+                    BasicMetadataValueEnum::IntValue(args_size),
+                    BasicMetadataValueEnum::PointerValue(result_blob_i8ptr),
+                ],
+                "actor_call_result",
             )
-            .map_err(|e| CompileError::LlvmError(format!("try_exit call: {e}")))?;
-        // mimi_try_exit is noreturn — emit unreachable.
+            .map_err(|e| CompileError::LlvmError(format!("mimi_actor_call: {e}")))?;
+
+        let result_cast = self
+            .generator
+            .builder
+            .build_bit_cast(result_blob, ptr_ty, "actor_result_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("actor result bitcast: {e}")))?
+            .into_pointer_value();
+        let result_ty = match &method_ret {
+            Some(ty) => self.generator.actor_abi_type_for(ty),
+            None => BasicTypeEnum::IntType(i64_ty),
+        };
+        self.generator
+            .build_load(result_ty, result_cast, "actor_method_result")
+    }
+
+    /// Emit a runtime loop that frees each cloned string element inside a
+    /// `List<string>` worker argument after the worker call has completed.
+    /// The list data buffer itself is freed separately by the caller.
+    fn emit_spawn_string_list_element_free(
+        &mut self,
+        len: inkwell::values::IntValue<'ctx>,
+        data: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_str_list_free_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_str_list_free_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_str_list_free_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "spawn_str_list_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "spawn_str_list_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, len, "spawn_str_list_cond")
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let elem_slot =
+            self.generator
+                .build_in_bounds_gep(i64_ty, data, &[idx], "spawn_str_list_elem_slot")?;
+        let elem_ptr = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "spawn_str_list_elem_i64",
+            )?
+            .into_int_value();
+        let elem_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(elem_ptr, ptr_ty, "spawn_str_list_elem_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn string elem ptr: {e}")))?;
+        let free_str = self.generator.get_runtime_fn("mimi_string_free")?;
         self.generator
             .builder
-            .build_unreachable()
-            .map_err(|e| CompileError::LlvmError(format!("try unreachable: {e}")))?;
+            .build_call(
+                free_str,
+                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
+                "spawn_str_list_elem_free",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn string elem free: {e}")))?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "spawn_str_list_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
 
-        // Ok path: position at ok_bb, coerce payload to the Try expression's type.
-        self.generator.builder.position_at_end(ok_bb);
-        let target_llvm_ty = self.lower_type(result_ty)?;
-        self.coerce_to(payload, target_llvm_ty)
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Emit a runtime loop that deep-copies each string element of a source
+    /// `List<string>` into a fresh `List<string>` data buffer. The copy is
+    /// stored into `dst_data` as i64 pointer handles for the worker env.
+    fn emit_spawn_string_list_clone(
+        &mut self,
+        len: inkwell::values::IntValue<'ctx>,
+        src_data: inkwell::values::PointerValue<'ctx>,
+        dst_data: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_str_list_clone_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_str_list_clone_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_str_list_clone_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "spawn_str_list_clone_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "spawn_str_list_clone_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                len,
+                "spawn_str_list_clone_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list clone cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let src_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            src_data,
+            &[idx],
+            "spawn_str_list_clone_src_slot",
+        )?;
+        let src_i64 = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                src_slot,
+                "spawn_str_list_clone_src_i64",
+            )?
+            .into_int_value();
+        let src_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(src_i64, ptr_ty, "spawn_str_list_clone_src_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list src ptr: {e}")))?;
+        let strlen_fn = self.generator.get_runtime_fn("strlen")?;
+        let src_len = self
+            .generator
+            .builder
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(src_ptr)],
+                "spawn_str_list_clone_strlen",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list strlen: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| {
+                CompileError::LlvmError("spawn string list strlen returned void".into())
+            })?
+            .into_int_value();
+        let clone_fn = self.generator.get_runtime_fn("mimi_str_clone")?;
+        let clone_handle = self
+            .generator
+            .builder
+            .build_call(
+                clone_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(src_ptr),
+                    BasicMetadataValueEnum::IntValue(src_len),
+                ],
+                "spawn_str_list_clone",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list clone: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("spawn string list clone returned void".into()))?
+            .into_int_value();
+        let dst_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            dst_data,
+            &[idx],
+            "spawn_str_list_clone_dst_slot",
+        )?;
+        self.generator.build_store(dst_slot, clone_handle)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(
+                idx,
+                i64_ty.const_int(1, false),
+                "spawn_str_list_clone_idx_next",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list clone inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Emit a runtime loop that deep-copies a `List<List<i32>>`/`List<List<f64>>`
+    /// worker argument into a fresh outer data array. Each inner list is
+    /// cloned element-by-element into a new inner data buffer and heap-boxed,
+    /// so the worker env owns every level of the nested container.
+    fn emit_spawn_nested_list_clone(
+        &mut self,
+        outer_len: inkwell::values::IntValue<'ctx>,
+        src_outer: inkwell::values::PointerValue<'ctx>,
+        dst_outer: inkwell::values::PointerValue<'ctx>,
+        inner_elem_size: u64,
+        inner_is_string: bool,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.generator.list_struct_type();
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_nested_clone_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_nested_clone_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_nested_clone_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "spawn_nested_clone_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "spawn_nested_clone_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                outer_len,
+                "spawn_nested_clone_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested clone cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let src_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            src_outer,
+            &[idx],
+            "spawn_nested_clone_src_slot",
+        )?;
+        let src_inner_i64 = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                src_slot,
+                "spawn_nested_clone_src_inner_i64",
+            )?
+            .into_int_value();
+        let src_inner_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(src_inner_i64, ptr_ty, "spawn_nested_clone_src_inner_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested inner ptr: {e}")))?;
+        let inner_val = self
+            .generator
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                src_inner_ptr,
+                "spawn_nested_clone_inner_val",
+            )?
+            .into_struct_value();
+        let inner_len = self
+            .generator
+            .build_extract_value(inner_val.into(), 0, "spawn_nested_clone_inner_len")?
+            .into_int_value();
+        let inner_data = self
+            .generator
+            .build_extract_value(inner_val.into(), 1, "spawn_nested_clone_inner_data")?
+            .into_pointer_value();
+        let inner_clone_data = if inner_is_string {
+            let inner_bytes = self
+                .generator
+                .builder
+                .build_int_mul(
+                    inner_len,
+                    i64_ty.const_int(8, false),
+                    "spawn_nested_clone_inner_bytes",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("spawn nested inner size: {e}")))?;
+            let inner_clone_data = self
+                .generator
+                .malloc_or_abort(inner_bytes, "spawn_nested_clone_inner_data")?;
+            self.emit_spawn_string_list_clone(inner_len, inner_data, inner_clone_data)?;
+            inner_clone_data
+        } else {
+            let inner_size = i64_ty.const_int(inner_elem_size, false);
+            let inner_bytes = self
+                .generator
+                .builder
+                .build_int_mul(inner_len, inner_size, "spawn_nested_clone_inner_bytes")
+                .map_err(|e| CompileError::LlvmError(format!("spawn nested inner size: {e}")))?;
+            let inner_clone_data = self
+                .generator
+                .malloc_or_abort(inner_bytes, "spawn_nested_clone_inner_data")?;
+            let memcpy_fn = self.generator.get_runtime_fn("memcpy")?;
+            self.generator
+                .builder
+                .build_call(
+                    memcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(inner_clone_data),
+                        BasicMetadataValueEnum::PointerValue(inner_data),
+                        BasicMetadataValueEnum::IntValue(inner_bytes),
+                    ],
+                    "spawn_nested_clone_inner_copy",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("spawn nested inner copy: {e}")))?;
+            inner_clone_data
+        };
+        let new_inner = list_ty.get_undef();
+        let new_inner = self
+            .generator
+            .builder
+            .build_insert_value(new_inner, inner_len, 0, "spawn_nested_clone_new_len")
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested inner len: {e}")))?
+            .into_struct_value();
+        let new_inner = self
+            .generator
+            .builder
+            .build_insert_value(
+                new_inner,
+                inner_clone_data,
+                1,
+                "spawn_nested_clone_new_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested inner data: {e}")))?
+            .into_struct_value();
+        let box_size = self
+            .generator
+            .llvm_type_size_bytes(BasicTypeEnum::StructType(list_ty));
+        let box_size_val = i64_ty.const_int(box_size, false);
+        let new_box = self
+            .generator
+            .malloc_or_abort(box_size_val, "spawn_nested_clone_box")?;
+        self.generator
+            .builder
+            .build_store(new_box, new_inner)
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested box store: {e}")))?;
+        let new_box_i64 = self
+            .generator
+            .builder
+            .build_ptr_to_int(new_box, i64_ty, "spawn_nested_clone_box_i64")
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested box int: {e}")))?;
+        let dst_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            dst_outer,
+            &[idx],
+            "spawn_nested_clone_dst_slot",
+        )?;
+        self.generator.build_store(dst_slot, new_box_i64)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(
+                idx,
+                i64_ty.const_int(1, false),
+                "spawn_nested_clone_idx_next",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested clone inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Emit a runtime loop that frees the inner boxes and inner data buffers
+    /// of a deep-copied `List<List<i32>>`/`List<List<f64>>` worker argument.
+    /// The outer data buffer itself is freed separately by the caller.
+    fn emit_spawn_nested_list_free(
+        &mut self,
+        outer_len: inkwell::values::IntValue<'ctx>,
+        outer_data: inkwell::values::PointerValue<'ctx>,
+        inner_is_string: bool,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.generator.list_struct_type();
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_nested_free_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_nested_free_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_nested_free_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "spawn_nested_free_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "spawn_nested_free_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                outer_len,
+                "spawn_nested_free_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested free cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            outer_data,
+            &[idx],
+            "spawn_nested_free_slot",
+        )?;
+        let inner_i64 = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                slot,
+                "spawn_nested_free_inner_i64",
+            )?
+            .into_int_value();
+        let inner_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(inner_i64, ptr_ty, "spawn_nested_free_inner_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested free ptr: {e}")))?;
+        let inner_val = self
+            .generator
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                inner_ptr,
+                "spawn_nested_free_inner_val",
+            )?
+            .into_struct_value();
+        let inner_len = self
+            .generator
+            .build_extract_value(inner_val.into(), 0, "spawn_nested_free_inner_len")?
+            .into_int_value();
+        let inner_data = self
+            .generator
+            .build_extract_value(inner_val.into(), 1, "spawn_nested_free_inner_data")?
+            .into_pointer_value();
+        if inner_is_string {
+            self.emit_spawn_string_list_element_free(inner_len, inner_data)?;
+        }
+        let free_fn = self.generator.get_runtime_fn("free")?;
+        self.generator
+            .builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(inner_data)],
+                "spawn_nested_free_inner_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested inner data free: {e}")))?;
+        self.generator
+            .builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(inner_ptr)],
+                "spawn_nested_free_inner_box",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested inner box free: {e}")))?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(
+                idx,
+                i64_ty.const_int(1, false),
+                "spawn_nested_free_idx_next",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn nested free inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Runtime loop to free each deep-copied record box in a `List<Record>`
+    /// worker argument. The boxes are allocated by
+    /// `emit_spawn_struct_list_clone`. Any cloned String/List data inside
+    /// each element is released before freeing the box.
+    fn emit_spawn_struct_list_element_free(
+        &mut self,
+        len: inkwell::values::IntValue<'ctx>,
+        data: inkwell::values::PointerValue<'ctx>,
+        elem_ty: inkwell::types::StructType<'ctx>,
+        string_paths: &[Vec<u32>],
+        list_paths: &[Vec<u32>],
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_struct_list_free_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_struct_list_free_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_struct_list_free_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "spawn_struct_list_free_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "spawn_struct_list_free_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                len,
+                "spawn_struct_list_free_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list free cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let elem_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            data,
+            &[idx],
+            "spawn_struct_list_free_elem_slot",
+        )?;
+        let elem_handle = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "spawn_struct_list_free_elem_handle",
+            )?
+            .into_int_value();
+        let elem_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(elem_handle, ptr_ty, "spawn_struct_list_free_elem_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list elem ptr: {e}")))?;
+        let elem = self
+            .generator
+            .build_load(
+                BasicTypeEnum::StructType(elem_ty),
+                elem_ptr,
+                "spawn_struct_list_free_elem",
+            )?
+            .into_struct_value();
+        let free_fn = self.generator.get_runtime_fn("free")?;
+        let free_str = self.generator.get_runtime_fn("mimi_string_free")?;
+        for path in string_paths {
+            let mut cur = elem;
+            let last = path.len() - 1;
+            for (idx, &field_idx) in path.iter().enumerate() {
+                let step = self
+                    .generator
+                    .build_extract_value(cur.into(), field_idx, "spawn_struct_list_str_path")?
+                    .into_struct_value();
+                if idx == last {
+                    let str_data = self
+                        .generator
+                        .build_extract_value(step.into(), 0, "spawn_struct_list_str_data")?
+                        .into_pointer_value();
+                    self.generator
+                        .builder
+                        .build_call(
+                            free_str,
+                            &[BasicMetadataValueEnum::PointerValue(str_data)],
+                            "spawn_struct_list_str_free",
+                        )
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("spawn struct list str free: {e}"))
+                        })?;
+                } else {
+                    cur = step;
+                }
+            }
+        }
+        for path in list_paths {
+            let mut cur = elem;
+            let last = path.len() - 1;
+            for (idx, &field_idx) in path.iter().enumerate() {
+                let step = self
+                    .generator
+                    .build_extract_value(cur.into(), field_idx, "spawn_struct_list_list_path")?
+                    .into_struct_value();
+                if idx == last {
+                    let list_data = self
+                        .generator
+                        .build_extract_value(step.into(), 1, "spawn_struct_list_list_data")?
+                        .into_pointer_value();
+                    self.generator
+                        .builder
+                        .build_call(
+                            free_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_data)],
+                            "spawn_struct_list_list_free",
+                        )
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("spawn struct list list free: {e}"))
+                        })?;
+                } else {
+                    cur = step;
+                }
+            }
+        }
+        self.generator
+            .builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
+                "spawn_struct_list_free_box",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list box free: {e}")))?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(
+                idx,
+                i64_ty.const_int(1, false),
+                "spawn_struct_list_free_idx_next",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list free inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Runtime loop that deep-copies a `List<Record>` data buffer. Each
+    /// source element is a pointer to a heap-allocated record struct. String
+    /// and scalar-List leaves inside each element are deep-copied using the
+    /// same recursive paths used for whole-Record worker arguments.
+    fn emit_spawn_struct_list_clone(
+        &mut self,
+        len: inkwell::values::IntValue<'ctx>,
+        src_data: inkwell::values::PointerValue<'ctx>,
+        dst_data: inkwell::values::PointerValue<'ctx>,
+        elem_ty: inkwell::types::StructType<'ctx>,
+        string_paths: &[Vec<u32>],
+        list_paths: &[Vec<u32>],
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_struct_list_clone_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_struct_list_clone_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "spawn_struct_list_clone_exit");
+        let idx_storage = self.generator.build_alloca(
+            BasicTypeEnum::IntType(i64_ty),
+            "spawn_struct_list_clone_idx",
+        )?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "spawn_struct_list_clone_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                len,
+                "spawn_struct_list_clone_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list clone cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let src_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            src_data,
+            &[idx],
+            "spawn_struct_list_clone_src_slot",
+        )?;
+        let src_handle = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                src_slot,
+                "spawn_struct_list_clone_src_handle",
+            )?
+            .into_int_value();
+        let src_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(src_handle, ptr_ty, "spawn_struct_list_clone_src_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list src ptr: {e}")))?;
+        let elem = self
+            .generator
+            .build_load(
+                BasicTypeEnum::StructType(elem_ty),
+                src_ptr,
+                "spawn_struct_list_clone_elem",
+            )?
+            .into_struct_value();
+        let mut cloned = elem;
+        for path in string_paths {
+            let mut pairs = Vec::new();
+            let mut cur = cloned;
+            for &field_idx in path {
+                pairs.push((cur, field_idx));
+                cur = self
+                    .generator
+                    .build_extract_value(cur.into(), field_idx, "spawn_struct_list_str_pair")?
+                    .into_struct_value();
+            }
+            let str_sv = cur;
+            let str_data = self
+                .generator
+                .build_extract_value(str_sv.into(), 0, "spawn_struct_list_str_data_in")?
+                .into_pointer_value();
+            let str_len = self
+                .generator
+                .build_extract_value(str_sv.into(), 1, "spawn_struct_list_str_len_in")?
+                .into_int_value();
+            let clone_fn = self.generator.get_runtime_fn("mimi_str_clone")?;
+            let handle = self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(str_data),
+                        BasicMetadataValueEnum::IntValue(str_len),
+                    ],
+                    "spawn_struct_list_str_clone",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("spawn struct list str clone: {e}")))?
+                .try_as_basic_value_opt()
+                .ok_or_else(|| {
+                    CompileError::LlvmError("spawn struct list str clone returned void".into())
+                })?
+                .into_int_value();
+            let clone_ptr = self
+                .generator
+                .builder
+                .build_int_to_ptr(handle, ptr_ty, "spawn_struct_list_str_clone_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("spawn struct list str ptr: {e}")))?;
+            let string_ty = str_sv.get_type();
+            let new_str = string_ty.get_undef();
+            let new_str = self
+                .generator
+                .builder
+                .build_insert_value(new_str, clone_ptr, 0, "spawn_struct_list_str_new_ptr")
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("spawn struct list str new ptr: {e}"))
+                })?
+                .into_struct_value();
+            let new_str = self
+                .generator
+                .builder
+                .build_insert_value(new_str, str_len, 1, "spawn_struct_list_str_new_len")
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("spawn struct list str new len: {e}"))
+                })?
+                .into_struct_value();
+            let mut rebuilt = new_str;
+            for (parent, parent_idx) in pairs.into_iter().rev() {
+                rebuilt = self
+                    .generator
+                    .builder
+                    .build_insert_value(
+                        parent,
+                        rebuilt,
+                        parent_idx,
+                        "spawn_struct_list_str_rebuild",
+                    )
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("spawn struct list str rebuild: {e}"))
+                    })?
+                    .into_struct_value();
+            }
+            cloned = rebuilt;
+        }
+        for path in list_paths {
+            let mut pairs = Vec::new();
+            let mut cur = cloned;
+            for &field_idx in path {
+                pairs.push((cur, field_idx));
+                cur = self
+                    .generator
+                    .build_extract_value(cur.into(), field_idx, "spawn_struct_list_list_pair")?
+                    .into_struct_value();
+            }
+            let list_sv = cur;
+            let list_len = self
+                .generator
+                .build_extract_value(list_sv.into(), 0, "spawn_struct_list_list_len_in")?
+                .into_int_value();
+            let list_data = self
+                .generator
+                .build_extract_value(list_sv.into(), 1, "spawn_struct_list_list_data_in")?
+                .into_pointer_value();
+            let total = self
+                .generator
+                .builder
+                .build_int_mul(
+                    list_len,
+                    i64_ty.const_int(8, false),
+                    "spawn_struct_list_list_bytes",
+                )
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("spawn struct list list size: {e}"))
+                })?;
+            let clone_data = self
+                .generator
+                .malloc_or_abort(total, "spawn_struct_list_list_heap")?;
+            let memcpy_fn = self.generator.get_runtime_fn("memcpy")?;
+            self.generator
+                .builder
+                .build_call(
+                    memcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(clone_data),
+                        BasicMetadataValueEnum::PointerValue(list_data),
+                        BasicMetadataValueEnum::IntValue(total),
+                    ],
+                    "spawn_struct_list_list_copy",
+                )
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("spawn struct list list copy: {e}"))
+                })?;
+            let new_list = list_sv.get_type().get_undef();
+            let new_list = self
+                .generator
+                .builder
+                .build_insert_value(new_list, list_len, 0, "spawn_struct_list_list_new_len")
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("spawn struct list list new len: {e}"))
+                })?
+                .into_struct_value();
+            let new_list = self
+                .generator
+                .builder
+                .build_insert_value(new_list, clone_data, 1, "spawn_struct_list_list_new_data")
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("spawn struct list list new data: {e}"))
+                })?
+                .into_struct_value();
+            let mut rebuilt = new_list;
+            for (parent, parent_idx) in pairs.into_iter().rev() {
+                rebuilt = self
+                    .generator
+                    .builder
+                    .build_insert_value(
+                        parent,
+                        rebuilt,
+                        parent_idx,
+                        "spawn_struct_list_list_rebuild",
+                    )
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("spawn struct list list rebuild: {e}"))
+                    })?
+                    .into_struct_value();
+            }
+            cloned = rebuilt;
+        }
+        let box_size = self
+            .generator
+            .llvm_type_size_bytes(BasicTypeEnum::StructType(elem_ty));
+        let box_size_val = i64_ty.const_int(box_size, false);
+        let dst_box = self
+            .generator
+            .malloc_or_abort(box_size_val, "spawn_struct_list_clone_box")?;
+        self.generator.build_store(dst_box, cloned)?;
+        let dst_handle = self
+            .generator
+            .builder
+            .build_ptr_to_int(dst_box, i64_ty, "spawn_struct_list_clone_handle")
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list handle: {e}")))?;
+        let dst_slot = self.generator.build_in_bounds_gep(
+            i64_ty,
+            dst_data,
+            &[idx],
+            "spawn_struct_list_clone_dst_slot",
+        )?;
+        self.generator.build_store(dst_slot, dst_handle)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(
+                idx,
+                i64_ty.const_int(1, false),
+                "spawn_struct_list_clone_idx_next",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn struct list clone inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Emit `spawn expr` as an eager, already-completed future. The resolved
+    /// slice does not yet generate a dedicated poll wrapper; evaluating the
+    /// expression synchronously preserves the value/result ABI and keeps the
+    /// spawn/await test corpus on the resolved path.
+    /// Real-thread spawn for direct calls to named functions.
+    ///
+    /// This is the default path when the environment variable
+    /// `MIMI_EAGER_SPAWN` is unset. It allocates a heap environment for the
+    /// call arguments, generates a poll function that runs the call on a worker
+    /// thread, stores the result at future offset 16, and marks the future
+    /// completed. Non-call expressions and calls with borrow parameters fall
+    /// back to the eager/synchronous resolved path.
+    fn try_emit_spawn_thread(
+        &mut self,
+        value: &ResolvedExpr,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        // A struct field is scalar-like when it does not transitively carry
+        // a pointer (heap allocation). Such fields can be copied by value into
+        // worker envs without any deep-copy/cleanup.
+        fn llvm_type_has_heap(ty: &BasicTypeEnum<'_>) -> bool {
+            match ty {
+                BasicTypeEnum::PointerType(_) => true,
+                BasicTypeEnum::StructType(st) => {
+                    st.get_field_types().iter().any(llvm_type_has_heap)
+                }
+                _ => false,
+            }
+        }
+        fn is_string_shape(ty: &BasicTypeEnum<'_>) -> bool {
+            matches!(
+                ty,
+                BasicTypeEnum::StructType(inner)
+                    if inner.get_field_types().len() == 2
+                        && matches!(
+                            inner.get_field_types()[0],
+                            BasicTypeEnum::PointerType(_)
+                        )
+                        && matches!(
+                            inner.get_field_types()[1],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                        )
+            )
+        }
+        fn is_list_shape(ty: &BasicTypeEnum<'_>) -> bool {
+            matches!(
+                ty,
+                BasicTypeEnum::StructType(inner)
+                    if inner.get_field_types().len() == 2
+                        && matches!(
+                            inner.get_field_types()[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                        )
+                        && matches!(inner.get_field_types()[1], BasicTypeEnum::PointerType(_))
+            )
+        }
+        fn collect_struct_heap_paths(
+            ty: &BasicTypeEnum<'_>,
+            prefix: &mut Vec<u32>,
+            string_paths: &mut Vec<Vec<u32>>,
+            list_paths: &mut Vec<Vec<u32>>,
+            supported: &mut bool,
+        ) {
+            match ty {
+                BasicTypeEnum::IntType(_) | BasicTypeEnum::FloatType(_) => {}
+                BasicTypeEnum::StructType(_) if !llvm_type_has_heap(ty) => {}
+                BasicTypeEnum::StructType(_) if is_string_shape(ty) => {
+                    string_paths.push(prefix.clone());
+                }
+                BasicTypeEnum::StructType(_) if is_list_shape(ty) => {
+                    list_paths.push(prefix.clone());
+                }
+                BasicTypeEnum::StructType(st) => {
+                    for (idx, field_ty) in st.get_field_types().iter().enumerate() {
+                        prefix.push(idx as u32);
+                        collect_struct_heap_paths(
+                            field_ty,
+                            prefix,
+                            string_paths,
+                            list_paths,
+                            supported,
+                        );
+                        prefix.pop();
+                    }
+                }
+                _ => *supported = false,
+            }
+        }
+        if std::env::var("MIMI_EAGER_SPAWN").is_ok() {
+            return Ok(None);
+        }
+        let ResolvedExprKind::Call(call) = &value.kind else {
+            return Ok(None);
+        };
+        let ResolvedCallee::Function(owner) = &call.callee else {
+            return Ok(None);
+        };
+        let symbol = self.callable_symbol(owner)?.to_string();
+        let Some(callee) = self.generator.module.get_function(&symbol) else {
+            return Ok(None);
+        };
+        // Borrow parameters cannot be copied into a worker env safely.
+        let borrow_positions: Vec<bool> = self
+            .program
+            .callable(owner)
+            .map(|callee_callable| {
+                callee_callable
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|p| {
+                        matches!(
+                            p.permission,
+                            Some(crate::core::ir::Permission::View)
+                                | Some(crate::core::ir::Permission::Mutate)
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if borrow_positions.iter().any(|b| *b) || borrow_positions.len() != call.arguments.len() {
+            return Ok(None);
+        }
+
+        // Evaluate and coerce call arguments.
+        let mut arg_values: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(call.arguments.len());
+        let mut is_string_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut is_list_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut is_string_list_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut is_nested_list_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut nested_inner_elem_sizes: Vec<u64> = Vec::with_capacity(call.arguments.len());
+        let mut nested_inner_is_string: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut is_scalar_struct_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut is_heap_struct_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut heap_struct_string_paths: Vec<Vec<Vec<u32>>> =
+            Vec::with_capacity(call.arguments.len());
+        let mut heap_struct_list_paths: Vec<Vec<Vec<u32>>> =
+            Vec::with_capacity(call.arguments.len());
+        let mut list_elem_sizes: Vec<u64> = Vec::with_capacity(call.arguments.len());
+        let mut is_struct_list_arg: Vec<bool> = Vec::with_capacity(call.arguments.len());
+        let mut struct_list_elem_types: Vec<Option<inkwell::types::StructType<'ctx>>> =
+            Vec::with_capacity(call.arguments.len());
+        let mut struct_list_string_paths: Vec<Vec<Vec<u32>>> =
+            Vec::with_capacity(call.arguments.len());
+        let mut struct_list_list_paths: Vec<Vec<Vec<u32>>> =
+            Vec::with_capacity(call.arguments.len());
+        let params = callee.get_params();
+        for (i, argument) in call.arguments.iter().enumerate() {
+            let v = self.emit_expr(&argument.value, frame)?;
+            let v = self.apply_conversion(v, &argument.conversion)?;
+            let v = if let Some(param) = params.get(i) {
+                let param_ty = param.get_type();
+                if v.get_type() != param_ty {
+                    self.coerce_to(v, param_ty)?
+                } else {
+                    v
+                }
+            } else {
+                v
+            };
+            let is_string = matches!(
+                self.program.resolved_types().get(&argument.value.ty),
+                Some(ResolvedType::Primitive(PrimitiveType::String))
+            );
+            is_string_arg.push(is_string);
+            let (
+                is_scalar_list,
+                is_string_list,
+                is_nested_list,
+                elem_size,
+                nested_inner_size,
+                nested_inner_string,
+                is_struct_list,
+                struct_elem_ty,
+                struct_string_paths,
+                struct_list_paths,
+            ) = match self.program.resolved_types().get(&argument.value.ty) {
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }) if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
+                    let elem_ty = self.lower_type(&arguments[0])?;
+                    if matches!(
+                        elem_ty,
+                        BasicTypeEnum::IntType(_) | BasicTypeEnum::FloatType(_)
+                    ) {
+                        (
+                            true,
+                            false,
+                            false,
+                            self.generator.llvm_type_size_bytes(elem_ty),
+                            0,
+                            false,
+                            false,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                        )
+                    } else if matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Primitive(PrimitiveType::String))
+                    ) {
+                        (
+                            false,
+                            true,
+                            false,
+                            0,
+                            0,
+                            false,
+                            false,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                        )
+                    } else if let Some(ResolvedType::Nominal {
+                        item: inner_item,
+                        arguments: inner_arguments,
+                        ..
+                    }) = self.program.resolved_types().get(&arguments[0])
+                    {
+                        if inner_item.as_str() == "builtin:type:List" && inner_arguments.len() == 1
+                        {
+                            let inner_elem_ty = self.lower_type(&inner_arguments[0])?;
+                            if matches!(
+                                inner_elem_ty,
+                                BasicTypeEnum::IntType(_) | BasicTypeEnum::FloatType(_)
+                            ) {
+                                (
+                                    false,
+                                    false,
+                                    true,
+                                    0,
+                                    self.generator.llvm_type_size_bytes(inner_elem_ty),
+                                    false,
+                                    false,
+                                    None,
+                                    Vec::new(),
+                                    Vec::new(),
+                                )
+                            } else if matches!(
+                                self.program.resolved_types().get(&inner_arguments[0]),
+                                Some(ResolvedType::Primitive(PrimitiveType::String))
+                            ) {
+                                (
+                                    false,
+                                    false,
+                                    true,
+                                    0,
+                                    0,
+                                    true,
+                                    false,
+                                    None,
+                                    Vec::new(),
+                                    Vec::new(),
+                                )
+                            } else {
+                                (
+                                    false,
+                                    false,
+                                    false,
+                                    0,
+                                    0,
+                                    false,
+                                    false,
+                                    None,
+                                    Vec::new(),
+                                    Vec::new(),
+                                )
+                            }
+                        } else if let BasicTypeEnum::StructType(st) = elem_ty {
+                            let mut string_paths = Vec::new();
+                            let mut list_paths = Vec::new();
+                            let mut all_supported = true;
+                            let mut prefix = Vec::new();
+                            collect_struct_heap_paths(
+                                &elem_ty,
+                                &mut prefix,
+                                &mut string_paths,
+                                &mut list_paths,
+                                &mut all_supported,
+                            );
+                            if all_supported {
+                                (
+                                    false,
+                                    false,
+                                    false,
+                                    0,
+                                    0,
+                                    false,
+                                    true,
+                                    Some(st),
+                                    string_paths,
+                                    list_paths,
+                                )
+                            } else {
+                                (
+                                    false,
+                                    false,
+                                    false,
+                                    0,
+                                    0,
+                                    false,
+                                    false,
+                                    None,
+                                    Vec::new(),
+                                    Vec::new(),
+                                )
+                            }
+                        } else {
+                            (
+                                false,
+                                false,
+                                false,
+                                0,
+                                0,
+                                false,
+                                false,
+                                None,
+                                Vec::new(),
+                                Vec::new(),
+                            )
+                        }
+                    } else if let BasicTypeEnum::StructType(st) = elem_ty {
+                        let mut string_paths = Vec::new();
+                        let mut list_paths = Vec::new();
+                        let mut all_supported = true;
+                        let mut prefix = Vec::new();
+                        collect_struct_heap_paths(
+                            &elem_ty,
+                            &mut prefix,
+                            &mut string_paths,
+                            &mut list_paths,
+                            &mut all_supported,
+                        );
+                        if all_supported {
+                            (
+                                false,
+                                false,
+                                false,
+                                0,
+                                0,
+                                false,
+                                true,
+                                Some(st),
+                                string_paths,
+                                list_paths,
+                            )
+                        } else {
+                            (
+                                false,
+                                false,
+                                false,
+                                0,
+                                0,
+                                false,
+                                false,
+                                None,
+                                Vec::new(),
+                                Vec::new(),
+                            )
+                        }
+                    } else {
+                        (
+                            false,
+                            false,
+                            false,
+                            0,
+                            0,
+                            false,
+                            false,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                        )
+                    }
+                }
+                _ => (
+                    false,
+                    false,
+                    false,
+                    0,
+                    0,
+                    false,
+                    false,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+            is_list_arg.push(is_scalar_list || is_string_list || is_nested_list || is_struct_list);
+            is_string_list_arg.push(is_string_list);
+            is_nested_list_arg.push(is_nested_list);
+            nested_inner_elem_sizes.push(nested_inner_size);
+            nested_inner_is_string.push(nested_inner_string);
+            list_elem_sizes.push(elem_size);
+            is_struct_list_arg.push(is_struct_list);
+            struct_list_elem_types.push(struct_elem_ty);
+            struct_list_string_paths.push(struct_string_paths);
+            struct_list_list_paths.push(struct_list_paths);
+            let is_list_value =
+                is_scalar_list || is_string_list || is_nested_list || is_struct_list;
+            let (is_scalar_struct, is_heap_struct, heap_string_paths, heap_list_paths) =
+                if is_list_value {
+                    (false, false, Vec::new(), Vec::new())
+                } else {
+                    match v.get_type() {
+                        BasicTypeEnum::StructType(st) => {
+                            let mut string_paths = Vec::new();
+                            let mut list_paths = Vec::new();
+                            let mut all_supported = true;
+                            let mut prefix = Vec::new();
+                            collect_struct_heap_paths(
+                                &st.into(),
+                                &mut prefix,
+                                &mut string_paths,
+                                &mut list_paths,
+                                &mut all_supported,
+                            );
+                            let scalar_struct =
+                                st.get_field_types().iter().all(|f| !llvm_type_has_heap(f));
+                            (
+                                scalar_struct,
+                                !scalar_struct && all_supported,
+                                string_paths,
+                                list_paths,
+                            )
+                        }
+                        _ => (false, false, Vec::new(), Vec::new()),
+                    }
+                };
+            is_scalar_struct_arg.push(is_scalar_struct);
+            is_heap_struct_arg.push(is_heap_struct);
+            heap_struct_string_paths.push(heap_string_paths);
+            heap_struct_list_paths.push(heap_list_paths);
+            arg_values.push(v);
+        }
+
+        // Only scalar/pointer arguments are safe to copy into the worker env
+        // without deep-copying. String and scalar-element List structs are
+        // allowed because they get deep-copied heap buffers below. Other
+        // Struct/Array/closure/record values stay on the eager path.
+        for (
+            (
+                (
+                    (
+                        ((((arg, is_string), is_list), is_string_list), is_nested_list),
+                        is_struct_list,
+                    ),
+                    is_scalar_struct,
+                ),
+                is_heap_struct,
+            ),
+            elem_size,
+        ) in arg_values
+            .iter()
+            .zip(&is_string_arg)
+            .zip(&is_list_arg)
+            .zip(&is_string_list_arg)
+            .zip(&is_nested_list_arg)
+            .zip(&is_struct_list_arg)
+            .zip(&is_scalar_struct_arg)
+            .zip(&is_heap_struct_arg)
+            .zip(&list_elem_sizes)
+        {
+            if matches!(arg.get_type(), BasicTypeEnum::ArrayType(_)) {
+                return Ok(None);
+            }
+            let is_struct = matches!(arg.get_type(), BasicTypeEnum::StructType(_));
+            if is_struct && !is_string && !is_list && !is_scalar_struct && !is_heap_struct {
+                return Ok(None);
+            }
+            if *is_string && *is_list {
+                return Ok(None);
+            }
+            if (*is_scalar_struct || *is_heap_struct) && (*is_string || *is_list) {
+                return Ok(None);
+            }
+            if !is_struct && (*is_string || *is_list || *is_scalar_struct || *is_heap_struct) {
+                return Ok(None);
+            }
+            if *is_list && *elem_size == 0 && !is_string_list && !is_nested_list && !is_struct_list
+            {
+                return Ok(None);
+            }
+        }
+
+        let i8_ty = self.generator.context.i8_type();
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let void_ty = self.generator.context.void_type();
+        let result_ty = self.lower_type(&value.ty)?;
+        let result_bytes = self.generator.llvm_type_size_bytes(result_ty);
+
+        // ── Generate poll function: void(ptr future) ──
+        let poll_name = format!("__resolved_spawn_poll_{}", self.generator.spawn_counter);
+        self.generator.spawn_counter += 1;
+        let poll_fn_type = void_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr_ty)], false);
+        let poll_fn = self
+            .generator
+            .module
+            .add_function(&poll_name, poll_fn_type, None);
+        let poll_entry = self.generator.context.append_basic_block(poll_fn, "entry");
+        let saved_block = self.generator.builder.get_insert_block();
+        self.generator.builder.position_at_end(poll_entry);
+        let future_ptr_param = poll_fn
+            .get_nth_param(0)
+            .ok_or_else(|| CompileError::LlvmError("spawn poll param missing".into()))?
+            .into_pointer_value();
+
+        let mut env_ptr: Option<inkwell::values::PointerValue<'ctx>> = None;
+        if !arg_values.is_empty() {
+            let arg_tys: Vec<BasicTypeEnum<'ctx>> =
+                arg_values.iter().map(|v| v.get_type()).collect();
+            let env_struct_type = self.generator.context.struct_type(&arg_tys, false);
+
+            // Load env pointer stored at future data offset 16.
+            let env_slot_i8 = self.generator.build_in_bounds_gep(
+                i8_ty,
+                future_ptr_param,
+                &[i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false)],
+                "spawn_poll_env_slot",
+            )?;
+            let env_slot_ptr = self
+                .generator
+                .builder
+                .build_bit_cast(env_slot_i8, ptr_ty, "spawn_poll_env_typed")
+                .map_err(|e| CompileError::LlvmError(format!("spawn poll env cast: {e}")))?
+                .into_pointer_value();
+            let env_loaded = self
+                .generator
+                .build_load(
+                    BasicTypeEnum::PointerType(ptr_ty),
+                    env_slot_ptr,
+                    "spawn_env_val",
+                )?
+                .into_pointer_value();
+            let env_struct_ptr =
+                self.generator
+                    .build_pointer_cast(env_loaded, ptr_ty, "spawn_poll_env_struct")?;
+            env_ptr = Some(env_loaded);
+
+            let mut thunk_args: Vec<BasicMetadataValueEnum<'ctx>> =
+                Vec::with_capacity(arg_values.len());
+            let mut string_free_ptrs: Vec<inkwell::values::PointerValue<'ctx>> = Vec::new();
+            let mut list_free_ptrs: Vec<inkwell::values::PointerValue<'ctx>> = Vec::new();
+            let mut string_list_elems: Vec<(
+                inkwell::values::IntValue<'ctx>,
+                inkwell::values::PointerValue<'ctx>,
+            )> = Vec::new();
+            let mut nested_list_elems: Vec<(
+                inkwell::values::IntValue<'ctx>,
+                inkwell::values::PointerValue<'ctx>,
+                bool,
+            )> = Vec::new();
+            let mut struct_list_elems: Vec<(
+                inkwell::values::IntValue<'ctx>,
+                inkwell::values::PointerValue<'ctx>,
+                inkwell::types::StructType<'ctx>,
+            )> = Vec::new();
+            for (i, arg_ty) in arg_tys.iter().enumerate() {
+                let field_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(env_struct_type, env_struct_ptr, i as u32, "spawn_env_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("spawn env gep: {e}")))?;
+                let field_val = self.generator.build_load(*arg_ty, field_gep, "spawn_arg")?;
+                if is_string_arg[i] {
+                    let sv = field_val.into_struct_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_str_data")?
+                        .into_pointer_value();
+                    string_free_ptrs.push(data);
+                }
+                if is_list_arg[i] {
+                    let sv = field_val.into_struct_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_list_data")?
+                        .into_pointer_value();
+                    if is_string_list_arg[i] {
+                        let len = self
+                            .generator
+                            .build_extract_value(sv.into(), 0, "spawn_string_list_len")?
+                            .into_int_value();
+                        string_list_elems.push((len, data));
+                    }
+                    if is_nested_list_arg[i] {
+                        let len = self
+                            .generator
+                            .build_extract_value(sv.into(), 0, "spawn_nested_list_len")?
+                            .into_int_value();
+                        nested_list_elems.push((len, data, nested_inner_is_string[i]));
+                    }
+                    list_free_ptrs.push(data);
+                }
+                if is_struct_list_arg[i] {
+                    let sv = field_val.into_struct_value();
+                    let len = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_struct_list_len")?
+                        .into_int_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_struct_list_data")?
+                        .into_pointer_value();
+                    if let Some(st) = struct_list_elem_types[i] {
+                        struct_list_elems.push((len, data, st));
+                    }
+                }
+                if is_heap_struct_arg[i] {
+                    let sv = field_val.into_struct_value();
+                    for path in &heap_struct_string_paths[i] {
+                        let mut cur = sv;
+                        let last = path.len() - 1;
+                        for (idx, &field_idx) in path.iter().enumerate() {
+                            let step = self
+                                .generator
+                                .build_extract_value(cur.into(), field_idx, "spawn_heap_str_path")?
+                                .into_struct_value();
+                            if idx == last {
+                                let data = self
+                                    .generator
+                                    .build_extract_value(
+                                        step.into(),
+                                        0,
+                                        "spawn_heap_str_path_data",
+                                    )?
+                                    .into_pointer_value();
+                                string_free_ptrs.push(data);
+                            } else {
+                                cur = step;
+                            }
+                        }
+                    }
+                    for path in &heap_struct_list_paths[i] {
+                        let mut cur = sv;
+                        let last = path.len() - 1;
+                        for (idx, &field_idx) in path.iter().enumerate() {
+                            let step = self
+                                .generator
+                                .build_extract_value(cur.into(), field_idx, "spawn_heap_list_path")?
+                                .into_struct_value();
+                            if idx == last {
+                                let data = self
+                                    .generator
+                                    .build_extract_value(
+                                        step.into(),
+                                        1,
+                                        "spawn_heap_list_path_data",
+                                    )?
+                                    .into_pointer_value();
+                                list_free_ptrs.push(data);
+                            } else {
+                                cur = step;
+                            }
+                        }
+                    }
+                }
+                thunk_args.push(BasicMetadataValueEnum::from(field_val));
+            }
+            let call = self
+                .generator
+                .builder
+                .build_call(callee, &thunk_args, "spawn_poll_call")
+                .map_err(|e| CompileError::LlvmError(format!("spawn poll call: {e}")))?;
+            let result = call
+                .try_as_basic_value_opt()
+                .ok_or_else(|| CompileError::LlvmError("spawn poll call returned void".into()))?;
+            let result = self.coerce_to(result, result_ty)?;
+
+            let result_slot = self.generator.build_in_bounds_gep(
+                i8_ty,
+                future_ptr_param,
+                &[i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false)],
+                "spawn_poll_result_i8",
+            )?;
+            let result_ptr = self
+                .generator
+                .builder
+                .build_bit_cast(result_slot, ptr_ty, "spawn_poll_result_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("spawn poll result cast: {e}")))?
+                .into_pointer_value();
+            self.generator.build_store(result_ptr, result)?;
+
+            // Free the deep-copied string buffers now that the callee has
+            // finished reading them.
+            for data_ptr in string_free_ptrs {
+                let free_str = self.generator.get_runtime_fn("mimi_string_free")?;
+                self.generator
+                    .builder
+                    .build_call(
+                        free_str,
+                        &[BasicMetadataValueEnum::PointerValue(data_ptr)],
+                        "spawn_clone_free",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("spawn string free: {e}")))?;
+            }
+            // Free deep-copied string elements inside List<string> arguments.
+            for (len, data) in string_list_elems {
+                self.emit_spawn_string_list_element_free(len, data)?;
+            }
+            // Free deep-copied nested List<List<i32|f64>> inner boxes/data.
+            for (len, data, inner_is_string) in nested_list_elems {
+                self.emit_spawn_nested_list_free(len, data, inner_is_string)?;
+            }
+            // Free deep-copied record boxes inside List<Record> arguments.
+            for (si, (len, data, st)) in struct_list_elems.into_iter().enumerate() {
+                self.emit_spawn_struct_list_element_free(
+                    len,
+                    data,
+                    st,
+                    &struct_list_string_paths[si],
+                    &struct_list_list_paths[si],
+                )?;
+            }
+            // Free deep-copied list data buffers (scalar lists) and the
+            // List<string> data arrays (after their element strings).
+            for data_ptr in list_free_ptrs {
+                let free_fn = self.generator.get_runtime_fn("free")?;
+                self.generator
+                    .builder
+                    .build_call(
+                        free_fn,
+                        &[BasicMetadataValueEnum::PointerValue(data_ptr)],
+                        "spawn_list_free",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("spawn list free: {e}")))?;
+            }
+        } else {
+            let call = self
+                .generator
+                .builder
+                .build_call(callee, &[], "spawn_poll_call")
+                .map_err(|e| CompileError::LlvmError(format!("spawn poll call: {e}")))?;
+            let result = call
+                .try_as_basic_value_opt()
+                .ok_or_else(|| CompileError::LlvmError("spawn poll call returned void".into()))?;
+            let result = self.coerce_to(result, result_ty)?;
+            let result_slot = self.generator.build_in_bounds_gep(
+                i8_ty,
+                future_ptr_param,
+                &[i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false)],
+                "spawn_poll_result_i8",
+            )?;
+            let result_ptr = self
+                .generator
+                .builder
+                .build_bit_cast(result_slot, ptr_ty, "spawn_poll_result_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("spawn poll result cast: {e}")))?
+                .into_pointer_value();
+            self.generator.build_store(result_ptr, result)?;
+        }
+
+        let set_fn = self.generator.get_runtime_fn("mimi_future_set_completed")?;
+        self.generator
+            .builder
+            .build_call(
+                set_fn,
+                &[BasicMetadataValueEnum::PointerValue(future_ptr_param)],
+                "spawn_poll_set",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn set completed: {e}")))?;
+
+        if let Some(env_ptr) = env_ptr {
+            let free_fn = self.generator.get_runtime_fn("free")?;
+            self.generator
+                .builder
+                .build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::PointerValue(env_ptr)],
+                    "spawn_env_free",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("spawn env free: {e}")))?;
+        }
+        self.generator.build_return(None)?;
+        if let Some(bb) = saved_block {
+            self.generator.builder.position_at_end(bb);
+        }
+
+        // ── At spawn site: allocate future + env, start worker thread ──
+        let alloc_fn = self.generator.get_runtime_fn("mimi_future_alloc")?;
+        let total_size = i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET + result_bytes.max(8), false);
+        let future_ptr = self
+            .generator
+            .builder
+            .build_call(
+                alloc_fn,
+                &[BasicMetadataValueEnum::IntValue(total_size)],
+                "spawn_future_alloc",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn future alloc: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("spawn future alloc returned void".into()))?
+            .into_pointer_value();
+
+        if !arg_values.is_empty() {
+            let arg_tys: Vec<BasicTypeEnum<'ctx>> =
+                arg_values.iter().map(|v| v.get_type()).collect();
+            let env_struct_type = self.generator.context.struct_type(&arg_tys, false);
+            let env_size = env_struct_type
+                .size_of()
+                .ok_or_else(|| CompileError::Unsupported("spawn env size_of failed".into()))?;
+            let env_heap_ptr = self.generator.malloc_or_abort(env_size, "spawn_env_heap")?;
+            for (i, arg) in arg_values.iter().enumerate() {
+                let field_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(
+                        env_struct_type,
+                        env_heap_ptr,
+                        i as u32,
+                        "spawn_env_store_gep",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("spawn env store gep: {e}")))?;
+                if is_string_arg[i] {
+                    let sv = (*arg).into_struct_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_str_data_in")?
+                        .into_pointer_value();
+                    let len = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_str_len_in")?
+                        .into_int_value();
+                    let clone_fn = self.generator.get_runtime_fn("mimi_str_clone")?;
+                    let handle = self
+                        .generator
+                        .builder
+                        .build_call(
+                            clone_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(data),
+                                BasicMetadataValueEnum::IntValue(len),
+                            ],
+                            "spawn_str_clone",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("spawn str clone: {e}")))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| {
+                            CompileError::LlvmError("spawn str clone returned void".into())
+                        })?
+                        .into_int_value();
+                    let clone_ptr = self
+                        .generator
+                        .builder
+                        .build_int_to_ptr(handle, ptr_ty, "spawn_str_clone_ptr")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("spawn str clone cast: {e}"))
+                        })?;
+                    let string_ty = arg.get_type().into_struct_type();
+                    let string_val = string_ty.get_undef();
+                    let string_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(string_val, clone_ptr, 0, "spawn_str_with_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn str build: {e}")))?;
+                    let string_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(string_val, len, 1, "spawn_str_with_len")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn str build: {e}")))?;
+                    self.generator.build_store(field_gep, string_val)?;
+                } else if is_list_arg[i] && is_struct_list_arg[i] {
+                    let sv = (*arg).into_struct_value();
+                    let len = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_struct_list_len_in")?
+                        .into_int_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_struct_list_data_in")?
+                        .into_pointer_value();
+                    let total = self
+                        .generator
+                        .builder
+                        .build_int_mul(len, i64_ty.const_int(8, false), "spawn_struct_list_bytes")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("spawn struct list size: {e}"))
+                        })?;
+                    let clone_data = self
+                        .generator
+                        .malloc_or_abort(total, "spawn_struct_list_heap")?;
+                    if let Some(st) = struct_list_elem_types[i] {
+                        self.emit_spawn_struct_list_clone(
+                            len,
+                            data,
+                            clone_data,
+                            st,
+                            &struct_list_string_paths[i],
+                            &struct_list_list_paths[i],
+                        )?;
+                    }
+                    let list_ty = arg.get_type().into_struct_type();
+                    let list_val = list_ty.get_undef();
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, len, 0, "spawn_struct_list_with_len")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("spawn struct list build: {e}"))
+                        })?;
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, clone_data, 1, "spawn_struct_list_with_data")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("spawn struct list build: {e}"))
+                        })?;
+                    self.generator.build_store(field_gep, list_val)?;
+                } else if is_list_arg[i] && is_string_list_arg[i] {
+                    let sv = (*arg).into_struct_value();
+                    let len = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_string_list_len_in")?
+                        .into_int_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_string_list_data_in")?
+                        .into_pointer_value();
+                    let total = self
+                        .generator
+                        .builder
+                        .build_int_mul(len, i64_ty.const_int(8, false), "spawn_string_list_bytes")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list size: {e}")))?;
+                    let clone_data = self.generator.malloc_or_abort(total, "spawn_list_heap")?;
+                    self.emit_spawn_string_list_clone(len, data, clone_data)?;
+                    let list_ty = arg.get_type().into_struct_type();
+                    let list_val = list_ty.get_undef();
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, len, 0, "spawn_list_with_len")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list build: {e}")))?;
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, clone_data, 1, "spawn_list_with_data")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list build: {e}")))?;
+                    self.generator.build_store(field_gep, list_val)?;
+                } else if is_list_arg[i] && is_nested_list_arg[i] {
+                    let sv = (*arg).into_struct_value();
+                    let len = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_nested_list_len_in")?
+                        .into_int_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_nested_list_data_in")?
+                        .into_pointer_value();
+                    let total = self
+                        .generator
+                        .builder
+                        .build_int_mul(len, i64_ty.const_int(8, false), "spawn_nested_list_bytes")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list size: {e}")))?;
+                    let clone_data = self.generator.malloc_or_abort(total, "spawn_list_heap")?;
+                    self.emit_spawn_nested_list_clone(
+                        len,
+                        data,
+                        clone_data,
+                        nested_inner_elem_sizes[i],
+                        nested_inner_is_string[i],
+                    )?;
+                    let list_ty = arg.get_type().into_struct_type();
+                    let list_val = list_ty.get_undef();
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, len, 0, "spawn_list_with_len")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list build: {e}")))?;
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, clone_data, 1, "spawn_list_with_data")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list build: {e}")))?;
+                    self.generator.build_store(field_gep, list_val)?;
+                } else if is_list_arg[i] {
+                    let sv = (*arg).into_struct_value();
+                    let len = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "spawn_list_len_in")?
+                        .into_int_value();
+                    let data = self
+                        .generator
+                        .build_extract_value(sv.into(), 1, "spawn_list_data_in")?
+                        .into_pointer_value();
+                    let elem_size = i64_ty.const_int(list_elem_sizes[i], false);
+                    let total = self
+                        .generator
+                        .builder
+                        .build_int_mul(len, elem_size, "spawn_list_bytes")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list size: {e}")))?;
+                    let clone_data = self.generator.malloc_or_abort(total, "spawn_list_heap")?;
+                    let memcpy_fn = self.generator.get_runtime_fn("memcpy")?;
+                    self.generator
+                        .builder
+                        .build_call(
+                            memcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(clone_data),
+                                BasicMetadataValueEnum::PointerValue(data),
+                                BasicMetadataValueEnum::IntValue(total),
+                            ],
+                            "spawn_list_copy",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list copy: {e}")))?;
+                    let list_ty = arg.get_type().into_struct_type();
+                    let list_val = list_ty.get_undef();
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, len, 0, "spawn_list_with_len")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list build: {e}")))?;
+                    let list_val = self
+                        .generator
+                        .builder
+                        .build_insert_value(list_val, clone_data, 1, "spawn_list_with_data")
+                        .map_err(|e| CompileError::LlvmError(format!("spawn list build: {e}")))?;
+                    self.generator.build_store(field_gep, list_val)?;
+                } else if is_heap_struct_arg[i] {
+                    let sv = (*arg).into_struct_value();
+                    let mut struct_val = sv;
+                    for path in &heap_struct_string_paths[i] {
+                        let mut pairs = Vec::new();
+                        let mut cur = sv;
+                        for &idx in path {
+                            pairs.push((cur, idx));
+                            cur = self
+                                .generator
+                                .build_extract_value(cur.into(), idx, "spawn_heap_str_pair")?
+                                .into_struct_value();
+                        }
+                        let str_sv = cur;
+                        let data = self
+                            .generator
+                            .build_extract_value(str_sv.into(), 0, "spawn_heap_str_path_data_in")?
+                            .into_pointer_value();
+                        let len = self
+                            .generator
+                            .build_extract_value(str_sv.into(), 1, "spawn_heap_str_path_len_in")?
+                            .into_int_value();
+                        let clone_fn = self.generator.get_runtime_fn("mimi_str_clone")?;
+                        let handle = self
+                            .generator
+                            .builder
+                            .build_call(
+                                clone_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(data),
+                                    BasicMetadataValueEnum::IntValue(len),
+                                ],
+                                "spawn_heap_str_clone",
+                            )
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap str clone: {e}"))
+                            })?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError("spawn heap str clone returned void".into())
+                            })?
+                            .into_int_value();
+                        let clone_ptr = self
+                            .generator
+                            .builder
+                            .build_int_to_ptr(handle, ptr_ty, "spawn_heap_str_clone_ptr")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap str ptr: {e}"))
+                            })?;
+                        let string_ty = str_sv.get_type();
+                        let new_str = string_ty.get_undef();
+                        let new_str = self
+                            .generator
+                            .builder
+                            .build_insert_value(new_str, clone_ptr, 0, "spawn_heap_str_new_ptr")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap str ptr ins: {e}"))
+                            })?
+                            .into_struct_value();
+                        let new_str = self
+                            .generator
+                            .builder
+                            .build_insert_value(new_str, len, 1, "spawn_heap_str_new_len")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap str len ins: {e}"))
+                            })?
+                            .into_struct_value();
+                        let mut rebuilt = new_str;
+                        for (parent, parent_idx) in pairs.into_iter().rev() {
+                            rebuilt = self
+                                .generator
+                                .builder
+                                .build_insert_value(
+                                    parent,
+                                    rebuilt,
+                                    parent_idx,
+                                    "spawn_heap_str_rebuild",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("spawn heap str rebuild: {e}"))
+                                })?
+                                .into_struct_value();
+                        }
+                        struct_val = rebuilt;
+                    }
+                    for path in &heap_struct_list_paths[i] {
+                        let mut pairs = Vec::new();
+                        let mut cur = sv;
+                        for &idx in path {
+                            pairs.push((cur, idx));
+                            cur = self
+                                .generator
+                                .build_extract_value(cur.into(), idx, "spawn_heap_list_pair")?
+                                .into_struct_value();
+                        }
+                        let list_sv = cur;
+                        let len = self
+                            .generator
+                            .build_extract_value(list_sv.into(), 0, "spawn_heap_list_path_len_in")?
+                            .into_int_value();
+                        let data = self
+                            .generator
+                            .build_extract_value(list_sv.into(), 1, "spawn_heap_list_path_data_in")?
+                            .into_pointer_value();
+                        let total = self
+                            .generator
+                            .builder
+                            .build_int_mul(len, i64_ty.const_int(8, false), "spawn_heap_list_bytes")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap list size: {e}"))
+                            })?;
+                        let clone_data = self
+                            .generator
+                            .malloc_or_abort(total, "spawn_heap_list_clone")?;
+                        let memcpy_fn = self.generator.get_runtime_fn("memcpy")?;
+                        self.generator
+                            .builder
+                            .build_call(
+                                memcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(clone_data),
+                                    BasicMetadataValueEnum::PointerValue(data),
+                                    BasicMetadataValueEnum::IntValue(total),
+                                ],
+                                "spawn_heap_list_copy",
+                            )
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap list copy: {e}"))
+                            })?;
+                        let list_ty = list_sv.get_type();
+                        let new_list = list_ty.get_undef();
+                        let new_list = self
+                            .generator
+                            .builder
+                            .build_insert_value(new_list, len, 0, "spawn_heap_list_new_len")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap list len: {e}"))
+                            })?
+                            .into_struct_value();
+                        let new_list = self
+                            .generator
+                            .builder
+                            .build_insert_value(new_list, clone_data, 1, "spawn_heap_list_new_data")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("spawn heap list data: {e}"))
+                            })?
+                            .into_struct_value();
+                        let mut rebuilt = new_list;
+                        for (parent, parent_idx) in pairs.into_iter().rev() {
+                            rebuilt = self
+                                .generator
+                                .builder
+                                .build_insert_value(
+                                    parent,
+                                    rebuilt,
+                                    parent_idx,
+                                    "spawn_heap_list_rebuild",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("spawn heap list rebuild: {e}"))
+                                })?
+                                .into_struct_value();
+                        }
+                        struct_val = rebuilt;
+                    }
+                    self.generator.build_store(field_gep, struct_val)?;
+                } else {
+                    self.generator.build_store(field_gep, *arg)?;
+                }
+            }
+            let env_slot = self.generator.build_in_bounds_gep(
+                i8_ty,
+                future_ptr,
+                &[i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false)],
+                "spawn_env_slot_i8",
+            )?;
+            let env_slot_ptr = self
+                .generator
+                .builder
+                .build_bit_cast(env_slot, ptr_ty, "spawn_env_slot_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("spawn env slot cast: {e}")))?
+                .into_pointer_value();
+            self.generator
+                .build_store(env_slot_ptr, BasicValueEnum::PointerValue(env_heap_ptr))?;
+        } else {
+            let env_slot = self.generator.build_in_bounds_gep(
+                i8_ty,
+                future_ptr,
+                &[i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false)],
+                "spawn_null_slot_i8",
+            )?;
+            let env_slot_ptr = self
+                .generator
+                .builder
+                .build_bit_cast(env_slot, ptr_ty, "spawn_null_slot_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("spawn null slot cast: {e}")))?
+                .into_pointer_value();
+            self.generator.build_store(
+                env_slot_ptr,
+                BasicValueEnum::PointerValue(ptr_ty.const_null()),
+            )?;
+        }
+
+        let spawn_fn = self.generator.get_runtime_fn("mimi_spawn_future")?;
+        let poll_fn_ptr = self
+            .generator
+            .builder
+            .build_bit_cast(
+                poll_fn.as_global_value().as_pointer_value(),
+                BasicTypeEnum::PointerType(ptr_ty),
+                "spawn_poll_fn_ptr",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn poll fn cast: {e}")))?
+            .into_pointer_value();
+        self.generator
+            .builder
+            .build_call(
+                spawn_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(future_ptr),
+                    BasicMetadataValueEnum::PointerValue(poll_fn_ptr),
+                ],
+                "spawn_future_thread",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("spawn_future call: {e}")))?;
+
+        Ok(Some(BasicValueEnum::PointerValue(future_ptr)))
+    }
+
+    /// Recursively transform string leaves inside a returned heap-owned
+    /// value into malloc-owned string data. Top-level string returns already
+    /// go through `claim_resolved_string_return`; records containing String
+    /// fields need the same ownership probe so the caller's later
+    /// `free`/`mimi_string_free` never touches a `.rodata` literal.
+    /// Ensure every string element in a `List<string>` is owned by heap
+    /// storage. The list's data array is mutated in place so the returned
+    /// value remains valid and the caller can safely `mimi_string_free` each
+    /// element during scope exit.
+    fn ensure_list_string_owned(
+        &mut self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 0, "ret_list_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("ret list str len: {e}")))?
+            .into_int_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 1, "ret_list_str_data")
+            .map_err(|e| CompileError::LlvmError(format!("ret list str data: {e}")))?
+            .into_pointer_value();
+        let function = self.generator.current_function().ok_or_else(|| {
+            CompileError::LlvmError("ret list str ensure outside function".into())
+        })?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "ret_list_str_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "ret_list_str_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "ret_list_str_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "ret_list_str_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "ret_list_str_idx_val",
+            )?
+            .into_int_value();
+        let cond = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            idx,
+            len,
+            "ret_list_str_cond",
+        );
+        let cond = cond.map_err(|e| CompileError::LlvmError(format!("ret list str cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let elem_slot =
+            self.generator
+                .build_in_bounds_gep(i64_ty, data, &[idx], "ret_list_str_elem_slot")?;
+        let elem_i64 = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "ret_list_str_elem_i64",
+            )?
+            .into_int_value();
+        let elem_ptr =
+            self.generator
+                .build_int_to_ptr(elem_i64, ptr_ty, "ret_list_str_elem_ptr")?;
+        let strlen_fn = self.generator.get_runtime_fn("strlen")?;
+        let len_val = self
+            .generator
+            .builder
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
+                "ret_list_str_strlen",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("ret list str strlen: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("ret list str strlen returned void".into()))?
+            .into_int_value();
+        let string_sv = self
+            .generator
+            .build_string_struct(elem_ptr, len_val)?
+            .into_struct_value();
+        let owned = self
+            .generator
+            .claim_resolved_string_return(string_sv.into())?
+            .into_struct_value();
+        let new_ptr = self
+            .generator
+            .build_extract_value(owned.into(), 0, "ret_list_str_owned_ptr")?
+            .into_pointer_value();
+        let new_i = self
+            .generator
+            .build_ptr_to_int(new_ptr, i64_ty, "ret_list_str_owned_i64")?;
+        self.generator.build_store(elem_slot, new_i)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "ret_list_str_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("ret list str inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(list_sv.into())
+    }
+
+    /// Ensure every inner `List<string>` in a `List<List<string>>` has
+    /// heap-owned string elements. The outer data array contains heap box
+    /// handles; each inner box is mutated in place.
+    fn ensure_string_list_list_owned(
+        &mut self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 0, "ret_lsl_len")
+            .map_err(|e| CompileError::LlvmError(format!("ret lsl len: {e}")))?
+            .into_int_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 1, "ret_lsl_data")
+            .map_err(|e| CompileError::LlvmError(format!("ret lsl data: {e}")))?
+            .into_pointer_value();
+        let function = self
+            .generator
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("ret lsl ensure outside function".into()))?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "ret_lsl_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "ret_lsl_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "ret_lsl_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "ret_lsl_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "ret_lsl_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, len, "ret_lsl_cond")
+            .map_err(|e| CompileError::LlvmError(format!("ret lsl cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let elem_slot =
+            self.generator
+                .build_in_bounds_gep(i64_ty, data, &[idx], "ret_lsl_elem_slot")?;
+        let inner_handle = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "ret_lsl_inner_handle",
+            )?
+            .into_int_value();
+        let inner_ptr =
+            self.generator
+                .build_int_to_ptr(inner_handle, ptr_ty, "ret_lsl_inner_ptr")?;
+        let inner_sv = self
+            .generator
+            .build_load(
+                BasicTypeEnum::StructType(elem_list_ty),
+                inner_ptr,
+                "ret_lsl_inner",
+            )?
+            .into_struct_value();
+        let owned_inner = self.ensure_list_string_owned(inner_sv)?.into_struct_value();
+        self.generator.build_store(inner_ptr, owned_inner)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "ret_lsl_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("ret lsl inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(list_sv.into())
+    }
+
+    /// Recursively ensure strings inside a returned value are heap-owned.
+    /// The optional resolved type lets list containers convert their element
+    /// string pointers (which are raw `char*` handles in list data arrays)
+    /// before the caller frees them.
+    fn ensure_returned_heap_strings_owned(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        type_id: Option<ResolvedTypeId>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if let Some(type_id) = type_id.as_ref() {
+            if let Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) = self.program.resolved_types().get(type_id)
+            {
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Primitive(PrimitiveType::String))
+                    )
+                {
+                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) =
+                        (value, ty)
+                    {
+                        return self.ensure_list_string_owned(sv);
+                    }
+                }
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Nominal {
+                            item,
+                            arguments,
+                            ..
+                        }) if item.as_str() == "builtin:type:List"
+                            && arguments.len() == 1
+                            && matches!(
+                                self.program.resolved_types().get(&arguments[0]),
+                                Some(ResolvedType::Primitive(PrimitiveType::String))
+                            )
+                    )
+                {
+                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) =
+                        (value, ty)
+                    {
+                        if let BasicTypeEnum::StructType(elem_list_ty) =
+                            self.lower_type(&arguments[0])?
+                        {
+                            return self.ensure_string_list_list_owned(sv, elem_list_ty);
+                        }
+                    }
+                }
+            }
+        }
+        match (value, ty) {
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st))
+                if st.get_field_types().len() == 2
+                    && matches!(st.get_field_types()[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        st.get_field_types()[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    ) =>
+            {
+                self.generator.claim_resolved_string_return(sv.into())
+            }
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
+                let field_displays: Option<Vec<String>> = if let Some(type_id) = type_id.as_ref() {
+                    if let Some(ResolvedType::Nominal { item, .. }) =
+                        self.program.resolved_types().get(type_id)
+                    {
+                        let item_str = item.as_str();
+                        let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+                        self.program
+                            .type_defs()
+                            .values()
+                            .find(|td| {
+                                td.qualified_name == type_name || td.qualified_name == item_str
+                            })
+                            .map(|td| td.fields.iter().map(|(_, d)| d.clone()).collect())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let mut rebuilt = sv;
+                for i in 0..st.count_fields() {
+                    let field_ty = st.get_field_types()[i as usize];
+                    let field = self.generator.build_extract_value(
+                        sv.into(),
+                        i,
+                        "ret_heap_str_field_in",
+                    )?;
+                    let child_id = field_displays
+                        .as_ref()
+                        .and_then(|v| v.get(i as usize))
+                        .and_then(|d| self.resolved_type_id_by_display(d));
+                    let field =
+                        self.ensure_returned_heap_strings_owned(field, field_ty, child_id)?;
+                    rebuilt = self
+                        .generator
+                        .builder
+                        .build_insert_value(rebuilt, field, i, "ret_heap_str_field_owned")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!(
+                                "return record string ownership rebuild: {e}"
+                            ))
+                        })?
+                        .into_struct_value();
+                }
+                Ok(rebuilt.into())
+            }
+            (other, _) => Ok(other),
+        }
+    }
+
+    /// Find a canonical `ResolvedTypeId` whose display name matches a
+    /// `TypeDef` field display (e.g. `"List<string>"` or `"Inner"`).
+    fn resolved_type_id_by_display(&self, display: &str) -> Option<ResolvedTypeId> {
+        let normalized = display.replace(' ', "");
+        self.program.resolved_types().iter().find_map(|(id, _)| {
+            let name = resolved_type_display_name(self.program, id);
+            if name.replace(' ', "") == normalized {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Register every heap pointer inside a function-call result with the
+    /// caller's heap scope. Resolved calls do not currently share the legacy
+    /// emitter's `track_string_return_lifetime` / list-return ownership
+    /// paths; without this, returned String, List, and heap-field Records
+    /// leak when the caller reassigns the value across many iterations.
+    ///
+    /// The optional resolved type is used to special-case `List<string>`
+    /// (top-level and direct Record fields) so each string element is freed
+    /// before the list data array.
+    fn track_returned_heap_pointers(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        type_id: Option<ResolvedTypeId>,
+    ) -> Result<(), CompileError> {
+        if let Some(type_id) = type_id.as_ref() {
+            if let Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) = self.program.resolved_types().get(type_id)
+            {
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Primitive(PrimitiveType::String))
+                    )
+                {
+                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(list_ty)) =
+                        (value, ty)
+                    {
+                        self.generator.register_returned_string_list(sv, list_ty)?;
+                    }
+                    return Ok(());
+                }
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Nominal {
+                            item,
+                            arguments,
+                            ..
+                        }) if item.as_str() == "builtin:type:List"
+                            && arguments.len() == 1
+                            && matches!(
+                                self.program.resolved_types().get(&arguments[0]),
+                                Some(ResolvedType::Primitive(PrimitiveType::String))
+                            )
+                    )
+                {
+                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(list_ty)) =
+                        (value, ty)
+                    {
+                        if let BasicTypeEnum::StructType(elem_list_ty) =
+                            self.lower_type(&arguments[0])?
+                        {
+                            self.generator.register_returned_string_list_list(
+                                sv,
+                                list_ty,
+                                elem_list_ty,
+                            )?;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        match (value, ty) {
+            (BasicValueEnum::PointerValue(pv), _) => {
+                self.generator.register_heap_alloc(pv);
+            }
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
+                let field_displays: Option<Vec<String>> = if let Some(type_id) = type_id.as_ref() {
+                    if let Some(ResolvedType::Nominal { item, .. }) =
+                        self.program.resolved_types().get(type_id)
+                    {
+                        let item_str = item.as_str();
+                        let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+                        self.program
+                            .type_defs()
+                            .values()
+                            .find(|td| {
+                                td.qualified_name == type_name || td.qualified_name == item_str
+                            })
+                            .map(|td| td.fields.iter().map(|(_, d)| d.clone()).collect())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                for i in 0..st.count_fields() {
+                    let field_ty = st.get_field_types()[i as usize];
+                    let field =
+                        self.generator
+                            .build_extract_value(sv.into(), i, "call_heap_ret_field")?;
+                    if let Some(display) = field_displays.as_ref().and_then(|v| v.get(i as usize)) {
+                        if display.replace(' ', "") == "List<string>" {
+                            if let (
+                                BasicValueEnum::StructValue(fsv),
+                                BasicTypeEnum::StructType(flt),
+                            ) = (field, field_ty)
+                            {
+                                self.generator.register_returned_string_list(fsv, flt)?;
+                                continue;
+                            }
+                        } else {
+                            let child_id = self.resolved_type_id_by_display(display);
+                            self.track_returned_heap_pointers(field, field_ty, child_id)?;
+                            continue;
+                        }
+                    }
+                    self.track_returned_heap_pointers(field, field_ty, None)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Claim every heap pointer inside a returned resolved value. The
+    /// early-return deterministic drop uses `flush_heap_scopes_to_boundary`;
+    /// claiming the exact data pointers carried by the returned value keeps
+    /// ownership transfer intact while still freeing all other locals.
+    /// `List<string>` values additionally register their element string
+    /// pointers as claimed so the flush does not free strings that the caller
+    /// will own.
+    fn claim_returned_heap_pointers(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        type_id: Option<ResolvedTypeId>,
+    ) -> Result<(), CompileError> {
+        if let Some(type_id) = type_id.as_ref() {
+            if let Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) = self.program.resolved_types().get(type_id)
+            {
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Primitive(PrimitiveType::String))
+                    )
+                {
+                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(list_ty)) =
+                        (value, ty)
+                    {
+                        self.generator.claim_returned_string_list(sv, list_ty)?;
+                    }
+                }
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(
+                        self.program.resolved_types().get(&arguments[0]),
+                        Some(ResolvedType::Nominal {
+                            item,
+                            arguments,
+                            ..
+                        }) if item.as_str() == "builtin:type:List"
+                            && arguments.len() == 1
+                            && matches!(
+                                self.program.resolved_types().get(&arguments[0]),
+                                Some(ResolvedType::Primitive(PrimitiveType::String))
+                            )
+                    )
+                {
+                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(list_ty)) =
+                        (value, ty)
+                    {
+                        if let BasicTypeEnum::StructType(elem_list_ty) =
+                            self.lower_type(&arguments[0])?
+                        {
+                            self.generator.claim_returned_string_list_list(
+                                sv,
+                                list_ty,
+                                elem_list_ty,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        match (value, ty) {
+            (BasicValueEnum::PointerValue(pv), _) => {
+                self.generator.claim_closure_env(pv);
+            }
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
+                let field_displays: Option<Vec<String>> = if let Some(type_id) = type_id.as_ref() {
+                    if let Some(ResolvedType::Nominal { item, .. }) =
+                        self.program.resolved_types().get(type_id)
+                    {
+                        let item_str = item.as_str();
+                        let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+                        self.program
+                            .type_defs()
+                            .values()
+                            .find(|td| {
+                                td.qualified_name == type_name || td.qualified_name == item_str
+                            })
+                            .map(|td| td.fields.iter().map(|(_, d)| d.clone()).collect())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                for i in 0..st.count_fields() {
+                    let field_ty = st.get_field_types()[i as usize];
+                    let field = self.generator.build_extract_value(
+                        sv.into(),
+                        i,
+                        "return_heap_claim_field",
+                    )?;
+                    if let Some(display) = field_displays.as_ref().and_then(|v| v.get(i as usize)) {
+                        if display.replace(' ', "") == "List<string>" {
+                            if let (
+                                BasicValueEnum::StructValue(fsv),
+                                BasicTypeEnum::StructType(flt),
+                            ) = (field, field_ty)
+                            {
+                                self.generator.claim_returned_string_list(fsv, flt)?;
+                            }
+                            // Also claim the list data pointer itself.
+                            self.claim_returned_heap_pointers(field, field_ty, None)?;
+                            continue;
+                        }
+                        let child_id = self.resolved_type_id_by_display(display);
+                        self.claim_returned_heap_pointers(field, field_ty, child_id)?;
+                        continue;
+                    }
+                    self.claim_returned_heap_pointers(field, field_ty, None)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn emit_spawn(
+        &mut self,
+        value: &ResolvedExpr,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // 0.37.x: real-thread spawn path for direct calls to named
+        // functions. Set MIMI_EAGER_SPAWN=1 to force the older
+        // eager/synchronous fallback for debugging. All other shapes remain
+        // eager/synchronous.
+        if let Some(real) = self.try_emit_spawn_thread(value, frame)? {
+            return Ok(real);
+        }
+        let i8_ty = self.generator.context.i8_type();
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+
+        // Run the expression synchronously (the future is completed before
+        // the caller sees the handle).
+        let inner_val = self.emit_expr(value, frame)?;
+        let result_ty = inner_val.get_type();
+        let result_bytes = self.generator.llvm_type_size_bytes(result_ty);
+        let total_size = i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET + result_bytes.max(8), false);
+
+        let alloc_fn = self.generator.get_runtime_fn("mimi_future_alloc")?;
+        let alloc = self
+            .generator
+            .builder
+            .build_call(
+                alloc_fn,
+                &[BasicMetadataValueEnum::IntValue(total_size)],
+                "spawn_future_alloc",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("mimi_future_alloc: {e}")))?;
+        let future_ptr = alloc
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("mimi_future_alloc returned void".into()))?
+            .into_pointer_value();
+
+        // Store the result at the future data region start (offset 16).
+        let offset = i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false);
+        let data_i8 =
+            self.generator
+                .build_in_bounds_gep(i8_ty, future_ptr, &[offset], "spawn_result_i8")?;
+        let data_ptr = self
+            .generator
+            .builder
+            .build_bit_cast(data_i8, ptr_ty, "spawn_result_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("spawn result bitcast: {e}")))?
+            .into_pointer_value();
+        self.generator.build_store(data_ptr, inner_val)?;
+
+        let set_fn = self.generator.get_runtime_fn("mimi_future_set_completed")?;
+        self.generator
+            .builder
+            .build_call(
+                set_fn,
+                &[BasicMetadataValueEnum::PointerValue(future_ptr)],
+                "spawn_set_completed",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("mimi_future_set_completed: {e}")))?;
+
+        Ok(BasicValueEnum::PointerValue(future_ptr))
+    }
+
+    /// Emit `await expr`: wait for a completed future and load its result.
+    fn emit_await(
+        &mut self,
+        value: &ResolvedExpr,
+        result_ty: &ResolvedTypeId,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ty = self.generator.context.i8_type();
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+
+        let handle_val = self.emit_expr(value, frame)?;
+        let future_ptr = match handle_val {
+            BasicValueEnum::PointerValue(pv) => pv,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "await operand is not a future pointer".into(),
+                ))
+            }
+        };
+
+        // Keep the same executor/await sequence as the legacy path so future
+        // metadata and ownership behavior stay aligned.
+        let executor_fn = self.generator.get_runtime_fn("mimi_executor_run")?;
+        self.generator
+            .builder
+            .build_call(executor_fn, &[], "executor_run")
+            .map_err(|e| CompileError::LlvmError(format!("mimi_executor_run: {e}")))?;
+
+        let await_fn = self.generator.get_runtime_fn("mimi_await_future")?;
+        self.generator
+            .builder
+            .build_call(
+                await_fn,
+                &[BasicMetadataValueEnum::PointerValue(future_ptr)],
+                "await_future",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("mimi_await_future: {e}")))?;
+
+        let offset = i64_ty.const_int(RESOLVED_FUTURE_DATA_OFFSET, false);
+        let data_i8 =
+            self.generator
+                .build_in_bounds_gep(i8_ty, future_ptr, &[offset], "await_result_i8")?;
+        let data_ptr = self
+            .generator
+            .builder
+            .build_bit_cast(data_i8, ptr_ty, "await_result_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("await result bitcast: {e}")))?
+            .into_pointer_value();
+        let result =
+            self.generator
+                .build_load(self.lower_type(result_ty)?, data_ptr, "future_result")?;
+
+        let free_fn = self.generator.get_runtime_fn("mimi_future_free")?;
+        self.generator
+            .builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(future_ptr)],
+                "future_free",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("mimi_future_free: {e}")))?;
+
+        Ok(result)
     }
 
     /// Emit a non-capturing lambda: generate a function + build closure struct.
@@ -7162,6 +10747,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .generator
             .context
             .ptr_type(inkwell::AddressSpace::default());
+
+        // Gather capture types from the enclosing frame before the lambda
+        // body emitter switches to lambda_frame.
+        let mut capture_tys: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(lambda.captures.len());
+        for cap_id in &lambda.captures {
+            let entry = frame.locals.get(cap_id).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "captured local '{}' not found in caller frame",
+                    cap_id.0 .0
+                ))
+            })?;
+            capture_tys.push(entry.llvm_type);
+        }
+
         let mut fn_param_tys: Vec<BasicMetadataTypeEnum> =
             vec![BasicMetadataTypeEnum::PointerType(ptr_ty)];
         for pty in &param_tys {
@@ -7241,6 +10840,56 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             );
         }
 
+        // Load captured variables from the env struct into local allocas.
+        // The lambda body refers to captured variables by their original
+        // ResolvedLocalId, so we insert matching entries into lambda_frame.
+        if !lambda.captures.is_empty() {
+            let env_struct_type = self.generator.context.struct_type(&capture_tys, false);
+            let env_ptr = lambda_fn
+                .get_nth_param(0)
+                .ok_or_else(|| CompileError::Unsupported("lambda env ptr missing".into()))?
+                .into_pointer_value();
+            let env_struct_ptr = self.generator.build_pointer_cast(
+                env_ptr,
+                self.generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default()),
+                "env_struct",
+            )?;
+            let callable_body = self
+                .program
+                .callable(&frame.owner)
+                .ok_or_else(|| CompileError::Unsupported("callable absent for lambda".into()))?
+                .body
+                .clone();
+            for (i, cap_id) in lambda.captures.iter().enumerate() {
+                let metadata = callable_body.locals.get(cap_id).ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "lambda capture local '{}' absent",
+                        cap_id.0 .0
+                    ))
+                })?;
+                let llvm_ty = self.lower_type(&metadata.ty)?;
+                let field_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(env_struct_type, env_struct_ptr, i as u32, "env_cap_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("lambda env cap gep: {e}")))?;
+                let field_val = self.generator.build_load(llvm_ty, field_gep, "cap_val")?;
+                let storage = self
+                    .generator
+                    .build_alloca(llvm_ty, &metadata.display_name)?;
+                self.generator.build_store(storage, field_val)?;
+                lambda_frame.locals.insert(
+                    cap_id.clone(),
+                    ResolvedVarEntry {
+                        storage,
+                        llvm_type: llvm_ty,
+                    },
+                );
+            }
+        }
+
         // Emit the lambda body.
         self.generator.push_heap_scope();
         let body_val = self.emit_block(&callable_body, &lambda.body, &mut lambda_frame)?;
@@ -7273,7 +10922,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             self.generator.builder.position_at_end(bb);
         }
 
-        // Build closure struct {fn_ptr, null_env_ptr}.
+        // Build closure struct {fn_ptr, env_ptr}.
         let closure_ty = self.generator.context.struct_type(
             &[
                 BasicTypeEnum::PointerType(ptr_ty),
@@ -7304,13 +10953,231 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .builder
             .build_struct_gep(closure_ty, closure_alloca, 1, "env_gep")
             .map_err(|e| CompileError::LlvmError(format!("closure env gep: {e}")))?;
-        let null_ptr = ptr_ty.const_null();
-        self.generator.build_store(env_gep, null_ptr)?;
+        if lambda.captures.is_empty() {
+            self.generator.build_store(env_gep, ptr_ty.const_null())?;
+        } else {
+            // Heap-allocate and populate the capture environment.
+            let env_struct_type = self.generator.context.struct_type(&capture_tys, false);
+            let env_size = env_struct_type
+                .size_of()
+                .ok_or_else(|| CompileError::Unsupported("closure env size_of failed".into()))?;
+            let env_heap_ptr = self.generator.malloc_or_abort(env_size, "lambda_env")?;
+            let env_ptr_i8 =
+                self.generator
+                    .build_pointer_cast(env_heap_ptr, ptr_ty, "lambda_env_i8")?;
+            // The env is owned and released by the enclosing heap scope.
+            self.generator.register_heap_alloc(env_ptr_i8);
+            for (i, cap_id) in lambda.captures.iter().enumerate() {
+                let entry = frame.locals.get(cap_id).ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "captured local '{}' not found in caller frame",
+                        cap_id.0 .0
+                    ))
+                })?;
+                let field_gep = self
+                    .generator
+                    .builder
+                    .build_struct_gep(env_struct_type, env_heap_ptr, i as u32, "lambda_env_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("lambda env store gep: {e}")))?;
+                let val =
+                    self.generator
+                        .build_load(entry.llvm_type, entry.storage, "capture_val")?;
+                self.generator.build_store(field_gep, val)?;
+            }
+            self.generator.build_store(env_gep, env_ptr_i8)?;
+        }
         self.generator.build_load(
             BasicTypeEnum::StructType(closure_ty),
             closure_alloca,
             "closure_val",
         )
+    }
+
+    /// Implement `reduce(list, fn, init)` for the resolved slice.
+    ///
+    /// The closure argument arrives as an already-constructed closure struct
+    /// `{fn_ptr, env_ptr}`. We loop over the list, call the closure with
+    /// `(env_ptr, acc, elem)`, and accumulate the result.
+    fn emit_resolved_reduce(
+        &mut self,
+        call: &crate::core::ir::ResolvedCall,
+        arguments: &[BasicMetadataValueEnum<'ctx>],
+        _frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if arguments.len() != 3 {
+            return Err(CompileError::Unsupported(
+                "resolved reduce expects (list, closure, init)".into(),
+            ));
+        }
+        let list_sv = match arguments[0] {
+            BasicMetadataValueEnum::StructValue(sv) => sv,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "resolved reduce first argument is not a list struct".into(),
+                ))
+            }
+        };
+        let len_val = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 0, "reduce_len")
+            .map_err(|e| CompileError::LlvmError(format!("reduce list len: {e}")))?
+            .into_int_value();
+        let data_ptr = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 1, "reduce_data")
+            .map_err(|e| CompileError::LlvmError(format!("reduce list data: {e}")))?
+            .into_pointer_value();
+        let closure_sv = match arguments[1] {
+            BasicMetadataValueEnum::StructValue(sv) => sv,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "resolved reduce second argument is not a closure struct".into(),
+                ))
+            }
+        };
+        let fn_ptr = self
+            .generator
+            .builder
+            .build_extract_value(closure_sv, 0, "reduce_fn_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("reduce fn ptr: {e}")))?
+            .into_pointer_value();
+        let env_ptr = self
+            .generator
+            .builder
+            .build_extract_value(closure_sv, 1, "reduce_env_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("reduce env ptr: {e}")))?
+            .into_pointer_value();
+
+        // Closure type: func(acc, elem) -> acc.
+        let (acc_ty, elem_ty, ret_ty) = match self
+            .program
+            .resolved_types()
+            .get(&call.arguments[1].value.ty)
+        {
+            Some(crate::core::ResolvedType::Function {
+                parameters, result, ..
+            }) if parameters.len() >= 2 => (
+                self.lower_type(&parameters[0])?,
+                self.lower_type(&parameters[1])?,
+                self.lower_type(result)?,
+            ),
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "resolved reduce closure type is not a two-parameter function".into(),
+                ))
+            }
+        };
+
+        let init_val: BasicValueEnum = match arguments[2] {
+            BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+            BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+            BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+            BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "resolved reduce unsupported init value".into(),
+                ))
+            }
+        };
+        let init_adj = self.coerce_to(init_val, acc_ty)?;
+        let acc_storage = self.generator.build_alloca(acc_ty, "reduce_acc")?;
+        self.generator.build_store(acc_storage, init_adj)?;
+
+        let i64_ty = self.generator.context.i64_type();
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "reduce_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+
+        let function = self.current_function()?;
+        let loop_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "reduce_loop");
+        let body_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "reduce_body");
+        let done_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "reduce_done");
+        self.generator.build_br(loop_bb)?;
+
+        self.generator.builder.position_at_end(loop_bb);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "reduce_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, len_val, "reduce_cond")
+            .map_err(|e| CompileError::LlvmError(format!("reduce compare: {e}")))?;
+        self.generator.build_cond_br(cond, body_bb, done_bb)?;
+
+        self.generator.builder.position_at_end(body_bb);
+        let elem_ptr =
+            self.generator
+                .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "reduce_elem_ptr")?;
+        let elem_i64 = self
+            .generator
+            .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "reduce_elem_i64")?
+            .into_int_value();
+        let elem_val = self.convert_list_elem_i64(elem_i64, elem_ty)?;
+        let acc_val = self
+            .generator
+            .build_load(acc_ty, acc_storage, "reduce_acc_val")?;
+
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let all_meta: Vec<BasicMetadataTypeEnum> = vec![
+            BasicMetadataTypeEnum::PointerType(ptr_ty),
+            BasicMetadataTypeEnum::from(acc_ty),
+            BasicMetadataTypeEnum::from(elem_ty),
+        ];
+        let indirect_fn_ty = match ret_ty {
+            BasicTypeEnum::IntType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&all_meta, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&all_meta, false),
+            _ => i64_ty.fn_type(&all_meta, false),
+        };
+        let call_args = [
+            BasicMetadataValueEnum::PointerValue(env_ptr),
+            BasicMetadataValueEnum::from(acc_val),
+            BasicMetadataValueEnum::from(elem_val),
+        ];
+        let call_result = self
+            .generator
+            .builder
+            .build_indirect_call(indirect_fn_ty, fn_ptr, &call_args, "reduce_call")
+            .map_err(|e| CompileError::LlvmError(format!("reduce indirect call: {e}")))?;
+        let reduced = call_result
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("reduce closure returned void".into()))?;
+        let reduced_adj = self.coerce_to(reduced, acc_ty)?;
+        self.generator.build_store(acc_storage, reduced_adj)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "reduce_next")
+            .map_err(|e| CompileError::LlvmError(format!("reduce increment: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(loop_bb)?;
+
+        self.generator.builder.position_at_end(done_bb);
+        self.generator
+            .build_load(acc_ty, acc_storage, "reduce_result")
     }
 
     /// Look up the alphabetical ordinal of an enum variant by its NodeId.

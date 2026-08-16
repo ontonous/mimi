@@ -1,9 +1,20 @@
-# Mimi 跨语言 FFI 验证项目集
+# Mimi 项目集
 
-本目录放置真实的跨语言调用项目，用于在真实 C / Rust / Python 调用端暴露
-Mimi FFI 绑定生成器与 codegen 的 ABI/内存/类型问题。
+本目录同时包含两类项目：
 
-## 项目列表
+1. **跨语言 FFI 验证项目**：在真实 C / Rust / Python 调用端暴露
+   Mimi FFI 绑定生成器与 codegen 的 ABI/内存/类型问题。
+2. **0.1.7 手写 dogfood 工程**：刻意覆盖 Flow / Session / 合约 / 线性，
+   为特性裁决和 DX 宣言提供真实工程证据。
+
+## 0.1.7 Dogfood 项目
+
+| 项目 | 覆盖场景 | 验证 |
+|------|----------|------|
+| `mimi-taskq` | Flow 任务生命周期 + Session 线性握手 + 合约 | `mimi check/run/test/build` 全通过 |
+| `mimi-ledger` | Flow 账户状态 + Session 审计通道 + 合约 | `mimi check/run/test/build` 全通过 |
+
+## 跨语言 FFI 验证项目
 
 | 项目 | 覆盖场景 | 状态 |
 |------|----------|------|
