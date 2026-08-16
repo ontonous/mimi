@@ -86,6 +86,92 @@ impl UnsupportedResolvedNode {
     }
 }
 
+/// 0.37.2: reachable dispatch experiment (`MIMI_REACHABLE_DISPATCH=1`).
+///
+/// Builds a conservative call graph from `CheckedProgram::call_sites()` and
+/// returns non-comptime function NodeIds reachable from any `main` entry plus
+/// everything referenced from those bodies. This is used only for dispatch
+/// statistics / per-function eligible-set filtering under the env flag, not
+/// for the ordinary production path.
+fn reachable_function_ids(program: &CheckedProgram) -> std::collections::BTreeSet<NodeId> {
+    use std::collections::{BTreeSet, HashMap, VecDeque};
+
+    let mut by_qualified: HashMap<String, Vec<NodeId>> = HashMap::new();
+    let mut by_bare: HashMap<String, Vec<NodeId>> = HashMap::new();
+    for function in program.functions().values() {
+        if function.is_comptime {
+            continue;
+        }
+        by_qualified
+            .entry(function.qualified_name.clone())
+            .or_default()
+            .push(function.node_id.clone());
+        let bare = function
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&function.qualified_name)
+            .to_string();
+        by_bare
+            .entry(bare)
+            .or_default()
+            .push(function.node_id.clone());
+    }
+
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for function in program.functions().values() {
+        if function.is_comptime {
+            continue;
+        }
+        let name = &function.qualified_name;
+        let is_entry = name == "main" || name.ends_with("::main") || name.ends_with(":main");
+        if is_entry && reachable.insert(function.node_id.clone()) {
+            queue.push_back(function.node_id.clone());
+        }
+    }
+
+    // No entry found: conservative fallback treats every non-comptime function
+    // as reachable, so the experimental stats never drop real codegen targets.
+    if reachable.is_empty() {
+        for function in program.functions().values() {
+            if !function.is_comptime {
+                reachable.insert(function.node_id.clone());
+            }
+        }
+        return reachable;
+    }
+
+    while let Some(owner) = queue.pop_front() {
+        let owner_fn = match program.functions().get(&owner) {
+            Some(function) => function,
+            None => continue,
+        };
+        let owner_key = format!("function:{}", owner_fn.qualified_name);
+        for site in program.call_sites().values() {
+            if site.owner != owner_key {
+                continue;
+            }
+            let callee = site.callee.as_str();
+            let candidates: Vec<NodeId> = if callee.contains("::") {
+                by_qualified.get(callee).cloned().unwrap_or_default()
+            } else {
+                let mut found = by_qualified.get(callee).cloned().unwrap_or_default();
+                if found.is_empty() {
+                    found = by_bare.get(callee).cloned().unwrap_or_default();
+                }
+                found
+            };
+            for id in candidates {
+                if reachable.insert(id.clone()) {
+                    queue.push_back(id);
+                }
+            }
+        }
+    }
+    reachable
+}
+
 pub(super) fn require_resolved_native_program(
     program: &CheckedProgram,
 ) -> Result<(), UnsupportedResolvedNode> {
@@ -255,6 +341,12 @@ pub(super) fn eligible_function_ids_with_stats(
     // defined in a different source file).
     let entry_source = program.entry_span().map(|s| s.source_id);
     let verbose = std::env::var("MIMI_VERBOSE").is_ok();
+    let reachable_only = std::env::var("MIMI_REACHABLE_DISPATCH").is_ok();
+    let reachable = if reachable_only {
+        reachable_function_ids(program)
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let mut stats = DispatchStats {
         // 0.34.40: program identity is the entry source id (u32). The
         // filename is correlated at the caller / script layer; codegen has
@@ -269,6 +361,9 @@ pub(super) fn eligible_function_ids_with_stats(
         if function.is_comptime {
             continue; // comptime functions are folded, not compiled.
         }
+        if reachable_only && !reachable.contains(&function.node_id) {
+            continue; // experimental reachable-only dispatch stats.
+        }
         stats.total_functions += 1;
         let name = &function.qualified_name;
         if function.is_async || function.extern_abi.is_some() {
@@ -278,7 +373,12 @@ pub(super) fn eligible_function_ids_with_stats(
             }
             continue;
         }
-        if !function.generics.is_empty() || function.qualified_name.contains("::") {
+        if (!function.generics.is_empty() || function.qualified_name.contains("::"))
+            && !matches!(function.origin, crate::core::Origin::User(_))
+        {
+            // Non-user generic functions and qualified non-user symbols stay
+            // on the legacy side. User-origin qualified symbols (actor
+            // methods, module-local users) may attempt the resolved slice.
             stats.record_skip("generics/qualified");
             if verbose {
                 eprintln!("info: resolved skip '{}': generics/qualified", name);
@@ -360,10 +460,20 @@ pub(super) fn eligible_function_ids_with_stats(
 ///    routing the whole str_* builtin family through the string emitters
 ///    (resolved/mod.rs STRING_ABI_BUILTINS), so trait-impl method bodies
 ///    compile through the resolved slice again.
+/// 0.37.0 (Phase A prep): full-corpus `MIMI_RESOLVED_MODULE_BODIES=1`
+///    experiment completed with 120/120 successful dispatch builds, no
+///    emit_failed and no corpus crash. The module files that were the
+///    remaining `module file (source_id mismatch)` burden in the 0.1.6
+///    baseline are now lifted by default: datetime, crypto, csv, env, io,
+///    template, time. `main` covers dependency package entry modules
+///    (e.g. the `mylib` package used by `tests/real_world/projects/consumer`).
 fn module_bodies_lifted(program: &CheckedProgram, source_id: crate::span::SourceId) -> bool {
     let spec = match std::env::var("MIMI_RESOLVED_MODULE_BODIES") {
         Ok(explicit) => explicit.trim().to_string(),
-        Err(_) => "prelude,mymath,strings,collections".to_string(),
+        Err(_) => {
+            "prelude,mymath,strings,collections,result,datetime,crypto,csv,env,io,template,time,main"
+                .to_string()
+        }
     };
     if spec.is_empty() {
         return false;
@@ -472,6 +582,24 @@ fn require_scalar_type(
         }
         // 0.32.14: Newtype is a transparent wrapper — same LLVM repr as inner.
         Some(ResolvedType::Newtype { inner, .. }) => require_scalar_type(program, owner, inner),
+        // C3 (audit 2026-08-03): Any / dynamic_value lowers to an opaque i64
+        // handle in types.rs, matching the runtime map value box ABI. Accept
+        // it in the per-function slice so stdlib Map/Set wrapper calls that
+        // flow through DynamicAny stay on the resolved emitter.
+        Some(ResolvedType::DynamicAny { .. }) => Ok(()),
+        // Generic parameters use the opaque i64 erasure slot in the resolved
+        // slice. This allows simple user polymorphic functions (identity,
+        // choose, pair, etc.) to be emitted when the body does not inspect
+        // the erased value.
+        Some(ResolvedType::GenericParameter(_)) => Ok(()),
+        // Reference types lower to opaque pointers in types.rs. They are
+        // accepted when the target is scalar so borrow bindings/parameters
+        // stay in the per-function slice.
+        Some(ResolvedType::Reference { target, .. }) => require_scalar_type(program, owner, target),
+        // Ownership (shared/weak) annotations are runtime-transparent for
+        // shared values: lower to the annotated target and let the resolved
+        // emitter handle method calls / upgrades when supported.
+        Some(ResolvedType::Ownership { target, .. }) => require_scalar_type(program, owner, target),
         // 0.32.16: Function types (closures) — LLVM repr is {ptr, ptr}.
         Some(ResolvedType::Function {
             parameters, result, ..
@@ -506,7 +634,8 @@ fn require_scalar_type(
                 | "builtin:type:Record"
                 | "builtin:type:SystemTrace"
                 | "builtin:type:MemoryDump"
-                | "builtin:type:PanicPayload" => {
+                | "builtin:type:PanicPayload"
+                | "builtin:type:PeerFault" => {
                     for arg in arguments {
                         require_scalar_type(program, owner, arg)?;
                     }
@@ -558,7 +687,14 @@ fn require_scalar_type(
                         // are similarly admitted — the resolved emitter
                         // lowers them via the legacy type_defs record layout
                         // (resolved/mod.rs lower_type state: fallback).
-                        if item_str.ends_with("SessionChan") || item_str.starts_with("state:") {
+                        // Actor handles are opaque i64 endpoints at the LLVM
+                        // level (mirroring SessionChan). The runtime actor
+                        // dispatch remains in the call/expression layer.
+                        if item_str.ends_with("SessionChan")
+                            || item_str.starts_with("state:")
+                            || item_str.starts_with("actor:")
+                            || item_str == "builtin:type:Future"
+                        {
                             Ok(())
                         } else {
                             Err(UnsupportedResolvedNode::new(
@@ -761,10 +897,13 @@ fn require_binding_pattern(
     pattern: &ResolvedPattern,
 ) -> Result<(), UnsupportedResolvedNode> {
     match &pattern.kind {
-        ResolvedPatternKind::Binding {
-            by_reference: None, ..
+        ResolvedPatternKind::Binding { .. } | ResolvedPatternKind::Wildcard => Ok(()),
+        ResolvedPatternKind::Constructor { fields, .. } => {
+            for (_, sub_pattern) in fields {
+                require_binding_pattern(owner, sub_pattern)?;
+            }
+            Ok(())
         }
-        | ResolvedPatternKind::Wildcard => Ok(()),
         ResolvedPatternKind::Tuple(sub_patterns) => {
             for sub in sub_patterns {
                 require_binding_pattern(owner, sub)?;
@@ -774,14 +913,14 @@ fn require_binding_pattern(
         _ => Err(UnsupportedResolvedNode::new(
             owner,
             &pattern.node_id,
-            "only value bindings, wildcards, and tuples are in the resolved native slice",
+            "only value bindings, wildcards, constructor, and tuples are in the resolved native slice",
         )),
     }
 }
 
 fn require_root_place(
-    owner: &NodeId,
-    node: &NodeId,
+    _owner: &NodeId,
+    _node: &NodeId,
     place: &ResolvedPlace,
 ) -> Result<(), UnsupportedResolvedNode> {
     for projection in &place.projections {
@@ -791,13 +930,7 @@ fn require_root_place(
             crate::core::ir::ResolvedProjection::Index { .. } => {}
             // 0.32.5: Field projections for record field access.
             crate::core::ir::ResolvedProjection::Field { .. } => {}
-            other => {
-                return Err(UnsupportedResolvedNode::new(
-                    owner,
-                    node,
-                    format!("projection {other:?} is not in the resolved native slice"),
-                ))
-            }
+            crate::core::ir::ResolvedProjection::Deref { .. } => {}
         }
     }
     Ok(())
@@ -820,6 +953,11 @@ fn require_conversion(
             | CheckedConversionKind::AliasUnwrap
             | CheckedConversionKind::NewtypeWrap
             | CheckedConversionKind::NewtypeUnwrap
+            // Ownership annotations are runtime-transparent: shared/weak
+            // values use the same LLVM representation as their target.
+            | CheckedConversionKind::OwnershipWrap
+            | CheckedConversionKind::OwnershipDowngrade
+            | CheckedConversionKind::OwnershipRead
     ) {
         Ok(())
     } else {
@@ -831,6 +969,20 @@ fn require_conversion(
     }
 }
 
+fn is_custom_try_enum(program: &CheckedProgram, id: &crate::core::ResolvedTypeId) -> bool {
+    let Some(crate::core::ResolvedType::Nominal { item, .. }) = program.resolved_types().get(id)
+    else {
+        return false;
+    };
+    let type_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+    program.type_defs().values().any(|td| {
+        (td.qualified_name == type_name || td.qualified_name == item.as_str())
+            && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Enum)
+            && td.variants.iter().any(|(name, _)| name == "Ok")
+            && td.variants.iter().any(|(name, _)| name == "Err")
+    })
+}
+
 fn require_expr(
     program: &CheckedProgram,
     owner: &NodeId,
@@ -839,11 +991,20 @@ fn require_expr(
     locals: &std::collections::BTreeMap<crate::core::ResolvedLocalId, crate::core::ResolvedLocal>,
 ) -> Result<(), UnsupportedResolvedNode> {
     if !expression.backend_requirements.is_empty() {
-        return Err(UnsupportedResolvedNode::new(
-            owner,
-            &expression.node_id,
-            "unmet expression backend requirement",
-        ));
+        // comptime-evaluate is a pure backend requirement; the resolved
+        // emitter evaluates the comptime block at runtime (same value, no
+        // separate compile-time evaluator), so accept that one requirement.
+        let is_supported_comptime = matches!(expression.kind, ResolvedExprKind::Comptime(_))
+            && expression.backend_requirements.iter().all(|r| {
+                r.requirement_id == "COMPTIME-PURE-001" && r.capability == "comptime.evaluate"
+            });
+        if !is_supported_comptime {
+            return Err(UnsupportedResolvedNode::new(
+                owner,
+                &expression.node_id,
+                "unmet expression backend requirement",
+            ));
+        }
     }
     require_scalar_type(program, &expression.node_id, &expression.ty)?;
     match &expression.kind {
@@ -916,6 +1077,18 @@ fn require_expr(
         {
             require_expr(program, owner, operand, entry_source, locals)
         }
+        // 0.37.x: borrow expressions (`&`, `&mut`) and dereference (`*`)
+        // enter the resolved slice with the reference pointer ABI.
+        ResolvedExprKind::Unary { op, operand }
+            if matches!(
+                op,
+                crate::core::ir::ResolvedUnaryOp::BorrowShared
+                    | crate::core::ir::ResolvedUnaryOp::BorrowMutable
+                    | crate::core::ir::ResolvedUnaryOp::Dereference
+            ) =>
+        {
+            require_expr(program, owner, operand, entry_source, locals)
+        }
         ResolvedExprKind::Cast { value, conversion } => {
             require_conversion(owner, &expression.node_id, conversion.kind)?;
             require_expr(program, owner, value, entry_source, locals)
@@ -933,8 +1106,10 @@ fn require_expr(
                 call.callee,
                 ResolvedCallee::Function(_)
                     | ResolvedCallee::Builtin(_)
+                    | ResolvedCallee::Constructor(_)
                     | ResolvedCallee::Transition(_)
                     | ResolvedCallee::ProtocolMethod { .. }
+                    | ResolvedCallee::ActorMethod { .. }
                     | ResolvedCallee::Extern(_)
             ) =>
         {
@@ -947,23 +1122,10 @@ fn require_expr(
             // 0.36.48: key off the declared method signature instead of
             // call.type_arguments — resolved lowering packs the IMPL-level
             // generic T into type_arguments for every trait method call
-            // (xs.intersperse(100) carries ListExt<T>'s T), so a non-empty
-            // check rejected ALL trait methods (intersperse/chunks/…), not
-            // just method-level-generic ones. CheckedProgram now mirrors the
-            // checker's method-level generic names per (trait, method).
-            if let ResolvedCallee::ProtocolMethod { ref method, .. } = call.callee {
-                let method_str = method.as_str();
-                // MethodId: "function:{Trait}:for:{Type}::{method}:{hash}"
-                let (trait_name, method_name) =
-                    parse_trait_method_id(method_str).unwrap_or_default();
-                if program.trait_method_generic_count(&trait_name, &method_name) > 0 {
-                    return Err(UnsupportedResolvedNode::new(
-                        owner,
-                        &expression.node_id,
-                        "call to method-level generic trait method (map<U>/filter<U>/...) is handled by the legacy monomorphization slice (0.36.47)",
-                    ));
-                }
-            }
+            // 0.37.x: method-level generic trait methods are now allowed to
+            // attempt the resolved ProtocolMethod path. If the resolved
+            // emitter cannot lower one, per-function dispatch falls back to
+            // the legacy monomorphization slice automatically.
             // Reject calls to non-User-origin functions (imported from
             // stdlib or generated by the runtime system). Their LLVM
             // symbols may not be declared when the resolved emitter
@@ -1025,6 +1187,9 @@ fn require_expr(
         ResolvedExprKind::Block(block) => {
             require_block(program, owner, block, entry_source, locals)
         }
+        ResolvedExprKind::Comptime(block) => {
+            require_block(program, owner, block, entry_source, locals)
+        }
         ResolvedExprKind::FString(parts) => {
             for part in parts {
                 if let crate::core::ir::ResolvedFStringPart::Interpolation(expr) = part {
@@ -1050,19 +1215,29 @@ fn require_expr(
             // alloc) keep their implicit value on the resolved native slice.
             require_block(program, owner, body, entry_source, locals)
         }
+        // 0.37.x: Spawn/Await are accepted as eager/synchronous futures in
+        // the resolved slice (the resolved emitter produces a completed
+        // future immediately; awaiting it loads the stored result).
+        ResolvedExprKind::Spawn(value) | ResolvedExprKind::Await(value) => {
+            require_expr(program, owner, value, entry_source, locals)
+        }
         // 0.32.10: Try expression (`?` operator). The inner value must be
         // Result<T, E> or Option<T>. The Try expression itself has type T
         // (the Ok/Some payload), already checked by require_scalar_type at
         // the top of require_expr.
         ResolvedExprKind::Try { value, .. } => {
             require_expr(program, owner, value, entry_source, locals)?;
-            // The inner expression's type must be Result or Option.
+            // The inner expression's type must be Result, Option, or a
+            // two-variant custom enum with Ok/Err names.
             match program.resolved_types().get(&value.ty) {
                 Some(ResolvedType::Result { .. } | ResolvedType::Option(_)) => Ok(()),
+                Some(ResolvedType::Nominal { .. }) if is_custom_try_enum(program, &value.ty) => {
+                    Ok(())
+                }
                 Some(other) => Err(UnsupportedResolvedNode::new(
                     owner,
                     &expression.node_id,
-                    format!("try inner type {other:?} is not Result or Option"),
+                    format!("try inner type {other:?} is not Result, Option, or Ok/Err enum"),
                 )),
                 None => Err(UnsupportedResolvedNode::new(
                     owner,
@@ -1071,14 +1246,19 @@ fn require_expr(
                 )),
             }
         }
-        // 0.32.16: Lambda expressions — only non-capturing closures.
+        // 0.32.16: Lambda expressions — non-capturing and capturing closures.
+        // Capturing closures are emitted with a heap-allocated environment
+        // (matching the legacy closure ABI) and fall back only if a capture
+        // cannot be lowered by the resolved emitter.
         ResolvedExprKind::Lambda(lambda) => {
-            if !lambda.captures.is_empty() {
-                return Err(UnsupportedResolvedNode::new(
-                    owner,
-                    &expression.node_id,
-                    "capturing lambda is not in the resolved native slice",
-                ));
+            for capture in &lambda.captures {
+                if !locals.contains_key(capture) {
+                    return Err(UnsupportedResolvedNode::new(
+                        owner,
+                        &expression.node_id,
+                        "captured local is not available in the resolved frame",
+                    ));
+                }
             }
             require_block(program, owner, &lambda.body, entry_source, locals)
         }
@@ -1306,18 +1486,4 @@ fn require_list_iterable_type(
             "for-in iterable has a missing canonical type",
         )),
     }
-}
-
-/// Parse a MethodId string "function:{Trait}:for:{Type}::{method}:{hash}"
-/// into (trait_name, method_name). Returns empty strings on any malformed
-/// shape — the caller then falls through to the non-generic path.
-pub(crate) fn parse_trait_method_id(id: &str) -> Option<(String, String)> {
-    let stripped = id.strip_prefix("function:")?;
-    let (trait_part, rest) = stripped.split_once(":for:")?;
-    let (_, method_part) = rest.split_once("::")?;
-    // method part may carry multiple "::" segments (module-qualified
-    // methods) — the method name is the LAST segment.
-    let method_name = method_part.rsplit("::").next()?;
-    let method_name = method_name.split(':').next()?;
-    Some((trait_part.to_string(), method_name.to_string()))
 }

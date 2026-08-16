@@ -1,6 +1,6 @@
 .SHELL: /bin/bash
 
-.PHONY: test test-all test-fuzz test-fuzz-quick test-fuzz-ci ci-full
+.PHONY: test test-all test-stress test-stress-heavy test-stress-fuzz test-fuzz test-fuzz-quick test-fuzz-ci ci-full test-dispatch-zero test-dogfood
 
 # Default: run all non-ignored tests
 test:
@@ -9,6 +9,39 @@ test:
 # Run all tests including ignored (slow/requires-cc)
 test-all:
 	cargo test -- --include-ignored
+
+# ============================================================
+# 0.1.7 stress targets
+# ============================================================
+
+# Run the PR-gate stress smoke suite (fast)
+test-stress:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress
+
+# Run heavy stress variants (nightly)
+test-stress-heavy:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress -- --ignored
+
+# Run only the stress fuzz smoke tests (parser/json/wire)
+test-stress-fuzz:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress fuzz_ -- --nocapture
+# Zero legacy-fallback hard gate: every corpus program must dispatch 100%
+# through the resolved slice.
+test-dispatch-zero:
+	python3 scripts/dispatch_stat.py check --zero
+
+# Hand-written 0.1.7 dogfood projects: Flow + Session + contracts + linearity.
+test-dogfood:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo build --bin mimi
+	./target/debug/mimi check projects/mimi-taskq/src/main.mimi
+	./target/debug/mimi test projects/mimi-taskq/src/main.mimi
+	./target/debug/mimi build projects/mimi-taskq/src/main.mimi -o /tmp/mimi-taskq-dogfood
+	./target/debug/mimi check projects/mimi-ledger/src/main.mimi
+	./target/debug/mimi test projects/mimi-ledger/src/main.mimi
+	./target/debug/mimi build projects/mimi-ledger/src/main.mimi -o /tmp/mimi-ledger-dogfood
+	/tmp/mimi-taskq-dogfood >/dev/null
+	/tmp/mimi-ledger-dogfood >/dev/null
+	@echo "[dogfood] mimi-taskq + mimi-ledger: check/test/build/run ok"
 
 # ============================================================
 # Fuzz targets

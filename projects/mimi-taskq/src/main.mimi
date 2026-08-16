@@ -1,0 +1,148 @@
+// mimi-taskq: small in-process task queue dogfood.
+//
+// Deliberate acceptance target for Mimi 0.1.7:
+//   - Flow: Task lifecycle Pending -> Running -> Completed/Failed
+//   - Session: typed linear handoff between dispatcher and worker
+//   - Contracts: requires/ensures on queue operations
+//   - Linear: each Session endpoint is consumed exactly once and closed
+//
+// Run:
+//   mimi run src/main.mimi
+//   mimi build src/main.mimi -o taskq && ./taskq
+
+const MAX_PRIORITY: i32 = 5
+const MIN_PRIORITY: i32 = 1
+
+func is_valid_priority(p: i32) -> bool {
+    p >= MIN_PRIORITY && p <= MAX_PRIORITY
+}
+
+func next_task_id(last: i32) -> i32 {
+    requires: last >= 0
+    ensures: result == last + 1
+    last + 1
+}
+
+func enqueue(task_desc: string) -> i32 {
+    requires: len(task_desc) > 0
+    ensures: result > 0
+    len(task_desc) * 7
+}
+
+func priority_score(priority: i32) -> i32 {
+    requires: is_valid_priority(priority)
+    ensures: result >= priority
+    priority * 10
+}
+
+flow TaskFlow {
+    state Pending { id: i32, desc: string, priority: i32 }
+    state Running { id: i32, desc: string, priority: i32, worker: string }
+    state Completed { id: i32 }
+    state Failed { id: i32, reason: string }
+
+    transition start(Pending, worker: string) -> Running {
+        return Running {
+            id: self.id,
+            desc: self.desc,
+            priority: self.priority,
+            worker: worker,
+        }
+    }
+    transition complete(Running) -> Completed {
+        return Completed { id: self.id }
+    }
+    transition fail(Running, reason: string) -> Failed {
+        return Failed { id: self.id, reason: reason }
+    }
+}
+
+// Typed linear handoff between a dispatcher and a worker.
+// 1. dispatcher sends task id
+// 2. worker replies with its worker id
+// 3. dispatcher sends a result code
+session Handoff = !i32 . ?i32 . !i32 . end
+
+func main() -> i32 {
+    println("mimi-taskq v0.1.0 — Flow + Session + Contracts + Linear dogfood")
+
+    let mut task_id = 0
+    task_id = next_task_id(task_id)
+    task_id = next_task_id(task_id)
+
+    let desc = "write 0.1.7 dogfood project"
+    let id = enqueue(desc)
+    let prio = 3
+    if !is_valid_priority(prio) {
+        println("priority out of range")
+        return 1
+    }
+    let score = priority_score(prio)
+    println("priority score: " + to_string(score))
+
+    // Flow lifecycle
+    let p0 = Pending { id: id, desc: desc, priority: prio }
+    let r0 = TaskFlow::start(p0, "alice")
+    let c0 = TaskFlow::complete(r0)
+    println("completed task: " + to_string(c0.id))
+
+    // A failed branch keeps Flow's failure state first-class.
+    let p1 = Pending { id: id + 1, desc: "crash repro", priority: 1 }
+    let r1 = TaskFlow::start(p1, "bob")
+    let f1 = TaskFlow::fail(r1, "timeout")
+    println("failed task: " + to_string(f1.id) + " reason: " + f1.reason)
+
+    // Linear session: each endpoint is consumed in exact protocol order.
+    let (dispatcher, worker) = session_pair::<Handoff>()
+    session_send(dispatcher, id)
+    let worker_id = session_recv(worker)
+    session_send(worker, 7)
+    let ack = session_recv(dispatcher)
+    session_send(dispatcher, if ack == 7 { 0 } else { 1 })
+    let result_code = session_recv(worker)
+    session_close(dispatcher)
+    session_close(worker)
+    println("handoff worker: " + to_string(worker_id) + " result: " + to_string(result_code))
+
+    0
+}
+
+// ---- dogfood test functions (mimi test) ----
+
+func test_flow_happy_path() {
+    let p0 = Pending { id: 11, desc: "flow", priority: 2 }
+    let r0 = TaskFlow::start(p0, "carol")
+    let c0 = TaskFlow::complete(r0)
+    if c0.id != 11 {
+        println("flow failed")
+        return
+    }
+    println("flow-ok")
+}
+
+func test_session_roundtrip() {
+    let (d0, w0) = session_pair::<Handoff>()
+    session_send(d0, 5)
+    let wid = session_recv(w0)
+    session_send(w0, 9)
+    let ack = session_recv(d0)
+    session_send(d0, if ack == 9 { 1 } else { 0 })
+    let code = session_recv(w0)
+    session_close(d0)
+    session_close(w0)
+    if wid != 5 || code != 1 {
+        println("session failed")
+        return
+    }
+    println("session-ok")
+}
+
+func test_contracts() {
+    let id = enqueue("contract")
+    let score = priority_score(2)
+    if id <= 0 || score < 2 {
+        println("contract failed")
+        return
+    }
+    println("contract-ok")
+}

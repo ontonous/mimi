@@ -233,6 +233,25 @@ pub struct CodeGenerator<'ctx> {
     /// `free_heap_allocs` emits runtime guards so these envs survive scope
     /// exit (the caller owns them). Cleared on every `free_heap_allocs` call.
     claimed_returned_envs: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// B9 extension: escaped `List<string>` values whose element string data
+    /// pointers must survive the callee's early-return flush. Each entry is
+    /// an entry-block alloca holding the list struct, plus its LLVM type.
+    claimed_returned_string_lists: std::cell::RefCell<
+        Vec<(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )>,
+    >,
+    /// B9 extension for `List<List<string>>`: escaped outer list whose inner
+    /// list boxes, inner list data arrays, and string elements must all
+    /// survive an early-return flush.
+    claimed_returned_string_list_lists: std::cell::RefCell<
+        Vec<(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )>,
+    >,
     /// 0.35.23 deep-eval: names of the current legacy-body function's
     /// view/mutate borrow params. Their list storage IS the caller's struct
     /// (pointer ABI) — `claim_returned_lists` must not null their data
@@ -586,6 +605,20 @@ enum HeapEntry<'ctx> {
         struct_ty: inkwell::types::StructType<'ctx>,
         boxed_ordinals: Vec<u64>,
     },
+    /// A returned `List<string>` struct whose data array owns each element's
+    /// heap string. At scope exit, free every string in the array and then
+    /// free the array itself.
+    StringListData {
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    },
+    /// A returned `List<List<string>>` struct. At scope exit, free every
+    /// inner string list (strings + data array) and then the outer data.
+    StringListListData {
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    },
 }
 
 // Resolved-directory query methods are production instrumentation consumed by
@@ -632,6 +665,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             shared_var_names: std::collections::HashSet::new(),
             heap_allocs: std::cell::RefCell::new(vec![Vec::new()]),
             claimed_returned_envs: std::cell::RefCell::new(Vec::new()),
+            claimed_returned_string_lists: std::cell::RefCell::new(Vec::new()),
+            claimed_returned_string_list_lists: std::cell::RefCell::new(Vec::new()),
             borrow_param_names: std::collections::HashSet::new(),
             heap_boundaries: std::cell::RefCell::new(Vec::new()),
             ensures_stmts: Vec::new(),
@@ -2151,6 +2186,62 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Register a returned `List<string>` value with the caller's heap scope.
+    /// The list struct is stored in an entry-block alloca; at scope exit the
+    /// cleanup loop frees each element string data and then the data array.
+    pub(super) fn register_returned_string_list(
+        &self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let slot =
+            self.build_entry_alloca(BasicTypeEnum::StructType(list_ty), "call_string_list_slot")?;
+        self.build_store(slot, list_sv)?;
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
+            stack.push(HeapEntry::StringListData { slot, list_ty });
+        } else {
+            mimi_debug_assert!(false, "register_returned_string_list with no active scope");
+            guard.push(vec![HeapEntry::StringListData { slot, list_ty }]);
+        }
+        Ok(())
+    }
+
+    /// Register a returned `List<List<string>>` value with the caller's heap
+    /// scope. At scope exit, free every inner `List<string>` (each string and
+    /// its data array) and then the outer data array.
+    pub(super) fn register_returned_string_list_list(
+        &self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let slot = self.build_entry_alloca(
+            BasicTypeEnum::StructType(list_ty),
+            "call_string_list_list_slot",
+        )?;
+        self.build_store(slot, list_sv)?;
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
+            stack.push(HeapEntry::StringListListData {
+                slot,
+                list_ty,
+                elem_list_ty,
+            });
+        } else {
+            mimi_debug_assert!(
+                false,
+                "register_returned_string_list_list with no active scope"
+            );
+            guard.push(vec![HeapEntry::StringListListData {
+                slot,
+                list_ty,
+                elem_list_ty,
+            }]);
+        }
+        Ok(())
+    }
+
     /// Register an entry-alloca struct slot whose loaded value should be freed at
     /// scope exit. `field` is the index of the pointer field inside the struct.
     /// At free time, a fresh GEP is emitted from `base` in the current block,
@@ -2236,6 +2327,46 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (see `track_closure_return_lifetime`).
     pub(super) fn claim_closure_env(&self, env_ptr: inkwell::values::PointerValue<'ctx>) {
         self.claimed_returned_envs.borrow_mut().push(env_ptr);
+    }
+
+    /// Claim a returned `List<string>` so its element string pointers survive
+    /// an early-return flush. The list struct is stored in an entry-block
+    /// alloca; `flush_heap_scopes_to_boundary` can then inspect the elements
+    /// at runtime and skip freeing any matching string data pointers.
+    pub(super) fn claim_returned_string_list(
+        &self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let slot = self.build_entry_alloca(
+            BasicTypeEnum::StructType(list_ty),
+            "claimed_string_list_slot",
+        )?;
+        self.build_store(slot, list_sv)?;
+        self.claimed_returned_string_lists
+            .borrow_mut()
+            .push((slot, list_ty));
+        Ok(())
+    }
+
+    /// Claim a returned `List<List<string>>` value. The outer list struct is
+    /// stored in an entry-block alloca; at flush time the membership check can
+    /// inspect every inner list box, inner data array, and string element.
+    pub(super) fn claim_returned_string_list_list(
+        &self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let slot = self.build_entry_alloca(
+            BasicTypeEnum::StructType(list_ty),
+            "claimed_string_list_list_slot",
+        )?;
+        self.build_store(slot, list_sv)?;
+        self.claimed_returned_string_list_lists
+            .borrow_mut()
+            .push((slot, list_ty, elem_list_ty));
+        Ok(())
     }
 
     /// Track the result type of `weak_var.upgrade()` for a `let` binding.
@@ -2402,6 +2533,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// free emission.
     pub(super) fn flush_heap_scopes_to_boundary(&mut self) -> Result<(), CompileError> {
         let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        let claimed_string_lists =
+            std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
+        let claimed_string_list_lists =
+            std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
         let boundary = self
             .heap_boundaries
             .borrow()
@@ -2433,6 +2568,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_enum_box_free(free_fn, slot, struct_ty, &boxed_ordinals, &claimed)?;
                 continue;
             }
+            if let HeapEntry::StringListData { slot, list_ty } = entry {
+                self.emit_string_list_data_free(slot, list_ty)?;
+                self.builder
+                    .build_store(slot, list_ty.const_zero())
+                    .map_err(|e| CompileError::LlvmError(format!("string-list reset: {e}")))?;
+                continue;
+            }
+            if let HeapEntry::StringListListData {
+                slot,
+                list_ty,
+                elem_list_ty,
+            } = entry
+            {
+                self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty)?;
+                self.builder
+                    .build_store(slot, list_ty.const_zero())
+                    .map_err(|e| CompileError::LlvmError(format!("string-list-list reset: {e}")))?;
+                continue;
+            }
             let ptr = match entry {
                 HeapEntry::Ptr(slot) => {
                     // register_heap_alloc stores the pointer into an
@@ -2462,8 +2616,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_pointer_value()
                 }
                 HeapEntry::EnumBox { .. } => unreachable!("handled above"),
+                HeapEntry::StringListData { .. } => unreachable!("string-list handled above"),
+                HeapEntry::StringListListData { .. } => {
+                    unreachable!("string-list-list handled above")
+                }
             };
-            if claimed.is_empty() {
+            if claimed.is_empty()
+                && claimed_string_lists.is_empty()
+                && claimed_string_list_lists.is_empty()
+            {
                 self.builder
                     .build_call(
                         free_fn,
@@ -2475,7 +2636,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Value-exact runtime comparison: skip the free when the
                 // pointer is a claimed escaping closure env — ownership
                 // transferred to the caller.
-                self.emit_guarded_scope_free(free_fn, ptr, &claimed)?;
+                self.emit_guarded_scope_free(
+                    free_fn,
+                    ptr,
+                    &claimed,
+                    &claimed_string_lists,
+                    &claimed_string_list_lists,
+                )?;
             }
         }
         Ok(())
@@ -2503,6 +2670,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // are no longer needed. Stale claims are harmless beyond that: they
         // only suppress frees of pointers that can never equal them.
         let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
+        std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
         let scope = self.heap_allocs.borrow_mut().pop();
         if self.heap_allocs.borrow().len() > 1 {
             *self.claimed_returned_envs.borrow_mut() = claimed.clone();
@@ -2531,6 +2700,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder
                         .build_store(slot, struct_ty.const_zero())
                         .map_err(|e| CompileError::LlvmError(format!("enum-box reset: {}", e)))?;
+                    continue;
+                }
+                if let HeapEntry::StringListData { slot, list_ty } = entry {
+                    self.emit_string_list_data_free(slot, list_ty)?;
+                    self.builder
+                        .build_store(slot, list_ty.const_zero())
+                        .map_err(|e| CompileError::LlvmError(format!("string-list reset: {e}")))?;
+                    continue;
+                }
+                if let HeapEntry::StringListListData {
+                    slot,
+                    list_ty,
+                    elem_list_ty,
+                } = entry
+                {
+                    self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty)?;
+                    self.builder
+                        .build_store(slot, list_ty.const_zero())
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("string-list-list reset: {e}"))
+                        })?;
                     continue;
                 }
                 let (ptr, reset_target) = match entry {
@@ -2564,6 +2754,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         (ptr, Some(gep))
                     }
                     HeapEntry::EnumBox { .. } => unreachable!("handled above"),
+                    HeapEntry::StringListData { .. } => unreachable!("string-list handled above"),
+                    HeapEntry::StringListListData { .. } => {
+                        unreachable!("string-list-list handled above")
+                    }
                 };
                 if claimed.is_empty() {
                     self.builder
@@ -2579,7 +2773,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // caller. Value-exact runtime comparison replaces the old
                     // positional pop (which misfired when unrelated
                     // allocations followed the env registration).
-                    self.emit_guarded_scope_free(free_fn, ptr, &claimed)?;
+                    self.emit_guarded_scope_free(free_fn, ptr, &claimed, &[], &[])?;
                 }
                 // L6c (D-4, 2026-08-06): reset the heap slot to null right after
                 // the free. When a conditional (e.g. `if` with a `Some(string)`
@@ -2600,14 +2794,484 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Emit frees for the current innermost heap scope WITHOUT popping it.
+    ///
+    /// Used by loop `break`/`continue` paths: those branches must release the
+    /// current iteration's loop-local heap allocations immediately, while the
+    /// compile-time scope stack must remain balanced for other branches that
+    /// are still being emitted. A later normal-path `free_heap_allocs()` will
+    /// emit frees again, but those frees execute on a different runtime path
+    /// where the slots are null (or belong to that path's own allocations).
+    pub(super) fn emit_frees_for_top_scope(&mut self) -> Result<(), CompileError> {
+        let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
+        std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
+        let scope = self.heap_allocs.borrow().last().cloned();
+        if let Some(scope) = scope {
+            let free_fn = self
+                .module
+                .get_function("free")
+                .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
+            for entry in scope {
+                if let HeapEntry::EnumBox {
+                    slot,
+                    struct_ty,
+                    boxed_ordinals,
+                } = entry
+                {
+                    self.emit_enum_box_free(free_fn, slot, struct_ty, &boxed_ordinals, &claimed)?;
+                    self.builder
+                        .build_store(slot, struct_ty.const_zero())
+                        .map_err(|e| CompileError::LlvmError(format!("enum-box reset: {}", e)))?;
+                    continue;
+                }
+                if let HeapEntry::StringListData { slot, list_ty } = entry {
+                    self.emit_string_list_data_free(slot, list_ty)?;
+                    self.builder
+                        .build_store(slot, list_ty.const_zero())
+                        .map_err(|e| CompileError::LlvmError(format!("string-list reset: {e}")))?;
+                    continue;
+                }
+                if let HeapEntry::StringListListData {
+                    slot,
+                    list_ty,
+                    elem_list_ty,
+                } = entry
+                {
+                    self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty)?;
+                    self.builder
+                        .build_store(slot, list_ty.const_zero())
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("string-list-list reset: {e}"))
+                        })?;
+                    continue;
+                }
+                let (ptr, reset_target) = match entry {
+                    HeapEntry::Ptr(slot) => {
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let ptr = self
+                            .builder
+                            .build_load(ptr_ty, slot, "heap_slot")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot load error: {}", e))
+                            })?
+                            .into_pointer_value();
+                        (ptr, Some(slot))
+                    }
+                    HeapEntry::Slot(base, struct_ty, field) => {
+                        let gep = self
+                            .gep()
+                            .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot gep error: {}", e))
+                            })?;
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let ptr = self
+                            .builder
+                            .build_load(ptr_ty, gep, "heap_slot")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot load error: {}", e))
+                            })?
+                            .into_pointer_value();
+                        (ptr, Some(gep))
+                    }
+                    HeapEntry::EnumBox { .. } => unreachable!("handled above"),
+                    HeapEntry::StringListData { .. } => unreachable!("string-list handled above"),
+                    HeapEntry::StringListListData { .. } => {
+                        unreachable!("string-list-list handled above")
+                    }
+                };
+                if claimed.is_empty() {
+                    self.builder
+                        .build_call(
+                            free_fn,
+                            &[BasicMetadataValueEnum::PointerValue(ptr)],
+                            "free_heap",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                } else {
+                    self.emit_guarded_scope_free(free_fn, ptr, &claimed, &[], &[])?;
+                }
+                if let Some(target) = reset_target {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    self.builder
+                        .build_store(target, ptr_ty.const_null())
+                        .map_err(|e| CompileError::LlvmError(format!("heap slot reset: {}", e)))?;
+                }
+            }
+        }
+        *self.claimed_returned_envs.borrow_mut() = claimed;
+        Ok(())
+    }
+
+    /// Emit a runtime traversal checking whether `ptr` is owned by a claimed
+    /// `List<List<string>>`: an inner list box, an inner data array, or any
+    /// string element inside an inner list.
+    fn emit_string_list_list_contains(
+        &mut self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_sv = self
+            .builder
+            .build_load(BasicTypeEnum::StructType(list_ty), slot, "claimed_sll_load")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll load: {e}")))?
+            .into_struct_value();
+        let outer_len = self
+            .builder
+            .build_extract_value(list_sv, 0, "claimed_sll_outer_len")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll outer len: {e}")))?
+            .into_int_value();
+        let outer_data = self
+            .builder
+            .build_extract_value(list_sv, 1, "claimed_sll_outer_data")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll outer data: {e}")))?
+            .into_pointer_value();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("claimed sll outside function".into()))?;
+        let outer_header = self
+            .context
+            .append_basic_block(function, "claimed_sll_outer_header");
+        let outer_body = self
+            .context
+            .append_basic_block(function, "claimed_sll_outer_body");
+        let outer_done = self
+            .context
+            .append_basic_block(function, "claimed_sll_outer_done");
+        let outer_idx =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "claimed_sll_outer_idx")?;
+        let found = self.build_alloca(
+            BasicTypeEnum::IntType(self.context.bool_type()),
+            "claimed_sll_found",
+        )?;
+        self.build_store(outer_idx, i64_ty.const_int(0, false))?;
+        self.build_store(found, self.context.bool_type().const_int(0, false))?;
+        self.build_br(outer_header)?;
+
+        self.builder.position_at_end(outer_header);
+        let oi = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                outer_idx,
+                "claimed_sll_outer_idx_val",
+            )?
+            .into_int_value();
+        let outer_cond = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                oi,
+                outer_len,
+                "claimed_sll_outer_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll outer cmp: {e}")))?;
+        self.build_cond_br(outer_cond, outer_body, outer_done)?;
+
+        self.builder.position_at_end(outer_body);
+        let elem_slot =
+            self.build_in_bounds_gep(i64_ty, outer_data, &[oi], "claimed_sll_elem_slot")?;
+        let inner_handle = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "claimed_sll_inner_handle",
+            )?
+            .into_int_value();
+        let inner_ptr = self.build_int_to_ptr(inner_handle, ptr_ty, "claimed_sll_inner_ptr")?;
+        let box_eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                inner_ptr,
+                ptr,
+                "claimed_sll_box_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll box eq: {e}")))?;
+        let found_box = self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.bool_type()),
+                found,
+                "claimed_sll_found_box",
+            )?
+            .into_int_value();
+        let found_after_box = self
+            .builder
+            .build_or(found_box, box_eq, "claimed_sll_found_after_box")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll box or: {e}")))?;
+        self.build_store(found, found_after_box)?;
+
+        let inner_sv = self
+            .build_load(
+                BasicTypeEnum::StructType(elem_list_ty),
+                inner_ptr,
+                "claimed_sll_inner_sv",
+            )?
+            .into_struct_value();
+        let inner_len = self
+            .builder
+            .build_extract_value(inner_sv, 0, "claimed_sll_inner_len")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll inner len: {e}")))?
+            .into_int_value();
+        let inner_data = self
+            .builder
+            .build_extract_value(inner_sv, 1, "claimed_sll_inner_data")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll inner data: {e}")))?
+            .into_pointer_value();
+        let data_eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                inner_data,
+                ptr,
+                "claimed_sll_data_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll data eq: {e}")))?;
+        let found_data = self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.bool_type()),
+                found,
+                "claimed_sll_found_data",
+            )?
+            .into_int_value();
+        let found_after_data = self
+            .builder
+            .build_or(found_data, data_eq, "claimed_sll_found_after_data")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll data or: {e}")))?;
+        self.build_store(found, found_after_data)?;
+
+        let inner_header = self
+            .context
+            .append_basic_block(function, "claimed_sll_inner_header");
+        let inner_body = self
+            .context
+            .append_basic_block(function, "claimed_sll_inner_body");
+        let inner_done = self
+            .context
+            .append_basic_block(function, "claimed_sll_inner_done");
+        let ii_storage =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "claimed_sll_inner_idx")?;
+        self.build_store(ii_storage, i64_ty.const_int(0, false))?;
+        self.build_br(inner_header)?;
+
+        self.builder.position_at_end(inner_header);
+        let ii = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                ii_storage,
+                "claimed_sll_inner_idx_val",
+            )?
+            .into_int_value();
+        let inner_cond = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                ii,
+                inner_len,
+                "claimed_sll_inner_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll inner cmp: {e}")))?;
+        self.build_cond_br(inner_cond, inner_body, inner_done)?;
+
+        self.builder.position_at_end(inner_body);
+        let inner_elem_slot =
+            self.build_in_bounds_gep(i64_ty, inner_data, &[ii], "claimed_sll_inner_elem_slot")?;
+        let inner_elem_i64 = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                inner_elem_slot,
+                "claimed_sll_inner_elem_i64",
+            )?
+            .into_int_value();
+        let inner_elem_ptr =
+            self.build_int_to_ptr(inner_elem_i64, ptr_ty, "claimed_sll_inner_elem_ptr")?;
+        let elem_eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                inner_elem_ptr,
+                ptr,
+                "claimed_sll_elem_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll elem eq: {e}")))?;
+        let f = self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.bool_type()),
+                found,
+                "claimed_sll_found_elem",
+            )?
+            .into_int_value();
+        let f2 = self
+            .builder
+            .build_or(f, elem_eq, "claimed_sll_found_elem_new")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll elem or: {e}")))?;
+        self.build_store(found, f2)?;
+        let ii_next = self
+            .builder
+            .build_int_add(ii, i64_ty.const_int(1, false), "claimed_sll_inner_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll inner inc: {e}")))?;
+        self.build_store(ii_storage, ii_next)?;
+        self.build_br(inner_header)?;
+
+        self.builder.position_at_end(inner_done);
+        let oi_next = self
+            .builder
+            .build_int_add(oi, i64_ty.const_int(1, false), "claimed_sll_outer_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll outer inc: {e}")))?;
+        self.build_store(outer_idx, oi_next)?;
+        self.build_br(outer_header)?;
+
+        self.builder.position_at_end(outer_done);
+        Ok(self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.bool_type()),
+                found,
+                "claimed_sll_result",
+            )?
+            .into_int_value())
+    }
+
+    /// Emit a runtime loop checking whether `ptr` is one of the string data
+    /// pointers owned by a claimed `List<string>`.
+    fn emit_string_list_contains(
+        &mut self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_sv = self
+            .builder
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                slot,
+                "claimed_str_list_load",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list load: {e}")))?
+            .into_struct_value();
+        let len = self
+            .builder
+            .build_extract_value(list_sv, 0, "claimed_str_list_len")
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list len: {e}")))?
+            .into_int_value();
+        let data = self
+            .builder
+            .build_extract_value(list_sv, 1, "claimed_str_list_data")
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list data: {e}")))?
+            .into_pointer_value();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("claimed str list outside function".into()))?;
+        let header = self
+            .context
+            .append_basic_block(function, "claimed_str_list_header");
+        let body = self
+            .context
+            .append_basic_block(function, "claimed_str_list_body");
+        let done = self
+            .context
+            .append_basic_block(function, "claimed_str_list_done");
+        let idx_storage =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "claimed_str_list_idx")?;
+        let found_storage = self.build_alloca(
+            BasicTypeEnum::IntType(self.context.bool_type()),
+            "claimed_str_list_found",
+        )?;
+        self.build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.build_store(found_storage, self.context.bool_type().const_int(0, false))?;
+        self.build_br(header)?;
+
+        self.builder.position_at_end(header);
+        let idx = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "claimed_str_list_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                len,
+                "claimed_str_list_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list cmp: {e}")))?;
+        self.build_cond_br(cond, body, done)?;
+
+        self.builder.position_at_end(body);
+        let elem_slot =
+            self.build_in_bounds_gep(i64_ty, data, &[idx], "claimed_str_list_elem_slot")?;
+        let elem_i64 = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "claimed_str_list_elem_i64",
+            )?
+            .into_int_value();
+        let elem_ptr = self.build_int_to_ptr(elem_i64, ptr_ty, "claimed_str_list_elem_ptr")?;
+        let eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                elem_ptr,
+                ptr,
+                "claimed_str_list_elem_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list eq: {e}")))?;
+        let found = self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.bool_type()),
+                found_storage,
+                "claimed_str_list_found_val",
+            )?
+            .into_int_value();
+        let found_new = self
+            .builder
+            .build_or(found, eq, "claimed_str_list_found_new")
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list or: {e}")))?;
+        self.build_store(found_storage, found_new)?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "claimed_str_list_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list inc: {e}")))?;
+        self.build_store(idx_storage, next)?;
+        self.build_br(header)?;
+
+        self.builder.position_at_end(done);
+        Ok(self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.bool_type()),
+                found_storage,
+                "claimed_str_list_result",
+            )?
+            .into_int_value())
+    }
+
     /// Emit `if (ptr != claimed_0 && ptr != claimed_1 && ...) { free(ptr); }`.
-    /// Splits the current block; the insertion point is left at the merge
-    /// block so subsequent emission flows normally.
+    /// Also skips when `ptr` is one of the string elements in a claimed
+    /// `List<string>`. Splits the current block; the insertion point is left
+    /// at the merge block so subsequent emission flows normally.
     fn emit_guarded_scope_free(
-        &self,
+        &mut self,
         free_fn: inkwell::values::FunctionValue<'ctx>,
         ptr: inkwell::values::PointerValue<'ctx>,
         claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
     ) -> Result<(), CompileError> {
         let i1_ty = self.context.bool_type();
         let mut matched = i1_ty.const_int(0, false);
@@ -2620,6 +3284,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_or(matched, eq, "b9_env_matched")
                 .map_err(|e| CompileError::LlvmError(format!("b9 env or error: {}", e)))?;
+        }
+        for (slot, list_ty) in claimed_string_lists {
+            let in_list = self.emit_string_list_contains(ptr, *slot, *list_ty)?;
+            matched = self
+                .builder
+                .build_or(matched, in_list, "b9_string_list_matched")
+                .map_err(|e| CompileError::LlvmError(format!("b9 string list or: {e}")))?;
+        }
+        for (slot, list_ty, elem_list_ty) in claimed_string_list_lists {
+            let in_list =
+                self.emit_string_list_list_contains(ptr, *slot, *list_ty, *elem_list_ty)?;
+            matched = self
+                .builder
+                .build_or(matched, in_list, "b9_string_list_list_matched")
+                .map_err(|e| CompileError::LlvmError(format!("b9 string list list or: {e}")))?;
         }
         let parent = self
             .builder
@@ -2653,7 +3332,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// is further guarded so a claimed box (ownership transferred to the caller)
     /// is not released here.
     fn emit_enum_box_free(
-        &self,
+        &mut self,
         free_fn: inkwell::values::FunctionValue<'ctx>,
         slot: inkwell::values::PointerValue<'ctx>,
         struct_ty: inkwell::types::StructType<'ctx>,
@@ -2727,10 +3406,249 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             // Guarded: skip if the box is claimed (returned to the caller).
             // emit_guarded_scope_free leaves insertion at its merge block.
-            self.emit_guarded_scope_free(free_fn, box_ptr, claimed)?;
+            self.emit_guarded_scope_free(free_fn, box_ptr, claimed, &[], &[])?;
             self.build_br(done_bb)?;
         }
         self.builder.position_at_end(done_bb);
+        Ok(())
+    }
+
+    /// Emit the runtime cleanup for a returned `List<string>` value. The
+    /// data array is loaded from an entry-block alloca; every element is a
+    /// heap `char*`, so each is passed to `mimi_string_free`, then the array
+    /// itself is freed.
+    /// Free one in-register `List<string>` value: every string data pointer
+    /// in the array, then the array itself. Used by returned `List<string>`
+    /// cleanup and by each inner list of a returned `List<List<string>>`.
+    fn emit_string_list_struct_free(
+        &mut self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        tag: &str,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let len = self
+            .builder
+            .build_extract_value(list_sv, 0, &format!("{tag}_len"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: len {e}")))?
+            .into_int_value();
+        let data = self
+            .builder
+            .build_extract_value(list_sv, 1, &format!("{tag}_data"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: data {e}")))?
+            .into_pointer_value();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError(format!("{tag}: outside function")))?;
+        let header = self
+            .context
+            .append_basic_block(function, &format!("{tag}_header"));
+        let body = self
+            .context
+            .append_basic_block(function, &format!("{tag}_body"));
+        let exit = self
+            .context
+            .append_basic_block(function, &format!("{tag}_exit"));
+        let idx_storage =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("{tag}_idx"))?;
+        self.build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.build_br(header)?;
+
+        self.builder.position_at_end(header);
+        let idx = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                &format!("{tag}_idx_val"),
+            )?
+            .into_int_value();
+        let cond = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, len, &format!("{tag}_cond"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: cmp {e}")))?;
+        self.build_cond_br(cond, body, exit)?;
+
+        self.builder.position_at_end(body);
+        let elem_slot =
+            self.build_in_bounds_gep(i64_ty, data, &[idx], &format!("{tag}_elem_slot"))?;
+        let elem_i64 = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                &format!("{tag}_elem_i64"),
+            )?
+            .into_int_value();
+        let elem_ptr = self.build_int_to_ptr(elem_i64, ptr_ty, &format!("{tag}_elem_ptr"))?;
+        let free_str = self
+            .module
+            .get_function("mimi_string_free")
+            .ok_or_else(|| CompileError::LlvmError("mimi_string_free not declared".into()))?;
+        self.builder
+            .build_call(
+                free_str,
+                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
+                &format!("{tag}_elem_free"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: elem free {e}")))?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), &format!("{tag}_idx_next"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: inc {e}")))?;
+        self.build_store(idx_storage, next)?;
+        self.build_br(header)?;
+
+        self.builder.position_at_end(exit);
+        let free_fn = self
+            .module
+            .get_function("free")
+            .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
+        self.builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(data)],
+                &format!("{tag}_free_data"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: data free {e}")))?;
+        Ok(())
+    }
+
+    fn emit_string_list_data_free(
+        &mut self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let list_sv = self
+            .builder
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                slot,
+                "string_list_ret_load",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list ret load: {e}")))?
+            .into_struct_value();
+        self.emit_string_list_struct_free(list_sv, "string_list_ret")
+    }
+
+    /// Free a returned `List<List<string>>`: loop the outer list, free each
+    /// inner `List<string>` via `emit_string_list_struct_free`, then free the
+    /// outer data array.
+    fn emit_string_list_list_data_free(
+        &mut self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.context.i64_type();
+        let list_sv = self
+            .builder
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                slot,
+                "string_list_list_ret_load",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret load: {e}")))?
+            .into_struct_value();
+        let len = self
+            .builder
+            .build_extract_value(list_sv, 0, "string_list_list_ret_len")
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret len: {e}")))?
+            .into_int_value();
+        let data = self
+            .builder
+            .build_extract_value(list_sv, 1, "string_list_list_ret_data")
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret data: {e}")))?
+            .into_pointer_value();
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("string list list free outside function".into())
+        })?;
+        let header = self
+            .context
+            .append_basic_block(function, "string_list_list_ret_header");
+        let body = self
+            .context
+            .append_basic_block(function, "string_list_list_ret_body");
+        let exit = self
+            .context
+            .append_basic_block(function, "string_list_list_ret_exit");
+        let idx_storage =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "string_list_list_ret_idx")?;
+        self.build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.build_br(header)?;
+
+        self.builder.position_at_end(header);
+        let idx = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "string_list_list_ret_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx,
+                len,
+                "string_list_list_ret_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret cmp: {e}")))?;
+        self.build_cond_br(cond, body, exit)?;
+
+        self.builder.position_at_end(body);
+        let elem_slot =
+            self.build_in_bounds_gep(i64_ty, data, &[idx], "string_list_list_ret_elem_slot")?;
+        let inner_handle = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "string_list_list_ret_inner_handle",
+            )?
+            .into_int_value();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let inner_ptr =
+            self.build_int_to_ptr(inner_handle, ptr_ty, "string_list_list_ret_inner_ptr")?;
+        let inner_list_sv = self
+            .build_load(
+                BasicTypeEnum::StructType(elem_list_ty),
+                inner_ptr,
+                "string_list_list_ret_inner",
+            )?
+            .into_struct_value();
+        self.emit_string_list_struct_free(inner_list_sv, "nested_str_list_elem")?;
+        let free_fn = self
+            .module
+            .get_function("free")
+            .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
+        self.builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(inner_ptr)],
+                "string_list_list_ret_free_inner_box",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret box free: {e}")))?;
+        let next = self
+            .builder
+            .build_int_add(
+                idx,
+                i64_ty.const_int(1, false),
+                "string_list_list_ret_idx_next",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret inc: {e}")))?;
+        self.build_store(idx_storage, next)?;
+        self.build_br(header)?;
+
+        self.builder.position_at_end(exit);
+        let free_fn = self
+            .module
+            .get_function("free")
+            .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
+        self.builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(data)],
+                "string_list_list_ret_free_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list list ret data free: {e}")))?;
         Ok(())
     }
 

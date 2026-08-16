@@ -117,6 +117,16 @@ fn lower_resolved_type<'ctx>(
                 context.struct_type(&elements, false),
             ))
         }
+        // Generic parameters are erased to an opaque i64 slot. This is only
+        // safe for functions that treat the value opaquely (identity/choose/
+        // pair/apply); non-erased use sites still fail closed.
+        ResolvedType::GenericParameter(_) => Ok(BasicTypeEnum::IntType(context.i64_type())),
+        ResolvedType::Reference { .. } => Ok(BasicTypeEnum::PointerType(
+            context.ptr_type(AddressSpace::default()),
+        )),
+        ResolvedType::Ownership { target, .. } => {
+            lower_resolved_type(context, types, target, active, nominal_hook)
+        }
         ResolvedType::DynamicAny { .. } => {
             // C3 (audit 2026-08-03): Any (stdlib map/set value type) lowers to
             // an opaque i64 handle — the same ABI as Map/Set handles and the
@@ -190,6 +200,17 @@ fn lower_resolved_type<'ctx>(
                 _v if item.as_str().ends_with("SessionChan") => {
                     Ok(BasicTypeEnum::IntType(context.i64_type()))
                 }
+                // Future<T> is an opaque i8* handle in both legacy and
+                // resolved ABIs; keeping it i64 broke resolved `spawn`/`await`
+                // main functions when binding the future to a local.
+                _v if item.as_str() == "builtin:type:Future" => Ok(BasicTypeEnum::PointerType(
+                    context.ptr_type(AddressSpace::default()),
+                )),
+                // Actor handles are pointers at the LLVM level (the legacy
+                // actor runtime returns and consumes i8* endpoints).
+                _v if item.as_str().starts_with("actor:") => Ok(BasicTypeEnum::PointerType(
+                    context.ptr_type(AddressSpace::default()),
+                )),
                 // 0.36.7 (裁决 3/DoD #4): the structured Fault crash-context
                 // records must lower in the resolved native slice, mirroring
                 // the legacy emitter layouts in codegen/compile.rs
@@ -202,7 +223,8 @@ fn lower_resolved_type<'ctx>(
                 // (cross-emitter ABI) requires the exact same layouts.
                 "builtin:type:SystemTrace"
                 | "builtin:type:MemoryDump"
-                | "builtin:type:PanicPayload" => {
+                | "builtin:type:PanicPayload"
+                | "builtin:type:PeerFault" => {
                     let pointer =
                         BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()));
                     let string_ty = BasicTypeEnum::StructType(context.struct_type(
@@ -216,6 +238,9 @@ fn lower_resolved_type<'ctx>(
                         )),
                         "builtin:type:PanicPayload" => Ok(BasicTypeEnum::StructType(
                             context.struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
+                        )),
+                        "builtin:type:PeerFault" => Ok(BasicTypeEnum::StructType(
+                            context.struct_type(&[string_ty, string_ty], false),
                         )),
                         _ => {
                             let memory_dump_ty = BasicTypeEnum::StructType(

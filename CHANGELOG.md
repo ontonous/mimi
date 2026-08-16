@@ -8,6 +8,843 @@
 > `devdocs/v0.37/README.md`，高压规范见 `devdocs/v0.37/high-stress-testing-spec.md`，
 > 可用性宣言见 `devdocs/v0.37/usability-dx-manifesto.md`。
 
+### 0.37.49 — 特性设计评估复盘落档 + 0.1.7 排期增补 + 0.1.8 规划锚定
+
+- 新增 `devdocs/v0.37/feature-design-review-0.37.md`：三证据流特性设计评估复盘
+  （保留/修改/砍除/元结论 + 裁决排期矩阵），含证据修正记录——projects/ 旧工程
+  全部为 v0.28 时代 Flow 诞生前产物（git 时间线核实），使用频率论据作废，价值侧
+  判断改判"证据真空"；根因定性为 dogfooding 管线干涸，**0.37.48 已由
+  mimi-taskq / mimi-ledger 重启**（首个数据点：未出现被字段拷贝/嵌套调用劝退，
+  transition 人体工学维持待验假设，0.1.8 裁决）。
+- 0.1.7 排期增补（`devdocs/v0.37/README.md`，sprint 总量 125→135）：
+  - Phase C 插入「并发原语名义类型化」切片（0.37.53–55 前置）：Mutex/Channel/
+    Atomic 裸 i64 handle → 名义类型 + 专用 checker 规则；SD-2 重评第一步，
+    不进泛型线性黑盒，MutexGuard 线性深整合留 0.1.8；
+  - Phase D dogfood 扩展载体：重写 mimichat（actor/channel/net 服务态 +
+    大 payload Flow）；DoD 新增验收维度——四大支柱各 ≥1 处非生成手写使用
+    （0.37.48 已达成，Phase D 复核）；
+  - Phase E 增补「边缘特性判死」（与既有"选择性解冻"对称）：quote 语法面
+    （含 `$(...)` 插值）、Protocol 表面语法、Effect lattice 残余判死删除；
+    spec 纸面特性出清（`ffi slice`/`ffi buffer`/MTE 标注 removed）；
+  - Phase 编号顺延：C 53–79 / D 80–105 / E 106–120 / F 121–135。
+- AGENTS.md §13.1 版本表锚定 0.1.8（内部 0.38.x：真实使用闭环 + 特性收缩
+  裁决，规划中），指向 feature-design-review-0.37.md 裁决输入。
+
+### 0.37.48 — 0.1.7 手写 dogfood：Flow / Session / 合约 / 线性真实验收靶
+
+- 新增 `projects/mimi-taskq`：
+  - Flow：任务生命周期 `Pending -> Running -> Completed/Failed`
+  - Session：`Handoff = !i32 . ?i32 . !i32 . end` 类型化线性握手
+  - 合约：`next_task_id` / `enqueue` / `priority_score` 的 requires/ensures
+  - 线性：`SessionChan` 双端点严格按协议顺序消费并 close
+  - 内置 3 个 `test_*`：flow / session / contracts 均通过 `mimi test`
+- 新增 `projects/mimi-ledger`：
+  - Flow：账户 `Active -> Frozen -> Active` 生命周期
+  - Session：一次性 `Audit = !i32 . ?i32 . end` 审计通道
+  - 合约：余额存取款的 requires/ensures
+  - 内置 3 个 `test_*` 全通过
+- 新增 `make test-dogfood` 门禁：
+  - 两个项目依次执行 `mimi check` / `mimi test` / `mimi build` / 原生运行
+- 目的：
+  - 解除特性裁决的证据真空
+  - 作为 DX 宣言的真实可读验收靶
+  - 与高压 soak 互补的功能性 dogfood
+- 当前结论：手写工程没有出现被字段拷贝/嵌套调用劝退的情况；
+  随后再依据更多工程证据决定 transition 人体工学糖与 linear shirink 取舍。
+
+### 0.37.47 — resolved 返回 `List<List<string>>` 递归所有权与字符串字面量复制
+
+- 新增 `HeapEntry::StringListListData`：
+  - 返回的 `List<List<string>>` 在 caller scope 退出时递归释放
+  - 每个外层元素是内层 List 的 heap box 句柄
+  - 依次释放内层每个 string、内层 data 数组、内层 box，最后释放外层 data 数组
+- `track_returned_heap_pointers` / `claim_returned_heap_pointers` 识别 `List<List<string>>`：
+  - caller 普通返回循环中不再泄漏内层字符串与 box（修复前 100k 次 RSS 约 416 MiB，修复后约 3 MiB）
+  - 早退返回时通过 `claimed_returned_string_list_lists` 运行时遍历检查，跳过内层 box / data / string 指针的释放，避免 use-after-free
+- `ensure_returned_heap_strings_owned` 升级为语义感知：
+  - `List<string>` / `List<List<string>>` 的字面量字符串元素会在返回前堆拷贝
+  - 修复返回 `["a","b"]`、`[["a","b"],["c","d"]]` 等字面量容器时 caller 对 `.rodata` 调用 `free` 崩溃的问题
+- 新增 soak 测试：
+  - `stress_soak_resolved_string_list_literal_return_ownership_smoke`
+  - `stress_soak_resolved_list_of_string_list_return_ownership_smoke`
+  - `stress_soak_early_return_list_of_string_list_ownership_smoke`
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.46 — resolved 返回记录嵌套用户 Record 中的 `List<string>`
+
+- `track_returned_heap_pointers` / `claim_returned_heap_pointers` 增加递归语义派生：
+  - 通过 `TypeDef` 字段 display 反查 canonical `ResolvedTypeId`
+  - Record 字段递归时继续携带子字段的 resolved type 上下文
+  - 因此 `Outer { inner: Inner }` + `Inner { items: List<string> }` 也能把内层字符串列表注册为 `StringListData`
+- 修复普通返回与早退返回嵌套 `Record<List<string>>` 时约 202 MiB 的累积泄漏：
+  - 100k 次返回 `Outer { inner: Inner { items: [两段 1000 字符字符串] } }`
+  - RSS 修复后约 3 MiB
+- 新增 soak 测试：
+  - `stress_soak_resolved_nested_heap_record_string_list_return_ownership_smoke`
+  - `stress_soak_early_return_nested_heap_record_string_list_ownership_smoke`
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.45 — resolved 早退 `Record<List<string>>` / `List<string>` 元素级所有权转移
+
+- 修复早退返回 `List<string>` 或含 `List<string>` 字段的 Record 时的 double free：
+  - callee 的早退 flush 会释放循环体局部字符串 data；若返回值内嵌这些字符串，caller 后续再释放会 double free
+  - 新增 `claimed_returned_string_lists` 与 `claim_returned_string_list`
+  - `flush_heap_scopes_to_boundary` 现在对每个待释放指针做运行时 “claimed string list 成员检查”
+  - 命中已转交字符串列表元素的指针跳过 free，同时原列表 data 指针继续走普通 claim
+- 新增 soak 测试：
+  - `stress_soak_early_return_heap_record_string_list_ownership_smoke`
+    - 100k 次早退返回含两个 1000 字节字符串元素的 `Bag { items: List<string> }`
+    - RSS < 128 MiB
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.44 — resolved 返回 `Record<List<string>>` / `List<string>` 的元素级释放
+
+- 新增 `HeapEntry::StringListData` 与 `register_returned_string_list`：
+  - 返回的 `List<string>` 不再只注册 data 数组
+  - caller scope 退出时运行时循环逐元素调用 `mimi_string_free`
+  - 最后释放 data 数组本身
+- `track_returned_heap_pointers` 增加语义感知：
+  - 顶层 `List<string>` 返回走 StringListData
+  - Record 直接字段若为 `List<string>` 也走 StringListData
+  - 避免把字符串 data 当成普通 data 数组释放导致泄漏或错误
+- 新增 soak 测试：
+  - `stress_soak_resolved_heap_record_string_list_return_ownership_smoke`
+    - 100k 次返回含两个 1000 字节字符串元素的 `Bag { items: List<string> }`
+    - RSS < 128 MiB（修复前约 202 MiB）
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.43 — resolved 含堆 Record 返回值的嵌套 String 所有权修复
+
+- 修复函数返回 `Record { name: string, nums: List<i32> }` 时：
+  - 如果 `name` 指向 `.rodata` 字符串字面量，callee 直接返回后 caller 会在 scope 退出时 `free` 非堆指针 → `munmap_chunk(): invalid pointer`
+  - 新增 `ensure_returned_heap_strings_owned`：递归遍历返回结构体的 String 叶子，对每个叶子调用 `claim_resolved_string_return`，把 `.rodata` 字面量转换为 caller 可安全释放的堆拷贝
+  - 同时接入早退路径：早退返回含堆 Record 前先完成嵌套 String 所有权转换，再 claim 所有堆指针叶子
+- 新增 soak 测试：
+  - `stress_soak_resolved_heap_record_return_ownership_smoke`：100k 次返回含 807 字符 String + 1000 元素 List 的 Record，RSS < 512 MiB
+  - `stress_soak_early_return_heap_record_ownership_smoke`：早退返回同类 Record，100k 次循环，RSS < 512 MiB
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.42 — resolved 调用返回值的堆所有权与早退 List 返回修复
+
+- 修复 resolved 早退路径把 `return xs` 的 List data 在返回前 free 的 use-after-free：
+  - 新增 `claim_returned_heap_pointers`：提取返回值中所有堆指针叶子并作为“已转交”guard
+  - `flush_heap_scopes_to_boundary` 对这些指针执行 skip-free
+  - IR 验证：早退分支不再直接 `free(list_data)` 后再 `ret`
+- 修复 resolved 函数调用返回值的 caller 侧堆注册缺失：
+  - 新增 `track_returned_heap_pointers`：对返回 String / List / 含堆字段 Record 的每个指针叶子调用 `register_heap_alloc`
+  - 此前 caller 每轮循环丢弃旧返回值会导致 List/String 数据无限累积
+  - 现在 caller scope 退出时统一释放
+- 新增 soak 测试：
+  - `stress_soak_resolved_list_return_ownership_smoke`：100k 次返回 1000 元素 List，RSS < 512 MiB（修复前约 785 MiB）
+  - `stress_soak_resolved_string_return_ownership_smoke`：200k 次返回 1000 字符 String，RSS < 128 MiB
+  - `stress_soak_early_return_list_ownership_smoke`：早退返回 1000 元素 List，100k 次循环，RSS < 512 MiB
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.41 — real-thread spawn 支持 List<含堆字段 Record/Struct> 实参
+
+- 将 `List<Record>` 深拷贝从纯标量元素扩展到含 String / List<i32|f64> 字段的元素：
+  - 运行时逐元素深拷贝每个 record 的堆叶子路径
+  - 每元素 String 逐个 `mimi_str_clone`
+  - 每元素标量 List 深拷贝 data 数组
+  - 重建 record 后写入新 box 与新 data 数组
+- worker 后逐元素释放：
+  - 所有克隆 String
+  - 所有克隆 List data
+  - record box
+  - 外层 data 数组
+- 新增测试：
+  - `stress_real_spawn_heap_record_list_smoke`：两个 `Inner { name, nums }` 元素 → `9`
+  - `stress_real_spawn_heap_record_list_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `180`
+  - `stress_real_spawn_heap_record_list_heavy`（ignored）：100 个 real-thread spawn，输出 `900`
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.40 — real-thread spawn 支持 List<纯标量 Record/Struct> 实参
+
+- 新增 `List<Record>` worker 实参支持（当前覆盖纯标量 Record 元素）：
+  - 运行时逐元素从源列表 box 中 `load` Record 结构
+  - 为每个元素分配新 box 并整值复制，写入新的 data 数组
+  - worker 结束后释放所有新 box 与新 data 数组
+  - 调用方原始列表及其 box 不受影响
+- 修正检测：List 整体不再被误判为“含堆 Struct 实参”，避免空路径导致 resolved 验证 panic
+- 修正实参安全门：允许 `is_list && elem_size == 0 && is_struct_list`
+- 新增测试：
+  - `stress_real_spawn_scalar_struct_list_smoke`：`List<Point>`，`[1+2, 3+4]` → `10`
+  - `stress_real_spawn_scalar_struct_list_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `200`
+  - `stress_real_spawn_scalar_struct_list_heavy`（ignored）：100 个 real-thread spawn，输出 `1000`
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.39 — real-thread spawn 支持嵌套含堆字段 Record/Struct 实参
+
+- 将 Record/Struct 深拷贝信息从“顶层字段索引”升级为“递归字段路径”：
+  - 收集 `[[嵌套字段...], 叶子字段]` 路径，支持任意深度的 String / List<i32|f64> 叶子
+  - spawn 现场按路径逐叶深拷贝并自底向上重建嵌套 struct
+  - worker 结束后按路径递归取出所有克隆 String/List data 并释放
+- 用例：`Outer { inner: Inner { name: string, nums: List<i32> }, tag: i32 }`
+  - `Inner` 的 `name` 与 `nums` 都深拷贝到 worker env，`tag` 按值复制
+- 新增测试：
+  - `stress_real_spawn_recursive_heap_struct_smoke`：`len("hi") + len([1,2,3]) + 10` → `15`
+  - `stress_real_spawn_recursive_heap_struct_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `300`
+  - `stress_real_spawn_recursive_heap_struct_heavy`（ignored）：100 个 real-thread spawn，输出 `1500`
+- resolved 44/44 编译，0 legacy 回退
+
+### 0.37.38 — 早退 return 路径的确定性堆释放
+
+- resolved 的每个早期 `return` 现在在 `ret` 前调用 `flush_heap_scopes_to_boundary`：
+  - 释放函数边界内所有已注册堆分配（含循环体局部 List/String）
+  - 不弹出编译期作用域栈，仍由 `end_function_heap_scope` 统一平衡簿记
+  - 返回值所有权由 `claimed_returned_envs` 保持，不误释放返回给调用方的堆数据
+- 修复循环内 `return` 未释放本次迭代堆分配的问题：
+  - 之前 break/continue 已即时释放，return 路径仍会推迟到函数尾（且实际上没有发射 free）
+  - 现在与 break/continue 同类路径全部即时、确定性释放
+- 新增 `stress_soak_early_return_loop_drop_smoke`：
+  - 80,000 次函数调用，每次循环内构造 1000 元素 List 后早退
+  - 若早退泄漏该 List，预计累计 >640 MiB；native RSS 门限 512 MiB，实测通过
+
+### 0.37.37 — real-thread spawn 支持嵌套纯标量 Record/Struct 实参
+
+- 递归识别“无堆结构”：
+  - 新增 `llvm_type_has_heap`，判断 struct 是否传递包含指针字段
+  - Record 字段即使嵌套了多个 Record，只要最终全是标量，就被视为 scalar-like
+  - spawn 现场直接按值复制到 worker env，无需深拷贝/释放
+- 同时修复 resolved `resolve_type_display` 对显式用户 Record 名的解析：
+  - 除 `id.as_str()` 与 `format!("{ty:?}")` 外，也匹配 `NominalTypeId` 的原名与 `type:` 前缀
+  - `Point` / `Line` 这类嵌套 Record 字段显示名不再导致 legacy 回退
+- 新增测试：
+  - `stress_real_spawn_nested_scalar_struct_smoke`：`Line { a: Point{}, b: Point{} }` → `4`
+  - `stress_real_spawn_nested_scalar_struct_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `80`
+  - `stress_real_spawn_nested_scalar_struct_heavy`（ignored）：100 个 real-thread spawn，输出 `400`
+
+### 0.37.36 — real-thread spawn 支持含 List 字段的 Record/Struct 实参
+
+- 扩展 Record/Struct worker 实参深拷贝到 `List<i32|f64>` 字段：
+  - 标量字段按值复制
+  - String 字段 `mimi_str_clone`
+  - List 字段深拷贝 data 数组（`len * 8` memcpy），写入新 list 结构
+  - worker 后释放所有克隆的 String 与 List data
+- 同时修复 resolved record 类型构建对 `List<T>` 字段的显示名解析：
+  - `resolve_type_display` 现在识别 `List<...>` 并返回统一 list ABI `{i64, ptr}`
+  - 含 List 字段的 Record 不再回退 legacy；本次用例 resolved 44/44
+- 新增测试：
+  - `stress_real_spawn_heap_struct_list_deep_copy_smoke`：`Bag { items: [1,2,3], label: "hi" }` → `8`
+  - `stress_real_spawn_heap_struct_list_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `160`
+  - `stress_real_spawn_heap_struct_list_heavy`（ignored）：100 个 real-thread spawn，输出 `800`
+
+### 0.37.35 — real-thread spawn 支持含 String 字段的 Record/Struct 实参
+
+- 新增含 `string` 字段的 Record/Struct worker 实参支持：
+  - 标量字段按值复制，字符串字段逐个 `mimi_str_clone` 深拷贝
+  - worker 读完实参后释放所有克隆的字符串字段
+- 识别条件：struct 字段全为标量或规范 String 形态 `{ptr, i64}`，且至少一个 String 字段
+- 新增测试：
+  - `stress_real_spawn_heap_struct_string_deep_copy_smoke`：`User { name: "hello", age: 5 }` → `10`
+  - `stress_real_spawn_heap_struct_string_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `200`
+  - `stress_real_spawn_heap_struct_string_heavy`（ignored）：100 个 real-thread spawn，输出 `1000`
+- 真实 spawn 实参覆盖扩展到含堆指针字段的用户定义 Record；resolved 44/44 编译，0 legacy 回退
+
+### 0.37.34 — break/continue 路径的循环体即时释放
+
+- 新增 `CodeGenerator::emit_frees_for_top_scope`：
+  - 只发射当前最内层堆作用域的 free，不弹出编译期作用域栈
+  - 供 break/continue 提前离开迭代时使用，同时保持后续分支/回边簿记平衡
+- resolved 的 `break` / `continue` 现在先释放本轮循环体堆分配，再跳转：
+  - 避免了提前退出路径把循环局部 List/堆分配推迟到函数退出
+  - 运行时路径互斥：break 分支的 free 与正常回边的 free 不会在同一次迭代同时执行
+- 新增 `stress_soak_loop_break_continue_drop_smoke`：
+  - break：`for i in 0..100` 中创建 List 后在 `i==3` break，输出 `0`
+  - continue：偶数迭代跳过，奇数迭代累加 List 长度，输出 `10`
+
+### 0.37.33 — real-thread spawn 支持 List<List<string>> 实参深拷贝
+
+- 扩展嵌套 List 深拷贝到内层为 String：
+  - `List<List<string>>` 三层/四层所有权全部由 worker env 接管：
+    - 外层 data 数组
+    - 内层 List box
+    - 内层 data 数组
+    - 每个字符串元素
+  - spawn 现场内层为 String 时逐元素 `strlen` + `mimi_str_clone`
+  - worker 结束后内层先逐个 `mimi_string_free`，再释放内层 data/box、外层 data
+- 新增测试：
+  - `stress_real_spawn_nested_string_list_deep_copy_smoke`：`[["a","bb"],["ccc","dddd",""]]` → `10`
+  - `stress_real_spawn_nested_string_list_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `200`
+  - `stress_real_spawn_nested_string_list_heavy`（ignored）：100 个 real-thread spawn，输出 `1000`
+- 真实 spawn 实参覆盖扩展到三层嵌套 String 容器；resolved 44/44 编译，0 legacy 回退
+
+### 0.37.32 — real-thread spawn 支持 List<List<i32|f64>> 实参深拷贝
+
+- 新增 `List<List<T>>`（T 为 i32/f64）worker 实参支持：
+  - spawn 现场按两层深拷贝：
+    - 外层 data 数组整体新建
+    - 每个内层 List 深拷贝 data 缓冲并重新堆装箱，写入新外层
+  - worker 读完实参后按两层释放：内层 data、内层 box、外层 data
+- 新增测试：
+  - `stress_real_spawn_nested_list_deep_copy_smoke`：`[[1,2],[3,4,5],[6]]` → `21`
+  - `stress_real_spawn_nested_list_matches_eager_semantics_smoke`：20 次循环，real/eager 均输出 `420`
+  - `stress_real_spawn_nested_list_heavy`（ignored）：100 个 real-thread spawn，输出 `2100`
+- 真实 spawn 实参覆盖扩展到双层嵌套标量 List；resolved 44/44 编译，0 legacy 回退
+
+### 0.37.31 — real-thread spawn 支持 List<string> 实参深拷贝
+
+- 新增 `List<string>` worker 实参支持：
+  - 在 spawn 现场为每个字符串元素执行 `strlen` + `mimi_str_clone`，写入新的 data 数组
+  - worker 内读完实参后，运行时循环逐个 `mimi_string_free`，再 `free` data 数组
+  - 与 String 实参、标量 List 实参同一套“worker 深拷贝 → 用完释放”所有权模型
+- 新增 `stress_real_spawn_string_list_deep_copy_smoke`：
+  - `spawn total_len(["hello", "world", "!"])` → `11`
+  - resolved 44/44 编译，0 legacy 回退
+- 新增 real/eager 语义一致性及 heavy：
+  - `stress_real_spawn_string_list_matches_eager_semantics_smoke`：20 次循环，两个后端均输出 `120`
+  - `stress_real_spawn_string_list_heavy`（ignored）：200 个 real-thread spawn，输出 `1200`
+- 真实线程 spawn 的实参覆盖扩展到：String / List<i32・f64> / List<string> / 标量 Tuple/Struct
+
+### 0.37.30 — 循环体内 List 确定性即时释放 + 嵌套 List push 深拷贝
+
+- 修复 `push(rows, row)` 传入 `List<T>` 值（StructValue 形态）时只浅拷贝
+  `{len, data}` 结构、与源列表共享 data 缓冲的问题
+  - 现在按 `PointerValue` 形态同样深拷贝内层 data 数组，再堆装箱写入外层
+  - `tricky_nested_loop_list` 等把循环内 List 移交外部容器的用例保持正确
+- 为 `for range`、`for list`、`while`、`loop` 的循环体添加每轮堆作用域：
+  - 每次迭代结束立即 `free_heap_allocs()`，释放本轮循环局部 List/堆分配
+  - 提前 return/break 路径用 `drain_heap_scope()` 平衡编译期簿记
+  - 不再把循环内临时 List 的释放推迟到整个函数退出
+- 原生二进制 soak 保持绿色：20 万次 List<String> 循环 RSS 远低于 512 MiB
+
+### 0.37.29 — 原生二进制 List/String 内存 soak
+
+- 新增 `build_and_run_native_with_max_rss_kb` 压力工具：
+  - `mimi build` 产出原生可执行文件
+  - `/usr/bin/time -v` 只统计运行期 RSS，不含编译器/JIT 进程头部开销
+- 新增 `stress_soak_native_list_string_loop_memory`：
+  - 20 万次循环创建/丢弃 `["a", "b", "c"]`
+  - 原生二进制输出 `0`，max RSS 低于 512 MiB（实测远低于该上限）
+- 说明：此前 `mimi run` 的 RSS 数字混入了编译器/LLVM 进程内存；
+  原生二进制 soak 更准确反映运行期堆行为。
+
+### 0.37.28 — 真实线程 spawn + Channel 数据面打通
+
+- 新增 Channel 工作线程压力：
+  - 50 个 real-thread worker 各自 `channel_send` 到同一 channel
+  - main 顺序 `channel_recv` 50 次，输出 `1225`
+  - heavy：500 个 real-thread worker，输出 `124750`
+- 接收顺序不确定但总和确定，验证真实并发数据面可用
+- 全部程序 resolved 44/44 编译，无 legacy 回退
+
+### 0.37.27 — 真实/eager 语义一致性验证
+
+- 新增 `stress_real_spawn_matches_eager_semantics_smoke`
+  - 同一 `spawn_sum_source(100)` 分别用默认真实线程与 `MIMI_EAGER_SPAWN`
+    编译运行，两个输出必须一致
+  - both 4950，语义一致
+- 通过该测试发现并修正测试自身对 0..99 求和的错误期望（5050→4950）
+
+### 0.37.26 — 真实 spawn 堆返回结果链路验证
+
+- 新增 `stress_real_spawn_list_return_smoke`：worker 返回 `List<i32>`
+  后由调用方 `await` 读取，确认堆结果从真实线程传回调用方可用
+- 此前已覆盖 String 返回；现在标量、String、List 三类真实 spawn 返回都
+  有独立压力冒烟
+
+### 0.37.25 — 真实 spawn 支持标量元组/Struct 实参
+
+- 纯标量字段的 Tuple/Struct（字段全为 Int/Float）作为 `spawn f(arg)` 实参时，
+  可直接按值复制到 worker env，不需要堆深拷贝，无共享引用风险
+- 非标量字段的 Tuple/Struct（含 String/List/指针/嵌套容器）仍回退 eager
+- 新增 `stress_real_spawn_scalar_tuple_arg_smoke`
+
+### 0.37.24 — 真实 spawn 支持标量 List 实参深拷贝
+
+- `List<i32>`/`List<f64>` 等标量元素 List 作为 `spawn f(list)` 实参时：
+  - 调用点深拷贝整个数据缓冲（`len * elem_size` memcpy）
+  - worker 线程调用目标后 `free` 数据缓冲
+  - 不会与调用方共享底层 list data，避免 use-after-free
+- 非标量元素/嵌套容器 List 仍安全回退 eager
+- 新增 `stress_real_spawn_list_scalar_deep_copy_smoke`
+- 新增 `MIMI_EAGER_SPAWN=1` 逃生口 smoke 测试
+
+### 0.37.23 — Future 句柄指针化，resolved `spawn`/`await` main 全链路真实线程
+
+本轮修正了长期阻断 resolved main 使用真实 spawn 的 ABI 错位：
+- `builtin:type:Future` 在 resolved 类型层从 i64 改为 opaque `ptr`
+  - 与 legacy 的 future 句柄 ABI 一致
+  - `let t = spawn f(...)` 绑定不再发生 Pointer→i64 非法转换
+  - resolved main 编译从 43/44 提升到 44/44，spawn/await 不再回退 legacy
+- 真实 spawn 参数深拷贝：
+  - `String` 实参在调用点通过 `mimi_str_clone` 深拷贝到 worker env
+  - poll 线程调用目标后由 `mimi_string_free` 释放副本，避免调用方
+    释放字符串后子线程仍读取的 use-after-free
+  - 其他 Struct/Array 实参仍安全回退 eager
+- `mimi_string_free` 注册进 resolved/legacy 共享 runtime 声明表
+- 更新 21 个 golden IR 基线（新增 `declare void @mimi_string_free(ptr)`）
+
+### 0.37.22 — 真实 spawn 参数安全边界
+
+真实线程 env 目前只安全地复制标量与不透明指针（i32/f64/actor handle 等）。
+`String`/`List`/闭包等堆指针容器若作为实参会等待深拷贝 ABI 后再启用实线程，
+当前安全地退回 eager 路径，避免调用方在子线程读取前释放参数堆内存。
+- 新增测试覆盖 string 参数 spawn 仍可正常执行（eager 回退）
+- actor+spawn 混合、500 spawn/await 压力仍走真实线程
+
+### 0.37.21 — Phase C：真实线程 spawn 成为默认路径
+
+`spawn f(args...)` 的直接命名函数调用现在默认由真实工作线程执行：
+- 移除 `MIMI_REAL_SPAWN=1` 实验门；默认尝试真实线程。
+- 保留 `MIMI_EAGER_SPAWN=1` 作为旧 eager 同步求值的调试逃生口。
+- 非直接命名函数调用、含 View/Mutate 借用参数的调用仍走 eager 路径。
+- 全量验证在默认 real-spawn 模式下通过：
+  - `cargo test --lib`：5474 passed / 0 failed / 6 ignored
+  - `cargo test --test real_world`：31 passed / 0 failed
+  - `make test-stress-heavy`：5 passed（500 spawn/await、
+    2000 actor+spawn 混合、2000 actor 链等）
+- 全语料 codegen 仍保持 aggregated 0 fallback。
+
+### 0.37.20 — Phase C 前哨：真实线程 spawn（实验开关）
+
+为 resolved 增加 `MIMI_REAL_SPAWN=1` 实验路径，把常见的
+`spawn f(args...)` 从 eager 同步求值升级为真实线程执行：
+
+- **适用范围**：spawn 操作数为直接命名函数调用，且参数不含
+  View/Mutate 借用；非该形态继续走 eager/synchronous 路径。
+- **实现**：
+  - 在调用点把参数值堆分配到 env，存入 future 数据区
+  - 生成 `void(ptr future)` poll 函数，在线程内加载参数、调用目标
+    函数、写回结果、`mimi_future_set_completed`
+  - 调用运行时 `mimi_spawn_future` 启动真实线程，`await` 复用现有
+    `mimi_await_future`
+- **压力测试**：
+  - `tests/stress/real_spawn.rs`：`MIMI_REAL_SPAWN=1` 下 50/500 个
+    real-thread spawn/await 全部通过
+  - actor+spawn 混合 200 组在 real-spawn 下输出仍为 19900
+- 默认未开启，保持原有 eager 行为与全语料确定性。
+
+### 0.37.19 — CI: 零回退硬门禁
+
+按 Phase A DoD 补上“任何新 Legacy 分发都会被拦截”的硬门禁：
+
+- `scripts/dispatch_stat.py check --zero`
+  - 在原有“无静默回退率上升”基础上，额外要求每个语料程序的
+    `legacy_fallback == 0`
+  - 新程序即使首次纳入，只要仍有 legacy 回退也会失败
+- Makefile 新增 `test-dispatch-zero` 目标，便于 CI 调用
+- 当前全量 120 个成功语料全部 0 fallback，门禁通过
+
+### 0.37.18 — Stress: Actor + Spawn/Await 混合链路
+
+新增 `tests/stress/actor_spawn.rs`，把 actor mailbox 与 spawned future
+放在同一个压力用例里跑：
+
+- `stress_actor_spawn_mixed_smoke`：200 组 `spawn task(w, i)` /
+  `await t`，常驻
+- `stress_actor_spawn_mixed_heavy`：2000 组，`--ignored`
+- 计算结果 `sum(0..200)=19900` / `sum(0..2000)=1999000`
+- 两者均通过
+
+### 0.37.17 — Phase A: 默认全语料同样 0 fallback
+
+继续清掉最后两类回退：
+
+- **User 限定名符号**：资格检查只对 non-User 的 `::` 或 non-User 泛型
+  函数保持 `generics/qualified`；User-origin 的 actor 方法（如
+  `Counter::increment`、`BankAccount::deposit`）进入 resolved 切片。
+  - `demos/13_actors.mimi`：54/54 eligible、0 fallback、运行正确
+- **模块函数**：默认 `MIMI_RESOLVED_MODULE_BODIES` 允许表加入 `result`，
+  使 `examples/guess.mimi` 中来自 `std::result` 的 14 个模块函数进入
+  resolved。
+  - `examples/guess.mimi`：74/74 eligible、0 fallback
+- **全语料更新**：
+  - 默认：`legacy_fallback 40→0`、fallback_rate 0.00686→0.0；
+    `total_functions 5832 / eligible 5832`
+  - Reachable 维持 345/345 eligible、0 fallback
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.16 — Phase A: 捕获闭包与 reduce 全量进入 resolved
+
+本轮实现 resolved 捕获闭包（capturing lambda）并补上 `reduce` 内联循环，
+把默认全语料回退从 402 压缩到 40：
+
+- **闭包环境**：`emit_lambda` 现在为捕获变量堆分配 `{fields...}` env，
+  闭包体从 env_ptr 加载捕获值；闭包结构仍为 `{fn_ptr, env_ptr}`，与
+  legacy ABI 一致。
+  - 支持直接捕获、返回闭包两种路径
+  - `make_adder` / 直接 `base` 捕获均 0 fallback 且运行正确
+- **门禁**：`ResolvedExprKind::Lambda` 不再拒绝非空 `captures`；捕获
+  local 必须存在于当前 resolved frame，否则 fail-closed。
+- **reduce**：新增 `emit_resolved_reduce`，对
+  `reduce(list, fn, init)` 生成列表循环 + 闭包间接调用，使
+  `List_count`（Trait 方法）也能由 resolved 发射，不再出现
+  `List_count` undefined symbol。
+- **验证程序**：
+  - `/tmp` 捕获简单/返回闭包用例：0 fallback、输出正确
+  - `a1_verification.mimi` / `std_collections.mimi`：编译运行通过
+- **全语料更新**：
+  - 默认：`legacy_fallback 402→40`、fallback_rate 0.0696→0.00686；
+    `unsupported_type (capturing lambda)` 362→0
+  - 剩余：`generics/qualified` 26、`module/source_id` 14
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.15 — Phase A: reachable 全语料 resolved 0 fallback
+
+移除 method-level generic trait method 的 resolved 门禁拒绝：这类调用现在
+进入 resolved ProtocolMethod 路径，若某个具体方法无法由 resolved 发射器
+处理，仍会由 per-function dispatch 自动回退 legacy monomorphization。
+
+- **门禁**：Call 分支不再因 `trait_method_generic_count > 0` 直接拒绝。
+- **效果**：
+  - `map_list`（`xs.map(f)`）在 `a1_verification.mimi` /
+    `std_collections.mimi` 中 0 fallback
+  - **reachable 全语料 345/345 eligible、0 fallback、0 emit_failed**
+- **全语料更新**：
+  - reachable：`legacy_fallback 2→0`、fallback_rate 0.0058→0.0
+  - 默认：`legacy_fallback 406→402`、fallback_rate 0.0696→0.0689；
+    `generics/qualified` 30→26
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.14 — Phase A: 用户泛型函数以 opaque i64 擦除进入 resolved
+
+本轮把用户侧泛型函数（非 stdlib 非方法级泛型 trait 方法）放入 resolved
+per-function 切片，并采用 opaque i64 擦除：
+
+- **门禁**：`eligible_function_ids_with_stats` 只对 qualified 或
+  非 User origin 的泛型函数继续记 `generics/qualified`；User-origin
+  泛型函数进入逐函数 eligibility。
+- **类型层**：`ResolvedType::GenericParameter` 在
+  `require_scalar_type` 中放行，并在 `types.rs` 降低为 opaque i64。
+- **效果**：
+  - `demos/03_functions.mimi`：8/8 eligible、0 fallback
+  - `tests/real_world/hm_core.mimi`：6/6 eligible、0 fallback
+  - `tests/real_world/std_prelude.mimi`：5/5 eligible、0 fallback
+  - 运行输出全部正确（identity/choose/pair/singleton/apply/swap 等）
+- **全语料更新**：
+  - reachable：`legacy_fallback 14→2`、fallback_rate 0.0406→0.0058；
+    剩余 2 个为 method-level generic trait method（map/filter 等）
+  - 默认：`legacy_fallback 1465→406`、fallback_rate 0.2512→0.0696；
+    `generics/qualified` 1420→30；`unsupported_type` 40→362
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.13 — Stress: Actor 邮箱链高压用例
+
+新增 `tests/stress/actor_stress.rs`，覆盖 resolved `mimi_actor_call`
+路径的连续调用稳定性：
+
+- `stress_actor_mailbox_inc_chain_smoke`：200 次顺序 `inc()`，常驻
+- `stress_actor_mailbox_inc_chain_heavy`：2000 次顺序 `inc()`，`--ignored`
+- 两者均通过，重负载耗时约 0.8s
+
+### 0.37.12 — Phase A: comptime 块进入 resolved 切片
+
+`comptime { expr }` 此前因 `COMPTIME-PURE-001` backend requirement 被
+resolved 门禁整体拒绝。该 requirement 只声明“应在编译期求值”；本轮让
+resolved 发射器以运行时求值方式处理纯 comptime 块，消除最后一个
+非泛型 reachable 回退：
+
+- **门禁**：仅当表达式为 `Comptime` 且全部 requirement 均为
+  `COMPTIME-PURE-001 / comptime.evaluate` 时放行；其他 backend
+  requirement 仍 fail-closed。
+- **发射器**：`Comptime(block)` 与嵌套 `Block` 共享内联块求值路径。
+- **验证程序**：
+  - `tests/real_world/meta_comptime_quote.mimi`：reachable 1/1
+    eligible、0 fallback，运行退出 0
+- **全语料更新**：
+  - reachable：`legacy_fallback 15→14`、fallback_rate 0.0435→0.0406；
+    `unsupported_expression` 1→0
+  - 默认：`legacy_fallback 1466→1465`、fallback_rate 0.2514→0.2512；
+    `unsupported_expression` 1→0
+- `classify --check` 已刷新并保持通过。
+- 当前 reachable 剩余回退全部为 `generics/qualified`（14 个函数）。
+
+### 0.37.11 — Phase A: Spawn/Await future 处理进入 resolved 切片
+
+本轮为 resolved 切片加入 `spawn` / `await` 的 eager future 路径，
+把剩余回退压缩到 `generics/qualified + 1`：
+
+- **门禁**：`require_expr` 接受 `ResolvedExprKind::Spawn` 与
+  `ResolvedExprKind::Await`。
+- **发射器**：
+  - `emit_spawn()`：在当前线程同步求值 spawn 表达式，将结果写入
+    future 数据区，并立即 `mimi_future_set_completed`；返回 future
+    指针。该路径暂不生成独立 poll 线程，值与 ABI 与 legacy future
+    布局保持一致。
+  - `emit_await()`：调用 `mimi_executor_run` / `mimi_await_future`，
+    从 offset 16 加载结果，并 `mimi_future_free` 释放 future。
+- **验证程序**：
+  - `examples/parasteps_on_failure_test.mimi`：reachable 6/6 eligible、
+    0 fallback，运行退出 0
+  - `tests/real_world/concurrency_spawn_await.mimi`：reachable 2/2
+    eligible、0 fallback，运行退出 0
+- **全语料更新**：
+  - reachable：`legacy_fallback 17→15`、fallback_rate 0.0493→0.0435；
+    `unsupported_expression` 3→1
+  - 默认：`legacy_fallback 1468→1466`、fallback_rate 0.2517→0.2514；
+    `unsupported_expression` 3→1
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.10 — Phase A: Actor 邮箱方法调用进入 resolved 切片
+
+本轮补上 resolved 发射器的 `mimi_actor_call` 邮箱 ABI，使所有以
+actor 方法调用为主的测试程序完全脱离 legacy 回退：
+
+- **类型层**：actor handle 从临时 i64 调整为 opaque pointer，与 legacy
+  actor runtime 的 `i8*` ABI 对齐。
+- **门禁**：`require_expr` 的 Call 分支接受 `ResolvedCallee::ActorMethod`。
+- **发射器**：
+  - 新增 `emit_actor_method_call()`：复用 `actor_method_ids` /
+    `actor_defs` / `actor_abi_type_for` / `actor_abi_slot_size`，
+    将参数压入固定 `i8` blob，调用 `mimi_actor_call`，再按方法返回类型
+    从结果 blob 读回。
+  - `actor_abi_type_for` / `actor_abi_slot_size` 提升为
+    `pub(in crate::codegen)` 供 resolved 子模块复用。
+- **验证程序**（reachable 全部 0 fallback）：
+  - `demos/13_actors.mimi`、`examples/actor_full_test.mimi`
+  - `examples/validation_concurrency.mimi`、`tests/real_world/concurrency_actor.mimi`
+  - `tests/real_world/flow_actor_lifecycle.mimi`、`flow_broadcast.mimi`
+  - `flow_delegate_channel.mimi`、`flow_mailbox_bp.mimi`
+  - `flow_producer_mute.mimi`、`flow_test_sandbox.mimi`
+- **全语料更新**：
+  - reachable：`legacy_fallback 28→17`、fallback_rate 0.0812→0.0493；
+    `unsupported_expression` 14→3
+  - 默认：`legacy_fallback 1479→1468`、fallback_rate 0.2536→0.2517；
+    `unsupported_expression` 14→3
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.9 — Phase A: Actor/Future opaque 与自定义 Ok/Err `?` 传播进入 resolved
+
+本轮同时推进了异步/并发的类型门禁和错误传播，把 resolved 回退推进到
+10% 以下：
+
+- **Actor/Future opaque**：
+  - `require_scalar_type` 接受 `actor:*` 与 `builtin:type:Future` 为
+    opaque handle；`types.rs` 将其降低为 i64。
+  - 使 `flow_spawn_quota.mimi` 完全 resolved（1 个函数 0 fallback），
+    其余 actor 程序从 unsupported_type 移到更精确的 unsupported_expression。
+  - reachable 的 `unsupported_type` 清零。
+- **自定义 Ok/Err 枚举 `?`**：
+  - eligibility 接受含 `Ok`/`Err` 的用户 Nominal 枚举作为 Try 内类型。
+  - `emit_try` 新增 `TryInnerKind::CustomEnum` 路径：Err 变体直接构造
+    当前函数的 Err 返回值并 `return`，Ok 从 i64 payload 槽恢复目标值；
+    保留 defer/on-failure 清理语义。
+  - `demos/07_error_handling.mimi`、`core_try_operator.mimi`、
+    `try_operator.mimi`、`error_propagation_test.mimi`、
+    `nested_on_failure_test.mimi`、`on_failure_test.mimi` 全部
+    reachable 0 fallback。
+- **全语料更新**：
+  - reachable：`legacy_fallback 37→28`、fallback_rate 0.1072→0.0812；
+    `unsupported_type` 14→0；`unsupported_expression` 22→14
+  - 默认：`legacy_fallback 1488→1479`、fallback_rate 0.2551→0.2536；
+    `unsupported_type` 54→40；`unsupported_expression` 9→14
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.8 — Phase A: shared/weak Ownership 注解进入 resolved 切片
+
+`core_shared_weak.mimi` 的 `main` 因 `Ownership { kind: Shared, ... }`
+和 `OwnershipWrap` 转换被门禁拒绝。Ownership 是编译期注解：shared/weak
+值在 LLVM 层与目标类型共用同一表示。本轮补齐：
+
+- **类型层**：`ResolvedType::Ownership` 降低为 inner target 类型。
+- **门禁**：`require_scalar_type()` 接受 Ownership 并递归校验目标；
+  `require_conversion()` 接受 `OwnershipWrap` / `OwnershipDowngrade` /
+  `OwnershipRead`。
+- **发射器**：`apply_conversion()` 将上述 Ownership 转换按 identity 处理。
+- **验证程序**：
+  - `tests/real_world/core_shared_weak.mimi`：reachable 1/1 eligible、
+    0 fallback，运行退出 0
+- **全语料更新**：
+  - reachable：`legacy_fallback 38→37`、fallback_rate 0.1101→0.1072；
+    `unsupported_type` 15→14
+  - 默认：`legacy_fallback 1489→1488`、fallback_rate 0.2553→0.2551；
+    `unsupported_type` 55→54
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.7 — Phase A: 引用/借用表达式（`ref`、`&mut`、`*`) 进入 resolved 切片
+
+本轮实现 resolved 发射器的引用指针 ABI，覆盖 `ref_type_test` 与
+`ownership_cfg` 的借用/解引用场景：
+
+- **类型层**：`ResolvedType::Reference` 降低为 opaque pointer；eligibility
+  接受引用的标量目标类型；`require_root_place` 接受 `Deref` 投影。
+- **绑定层**：`bind_pattern` / `require_binding_pattern` 接受
+  `by_reference: Some` 绑定，引用本地保存指针值。
+- **表达式层**：
+  - `BorrowShared` / `BorrowMutable`：对于 `Load(place)` 返回其存储地址；
+    对于 rvalue 临时分配 alloca 并返回其地址。
+  - `Dereference`：通过指针加载目标类型值。
+  - `root_place` 的 `Deref` 投影支持 `*ptr = ...` 写路径。
+- **验证程序**：
+  - `examples/ref_type_test.mimi`：reachable 2/2 eligible、0 fallback，
+    运行返回 42
+  - `tests/real_world/ownership_cfg.mimi`：reachable 7/7 eligible、
+    0 fallback，运行退出 0
+- **全语料更新**：
+  - reachable：`legacy_fallback 43→38`、fallback_rate 0.1246→0.1101；
+    `match_pattern` 1→0；`unsupported_type` 19→15
+  - 默认：`legacy_fallback 1494→1489`、fallback_rate 0.2562→0.2553；
+    `unsupported_type` 59→55
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.6 — Phase A: PeerFault 内置记录进入 resolved 切片
+
+`tests/real_world/flow_peer_fault.mimi` 的 `main` 由于
+`builtin:type:PeerFault` 未在 eligibility 的 builtin 可切片名单中而整体回退。
+`checker` 与 `resolved` 的类型表已经具备 PeerFault 的字段 schema，
+`types.rs` 尚未给出对应 LLVM 布局。本轮补齐：
+
+- **eligibility 门禁**：`require_scalar_type()` 接受
+  `builtin:type:PeerFault`，与 SystemTrace/MemoryDump/PanicPayload 一致。
+- **resolved/types.rs**：新增 PeerFault LLVM 布局
+  `{ string peer_id, string reason }`，与 checker/legacy 记录布局对齐。
+- **验证程序**：
+  - `tests/real_world/flow_peer_fault.mimi`：reachable 1/1 eligible、
+    0 fallback，运行退出 0
+- **全语料更新**：
+  - reachable：`legacy_fallback 44→43`、fallback_rate 0.1275→0.1246；
+    `unsupported_type` 20→19
+  - 默认：`legacy_fallback 1495→1494`、fallback_rate 0.2563→0.2562；
+    `unsupported_type` 60→59
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.5 — Phase A: DynamicAny/map 值句柄进入 resolved 切片
+
+`std_maps.mimi` 的 `main` 因为 `type DynamicAny { capability: "type.dynamic_value" }`
+被 eligibility 门禁拒绝，实际上 `types.rs` 已经把它降低为不透明 `i64`
+句柄（与 Map/Set/Record 句柄、运行时 map value box ABI 一致），
+`apply_conversion` 也已支持 `DynamicAnyPack`。本轮补齐：
+
+- **eligibility 门禁**：`require_scalar_type()` 接受 `ResolvedType::DynamicAny`
+  作为 per-function 切片可标量类型，与 `types.rs` / `apply_conversion` 对齐。
+- **验证程序**：
+  - `tests/real_world/std_maps.mimi`：reachable 1/1 eligible、0 fallback，
+    运行退出 0
+- **全语料更新**：
+  - reachable：legacy_fallback 45→44、fallback_rate 0.1304→0.1275；
+    `unsupported_type` 21→20
+  - 默认：legacy_fallback 1496→1495、fallback_rate 0.2565→0.2563；
+    `unsupported_type` 61→60
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.4 — Phase A: newtype 构造绑定模式进入 resolved 切片
+
+在 0.37.3 支持构造表达式后，剩余 `match_pattern` 主要来自
+`let UserId(v) = ...` 这类 newtype 解构绑定。本轮补齐：
+
+- **resolved 发射器**：`bind_pattern()` 新增 Constructor 分支；newtype
+  构造绑定直接复用值并递归绑定子模式。
+- **eligibility 门禁**：`require_binding_pattern()` 允许 Constructor 模式
+  递归校验，与 match 模式保持一致。
+- **验证程序**：
+  - `examples/newtype.mimi`：reachable 2/2 eligible、0 fallback，运行返回 42
+  - `demos/11_advanced.mimi`：reachable 11/11 eligible、0 fallback，运行退出 0
+  - `tests/real_world/core_newtype.mimi`：reachable 2/2 eligible、0 fallback
+- **全语料更新**：
+  - reachable：legacy_fallback 47→45、fallback_rate 0.1362→0.1304；
+    `match_pattern` 3→1
+  - 默认：legacy_fallback 1498→1496、fallback_rate 0.2569→0.2565；
+    `match_pattern` 3→1
+- `classify --check` 已刷新并保持通过。
+
+### 0.37.3 — Phase A: 用户 newtype/枚举构造表达式进入 resolved 切片
+
+在 `MIMI_REACHABLE_DISPATCH=1` 实验揭露出 `unsupported_expression` 主体为
+用户构造表达式后，本轮直接补齐 resolved 对构造调用的支持：
+
+- **resolved 发射器**：`ResolvedExprKind::Call` 新增
+  `ResolvedCallee::Constructor` 分支。
+  - newtype 构造（如 `UserId(42)`）按值恒等包装发射，底层 LLVM 值直接透传；
+  - 单载荷/无载荷自定义枚举变体复用既有 `emit_custom_enum_ctor()`
+    （`{i32 tag, i64 payload}`）；
+  - 多载荷枚举变体（如 `Rect(w, h)`）仍安全回退 legacy，不产出错误 ABI。
+- **eligibility 门禁**：`require_expr` 的 Call 允许 `ResolvedCallee::Constructor(_)`，
+  并对参数递归校验。
+- **验证程序**：
+  - `examples/newtype.mimi`：可编译且运行返回 42（与默认一致）
+  - `tests/real_world/core_newtype.mimi`：reachable 2/2 eligible、0 fallback
+  - `tests/real_world/core_enums_match.mimi`：reachable 2/2 eligible、0 fallback，
+    运行退出 0（修复前一版错误 ABI 的段错误）
+  - `demos/11_advanced.mimi`：reachable 11 函数仅剩 1 个模式匹配回退
+- **全语料 reachable 更新**：120/128 可编译程序成功，aggregate
+  legacy_fallback 57→47、fallback_rate 0.1652→0.1362；
+  剩余 47 个回退拆解为 `unsupported_type` 21、`unsupported_expression` 9、
+  `generics/qualified` 14、`match_pattern` 3。
+- **默认路径同步受益**：默认 aggregate 4334/5832 eligible、
+  legacy_fallback 1508→1498、fallback_rate 0.2586→0.2569；
+  classify 中 `unsupported_expression` 19→9；`classify --check` 已刷新并保持通过。
+
+### 0.37.2 — Phase A: 可达函数 dispatch 实验（MIMI_REACHABLE_DISPATCH=1）
+
+针对 `generics/qualified` 占 94.2% 回退的现状，新增一个不改变默认行为的
+实验路径：`MIMI_REACHABLE_DISPATCH=1` 时，dispatch 统计/eligible 集合只
+处理从入口 `main` 可达的函数。
+
+- **调用图构建**：`eligibility.rs` 新增 `reachable_function_ids()`，基于
+  `CheckedProgram::call_sites()` 从所有 `main` 入口做保守 BFS；找不到入口时
+  回退为“全函数可达”，保证实验统计不会丢真实代码目标。
+- **实测效果**（单程序）：
+  - `tests/real_world/std_datetime.mimi`：72 函数/11 回退 → 4 函数/0 回退
+  - `tests/real_world/std_collections.mimi`：真实使用的 `map_list` /
+    `filter_list` / `reduce_list` 等在可达集合内仍保留为 `generics/qualified`
+  - `tests/real_world/hm_core.mimi`：5 个真实调用的泛型函数仍是回退，证明该
+    实验不会把“必须 legacy 的已用泛型”误判为可消除
+- **全语料 reachable 结果（构造支持前）**：120/128 可编译程序成功，
+  aggregate total 5832→345、legacy_fallback 1508→57、
+  fallback_rate 0.2586→0.1652；剩余 57 个回退拆解为
+  `unsupported_expression` 19、`unsupported_type` 21、
+  `generics/qualified` 14、`match_pattern` 3。这个结果说明 prelude 泛型
+  虽然是最显眼的跳过项，但真实可达回退的主体已转向表达式/类型后端缺口。
+- **脚本入口**：`scripts/dispatch_stat.py report --reachable` /
+  `check --reachable` / `sample --reachable` 增加同一实验路径的可视化。
+- 在 0.37.2 阶段默认路径与既有基线完全不变，`classify --check` 零漂移。
+  （0.37.3 的构造表达式支持随后同步改善了默认路径。）
+
+### 0.37.0 — Phase 0：高压测试基建启动 + fallback 根因分类（初始）
+
+0.1.7 战役启动，先建立可自动化的 Phase 0 基础设施：
+
+- **高压测试 Harness**：新增 `tests/stress.rs` + `tests/stress/` 模块族，提供
+  `mimi run` 子进程驱动、临时目录、耗时统计与 Flow 链式事件/并发 spawn
+  源生成器。按规范拆分为 `event_storm.rs`、`chaos_fault.rs`、
+  `soak_memory.rs`、`concurrency_scale.rs`、`fuzz_parser.rs`、`fuzz_json.rs`、`fuzz_wire.rs`。冒烟门禁：200 次 Flow 转移、
+  标准库畸形 JSON 0 Panic、50 个 spawn/await、5 轮重复 Flow 链浸泡；
+  另附 2000 次 Flow 转移与 500 个 spawn/await 的 `#[ignore]` 重载用例；
+  `soak_memory.rs` 增加基于 `/usr/bin/time -v` 的 Max RSS 采样冒烟，
+  10 万次 List 分配/释放循环零异常；`fuzz_parser.rs` 加入截断/变异源文件
+  的 parser 崩溃冒烟（0 Panic / 0 SIGSEGV）；`fuzz_json.rs` 增加 16 类畸形
+  JSON 批量拒绝冒烟；`fuzz_wire.rs` 增加 1000 轮随机二进制解码冒烟；
+  `chaos_fault.rs` 增加 IEEE 除零错误通道捕获冒烟。
+  Makefile 新增 `test-stress` / `test-stress-heavy` / `test-stress-fuzz` 入口。
+  实测 `cargo test --test stress` 9 passed / 2 ignored（约 1.2s），
+  `--ignored` 全部重载通过（约 4.3s）。
+- **Legacy 回退根因分类工具**：`scripts/dispatch_stat.py` 新增 `classify`
+  子命令，直接消费 `devdocs/v0.34/golden/dispatch-baseline.json`，将现有
+  `skip_reasons` 映射为 `generics/qualified`、`module/source_id`、
+  `unsupported_type`、`unsupported_expression`、`match_pattern` 五大类。
+  结果持久化为 `devdocs/v0.37/dispatch-fallback-root-causes.json`；
+  支持 `--check` 门禁，校验已生成清单与当前基线一致。
+- **当前基线拆解**：1508 个 Legacy 回退中，泛型/限定名 1420（94.2%）、
+  不支持类型 61（4.0%）、不支持表达式 19（1.3%）、模块函数体 source_id 5
+  （0.3%）、模式匹配边界 3（0.2%），为 Phase A 按根因攻坚提供精确清单。
+- **MIMI_VERBOSE 采样工具**：`scripts/dispatch_stat.py sample` 可指定
+  `--program` / `--limit` / `--output` 批量编译语料并解析
+  `resolved skip '<name>': reason` 行，聚合高频 skip 函数与根因；
+  已用 20 程序采样验证，确认 `generics/qualified` 主要由 prelude 的 11 个
+  泛型函数（identity/const_val/swap/compose/pipe/tap/flip/apply/konst/
+  eq/not_eq）在几乎每个程序中重复出现造成。
+
+### 0.37.1 — Phase A prep：模块函数体默认 allowlist 扩展（回退率 0.2750→0.2586）
+
+0.1.7 Phase A 第一个编译后端攻坚入口：将此前只能通过实验性
+`MIMI_RESOLVED_MODULE_BODIES=1` 开启的模块函数体 resolved 编译，扩大为
+生产默认 allowlist。
+
+- **全语料实验**：`MIMI_RESOLVED_MODULE_BODIES=1` 跑完 120/120 个可编译
+  语料，0 emit_failed、0 崩溃；随后在默认路径下复测得到一致聚合数据。
+- **默认 allowlist 扩展**：`src/codegen/resolved/eligibility.rs` 的默认
+  `prelude,mymath,strings,collections` 扩展为
+  `prelude,mymath,strings,collections,datetime,crypto,csv,env,io,template,time,main`；
+  `main` 覆盖依赖包入口模块（如 `mylib`）。
+- **回退率变化**：aggregate eligible 4228→4324，legacy_fallback
+  1604→1508，fallback_rate 0.2750→0.2586；原先 81 个
+  `module file (source_id mismatch)` 中有 76 个被默认转正。剩余
+  `examples/guess.mimi` 的 5 个来自 `std/result` 的模块项在全局 lift 下
+  仍以 `unsupported type` 形式保持同量回退，因此不额外加入 allowlist。
+- 本地已重新生成 `dispatch-baseline.json` 与
+  `dispatch-fallback-root-causes.json` 快照。
+
 ## [0.1.6] — 2026-08-16
 
 > **核心深度闭环（Deep over Broad）——逐支柱"重设计 → 锚定 → 挣绿"已发布**。

@@ -2018,6 +2018,12 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_string_free(i8*) → void (free a heap string created by mimi_str_clone)
+    module.add_function(
+        "mimi_string_free",
+        _void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_str_count_substring(s, sub) → i32 (count of non-overlapping occurrences)
     module.add_function(
         "mimi_str_count_substring",
