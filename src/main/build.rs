@@ -267,10 +267,11 @@ pub(crate) fn build(
     // Compile and link Rust runtime
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runtime_rs = manifest_dir.join("src/runtime/standalone.rs");
-    let runtime_lib = output_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("libmimi_runtime.a");
+    // Use a per-build temp archive instead of a fixed sibling of the output.
+    // Concurrent `mimi build` invocations sharing an output directory used to
+    // race on the same `libmimi_runtime.a` (flaky "memory map must have a
+    // non-zero length" / "failed to open object file" during CI).
+    let runtime_lib = tmp_dir.join("libmimi_runtime.a");
 
     // Compile the standalone runtime with rustc
     let mut rt_cmd = std::process::Command::new("rustc");

@@ -1,6 +1,6 @@
 .SHELL: /bin/bash
 
-.PHONY: test test-all test-stress test-stress-heavy test-stress-fuzz test-fuzz test-fuzz-quick test-fuzz-ci ci-full test-dispatch-zero test-dogfood
+.PHONY: test test-all test-stress test-stress-heavy test-stress-fuzz test-realworld test-realworld-cli test-build-race test-fuzz test-fuzz-quick test-fuzz-ci ci-full test-dispatch-zero test-dogfood
 
 # Default: run all non-ignored tests
 test:
@@ -25,12 +25,24 @@ test-stress-heavy:
 # Run only the stress fuzz smoke tests (parser/json/wire)
 test-stress-fuzz:
 	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress fuzz_ -- --nocapture
+# Real-world dual-backend suite: compile/run every corpus through both
+# the bytecode VM and native codegen.
+test-realworld:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test real_world -- --test-threads=4
+
+test-realworld-cli:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test real_world_cli -- --test-threads=1
+
+# Parallel mimi build archive-race regression
+test-build-race:
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress stress_parallel_mimi_build_no_archive_race -- --nocapture
+
 # Zero legacy-fallback hard gate: every corpus program must dispatch 100%
 # through the resolved slice.
 test-dispatch-zero:
 	python3 scripts/dispatch_stat.py check --zero
 
-# Hand-written 0.1.7 dogfood projects: Flow + Session + contracts + linearity.
+# Hand-written 0.1.7 dogfood projects + legacy real-project regression gate.
 test-dogfood:
 	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo build --bin mimi
 	./target/debug/mimi check projects/mimi-taskq/src/main.mimi
@@ -41,8 +53,15 @@ test-dogfood:
 	./target/debug/mimi build projects/mimi-ledger/src/main.mimi -o /tmp/mimi-ledger-dogfood
 	/tmp/mimi-taskq-dogfood >/dev/null
 	/tmp/mimi-ledger-dogfood >/dev/null
-	@echo "[dogfood] mimi-taskq + mimi-ledger: check/test/build/run ok"
-
+	./target/debug/mimi check projects/mimichat/src/main.mimi
+	./target/debug/mimi test projects/mimichat/src/main.mimi
+	./target/debug/mimi build projects/mimichat/src/main.mimi -o /tmp/mimichat-dogfood
+	/tmp/mimichat-dogfood >/dev/null
+	./target/debug/mimi check projects/mimichat-modern/src/main.mimi
+	./target/debug/mimi test projects/mimichat-modern/src/main.mimi
+	./target/debug/mimi build projects/mimichat-modern/src/main.mimi -o /tmp/mimichat-modern-dogfood
+	/tmp/mimichat-modern-dogfood >/dev/null
+	@echo "[dogfood] mimi-taskq + mimi-ledger + mimichat + mimichat-modern: check/test/build/run ok"
 # ============================================================
 # Fuzz targets
 # ============================================================

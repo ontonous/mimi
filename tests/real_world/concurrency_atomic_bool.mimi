@@ -1,0 +1,9 @@
+// real_world: AtomicBool nominal type load/store in both backends.
+
+func main() -> i32 {
+    let a = atomic_bool_new(false)
+    atomic_bool_store(a, true)
+    let v = atomic_bool_load(a)
+    atomic_bool_drop(a)
+    if v { 0 } else { 1 }
+}

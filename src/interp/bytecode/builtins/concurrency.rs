@@ -71,6 +71,12 @@ pub fn register(reg: &mut BuiltinRegistry) {
         func: builtin_atomic_i64_fetch_add,
     });
     reg.register(BuiltinDesc {
+        name: "atomic_i64_compare_exchange",
+        arity: 3,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i64_compare_exchange,
+    });
+    reg.register(BuiltinDesc {
         name: "atomic_i64_drop",
         arity: 1,
         category: BuiltinCategory::System,
@@ -94,6 +100,12 @@ pub fn register(reg: &mut BuiltinRegistry) {
         arity: 2,
         category: BuiltinCategory::System,
         func: builtin_atomic_bool_store,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_bool_compare_exchange",
+        arity: 3,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_bool_compare_exchange,
     });
     reg.register(BuiltinDesc {
         name: "atomic_bool_drop",
@@ -380,6 +392,24 @@ fn builtin_atomic_i64_fetch_add(
     Ok(Value::Int(crate::runtime::mimi_atomic_i64_fetch_add(h, d)))
 }
 
+fn builtin_atomic_i64_compare_exchange(
+    _vm: &mut BytecodeVM,
+    args: &[Value],
+) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    let exp = match &args[1] {
+        Value::Int(x) => *x,
+        _ => return Err(InterpError::new("expects i64")),
+    };
+    let nv = match &args[2] {
+        Value::Int(x) => *x,
+        _ => return Err(InterpError::new("expects i64")),
+    };
+    Ok(Value::Int(
+        crate::runtime::mimi_atomic_i64_compare_exchange(h, exp, nv) as i64,
+    ))
+}
+
 fn builtin_atomic_i64_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     crate::runtime::mimi_atomic_i64_drop(h);
@@ -421,6 +451,26 @@ fn builtin_atomic_bool_store(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Val
     };
     crate::runtime::mimi_atomic_bool_store(h, v);
     Ok(Value::Unit)
+}
+
+fn builtin_atomic_bool_compare_exchange(
+    _vm: &mut BytecodeVM,
+    args: &[Value],
+) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    let exp = match &args[1] {
+        Value::Bool(b) => *b as i32,
+        Value::Int(x) => (*x != 0) as i32,
+        _ => return Err(InterpError::new("expects bool or i32")),
+    };
+    let nv = match &args[2] {
+        Value::Bool(b) => *b as i32,
+        Value::Int(x) => (*x != 0) as i32,
+        _ => return Err(InterpError::new("expects bool or i32")),
+    };
+    Ok(Value::Int(
+        crate::runtime::mimi_atomic_bool_compare_exchange(h, exp, nv) as i64,
+    ))
 }
 
 fn builtin_atomic_bool_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {

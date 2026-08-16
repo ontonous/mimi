@@ -169,10 +169,12 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "atomic_i64_load"
             | "atomic_i64_store"
             | "atomic_i64_fetch_add"
+            | "atomic_i64_compare_exchange"
             | "atomic_i64_drop"
             | "atomic_bool_new"
             | "atomic_bool_load"
             | "atomic_bool_store"
+            | "atomic_bool_compare_exchange"
             | "atomic_bool_drop"
             | "mutex_new"
             | "mutex_lock"
@@ -293,6 +295,7 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "ast_eval" => Some(1),
         "atan" => Some(1),
         "atan2" => Some(2),
+        "atomic_bool_compare_exchange" => Some(3),
         "atomic_bool_drop" => Some(1),
         "atomic_bool_load" => Some(1),
         "atomic_bool_new" => Some(1),
@@ -303,6 +306,7 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "atomic_i32_load" => Some(1),
         "atomic_i32_new" => Some(1),
         "atomic_i32_store" => Some(2),
+        "atomic_i64_compare_exchange" => Some(3),
         "atomic_i64_drop" => Some(1),
         "atomic_i64_fetch_add" => Some(2),
         "atomic_i64_load" => Some(1),

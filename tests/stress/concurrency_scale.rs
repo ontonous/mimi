@@ -15,3 +15,11 @@ fn stress_concurrency_scale_heavy() {
     let out = run_program(&source).expect("concurrency scale heavy failed");
     assert_eq!(out.trim(), "124750");
 }
+
+#[test]
+#[ignore = "heavy: 1000 spawn/await; run explicitly with --ignored"]
+fn stress_concurrency_scale_thousand() {
+    let source = spawn_sum_source(1000);
+    let out = run_program(&source).expect("concurrency scale thousand failed");
+    assert_eq!(out.trim(), "499500");
+}

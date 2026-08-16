@@ -3,11 +3,11 @@
 // Direct `spawn f(args...)` now runs on a real worker thread by default. This
 // suite explicitly checks that path, and also covers the MIMI_EAGER_SPAWN
 // escape hatch (by leaving it unset we get the default real-thread behavior).
-use super::{run_program_with_env, spawn_sum_source};
+use super::{build_and_run_native, run_program_with_env, spawn_sum_source};
 
 fn channel_spawn_source(n: usize) -> String {
     format!(
-        r#"func send_id(ch: i64, x: i64) -> i32 {{
+        r#"func send_id(ch: Channel<i64>, x: i64) -> i32 {{
     channel_send(ch, x)
     0
 }}
@@ -238,6 +238,232 @@ func main() -> i32 {{
 fn real_spawn_run(source: &str) -> Result<String, String> {
     // The default is already real-thread; pass no env to assert that default.
     run_program_with_env(source, &[])
+}
+
+fn mutex_parasteps_source(n: usize, per_task: i64) -> String {
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!(
+            "        let t{} = spawn worker(m, {})\n        let r{} = await t{}\n        if r{} != 0 {{ return {} }}\n",
+            i, per_task, i, i, i, (i + 1) % 256
+        ));
+    }
+    format!(
+        r#"func worker(m: Mutex<i64>, n: i64) -> i32 {{
+    for i in range(0, n) {{
+        let g = mutex_lock(m)
+        let v = mutex_get(g)
+        mutex_set(g, v + 1)
+        mutex_unlock(g)
+    }}
+    0
+}}
+func main() -> i32 {{
+    let m = mutex_new(0)
+    parasteps {{
+{}
+    }}
+    let g = mutex_lock(m)
+    let v = mutex_get(g)
+    mutex_unlock(g)
+    println(v)
+    mutex_drop(m)
+    0
+}}
+"#,
+        body,
+    )
+}
+
+fn atomic_bool_lock_parasteps_source(n: usize, per_task: i64) -> String {
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!(
+            "        let t{} = spawn worker(flag, count, {})\n        let r{} = await t{}\n        if r{} != 0 {{ return {} }}\n",
+            i, per_task, i, i, i, (i + 1) % 256
+        ));
+    }
+    format!(
+        r#"func worker(flag: AtomicBool, count: AtomicI64, n: i64) -> i32 {{
+    for i in range(0, n) {{
+        let mut done = 0
+        while done == 0 {{
+            done = atomic_bool_compare_exchange(flag, false, true)
+        }}
+        atomic_i64_fetch_add(count, 1)
+        atomic_bool_store(flag, false)
+    }}
+    0
+}}
+func main() -> i32 {{
+    let flag = atomic_bool_new(false)
+    let count = atomic_i64_new(0)
+    parasteps {{
+{}
+    }}
+    let total = atomic_i64_load(count)
+    println(total)
+    atomic_i64_drop(count)
+    atomic_bool_drop(flag)
+    0
+}}
+"#,
+        body,
+    )
+}
+
+fn spawn_await_loop_source(n: i32) -> String {
+    format!(
+        r#"func id(x: i32) -> i32 {{ x }}
+func main() -> i32 {{
+    let mut sum = 0
+    for i in range(0, {n}) {{
+        let t = spawn id(i)
+        sum = sum + await t
+    }}
+    println(sum)
+    0
+}}
+"#
+    )
+}
+
+fn nested_spawn_chain_source(depth: i32) -> String {
+    format!(
+        r#"func worker(x: i32, depth: i32) -> i32 {{
+    if depth == 0 {{ x }} else {{
+        let t = spawn worker(x + 1, depth - 1)
+        let r = await t
+        r
+    }}
+}}
+
+func main() -> i32 {{
+    let t = spawn worker(0, {depth})
+    let r = await t
+    println(r)
+    0
+}}
+"#
+    )
+}
+
+fn nested_spawn_fanout_source(depth: i32) -> String {
+    format!(
+        r#"func worker(x: i32, depth: i32) -> i32 {{
+    if depth == 0 {{ 1 }} else {{
+        let a = spawn worker(x, depth - 1)
+        let b = spawn worker(x, depth - 1)
+        let ra = await a
+        let rb = await b
+        ra + rb
+    }}
+}}
+
+func main() -> i32 {{
+    let t = spawn worker(0, {depth})
+    let r = await t
+    println(r)
+    0
+}}
+"#
+    )
+}
+
+fn atomic_parasteps_source(n: usize, per_task: i32) -> String {
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!(
+            "        let t{} = spawn worker(a, {})\n        let r{} = await t{}\n        if r{} != 0 {{ return {} }}\n",
+            i, per_task, i, i, i, (i + 1) % 256
+        ));
+    }
+    format!(
+        r#"func worker(a: AtomicI32, n: i32) -> i32 {{
+    for i in range(0, n) {{
+        atomic_i32_fetch_add(a, 1)
+    }}
+    0
+}}
+func main() -> i32 {{
+    let a = atomic_i32_new(0)
+    parasteps {{
+{}
+    }}
+    let v = atomic_i32_load(a)
+    println(v)
+    atomic_i32_drop(a)
+    0
+}}
+"#,
+        body,
+    )
+}
+
+fn atomic_i64_cas_parasteps_source(n: usize, per_task: i64) -> String {
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!(
+            "        let t{} = spawn worker(a, {})\n        let r{} = await t{}\n        if r{} != 0 {{ return {} }}\n",
+            i, per_task, i, i, i, (i + 1) % 256
+        ));
+    }
+    format!(
+        r#"func worker(a: AtomicI64, count: i64) -> i32 {{
+    for i in range(0, count) {{
+        let mut done = 0
+        while done == 0 {{
+            let cur = atomic_i64_load(a)
+            let next = cur + 1
+            done = atomic_i64_compare_exchange(a, cur, next)
+        }}
+    }}
+    0
+}}
+func main() -> i32 {{
+    let a = atomic_i64_new(0)
+    parasteps {{
+{}
+    }}
+    let v = atomic_i64_load(a)
+    println(v)
+    atomic_i64_drop(a)
+    0
+}}
+"#,
+        body,
+    )
+}
+
+fn parasteps_channel_source(n: usize) -> String {
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!(
+            "        let t{} = spawn send_id(ch, {})\n        let r{} = await t{}\n        if r{} != 0 {{ return {} }}\n",
+            i, i, i, i, i, (i + 1) % 256
+        ));
+    }
+    format!(
+        r#"func send_id(ch: Channel<i64>, x: i64) -> i32 {{
+    channel_send(ch, x)
+    0
+}}
+func main() -> i32 {{
+    let ch = channel_new()
+    parasteps {{
+{}
+    }}
+    let mut sum: i64 = 0
+    for i in range(0, {n}) {{
+        sum = sum + channel_recv(ch)
+    }}
+    println(sum)
+    channel_drop(ch)
+    0
+}}
+"#,
+        body,
+    )
 }
 
 fn eager_spawn_run(source: &str) -> Result<String, String> {
@@ -692,12 +918,137 @@ fn stress_real_spawn_channel_workers_smoke() {
 }
 
 #[test]
+fn stress_native_parasteps_channel_smoke() {
+    let source = parasteps_channel_source(8);
+    let out = build_and_run_native(&source).expect("native parasteps+Channel smoke failed");
+    assert_eq!(out.trim(), "28");
+}
+
+#[test]
+#[ignore = "heavy: 64 native parasteps channel senders; run explicitly with --ignored"]
+fn stress_native_parasteps_channel_heavy() {
+    let source = parasteps_channel_source(64);
+    let out = build_and_run_native(&source).expect("native parasteps+Channel heavy failed");
+    assert_eq!(out.trim(), "2016");
+}
+
+#[test]
+fn stress_native_nested_spawn_chain_smoke() {
+    let source = nested_spawn_chain_source(16);
+    let out = build_and_run_native(&source).expect("native nested spawn chain smoke failed");
+    assert_eq!(out.trim(), "16");
+}
+
+#[test]
+#[ignore = "heavy: 128-deep native nested spawn chain; run explicitly with --ignored"]
+fn stress_native_nested_spawn_chain_heavy() {
+    let source = nested_spawn_chain_source(128);
+    let out = build_and_run_native(&source).expect("native nested spawn chain heavy failed");
+    assert_eq!(out.trim(), "128");
+}
+
+#[test]
+fn stress_native_nested_spawn_fanout_smoke() {
+    let source = nested_spawn_fanout_source(6);
+    let out = build_and_run_native(&source).expect("native nested spawn fanout smoke failed");
+    // depth 6 => exactly 2^6 leaf tasks finish and sum to 64
+    assert_eq!(out.trim(), "64");
+}
+
+#[test]
+#[ignore = "heavy: 2^10 native nested spawn fanout; run explicitly with --ignored"]
+fn stress_native_nested_spawn_fanout_heavy() {
+    let source = nested_spawn_fanout_source(10);
+    let out = build_and_run_native(&source).expect("native nested spawn fanout heavy failed");
+    // depth 10 => 2^10 leaves sum to 1024
+    assert_eq!(out.trim(), "1024");
+}
+
+#[test]
+fn stress_native_atomic_fetch_add_smoke() {
+    let source = atomic_parasteps_source(8, 100);
+    let out = build_and_run_native(&source).expect("native atomic fetch-add smoke failed");
+    assert_eq!(out.trim(), "800");
+}
+
+#[test]
+#[ignore = "heavy: 32 native atomic workers * 1000 increments; run explicitly with --ignored"]
+fn stress_native_atomic_fetch_add_heavy() {
+    let source = atomic_parasteps_source(32, 1000);
+    let out = build_and_run_native(&source).expect("native atomic fetch-add heavy failed");
+    assert_eq!(out.trim(), "32000");
+}
+
+#[test]
+fn stress_native_atomic_i64_cas_smoke() {
+    let source = atomic_i64_cas_parasteps_source(8, 50);
+    let out = build_and_run_native(&source).expect("native atomic i64 CAS smoke failed");
+    assert_eq!(out.trim(), "400");
+}
+
+#[test]
+#[ignore = "heavy: 32 native atomic CAS workers * 500 increments; run explicitly with --ignored"]
+fn stress_native_atomic_i64_cas_heavy() {
+    let source = atomic_i64_cas_parasteps_source(32, 500);
+    let out = build_and_run_native(&source).expect("native atomic i64 CAS heavy failed");
+    assert_eq!(out.trim(), "16000");
+}
+
+#[test]
+fn stress_native_atomic_bool_lock_smoke() {
+    let source = atomic_bool_lock_parasteps_source(8, 50);
+    let out = build_and_run_native(&source).expect("native atomic bool lock smoke failed");
+    assert_eq!(out.trim(), "400");
+}
+
+#[test]
+#[ignore = "heavy: 32 native AtomicBool lock workers * 500 increments; run explicitly with --ignored"]
+fn stress_native_atomic_bool_lock_heavy() {
+    let source = atomic_bool_lock_parasteps_source(32, 500);
+    let out = build_and_run_native(&source).expect("native atomic bool lock heavy failed");
+    assert_eq!(out.trim(), "16000");
+}
+
+#[test]
+fn stress_native_mutex_protected_smoke() {
+    let source = mutex_parasteps_source(8, 50);
+    let out = build_and_run_native(&source).expect("native mutex protected smoke failed");
+    assert_eq!(out.trim(), "400");
+}
+
+#[test]
+#[ignore = "heavy: 32 native mutex workers * 500 increments; run explicitly with --ignored"]
+fn stress_native_mutex_protected_heavy() {
+    let source = mutex_parasteps_source(32, 500);
+    let out = build_and_run_native(&source).expect("native mutex protected heavy failed");
+    assert_eq!(out.trim(), "16000");
+}
+
+#[test]
 #[ignore = "heavy: 500 real-thread channel workers; run explicitly with --ignored"]
 fn stress_real_spawn_channel_workers_heavy() {
     let out =
         real_spawn_run(&channel_spawn_source(500)).expect("channel+spawn worker heavy failed");
     // sum 0..499 = 124750 even though receive order is nondeterministic
     assert_eq!(out.trim(), "124750");
+}
+
+#[test]
+#[ignore = "heavy: 10000 native channel workers; run explicitly with --ignored"]
+fn stress_native_channel_workers_tenk() {
+    let source = channel_spawn_source(10000);
+    let out = build_and_run_native(&source).expect("native channel workers tenk failed");
+    // sum 0..9999 = 49995000 even though receive order is nondeterministic
+    assert_eq!(out.trim(), "49995000");
+}
+
+#[test]
+#[ignore = "heavy: 10000 native spawn/await loop; run explicitly with --ignored"]
+fn stress_native_spawn_await_tenk() {
+    let source = spawn_await_loop_source(10000);
+    let out = build_and_run_native(&source).expect("native spawn/await tenk failed");
+    // sum 0..9999 = 49995000
+    assert_eq!(out.trim(), "49995000");
 }
 
 #[test]

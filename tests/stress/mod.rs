@@ -14,12 +14,14 @@
 
 pub(crate) mod actor_spawn;
 pub(crate) mod actor_stress;
+pub(crate) mod build_concurrency;
 pub(crate) mod chaos_fault;
 pub(crate) mod concurrency_scale;
 pub(crate) mod event_storm;
 pub(crate) mod fuzz_json;
 pub(crate) mod fuzz_parser;
 pub(crate) mod fuzz_wire;
+pub(crate) mod net_concurrency;
 pub(crate) mod real_spawn;
 pub(crate) mod soak_memory;
 
@@ -125,6 +127,63 @@ pub(crate) fn run_program_with_env(source: &str, envs: &[(&str, &str)]) -> Resul
         normalized = lines.join("\n");
     }
     Ok(normalized)
+}
+
+/// Build a Mimi source into a native executable and run it.
+///
+/// This is the correct path for real-thread concurrency and blocking I/O cases;
+/// `mimi run`'s bytecode VM still executes `spawn`/`await` sequentially, which
+/// can deadlock server/client programs that rely on concurrent sockets.
+pub(crate) fn build_and_run_native(source: &str) -> Result<String, String> {
+    let dir = temp_dir();
+    let src_path = dir.join("stress_case.mimi");
+    let exe_path = dir.join("stress_case_bin");
+    fs::write(&src_path, source).expect("write stress source");
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .map_err(|e| format!("failed to invoke mimi build: {e}"))?;
+    if !build.status.success() {
+        let stdout = String::from_utf8_lossy(&build.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&build.stderr).to_string();
+        let _ = fs::remove_dir_all(&dir);
+        return Err(format!(
+            "mimi build failed with {}
+stdout:
+{}
+stderr:
+{}",
+            build.status, stdout, stderr
+        ));
+    }
+
+    let start = Instant::now();
+    let output = Command::new(&exe_path)
+        .current_dir(project_root())
+        .output()
+        .map_err(|e| format!("failed to run native binary: {e}"))?;
+    let elapsed = start.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let _ = fs::remove_dir_all(&dir);
+
+    if !output.status.success() {
+        return Err(format!(
+            "native binary exited with {} after {:.2?}
+stdout:
+{}
+stderr:
+{}",
+            output.status, elapsed, stdout, stderr
+        ));
+    }
+    eprintln!("stress: native run completed in {:.2?}", elapsed);
+    Ok(stdout)
 }
 
 /// Run a Mimi source through `/usr/bin/time -v` and return `(stdout, max_rss_kb)`.

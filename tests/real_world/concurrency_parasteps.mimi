@@ -1,0 +1,16 @@
+// real_world: structured concurrency through parasteps + spawn/await.
+// Two spawned tasks must both finish before the block exits (join at scope end).
+
+func add(a: i32, b: i32) -> i32 { a + b }
+
+func main() -> i32 {
+    parasteps {
+        let a = spawn add(10, 20)
+        let b = spawn add(30, 40)
+        let ra = await a
+        let rb = await b
+        if ra != 30 { return 1 }
+        if rb != 70 { return 2 }
+    }
+    0
+}

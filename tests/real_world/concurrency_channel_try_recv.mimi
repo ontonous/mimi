@@ -1,0 +1,13 @@
+// real_world: non-blocking channel receive.
+// channel_try_recv returns -1 on empty channel, then a sent value.
+
+func main() -> i32 {
+    let ch = channel_new()
+    let empty = channel_try_recv(ch)
+    if empty != -1 { return 1 }
+    channel_send(ch, 7)
+    let v = channel_try_recv(ch)
+    if v != 7 { return 2 }
+    channel_drop(ch)
+    0
+}

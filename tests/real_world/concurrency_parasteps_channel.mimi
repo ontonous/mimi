@@ -1,0 +1,24 @@
+// real_world: structured concurrency + Channel pipeline.
+// Tasks spawned inside parasteps send through a shared Channel before the
+// block joins; the main thread receives both values after the scope.
+
+func send_id(ch: Channel<i64>, x: i64) -> i32 {
+    channel_send(ch, x)
+    0
+}
+
+func main() -> i32 {
+    let ch = channel_new()
+    parasteps {
+        let t0 = spawn send_id(ch, 1)
+        let t1 = spawn send_id(ch, 2)
+        let r0 = await t0
+        let r1 = await t1
+        if r0 != 0 { return 1 }
+        if r1 != 0 { return 2 }
+    }
+    let a = channel_recv(ch)
+    let b = channel_recv(ch)
+    channel_drop(ch)
+    if a + b == 3 { 0 } else { 1 }
+}

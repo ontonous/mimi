@@ -228,6 +228,105 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(BasicValueEnum::IntValue(raw))
     }
 
+    pub(super) fn compile_atomic_i64_compare_exchange(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 {
+            return Err("atomic_i64_compare_exchange expects 3 arguments".into());
+        }
+        let handle = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("atomic_i64_compare_exchange: handle must be i64".into()),
+        };
+        let exp = match args[1] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("expected i64 expected-value".into()),
+        };
+        let nv = match args[2] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("expected i64 new-value".into()),
+        };
+        let func = self
+            .module
+            .get_function("mimi_atomic_i64_compare_exchange")
+            .ok_or("mimi_atomic_i64_compare_exchange not declared")?;
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(exp),
+                    BasicMetadataValueEnum::IntValue(nv),
+                ],
+                "atomic_i64_cas",
+            )
+            .map_err(|e| format!("i64 cas error: {}", e))?;
+        let raw = call_try_basic_value(&result)
+            .ok_or("i64 cas returned void")?
+            .into_int_value();
+        // Runtime returns i32 — keep raw i32 (same as AtomicI32 CAS).
+        Ok(BasicValueEnum::IntValue(raw))
+    }
+
+    pub(super) fn compile_atomic_bool_compare_exchange(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 {
+            return Err("atomic_bool_compare_exchange expects 3 arguments".into());
+        }
+        let handle = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("atomic_bool_compare_exchange: handle must be i64".into()),
+        };
+        let i32_ty = self.context.i32_type();
+        let exp = match args[1] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("expected bool/i32 expected-value".into()),
+        };
+        let nv = match args[2] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("expected bool/i32 new-value".into()),
+        };
+        let exp = if exp.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(exp, i32_ty, "cas_exp_trunc")
+                .map_err(|e| format!("cas exp truncate error: {}", e))?
+        } else {
+            exp
+        };
+        let nv = if nv.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(nv, i32_ty, "cas_nv_trunc")
+                .map_err(|e| format!("cas nv truncate error: {}", e))?
+        } else {
+            nv
+        };
+        let func = self
+            .module
+            .get_function("mimi_atomic_bool_compare_exchange")
+            .ok_or("mimi_atomic_bool_compare_exchange not declared")?;
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(exp),
+                    BasicMetadataValueEnum::IntValue(nv),
+                ],
+                "atomic_bool_cas",
+            )
+            .map_err(|e| format!("bool cas error: {}", e))?;
+        let raw = call_try_basic_value(&result)
+            .ok_or("bool cas returned void")?
+            .into_int_value();
+        // Runtime returns i32 — keep raw i32 (same as AtomicI32 CAS).
+        Ok(BasicValueEnum::IntValue(raw))
+    }
+
     pub(super) fn compile_atomic_drop_helper(
         &self,
         rt_fn: &str,
