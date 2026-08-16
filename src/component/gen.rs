@@ -449,6 +449,31 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(handle("MapHandle"))
             .effect("alloc")
     });
+    gen.export("mimi_map_to_json_i64", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_map_to_json_string", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_map_to_json_bool", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_map_to_json_f64", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_map_to_json_f64_serde", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
 
     // ── Set (runtime/mod.rs:16495-18393; SetHandle = i64, SetValueHandle = i64) ──
     // Audit 2026-08-05: handles are plain i64 in the real runtime
@@ -670,6 +695,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("delta", prim(I64))
             .returns(prim(I64))
     });
+    gen.export("mimi_atomic_i64_compare_exchange", |f| {
+        f.param("handle", prim(I64))
+            .param("expected", prim(I64))
+            .param("desired", prim(I64))
+            .returns(prim(I32))
+    });
     gen.export("mimi_atomic_i64_drop", |f| {
         f.param("handle", prim(I64)).effect("dealloc")
     });
@@ -683,6 +714,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_atomic_bool_store", |f| {
         f.param("handle", prim(I64)).param("value", prim(I32))
+    });
+    gen.export("mimi_atomic_bool_compare_exchange", |f| {
+        f.param("handle", prim(I64))
+            .param("expected", prim(I32))
+            .param("desired", prim(I32))
+            .returns(prim(I32))
     });
     gen.export("mimi_atomic_bool_drop", |f| {
         f.param("handle", prim(I64)).effect("dealloc")
@@ -1444,6 +1481,11 @@ mod tests {
             "mimi_map_size",
             "mimi_map_destroy",
             "mimi_map_from_list",
+            "mimi_map_to_json_i64",
+            "mimi_map_to_json_string",
+            "mimi_map_to_json_bool",
+            "mimi_map_to_json_f64",
+            "mimi_map_to_json_f64_serde",
             // Set
             "mimi_set_new",
             "mimi_set_insert",
@@ -1473,6 +1515,8 @@ mod tests {
             // Concurrency
             "mimi_atomic_i32_new",
             "mimi_atomic_i32_compare_exchange",
+            "mimi_atomic_i64_compare_exchange",
+            "mimi_atomic_bool_compare_exchange",
             "mimi_mutex_new",
             "mimi_mutex_lock",
             "mimi_mutex_unlock",

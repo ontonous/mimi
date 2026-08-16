@@ -39,6 +39,7 @@
 #[cfg(standalone)]
 use super::libc;
 use std::sync::atomic::Ordering;
+use std::sync::{Condvar, Mutex};
 
 /// Header prefix of every future allocation. The data region immediately
 /// follows (see module docs). `#[repr(C)]` pins the field offsets:
@@ -164,6 +165,16 @@ pub extern "C" fn mimi_future_alloc(result_size: u64) -> *mut std::ffi::c_void {
     ptr as *mut std::ffi::c_void
 }
 
+/// Global wait channel used by `mimi_await_future` so waiting threads block
+/// instead of spin-aborting after a fixed iteration cap.
+///
+/// A single condvar is enough: completions are ordered by the same mutex,
+/// waiters re-check the atomic flag after every wakeup, and spurious wakeups
+/// are harmless. This also avoids per-future heap allocations in the runtime
+/// (important for Valgrind-clean FFI binaries).
+static AWAIT_LOCK: Mutex<()> = Mutex::new(());
+static AWAIT_CONDVAR: Condvar = Condvar::new();
+
 /// Mark a freed intent and release the owner ref. The allocation is
 /// deallocated when the refcount reaches zero (see `future_release`).
 ///
@@ -210,9 +221,17 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
         }
         // SAFETY: successfully retained → allocation is live.
         let rep = &*fut;
-        let _ = rep
+        // Ordering with await: await holds AWAIT_LOCK while checking the
+        // atomic flag, so a successful CAS under the same lock cannot miss
+        // the condvar notify.
+        let _guard = AWAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if rep
             .completed
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            AWAIT_CONDVAR.notify_all();
+        }
         future_release(fut);
     }
 }
@@ -241,23 +260,117 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
     }
 }
 
-/// Spawned thread handles retained so they can be joined before process exit.
-/// H15 fix: use OnceLock so the atexit handler can check whether SPAWN_HANDLES
-/// is still initialized before accessing it. This prevents UB when atexit fires
-/// after Rust's static destructors have already dropped the Mutex.
+/// Spawned task queue used by the lightweight worker pool.
+///
+/// `mimi_spawn_future` no longer creates a fresh OS thread per future; it
+/// submits to a bounded pool of reusable workers.  This is the first slice of
+/// the 0.1.7 Phase C lightweight Task scheduler work: tasks are still polled
+/// on real threads, but thread count is bounded and worker threads are joined
+/// before Valgrind checks.
+struct SpawnJob {
+    future_addr: usize,
+    poll_fn: PollFn,
+}
+
+// SAFETY: SpawnJob only carries a function pointer and an address-sized raw
+// pointer representation.  The future is separately reference-counted, so the
+// pointer remains valid for whichever worker receives the job.
+unsafe impl Send for SpawnJob {}
+
+struct SpawnPool {
+    sender: Option<std::sync::mpsc::Sender<SpawnJob>>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+static SPAWN_POOL: std::sync::OnceLock<std::sync::Mutex<Option<SpawnPool>>> =
+    std::sync::OnceLock::new();
+static SPAWN_POOL_ATEXIT_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Dedicated threads for nested spawns from inside a pool worker.  A pooled
+/// worker may block while awaiting another future; queueing that child back
+/// into the same bounded pool could deadlock when every worker is blocked.
 static SPAWN_HANDLES: std::sync::OnceLock<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>> =
     std::sync::OnceLock::new();
-static SPAWN_ATEXIT_REGISTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    static IN_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn get_spawn_handles() -> &'static std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> {
     SPAWN_HANDLES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-extern "C" fn mimi_join_spawned_threads_atexit() {
-    // H15 fix: check if SPAWN_HANDLES is still initialized before trying to
-    // lock it. If Rust statics have already been dropped, OnceLock::get()
-    // returns None and we skip joining (handles will be detached by OS).
+fn spawn_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().max(2))
+        .unwrap_or(4)
+        .min(8)
+}
+
+fn worker_loop(rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<SpawnJob>>>) {
+    loop {
+        let job = {
+            let lock = rx.lock().unwrap_or_else(|e| e.into_inner());
+            lock.recv()
+        };
+        let Ok(job) = job else {
+            // All senders dropped: shutdown signal.
+            return;
+        };
+        // SAFETY: retained by mimi_spawn_future before submitting; the worker
+        // ref is released after poll_fn returns, so the pointer stays live.
+        IN_WORKER.with(|flag| {
+            let previous = flag.get();
+            flag.set(true);
+            unsafe {
+                let fut = job.future_addr as *mut MimiFutureHeader;
+                (job.poll_fn)(fut as *mut std::ffi::c_void);
+                future_release(fut);
+            }
+            flag.set(previous);
+        });
+    }
+}
+
+fn ensure_spawn_pool() -> Option<std::sync::mpsc::Sender<SpawnJob>> {
+    let pool_mutex = SPAWN_POOL.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = pool_mutex.lock().ok()?;
+    if let Some(pool) = guard.as_ref() {
+        return pool.sender.clone();
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<SpawnJob>();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    let workers = spawn_worker_count();
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let rx = rx.clone();
+        handles.push(std::thread::spawn(move || worker_loop(rx)));
+    }
+    *guard = Some(SpawnPool {
+        sender: Some(tx.clone()),
+        handles,
+    });
+    Some(tx)
+}
+
+extern "C" fn mimi_join_spawn_pool_atexit() {
+    // H15-style safety: if Rust statics were already dropped, OnceLock::get()
+    // returns None and we skip joining (the OS will reap worker threads).
+    if let Some(pool_mutex) = SPAWN_POOL.get() {
+        if let Ok(mut guard) = pool_mutex.lock() {
+            if let Some(pool) = guard.as_mut() {
+                // Closing the channel makes idle workers exit after finishing
+                // any in-flight task. Joining guarantees the pthread stacks are
+                // released before Valgrind checks.
+                pool.sender.take();
+                for handle in pool.handles.drain(..) {
+                    let _ = handle.join();
+                }
+            }
+        }
+    }
+    // Join dedicated nested-spawn threads too.
     if let Some(handles_mutex) = SPAWN_HANDLES.get() {
         if let Ok(mut handles) = handles_mutex.lock() {
             for handle in handles.drain(..) {
@@ -267,11 +380,9 @@ extern "C" fn mimi_join_spawned_threads_atexit() {
     }
 }
 
-/// Spawn a future on a real thread (used by codegen `spawn expr`).
-/// The poll function is called on a new thread, which sets completed=1 when done.
-/// Returns the future pointer (same as input).
-/// The returned `JoinHandle` is retained in `SPAWN_HANDLES` and joined at
-/// process exit so that the pthread stack is freed before Valgrind checks.
+/// Spawn a future on a real worker thread (used by codegen `spawn expr`).
+/// The poll function is submitted to a bounded global worker pool, which calls
+/// it and sets completed=1 when done. Returns the future pointer (same input).
 #[no_mangle]
 pub extern "C" fn mimi_spawn_future(
     future: *mut std::ffi::c_void,
@@ -289,21 +400,68 @@ pub extern "C" fn mimi_spawn_future(
             return std::ptr::null_mut();
         }
     }
-    let future_addr = future as usize;
-    let handle = std::thread::spawn(move || {
-        // SAFETY: retained above for this thread's lifetime; the ref is
-        // released after poll_fn returns, so the pointer stays live for both.
+    // Nested spawns from inside a pool worker use a dedicated thread.  This
+    // keeps bounded workers safe when an async body itself awaits another
+    // spawned future: the child is never queued behind a full pool.
+    if IN_WORKER.with(|flag| flag.get()) {
+        let future_addr = future as usize;
+        let handle = std::thread::spawn(move || {
+            // This dedicated thread is itself a worker context. Mark it so
+            // further nested spawns also get dedicated threads; otherwise a
+            // deep spawn chain can queue back into the bounded pool while all
+            // pool workers are blocked awaiting children (deadlock).
+            IN_WORKER.with(|flag| {
+                let previous = flag.get();
+                flag.set(true);
+                // SAFETY: retained above for this thread's lifetime; the ref is
+                // released after poll_fn returns, so the pointer stays live.
+                unsafe {
+                    let fut = future_addr as *mut MimiFutureHeader;
+                    poll_fn(fut as *mut std::ffi::c_void);
+                    future_release(fut);
+                }
+                flag.set(previous);
+            });
+        });
+        if let Ok(mut handles) = get_spawn_handles().lock() {
+            handles.push(handle);
+        }
+        if SPAWN_POOL_ATEXIT_REGISTERED
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            // SAFETY: `mimi_join_spawn_pool_atexit` has C ABI and no parameters.
+            unsafe { libc::atexit(mimi_join_spawn_pool_atexit) };
+        }
+        return future;
+    }
+    let Some(sender) = ensure_spawn_pool() else {
+        // Extremely defensive fallback: no pool available, don't leak the ref.
         unsafe {
-            let fut = future_addr as *mut MimiFutureHeader;
-            poll_fn(fut as *mut std::ffi::c_void);
+            let fut = future as *mut MimiFutureHeader;
             future_release(fut);
         }
-    });
-    if let Ok(mut handles) = get_spawn_handles().lock() {
-        handles.push(handle);
+        return std::ptr::null_mut();
+    };
+    let job = SpawnJob {
+        future_addr: future as usize,
+        poll_fn,
+    };
+    if sender.send(job).is_err() {
+        // Pool already shut down; release the worker ref and fail cleanly.
+        unsafe {
+            let fut = future as *mut MimiFutureHeader;
+            future_release(fut);
+        }
+        return std::ptr::null_mut();
     }
-    // Register an atexit handler once to join all spawned threads before exit.
-    if SPAWN_ATEXIT_REGISTERED
+    // Register an atexit handler once to join all workers before exit.
+    if SPAWN_POOL_ATEXIT_REGISTERED
         .compare_exchange(
             false,
             true,
@@ -312,37 +470,38 @@ pub extern "C" fn mimi_spawn_future(
         )
         .is_ok()
     {
-        // SAFETY: `mimi_join_spawned_threads_atexit` has C ABI and no parameters.
-        unsafe { libc::atexit(mimi_join_spawned_threads_atexit) };
+        // SAFETY: `mimi_join_spawn_pool_atexit` has C ABI and no parameters.
+        unsafe { libc::atexit(mimi_join_spawn_pool_atexit) };
     }
     future
 }
 
-/// Wait (spin) for a future to become completed. Used by codegen `await`
-/// for thread-spawned futures (not managed by the single-threaded executor).
+/// Wait for a future to become completed. Used by codegen `await` for
+/// thread-spawned futures.  Uses a per-future condvar so long-running tasks do
+/// not trip an artificial spin cap and abort the process.
 #[no_mangle]
 pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     if future.is_null() {
         return;
     }
-    // R-C5: retain for the spin so concurrent free cannot free under us.
+    // R-C5: retain for the wait so concurrent free cannot free under us.
     // SAFETY: non-null pointer from mimi_future_alloc.
     unsafe {
         let fut = future as *mut MimiFutureHeader;
         if !future_try_retain(fut) {
             return;
         }
-        let mut iterations: u64 = 0;
-        const MAX_SPIN_ITERATIONS: u64 = 1_000_000;
-        // SAFETY: successfully retained → allocation is live for the spin.
-        while (*fut).completed.load(Ordering::Acquire) == 0 {
-            std::thread::yield_now();
-            iterations += 1;
-            if iterations >= MAX_SPIN_ITERATIONS {
-                future_release(fut);
-                std::process::abort();
-            }
+        // Fast path: already completed before we block on the condvar.
+        if (*fut).completed.load(Ordering::Acquire) != 0 {
+            future_release(fut);
+            return;
         }
+        let mut guard = AWAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: successfully retained → allocation is live while waiting.
+        while (*fut).completed.load(Ordering::Acquire) == 0 {
+            guard = AWAIT_CONDVAR.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
+        drop(guard);
         future_release(fut);
     }
 }
@@ -502,5 +661,43 @@ mod tests {
         if !f.is_null() {
             mimi_future_free(f);
         }
+    }
+
+    #[test]
+    fn future_await_blocks_until_completion_without_spin_abort() {
+        use std::time::Duration;
+
+        let f = mimi_future_alloc(64);
+        assert!(!f.is_null());
+        let other = f as usize;
+        let completer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            mimi_future_set_completed(other as *mut std::ffi::c_void);
+        });
+        // This is the call that used to abort after 1M yield iterations if a
+        // spawned task took slightly longer than the fixed spin budget.
+        mimi_await_future(f);
+        assert_eq!(mimi_future_is_completed(f), 1);
+        mimi_future_free(f);
+        completer.join().expect("completer thread panicked");
+    }
+    #[test]
+    fn bounded_pool_nested_spawn_does_not_deadlock() {
+        unsafe extern "C" fn child_poll(fut: *mut std::ffi::c_void) {
+            mimi_future_set_completed(fut);
+        }
+        unsafe extern "C" fn nested_poll(fut: *mut std::ffi::c_void) {
+            let child = mimi_future_alloc(0);
+            assert!(!child.is_null());
+            mimi_spawn_future(child, child_poll);
+            mimi_await_future(child);
+            mimi_future_free(child);
+            mimi_future_set_completed(fut);
+        }
+        let parent = mimi_future_alloc(0);
+        assert!(!parent.is_null());
+        mimi_spawn_future(parent, nested_poll);
+        mimi_await_future(parent);
+        mimi_future_free(parent);
     }
 }

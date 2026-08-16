@@ -10,9 +10,9 @@ fn stress_flow_event_storm_smoke() {
 }
 
 #[test]
-#[ignore = "heavy: 2000 Flow transitions; run explicitly with --ignored"]
+#[ignore = "heavy: 5000 Flow transitions; run explicitly with --ignored"]
 fn stress_flow_event_storm_heavy() {
-    let source = flow_chain_source(2_000);
+    let source = flow_chain_source(5_000);
     let out = run_program(&source).expect("flow event storm heavy failed");
-    assert_eq!(out.trim(), "2000");
+    assert_eq!(out.trim(), "5000");
 }

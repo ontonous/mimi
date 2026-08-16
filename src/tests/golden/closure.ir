@@ -689,7 +689,11 @@ declare void @mimi_atomic_i64_store(i64, i64)
 
 declare i64 @mimi_atomic_i64_fetch_add(i64, i64)
 
+declare i32 @mimi_atomic_i64_compare_exchange(i64, i64, i64)
+
 declare void @mimi_atomic_i64_drop(i64)
+
+declare i32 @mimi_atomic_bool_compare_exchange(i64, i32, i32)
 
 declare i64 @mimi_atomic_bool_new(i32)
 

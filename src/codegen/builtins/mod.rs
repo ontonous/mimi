@@ -3491,6 +3491,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "atomic_i64_load" => self.compile_atomic_i64_load(args),
             "atomic_i64_store" => self.compile_atomic_i64_store(args),
             "atomic_i64_fetch_add" => self.compile_atomic_i64_fetch_add(args),
+            "atomic_i64_compare_exchange" => self.compile_atomic_i64_compare_exchange(args),
             "atomic_i64_drop" => {
                 self.compile_atomic_drop_helper("mimi_atomic_i64_drop", args)?;
                 Ok(BasicValueEnum::IntValue(
@@ -3500,6 +3501,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "atomic_bool_new" => self.compile_atomic_bool_new(args),
             "atomic_bool_load" => self.compile_atomic_bool_load(args),
             "atomic_bool_store" => self.compile_atomic_bool_store(args),
+            "atomic_bool_compare_exchange" => self.compile_atomic_bool_compare_exchange(args),
             "atomic_bool_drop" => {
                 self.compile_atomic_drop_helper("mimi_atomic_bool_drop", args)?;
                 Ok(BasicValueEnum::IntValue(
@@ -4075,12 +4077,36 @@ fn register_atomic_mutex_channel_rt<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_atomic_i64_compare_exchange",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_atomic_i64_drop",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
 
     // ----- AtomicBool (stored as i32 with 0/1) -----
+    module.add_function(
+        "mimi_atomic_bool_compare_exchange",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i32),
+                BasicMetadataTypeEnum::IntType(i32),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_atomic_bool_new",
         i64.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),

@@ -1,0 +1,19 @@
+// real_world: nested spawn from a pool worker (outer -> inner).
+// Exercises the dedicated-thread path used by codegen native async bodies.
+
+func inner(x: i32) -> i32 {
+    x * 2
+}
+
+func outer(x: i32) -> i32 {
+    let t = spawn inner(x + 1)
+    let r = await t
+    r
+}
+
+func main() -> i32 {
+    let t = spawn outer(21)
+    let r = await t
+    println(r)
+    0
+}

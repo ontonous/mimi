@@ -2816,6 +2816,128 @@ func main() -> i32 {
 }
 
 #[test]
+fn e2e_flow_transition_named_accept_does_not_shadow_builtin_accept() {
+    // Flow transitions are also EventId enum variants. Without scoping bare
+    // StateId/EventId construction to flow transition bodies, a later plain
+    // function's network `accept(fd)` compiled as the flow's EventId
+    // constructor (a struct in `if client < 0` → E0700).
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+flow Chat {
+    state Idle { n: i32 }
+    state Ready { n: i32 }
+
+    transition accept(Idle) -> Ready {
+        return Ready { n: self.n }
+    }
+}
+
+func server_with_listener(port: i32) -> i32 {
+    let fd = socket(2, 1, 0)
+    if fd < 0 { return 1 }
+    let ret = bind(fd, port)
+    if ret < 0 { close_fd(fd); return 2 }
+    let ret2 = listen(fd, 1)
+    if ret2 < 0 { close_fd(fd); return 3 }
+    let client = accept(fd)
+    if client < 0 { close_fd(fd); return 4 }
+    close_fd(client)
+    close_fd(fd)
+    0
+}
+
+func main() -> i32 {
+    let s0 = Idle { n: 1 }
+    let s1 = Chat::accept(s0)
+    if s1.n != 1 {
+        println("flow transition failed")
+        return 1
+    }
+    0
+}
+"#,
+    )
+    .expect("src/tests/codegen_e2e.rs:flow_transition_named_accept_unwrap");
+    assert_eq!(stdout.trim(), "");
+}
+
+#[test]
+fn e2e_native_string_build_loop_ownership() {
+    // Regression: `w = w + ch` and `w = ch` inside a loop used to leave the
+    // RHS heap string in the per-iteration heap scope, so free_heap_allocs
+    // released it before the next iteration (native corruption/UB). The
+    // resolved emitter now transfers concat/call temporaries into variable
+    // slots and heap-copies plain string-variable assignments.
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+func build(s: string) -> string {
+    let mut w = ""
+    for i in range(0, len(s)) {
+        let ch = str_char_at(s, i)
+        w = w + ch
+    }
+    w
+}
+
+func pick_last(s: string) -> string {
+    let mut w = ""
+    for i in range(0, len(s)) {
+        let ch = str_char_at(s, i)
+        w = ch
+    }
+    w
+}
+
+func main() -> i32 {
+    let a = build("FooBar")
+    let b = pick_last("FooBar")
+    println(a)
+    println(b)
+    if a != "FooBar" { return 1 }
+    if b != "r" { return 2 }
+    0
+}
+"#,
+    )
+    .expect("src/tests/codegen_e2e.rs:string_loop_ownership_unwrap");
+    assert_eq!(stdout.trim(), "FooBar\nr");
+}
+
+#[test]
+fn e2e_resolved_to_float_promotes_i32_handle() {
+    // Regression: random_int / random_choice passed an i32 list-length/span
+    // directly to runtime mimi_any_to_float(i64). The resulting IR was invalid
+    // and resolved per-function verification rejected the random module bodies,
+    // leaving List_random_choice undefined at link time.
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+func main() -> i32 {
+    let a = to_float(7)
+    let b = to_float(-3)
+    if a != 7.0 { return 1 }
+    if b != -3.0 { return 2 }
+    println("float-ok")
+    0
+}
+"#,
+    )
+    .expect("src/tests/codegen_e2e.rs:to_float_promote_unwrap");
+    assert_eq!(stdout.trim(), "float-ok");
+}
+
+#[test]
 fn e2e_net_connect_failure() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

@@ -1,0 +1,11 @@
+// real_world: AtomicI64 nominal type load/store/fetch_add in both backends.
+
+func main() -> i32 {
+    let a = atomic_i64_new(0)
+    atomic_i64_store(a, 10)
+    let v = atomic_i64_load(a)
+    let prev = atomic_i64_fetch_add(a, 3)
+    let ok = v == 10 && prev == 10 && atomic_i64_load(a) == 13
+    atomic_i64_drop(a)
+    if ok { 0 } else { 1 }
+}

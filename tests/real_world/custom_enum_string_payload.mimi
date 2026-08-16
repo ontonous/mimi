@@ -1,0 +1,25 @@
+// real_world: custom enum single string payload must decode through the
+// boxed enum ABI (inttoptr + load {ptr,len}), not as a raw C string.
+
+type Status { Label(string) | Count(i32) }
+
+func label_of(s: Status) -> string {
+    match s {
+        Label(x) => x,
+        Count(_) => "",
+    }
+}
+
+func count_of(s: Status) -> i32 {
+    match s {
+        Label(_) => 0,
+        Count(n) => n,
+    }
+}
+
+func main() -> i32 {
+    let l = label_of(Label("hello"))
+    if l != "hello" { return 1 }
+    if count_of(Count(7)) != 7 { return 2 }
+    0
+}

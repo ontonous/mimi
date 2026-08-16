@@ -1,0 +1,26 @@
+// real_world: real spawned tasks communicate through Channel<i64>.
+// Explicit spawn/await pairs keep both the VM and resolved codegen happy;
+// sum of 0..3 is 6 even when receive order is nondeterministic.
+
+func send_id(ch: Channel<i64>, x: i64) -> i32 {
+    channel_send(ch, x)
+    0
+}
+
+func main() -> i32 {
+    let ch = channel_new()
+    let t0 = spawn send_id(ch, 0)
+    await t0
+    let t1 = spawn send_id(ch, 1)
+    await t1
+    let t2 = spawn send_id(ch, 2)
+    await t2
+    let t3 = spawn send_id(ch, 3)
+    await t3
+    let mut sum: i64 = 0
+    for i in range(0, 4) {
+        sum = sum + channel_recv(ch)
+    }
+    channel_drop(ch)
+    if sum == 6 { 0 } else { 1 }
+}

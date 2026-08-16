@@ -3268,6 +3268,13 @@ fn dual_generic_linear_cap_missing_drop_rejected() {
         rendered.contains("E0256"),
         "expected E0256 diagnostic, got:\n{rendered}"
     );
+    assert!(
+        diags.iter().any(|d| d
+            .notes
+            .iter()
+            .any(|n| n.message.contains("introduced here"))),
+        "expected E0256 to carry a 'resource introduced here' note, got:\n{rendered}"
+    );
 }
 
 #[test]
@@ -14963,6 +14970,50 @@ fn dual_atomic_i32_compare_exchange() {
         }
         "#,
         "1\n0\n100"
+    );
+}
+
+#[test]
+fn dual_atomic_i64_compare_exchange() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_i64_new(7)
+            let ok1 = atomic_i64_compare_exchange(c, 7, 100)
+            println(ok1)
+            let ok2 = atomic_i64_compare_exchange(c, 7, 200)
+            println(ok2)
+            let v = atomic_i64_load(c)
+            println(v)
+            0
+        }
+        "#,
+        "1\n0\n100"
+    );
+}
+
+#[test]
+fn dual_atomic_bool_compare_exchange() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_bool_new(true)
+            let ok1 = atomic_bool_compare_exchange(c, true, false)
+            println(ok1)
+            let ok2 = atomic_bool_compare_exchange(c, true, false)
+            println(ok2)
+            let v = atomic_bool_load(c)
+            if v { println("on") } else { println("off") }
+            0
+        }
+        "#,
+        "1\n0\noff"
     );
 }
 

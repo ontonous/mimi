@@ -1,0 +1,12 @@
+// real_world: AtomicI64 compare_exchange success and mismatch paths.
+
+func main() -> i32 {
+    let a = atomic_i64_new(0)
+    atomic_i64_store(a, 5)
+    let ok1 = atomic_i64_compare_exchange(a, 5, 9)
+    let v = atomic_i64_load(a)
+    let ok2 = atomic_i64_compare_exchange(a, 5, 1)
+    let w = atomic_i64_load(a)
+    atomic_i64_drop(a)
+    if ok1 == 1 && v == 9 && ok2 == 0 && w == 9 { 0 } else { 1 }
+}

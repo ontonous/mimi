@@ -1,0 +1,38 @@
+// real_world: AtomicBool compare_exchange used as a small spinlock.
+// Workers acquire the flag, increment a shared AtomicI64, release.
+
+func worker(flag: AtomicBool, count: AtomicI64, loops: i64) -> i32 {
+    for i in range(0, loops) {
+        let mut done = 0
+        while done == 0 {
+            done = atomic_bool_compare_exchange(flag, false, true)
+        }
+        atomic_i64_fetch_add(count, 1)
+        atomic_bool_store(flag, false)
+    }
+    0
+}
+
+func main() -> i32 {
+    let flag = atomic_bool_new(false)
+    let count = atomic_i64_new(0)
+    parasteps {
+        let t0 = spawn worker(flag, count, 20)
+        let r0 = await t0
+        if r0 != 0 { return 1 }
+        let t1 = spawn worker(flag, count, 20)
+        let r1 = await t1
+        if r1 != 0 { return 1 }
+        let t2 = spawn worker(flag, count, 20)
+        let r2 = await t2
+        if r2 != 0 { return 1 }
+        let t3 = spawn worker(flag, count, 20)
+        let r3 = await t3
+        if r3 != 0 { return 1 }
+    }
+    let total = atomic_i64_load(count)
+    println(total)
+    atomic_i64_drop(count)
+    atomic_bool_drop(flag)
+    0
+}

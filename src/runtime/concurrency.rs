@@ -255,6 +255,29 @@ pub extern "C" fn mimi_atomic_i64_fetch_add(handle: i64, delta: i64) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn mimi_atomic_i64_compare_exchange(
+    handle: i64,
+    expected: i64,
+    new_value: i64,
+) -> i32 {
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match table.atomics.get(&(handle as u64)) {
+        Some(ConcurrencyAtomic::I64(a)) => match a.compare_exchange(
+            expected,
+            new_value,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        },
+        _ => 0,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn mimi_atomic_i64_drop(handle: i64) {
     let mut table = CONCURRENCY_HANDLES
         .lock()
@@ -291,6 +314,31 @@ pub extern "C" fn mimi_atomic_bool_store(handle: i64, value: i32) {
         .unwrap_or_else(|e| e.into_inner());
     if let Some(ConcurrencyAtomic::Bool(a)) = table.atomics.get(&(handle as u64)) {
         a.store(b, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mimi_atomic_bool_compare_exchange(
+    handle: i64,
+    expected: i32,
+    new_value: i32,
+) -> i32 {
+    let exp = expected != 0;
+    let nv = new_value != 0;
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match table.atomics.get(&(handle as u64)) {
+        Some(ConcurrencyAtomic::Bool(a)) => match a.compare_exchange(
+            exp,
+            nv,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        },
+        _ => 0,
     }
 }
 
@@ -434,7 +482,12 @@ pub extern "C" fn mimi_channel_send(handle: i64, value: i64) {
         table.channels.get(&(handle as u64)).map(|ch| ch.tx.clone())
     };
     if let Some(tx) = tx {
-        let _ = tx.send(value);
+        // H12-style visibility: an unbounded mpsc send only fails when the
+        // receiver has been dropped. Log it so a caller does not mistake a
+        // silently dropped message for delivery.
+        if let Err(e) = tx.send(value) {
+            eprintln!("[mimi runtime] channel send: channel disconnected: {}", e);
+        }
     }
 }
 

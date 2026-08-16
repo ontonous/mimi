@@ -1,0 +1,12 @@
+// real_world: AtomicBool compare_exchange success and mismatch paths.
+
+func main() -> i32 {
+    let a = atomic_bool_new(false)
+    atomic_bool_store(a, true)
+    let ok1 = atomic_bool_compare_exchange(a, true, false)
+    let v = atomic_bool_load(a)
+    let ok2 = atomic_bool_compare_exchange(a, true, false)
+    let w = atomic_bool_load(a)
+    atomic_bool_drop(a)
+    if ok1 == 1 && v == false && ok2 == 0 && w == false { 0 } else { 1 }
+}
