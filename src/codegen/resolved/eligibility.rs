@@ -471,7 +471,7 @@ fn module_bodies_lifted(program: &CheckedProgram, source_id: crate::span::Source
     let spec = match std::env::var("MIMI_RESOLVED_MODULE_BODIES") {
         Ok(explicit) => explicit.trim().to_string(),
         Err(_) => {
-            "prelude,mymath,strings,collections,result,datetime,crypto,csv,env,io,template,time,main"
+            "prelude,mymath,strings,collections,result,array,datetime,crypto,csv,env,errors,fs,io,iter,json,maps,net,random,set,template,testing,text,time,main"
                 .to_string()
         }
     };
@@ -628,14 +628,22 @@ fn require_scalar_type(
                 // field access (`.trace.last_state_name`) keeps main in the
                 // resolved slice instead of forcing a legacy fallback that
                 // loses the qualified flow-fault field types.
-                "builtin:type:List"
+                "builtin:type:AtomicI32"
+                | "builtin:type:AtomicI64"
+                | "builtin:type:AtomicBool"
+                | "builtin:type:Channel"
+                | "builtin:type:Mutex"
+                | "builtin:type:MutexGuard"
+                | "builtin:type:List"
                 | "builtin:type:Map"
                 | "builtin:type:Set"
                 | "builtin:type:Record"
                 | "builtin:type:SystemTrace"
                 | "builtin:type:MemoryDump"
                 | "builtin:type:PanicPayload"
-                | "builtin:type:PeerFault" => {
+                | "builtin:type:PeerFault"
+                | "builtin:type:ExecResult"
+                | "builtin:type:StatResult" => {
                     for arg in arguments {
                         require_scalar_type(program, owner, arg)?;
                     }
@@ -958,6 +966,15 @@ fn require_conversion(
             | CheckedConversionKind::OwnershipWrap
             | CheckedConversionKind::OwnershipDowngrade
             | CheckedConversionKind::OwnershipRead
+            // ContainerErase is a purely-typed set/list erasure: the LLVM
+            // representation is the same opaque handle, so the resolved
+            // emitter already treats it as identity.
+            | CheckedConversionKind::ContainerErase
+            // DynamicAnyPack: concrete values passed to stdlib Any-typed
+            // wrappers. The resolved emitter lowers DynamicAny to i64 and
+            // widens narrow ints; map/set runtime boxes already use the same
+            // ABI, so this conversion is supported in the native slice.
+            | CheckedConversionKind::DynamicAnyPack
     ) {
         Ok(())
     } else {

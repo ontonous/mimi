@@ -603,10 +603,27 @@ fn audit_14_concurrency_handle_nominal_families_reject_mixing() {
         "mutex_unlock(atomic_i64_new(0))",
         "channel_send(atomic_i32_new(0), 1)",
         "channel_recv(mutex_new(0))",
+        // Value-slot type checks: handle family is right, payload is wrong.
+        "atomic_i32_store(atomic_i32_new(0), \"x\")",
+        "atomic_bool_store(atomic_bool_new(false), 1)",
+        "atomic_i32_fetch_add(atomic_i32_new(0), true)",
+        "channel_send(channel_new(), true)",
+        "mutex_set(mutex_lock(mutex_new(0)), true)",
     ];
     for call in cases {
         let src = format!("func main() -> i32 {{ let _ = {call}\n0 }}");
         assert_err_code(&src, crate::diagnostic::codes::E0242);
+    }
+
+    // Builtin nominal arity is enforced even without a TypeDef.
+    for (annotation, value) in [
+        ("AtomicI32<i64>", "atomic_i32_new(0)"),
+        ("Mutex", "mutex_new(0)"),
+        ("Channel<i64, i64>", "channel_new()"),
+        ("MutexGuard", "mutex_lock(mutex_new(0))"),
+    ] {
+        let src = format!("func main() -> i32 {{ let _: {annotation} = {value}\n0 }}");
+        assert_err_code(&src, crate::diagnostic::codes::E0438);
     }
 
     // The intended typed surface still checks.

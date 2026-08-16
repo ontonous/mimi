@@ -1,0 +1,26 @@
+// 0.37 Phase C slice 1: concurrency primitive nominal surfaces.
+// Exercises explicit AtomicI32 / Mutex<i64> / Channel<i64> parameter types.
+
+func atomic_probe(a: AtomicI32) -> i32 {
+    atomic_i32_load(a)
+}
+
+func mutex_probe(m: Mutex<i64>) -> i64 {
+    let g = mutex_lock(m)
+    let v = mutex_get(g)
+    mutex_unlock(g)
+    v
+}
+
+func channel_probe(c: Channel<i64>) -> i64 {
+    channel_send(c, 7)
+    channel_recv(c)
+}
+
+func main() -> i32 {
+    let a = atomic_i32_new(5)
+    let m = mutex_new(10)
+    let c = channel_new()
+    let ok = atomic_probe(a) == 5 && mutex_probe(m) == 10 && channel_probe(c) == 7
+    if ok { 0 } else { 1 }
+}
