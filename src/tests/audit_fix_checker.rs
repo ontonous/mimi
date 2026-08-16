@@ -590,6 +590,44 @@ func main() -> i32 {
     .expect("legal handle-builtin arities must still check");
 }
 
+#[test]
+fn audit_14_concurrency_handle_nominal_families_reject_mixing() {
+    // 0.37 Phase C slice 1: Mutex / Channel / AtomicI32 / AtomicI64 /
+    // AtomicBool are distinct nominal handles. Passing a handle from one
+    // family into another family's builtin must be rejected at check time.
+    let cases: &[&str] = &[
+        "atomic_i32_load(channel_new())",
+        "atomic_bool_store(channel_new(), true)",
+        "mutex_get(mutex_new(0))",
+        "mutex_lock(channel_new())",
+        "mutex_unlock(atomic_i64_new(0))",
+        "channel_send(atomic_i32_new(0), 1)",
+        "channel_recv(mutex_new(0))",
+    ];
+    for call in cases {
+        let src = format!("func main() -> i32 {{ let _ = {call}\n0 }}");
+        assert_err_code(&src, crate::diagnostic::codes::E0242);
+    }
+
+    // The intended typed surface still checks.
+    check_source(
+        r#"
+func main() -> i32 {
+    let a: AtomicI32 = atomic_i32_new(0)
+    let m: Mutex<i64> = mutex_new(0)
+    let c: Channel<i64> = channel_new()
+    let g: MutexGuard<i64> = mutex_lock(m)
+    atomic_i32_store(a, 1)
+    channel_send(c, 42)
+    mutex_set(g, 43)
+    mutex_unlock(g)
+    0
+}
+"#,
+    )
+    .expect("nominal concurrency handle surface must check");
+}
+
 // U3 (0.35.45): contract-derived arity assertions. The legal arity is read
 // from the single-point `core::builtins::builtin_arity` table (U1) and the
 // checker's per-builtin enforcement must agree: legal arity checks, arity+1

@@ -1074,33 +1074,75 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("Record".into(), vec![]);
                 }
-                // v0.28.20 — concurrency primitives; handle types are uniform i64.
-                "atomic_i32_new"
-                | "atomic_i32_drop"
-                | "atomic_i64_new"
-                | "atomic_i64_drop"
-                | "atomic_bool_new"
-                | "atomic_bool_drop"
-                | "mutex_new"
-                | "mutex_lock"
-                | "actor_mailbox_depth"
-                | "actor_is_faulted"
-                | "actor_is_muted" => {
-                    // §2-#14 (audit 2026-08-05): concurrency handle builtins
-                    // had NO checker arity check — `mutex_new(1,2,3)` passed
-                    // `mimi check` and only trapped as E0800 at run/codegen
-                    // (check/run divergence). These are all single-argument
-                    // handle factories (codegen/VM already enforce ==1); the
-                    // checker must reject the surplus args up front.
+                // v0.28.20 — concurrency primitives.
+                // 0.37 Phase C slice 1: handles/nominal types instead of bare
+                // i64. Runtime representation remains i64, but the checker now
+                // keeps Mutex / Channel / AtomicI32 / AtomicI64 / AtomicBool
+                // distinct and rejects accidental mixing of handle families.
+                "atomic_i32_new" | "atomic_i64_new" | "atomic_bool_new" => {
                     if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("{name} expects 1 argument (a handle factory receives a single tracked value)"),
+                            format!("{name} expects 1 argument (a value for the atomic)"),
                         );
                     } else {
-                        for a in args {
-                            self.infer_expr(a, scopes);
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return match name {
+                        "atomic_i32_new" => Type::Name("AtomicI32".into(), vec![]),
+                        "atomic_i64_new" => Type::Name("AtomicI64".into(), vec![]),
+                        _ => Type::Name("AtomicBool".into(), vec![]),
+                    };
+                }
+                "mutex_new" => {
+                    // §2-#14 (audit 2026-08-05): arity is checked both here
+                    // and by the generic builtin_arity table.
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "mutex_new expects 1 argument (the initial i64 payload)",
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_int(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "mutex_new expects an integer payload, found {}",
+                                    fmt_type(&t)
+                                ),
+                            );
                         }
+                    }
+                    return Type::Name("Mutex".into(), vec![Type::Name("i64".into(), vec![])]);
+                }
+                "mutex_lock" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "mutex_lock expects 1 argument (a mutex handle)",
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if t != Type::Name("Mutex".into(), vec![Type::Name("i64".into(), vec![])]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("mutex_lock expects Mutex<i64>, found {}", fmt_type(&t)),
+                            );
+                        }
+                    }
+                    return Type::Name("MutexGuard".into(), vec![Type::Name("i64".into(), vec![])]);
+                }
+                // Actor handle queries remain raw i64 handles (actor type
+                // identities are separate and already typed by method forms).
+                "actor_mailbox_depth" | "actor_is_faulted" | "actor_is_muted" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 1 argument"),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
                     }
                     return Type::Name("i64".into(), vec![]);
                 }
@@ -1115,7 +1157,12 @@ impl<'a> Checker<'a> {
                             format!("{name} expects 0 arguments (it queries runtime state, not a handle)"),
                         );
                     }
-                    return Type::Name("i64".into(), vec![]);
+                    return match name {
+                        "channel_new" => {
+                            Type::Name("Channel".into(), vec![Type::Name("i64".into(), vec![])])
+                        }
+                        _ => Type::Name("i64".into(), vec![]),
+                    };
                 }
                 "broadcast" => {
                     // broadcast(list, method_name) -> List (Vec of Result / values)
@@ -1190,38 +1237,47 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
                 }
-                "atomic_i32_load"
-                | "atomic_i32_compare_exchange"
-                | "atomic_i32_fetch_add"
-                | "atomic_i64_fetch_add" => {
+                "atomic_i32_load" | "atomic_i32_compare_exchange" | "atomic_i32_fetch_add" => {
                     if args.is_empty() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!("{} expects at least 1 argument", name),
                         );
                     } else {
-                        self.infer_expr(&args[0], scopes);
+                        let handle = self.infer_expr(&args[0], scopes);
+                        if handle != Type::Name("AtomicI32".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects AtomicI32, found {}", name, fmt_type(&handle)),
+                            );
+                        }
                         for a in &args[1..] {
                             self.infer_expr(a, scopes);
                         }
                     }
                     return Type::Name("i32".into(), vec![]);
                 }
-                "atomic_i64_load" | "mutex_get" | "channel_recv" | "channel_try_recv" => {
-                    if args.len() != 1 {
+                "atomic_i64_load" | "atomic_i64_fetch_add" => {
+                    if args.is_empty() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
-                            format!("{} expects 1 argument", name),
+                            format!("{} expects at least 1 argument", name),
                         );
                     } else {
-                        self.infer_expr(&args[0], scopes);
+                        let handle = self.infer_expr(&args[0], scopes);
+                        if handle != Type::Name("AtomicI64".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects AtomicI64, found {}", name, fmt_type(&handle)),
+                            );
+                        }
+                        for a in &args[1..] {
+                            self.infer_expr(a, scopes);
+                        }
                     }
+                    // fetch_add returns i64, not i32 (runtime ABI).
                     return Type::Name("i64".into(), vec![]);
                 }
-                // atomic_bool_load yields the loaded boolean (i1 on the codegen
-                // side), not i64. Previously grouped with the i64 loads, producing
-                // "condition must be bool, found i64" on `if atomic_bool_load(c)`
-                // (0.34.19 CHECKER-GAP E0205).
                 "atomic_bool_load" => {
                     if args.len() != 1 {
                         self.emit_code(
@@ -1229,22 +1285,125 @@ impl<'a> Checker<'a> {
                             format!("{} expects 1 argument", name),
                         );
                     } else {
-                        self.infer_expr(&args[0], scopes);
+                        let handle = self.infer_expr(&args[0], scopes);
+                        if handle != Type::Name("AtomicBool".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects AtomicBool, found {}", name, fmt_type(&handle)),
+                            );
+                        }
                     }
                     return Type::Name("bool".into(), vec![]);
+                }
+                "mutex_get" | "mutex_set" | "mutex_unlock" => {
+                    if args.is_empty() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects at least 1 argument", name),
+                        );
+                    } else {
+                        let guard = self.infer_expr(&args[0], scopes);
+                        let guard_ty =
+                            Type::Name("MutexGuard".into(), vec![Type::Name("i64".into(), vec![])]);
+                        if guard != guard_ty {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "{} expects MutexGuard<i64>, found {}",
+                                    name,
+                                    fmt_type(&guard)
+                                ),
+                            );
+                        }
+                        for a in &args[1..] {
+                            self.infer_expr(a, scopes);
+                        }
+                    }
+                    return if name == "mutex_get" {
+                        Type::Name("i64".into(), vec![])
+                    } else {
+                        Type::Name("unit".into(), vec![])
+                    };
+                }
+                "channel_recv" | "channel_try_recv" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        let handle = self.infer_expr(&args[0], scopes);
+                        let channel_ty =
+                            Type::Name("Channel".into(), vec![Type::Name("i64".into(), vec![])]);
+                        if handle != channel_ty {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "{} expects Channel<i64>, found {}",
+                                    name,
+                                    fmt_type(&handle)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Name("i64".into(), vec![]);
                 }
                 "atomic_i32_store"
                 | "atomic_i64_store"
                 | "atomic_bool_store"
-                | "mutex_set"
-                | "mutex_unlock"
+                | "atomic_i32_drop"
+                | "atomic_i64_drop"
+                | "atomic_bool_drop"
                 | "mutex_drop"
                 | "channel_send"
                 | "channel_drop"
                 | "actor_set_mailbox_depth"
                 | "actor_set_max_children" => {
-                    for a in args {
+                    let handle_ty = if args.is_empty() {
+                        Type::TyErr
+                    } else {
+                        self.infer_expr(&args[0], scopes)
+                    };
+                    for a in &args[1..] {
                         self.infer_expr(a, scopes);
+                    }
+                    // Type-check the handle; value slots are checked by the
+                    // generic inference pass above (and by downstream codegen).
+                    if !args.is_empty() {
+                        let expected = match name {
+                            "atomic_i32_store" | "atomic_i32_drop" => {
+                                Some(Type::Name("AtomicI32".into(), vec![]))
+                            }
+                            "atomic_i64_store" | "atomic_i64_drop" => {
+                                Some(Type::Name("AtomicI64".into(), vec![]))
+                            }
+                            "atomic_bool_store" | "atomic_bool_drop" => {
+                                Some(Type::Name("AtomicBool".into(), vec![]))
+                            }
+                            "mutex_drop" => Some(Type::Name(
+                                "Mutex".into(),
+                                vec![Type::Name("i64".into(), vec![])],
+                            )),
+                            "channel_send" | "channel_drop" => Some(Type::Name(
+                                "Channel".into(),
+                                vec![Type::Name("i64".into(), vec![])],
+                            )),
+                            _ => None,
+                        };
+                        if let Some(expected) = expected {
+                            let actual = handle_ty;
+                            if actual != expected {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "{} expects {}, found {}",
+                                        name,
+                                        fmt_type(&expected),
+                                        fmt_type(&actual)
+                                    ),
+                                );
+                            }
+                        }
                     }
                     return Type::Name("unit".into(), vec![]);
                 }

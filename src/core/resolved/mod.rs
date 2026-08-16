@@ -8360,12 +8360,18 @@ fn build_canonical_function_signatures(
     fn builtin_nominal(name: &str) -> Option<crate::core::NominalTypeId> {
         const BUILTIN_NOMINALS: &[&str] = &[
             "AST",
+            "AtomicBool",
+            "AtomicI32",
+            "AtomicI64",
+            "Channel",
             "ExecResult",
             "Fault",
             "Future",
             "List",
             "Map",
             "MemoryDump",
+            "Mutex",
+            "MutexGuard",
             "Option",
             "PanicPayload",
             "PeerFault",
