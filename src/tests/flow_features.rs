@@ -23,6 +23,33 @@ flow Counter {
     );
 }
 
+/// Regression: explicit `List<string>` local annotations inside Flow
+/// transition bodies must be usable by the resolved typed-body lowering.
+/// Discovered by mimichat-modern dogfood; previously failed with
+/// TOOL-RESOLUTION-001 ("explicit annotation has no checker-canonical type").
+#[test]
+fn flow_transition_local_list_annotation_resolved() {
+    let src = r#"
+flow Chat {
+    state Idle { nick: string }
+    state Ready { nick: string, transcript: List<string> }
+
+    transition join(Idle, room: string) -> Ready {
+        let empty: List<string> = []
+        let mut updated: List<string> = []
+        push(updated, room)
+        return Ready { nick: self.nick, transcript: updated }
+    }
+    transition reset(Ready) -> Ready {
+        let empty: List<string> = []
+        return Ready { nick: self.nick, transcript: empty }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    check_source(src).expect("Flow transition body with List<string> locals must check");
+}
+
 /// State names excluding the auto-injected Fault sink.
 fn user_states(f: &FlowDef) -> Vec<&str> {
     f.states

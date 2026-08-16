@@ -233,7 +233,9 @@ fn lower_resolved_type<'ctx>(
                 "builtin:type:SystemTrace"
                 | "builtin:type:MemoryDump"
                 | "builtin:type:PanicPayload"
-                | "builtin:type:PeerFault" => {
+                | "builtin:type:PeerFault"
+                | "builtin:type:ExecResult"
+                | "builtin:type:StatResult" => {
                     let pointer =
                         BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()));
                     let string_ty = BasicTypeEnum::StructType(context.struct_type(
@@ -251,6 +253,27 @@ fn lower_resolved_type<'ctx>(
                         "builtin:type:PeerFault" => Ok(BasicTypeEnum::StructType(
                             context.struct_type(&[string_ty, string_ty], false),
                         )),
+                        "builtin:type:ExecResult" => {
+                            Ok(BasicTypeEnum::StructType(context.struct_type(
+                                &[
+                                    BasicTypeEnum::IntType(context.i32_type()),
+                                    string_ty,
+                                    string_ty,
+                                ],
+                                false,
+                            )))
+                        }
+                        "builtin:type:StatResult" => {
+                            Ok(BasicTypeEnum::StructType(context.struct_type(
+                                &[
+                                    BasicTypeEnum::IntType(context.i64_type()),
+                                    BasicTypeEnum::IntType(context.i64_type()),
+                                    BasicTypeEnum::IntType(context.bool_type()),
+                                    BasicTypeEnum::IntType(context.bool_type()),
+                                ],
+                                false,
+                            )))
+                        }
                         _ => {
                             let memory_dump_ty = BasicTypeEnum::StructType(
                                 context.struct_type(&[string_ty, i32_ty], false),

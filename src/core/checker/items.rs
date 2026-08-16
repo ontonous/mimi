@@ -5,6 +5,7 @@ use crate::span::Span;
 use std::collections::HashMap;
 
 use super::Checker;
+use crate::core::type_folder::NamedSubstitutionFolder;
 
 impl<'a> Checker<'a> {
     fn item_span(item: &Item) -> Span {
@@ -904,7 +905,20 @@ impl<'a> Checker<'a> {
                     self.generic_scope
                         .truncate(self.generic_scope.len() - generic_names.len());
                     // CK-C1: reject silent overwrite when two impls register the same method key.
-                    let key = format!("{}_{}", impl_def.type_name, method.name);
+                    // Include the trait name/args so the same method name can be
+                    // implemented for multiple trait instantiations (e.g. several
+                    // `impl From<X, AppError> for AppError` conversion overloads).
+                    let key = crate::core::resolved::impl_method_key(
+                        &impl_def.type_name,
+                        &method.name,
+                        &impl_def.trait_name,
+                        &impl_def.trait_args,
+                        &impl_def
+                            .generics
+                            .iter()
+                            .map(|g| g.name.clone())
+                            .collect::<Vec<_>>(),
+                    );
                     if self.funcs.contains_key(&key) {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
@@ -1580,6 +1594,51 @@ impl<'a> Checker<'a> {
                                 .as_ref()
                                 .map(|t| self.resolve_type(t))
                                 .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                            // Substitute the trait's generic parameters (e.g.
+                            // From<T,U>) with this impl's concrete trait args
+                            // (e.g. From<FsError, AppError>) before comparing
+                            // signatures.
+                            let trait_params = if let Some(generic_names) =
+                                self.trait_generics.get(&impl_def.trait_name)
+                            {
+                                if generic_names.len() == impl_def.trait_args.len() {
+                                    let substitutions: HashMap<String, Type> = generic_names
+                                        .iter()
+                                        .zip(impl_def.trait_args.iter())
+                                        .map(|(name, arg)| (name.clone(), self.resolve_type(arg)))
+                                        .collect();
+                                    let substitute = |ty: &Type| {
+                                        let mut folder =
+                                            NamedSubstitutionFolder::new(substitutions.clone());
+                                        crate::core::type_folder::walk_type(ty.clone(), &mut folder)
+                                    };
+                                    trait_params.iter().map(substitute).collect()
+                                } else {
+                                    trait_params.clone()
+                                }
+                            } else {
+                                trait_params.clone()
+                            };
+                            let trait_ret = if let Some(generic_names) =
+                                self.trait_generics.get(&impl_def.trait_name)
+                            {
+                                if generic_names.len() == impl_def.trait_args.len() {
+                                    let substitutions: HashMap<String, Type> = generic_names
+                                        .iter()
+                                        .zip(impl_def.trait_args.iter())
+                                        .map(|(name, arg)| (name.clone(), self.resolve_type(arg)))
+                                        .collect();
+                                    let mut folder = NamedSubstitutionFolder::new(substitutions);
+                                    crate::core::type_folder::walk_type(
+                                        trait_ret.clone(),
+                                        &mut folder,
+                                    )
+                                } else {
+                                    trait_ret.clone()
+                                }
+                            } else {
+                                trait_ret.clone()
+                            };
                             // Trait params usually exclude `self`; compare trailing params.
                             let trait_user = if trait_params.len() == impl_params.len() + 1 {
                                 &trait_params[1..]
@@ -1638,13 +1697,18 @@ impl<'a> Checker<'a> {
                 self.generic_scope
                     .extend(impl_generic_names.iter().cloned());
                 let impl_qualified_name = if self.module_path.is_empty() {
-                    format!("{}:for:{}", impl_def.trait_name, impl_def.type_name)
+                    crate::core::resolved::impl_qualified_name(
+                        "",
+                        &impl_def.trait_name,
+                        &impl_def.trait_args,
+                        &impl_def.type_name,
+                    )
                 } else {
-                    format!(
-                        "{}::{}:for:{}",
-                        self.module_path.join("::"),
-                        impl_def.trait_name,
-                        impl_def.type_name
+                    crate::core::resolved::impl_qualified_name(
+                        &self.module_path.join("::"),
+                        &impl_def.trait_name,
+                        &impl_def.trait_args,
+                        &impl_def.type_name,
                     )
                 };
                 for method in &impl_def.methods {

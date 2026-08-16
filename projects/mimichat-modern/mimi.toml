@@ -1,0 +1,7 @@
+[package]
+name = "mimichat-modern"
+version = "0.1.0"
+description = "Modern MimiChat dogfood: Flow + Actor + Channel + large payload"
+authors = ["ontonous"]
+license = "Apache-2.0"
+entry = "src/main.mimi"

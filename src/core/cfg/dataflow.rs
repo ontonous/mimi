@@ -384,14 +384,16 @@ fn validate_return_resources(
                 .unwrap_or_else(|| resource.0 .0.clone());
             match fact.availability {
                 Availability::Available => {
-                    errors.push(
+                    errors.push(add_introduction_note(
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0256,
                             format!("linear resource '{}' must be consumed {}", name, path_noun),
                             source.span,
                         )
                         .with_help("move, return, transfer, or drop the resource before returning"),
-                    );
+                        fact,
+                        &name,
+                    ));
                 }
                 // Audit 2026-08-05 (wave-1 fix 2): MaybeConsumed at a return
                 // terminator is an obligation — the resource is not provably
@@ -399,7 +401,7 @@ fn validate_return_resources(
                 // skipped every non-Available fact, letting conditionally
                 // moved caps leak. (Droppable resources returned above.)
                 Availability::MaybeConsumed => {
-                    errors.push(
+                    errors.push(add_introduction_note(
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0256,
                             format!(
@@ -411,7 +413,9 @@ fn validate_return_resources(
                         .with_help(
                             "move, return, transfer, or drop the resource on every reachable path",
                         ),
-                    );
+                        fact,
+                        &name,
+                    ));
                 }
                 Availability::Consumed => {}
             }
@@ -459,6 +463,7 @@ fn transfer(
                 ResourceFact {
                     availability: Availability::Available,
                     owner: action.target.clone().or_else(|| action.source.clone()),
+                    introduced_span: Some(action.span),
                 },
             );
         }
@@ -478,19 +483,25 @@ fn transfer(
                 .or_insert(ResourceFact {
                     availability: Availability::Available,
                     owner: action.source.clone(),
+                    introduced_span: Some(action.span),
                 });
+            if fact.introduced_span.is_none() {
+                fact.introduced_span = Some(action.span);
+            }
             if fact.availability != Availability::Available {
-                errors.push(Diagnostic::error_code(
-                    crate::diagnostic::codes::E0304,
-                    format!(
-                        "resource '{}' is moved after it was consumed",
-                        action
-                            .source
-                            .as_ref()
-                            .map(Place::display)
-                            .unwrap_or_else(|| action.resource.0 .0.clone())
+                let moved_name = action
+                    .source
+                    .as_ref()
+                    .map(Place::display)
+                    .unwrap_or_else(|| action.resource.0 .0.clone());
+                errors.push(add_introduction_note(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0304,
+                        format!("resource '{}' is moved after it was consumed", moved_name),
+                        action.span,
                     ),
-                    action.span,
+                    fact,
+                    &moved_name,
                 ));
             }
             if let Some(target) = &action.target {
@@ -516,19 +527,28 @@ fn transfer(
                 .or_insert(ResourceFact {
                     availability: Availability::Available,
                     owner: action.source.clone(),
+                    introduced_span: Some(action.span),
                 });
+            if fact.introduced_span.is_none() {
+                fact.introduced_span = Some(action.span);
+            }
             if fact.availability != Availability::Available {
-                errors.push(Diagnostic::error_code(
-                    crate::diagnostic::codes::E0304,
-                    format!(
-                        "resource '{}' is consumed more than once on this CFG path",
-                        action
-                            .source
-                            .as_ref()
-                            .map(Place::display)
-                            .unwrap_or_else(|| action.resource.0 .0.clone())
+                let consumed_name = action
+                    .source
+                    .as_ref()
+                    .map(Place::display)
+                    .unwrap_or_else(|| action.resource.0 .0.clone());
+                errors.push(add_introduction_note(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0304,
+                        format!(
+                            "resource '{}' is consumed more than once on this CFG path",
+                            consumed_name
+                        ),
+                        action.span,
                     ),
-                    action.span,
+                    fact,
+                    &consumed_name,
                 ));
             }
             fact.availability = Availability::Consumed;
@@ -597,6 +617,14 @@ fn transfer(
     }
 }
 
+fn add_introduction_note(diag: Diagnostic, fact: &ResourceFact, name: &str) -> Diagnostic {
+    if let Some(span) = fact.introduced_span {
+        diag.with_note(format!("resource '{name}' introduced here"), span)
+    } else {
+        diag
+    }
+}
+
 /// Audit 2026-08-05 (wave-2, H-5): the action's source place must be the
 /// current owner of the resource fact. Moves with a target rewrite the owner;
 /// any later action addressing the resource through a STALE place name is a
@@ -618,7 +646,7 @@ fn validate_action_owner(
     if owner.base == source.base {
         return;
     }
-    errors.push(
+    errors.push(add_introduction_note(
         Diagnostic::error_code(
             crate::diagnostic::codes::E0304,
             format!(
@@ -629,7 +657,9 @@ fn validate_action_owner(
             action.span,
         )
         .with_help("use the binding that currently owns the resource"),
-    );
+        fact,
+        &source.display(),
+    ));
 }
 
 fn reject_read_conflicts(
@@ -734,6 +764,7 @@ fn join_predecessors(
                     ResourceFact {
                         availability: Availability::MaybeConsumed,
                         owner: (left.owner == right.owner).then_some(left.owner).flatten(),
+                        introduced_span: left.introduced_span.or(right.introduced_span),
                     }
                 }
                 (Some(fact), None) | (None, Some(fact)) => {
@@ -763,14 +794,17 @@ fn join_predecessors(
                         Availability::Available => ResourceFact {
                             availability: Availability::Available,
                             owner: fact.owner,
+                            introduced_span: fact.introduced_span,
                         },
                         Availability::Consumed => ResourceFact {
                             availability: Availability::Consumed,
                             owner: None,
+                            introduced_span: fact.introduced_span,
                         },
                         Availability::MaybeConsumed => ResourceFact {
                             availability: Availability::MaybeConsumed,
                             owner: fact.owner,
+                            introduced_span: fact.introduced_span,
                         },
                     }
                 }

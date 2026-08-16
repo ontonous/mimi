@@ -1334,6 +1334,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
                 let value = self.emit_expr(initializer, frame)?;
                 self.bind_pattern(body, pattern, value, frame)?;
+                // 0.37.x: transfer string-temp ownership into the local slot for
+                // simple bindings too. Without this, `let ch = str_char_at(...)`
+                // inside a loop left the heap allocation in the per-iteration
+                // scope and `free_heap_allocs` freed it before the next
+                // statement could safely use the local.
+                let is_string_temp_bind = matches!(
+                    initializer.kind,
+                    ResolvedExprKind::Binary {
+                        op: ResolvedBinaryOp::Add,
+                        ..
+                    } | ResolvedExprKind::FString(_)
+                        | ResolvedExprKind::Call(_)
+                );
+                if is_string_temp_bind {
+                    if let ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    } = &pattern.kind
+                    {
+                        if let Some(entry) = frame.locals.get(local) {
+                            if let BasicTypeEnum::StructType(st) = entry.llvm_type {
+                                let fields = st.get_field_types();
+                                let is_plain_string = fields.len() == 2
+                                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                                    && matches!(fields[1], BasicTypeEnum::IntType(_));
+                                if is_plain_string && self.generator.pop_last_heap_ptr().is_some() {
+                                    self.generator.register_heap_slot(entry.storage, st, 0);
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(None)
             }
             ResolvedStmtKind::Assign {
@@ -1341,6 +1373,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 value,
                 conversion,
             } => {
+                let rhs_expr = value;
                 let value = self.emit_expr(value, frame)?;
                 // SD-7 (0.34.34): narrowing assign into an i32 variable traps
                 // out of range (VM assign-guard parity). Range-check BEFORE
@@ -1361,7 +1394,56 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let value = self.apply_conversion(value, conversion)?;
                 // Assignment targets an index WRITE (negative indices trap,
                 // VM ListSet parity) — see emit_checked_list_index (H-15).
+                let target_is_root_local = target.projections.is_empty();
                 let target = self.root_place(frame, target, false)?;
+                // 0.37.x (dogfood: build string by `w = w + ch` in loops):
+                // resolved string-temp assignments must transfer ownership out
+                // of the per-iteration heap scope. The old code left the concat
+                // result in `heap_allocs`, so `free_heap_allocs` at the end of
+                // each loop body freed the string that was just stored into the
+                // variable. Register the variable slot in the function root
+                // scope instead, mirroring the legacy emitter's
+                // `compile_assign_stmt` string-temp transfer.
+                let is_string_temp_assign = matches!(
+                    rhs_expr.kind,
+                    ResolvedExprKind::Binary {
+                        op: ResolvedBinaryOp::Add,
+                        ..
+                    } | ResolvedExprKind::FString(_)
+                        | ResolvedExprKind::Call(_)
+                );
+                if target_is_root_local {
+                    if let BasicTypeEnum::StructType(st) = target.llvm_type {
+                        let fields = st.get_field_types();
+                        let is_plain_string = fields.len() == 2
+                            && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                            && matches!(fields[1], BasicTypeEnum::IntType(_));
+                        if is_plain_string {
+                            if is_string_temp_assign {
+                                // Only claim when the expression really registered a
+                                // heap allocation. User string-returning calls may
+                                // already have claimed their own result; literals
+                                // and other non-heap strings must not be popped.
+                                if self.generator.pop_last_heap_ptr().is_some() {
+                                    self.generator
+                                        .register_heap_slot_root(target.storage, st, 0);
+                                }
+                            } else if matches!(rhs_expr.kind, ResolvedExprKind::Load(_)) {
+                                // A string variable assigned from another string
+                                // variable must not alias a per-iteration heap slot
+                                // (e.g. `w = ch` inside a loop, where `ch` is freed
+                                // at the end of the iteration). Heap-copy the data
+                                // so the target owns an independent buffer.
+                                let value = self.generator.heap_copy_string_value(value)?;
+                                self.generator
+                                    .register_heap_slot_root(target.storage, st, 0);
+                                let value = self.coerce_to(value, target.llvm_type)?;
+                                self.generator.build_store(target.storage, value)?;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
                 let value = self.coerce_to(value, target.llvm_type)?;
                 self.generator.build_store(target.storage, value)?;
                 Ok(None)
@@ -3031,7 +3113,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ResolvedCallee::ProtocolMethod { ref method, .. } => {
                         // MethodId format: "function:{Trait}:for:{Type}::{method}:{hash}"
                         let method_str = method.as_str();
-                        let symbol = method_str
+                        let (impl_type, method_name) = method_str
                             .strip_prefix("function:")
                             .and_then(|s: &str| s.split_once(":for:"))
                             .and_then(|(_, rest): (&str, &str)| {
@@ -3041,7 +3123,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                             .rsplit_once(':')
                                             .map(|(m, _)| m)
                                             .unwrap_or(method_hash);
-                                        format!("{}_{}", ty, method_name)
+                                        (ty.to_string(), method_name.to_string())
                                     })
                             })
                             .ok_or_else(|| {
@@ -3049,6 +3131,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "cannot parse ProtocolMethod MethodId '{method_str}'"
                                 ))
                             })?;
+                        // Builtin SetExt methods must call the runtime directly.
+                        // The resolved lowering re-dispatches `self.size()` inside
+                        // the synthetic `Set_size` impl body back through
+                        // ProtocolMethod, producing self-recursive trampolines
+                        // (`call Set_size -> Set_size -> ...`). The legacy emitter
+                        // already gives builtin Set semantics precedence; mirror
+                        // that here before looking up the generic symbol.
+                        if impl_type == "Set" || impl_type.starts_with("Set<") {
+                            if let Some(value) =
+                                self.emit_builtin_set_protocol_method(&method_name, &arguments)?
+                            {
+                                return Ok(value);
+                            }
+                        }
+                        let symbol = format!("{}_{}", impl_type, method_name);
                         let callee =
                             self.generator.module.get_function(&symbol).ok_or_else(|| {
                                 CompileError::LlvmError(format!(
@@ -3742,6 +3839,156 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator.build_string_struct(buf, offset)
     }
 
+    /// Emit a builtin `SetExt` method directly against the runtime set API.
+    ///
+    /// The resolved lowering represents each trait impl method as a synthetic
+    /// function (`Set_size`, `Set_insert`, ...). Its body is the original
+    /// `self.method(...)` call, which would re-enter the same ProtocolMethod
+    /// symbol and create a self-recursive trampoline. Builtin Set operations
+    /// mutate/pass the handle in-place, so call the runtime helpers directly
+    /// and coerce to the small LLVM types used by the trait signatures.
+    fn emit_builtin_set_protocol_method(
+        &mut self,
+        method_name: &str,
+        arguments: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        if arguments.is_empty() {
+            return Ok(None);
+        }
+        let i64_ty = self.generator.context.i64_type();
+        let handle = match arguments[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            BasicMetadataValueEnum::PointerValue(pv) => self
+                .generator
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "set_self_handle")
+                .map_err(|e| CompileError::LlvmError(format!("set ptrtoint: {e}")))?,
+            _ => return Ok(None),
+        };
+
+        match method_name {
+            "size" | "len" => {
+                let func = self.generator.get_runtime_fn("mimi_set_size")?;
+                let result = self
+                    .generator
+                    .build_call(
+                        func,
+                        &[BasicMetadataValueEnum::IntValue(handle)],
+                        "set_size",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("mimi_set_size returned void".into()))?
+                    .into_int_value();
+                let i32_ty = self.generator.context.i32_type();
+                let result_i32 = self
+                    .generator
+                    .builder
+                    .build_int_truncate(result, i32_ty, "set_size_i32")
+                    .map_err(|e| CompileError::LlvmError(format!("set_size trunc: {e}")))?;
+                Ok(Some(result_i32.into()))
+            }
+            "is_empty" => {
+                let func = self.generator.get_runtime_fn("mimi_set_size")?;
+                let result = self
+                    .generator
+                    .build_call(
+                        func,
+                        &[BasicMetadataValueEnum::IntValue(handle)],
+                        "set_size",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("mimi_set_size returned void".into()))?
+                    .into_int_value();
+                let zero = i64_ty.const_zero();
+                let is_empty = self
+                    .generator
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, result, zero, "set_is_empty")
+                    .map_err(|e| CompileError::LlvmError(format!("set is_empty cmp: {e}")))?;
+                Ok(Some(is_empty.into()))
+            }
+            "contains" | "insert" | "remove" => {
+                if arguments.len() < 2 {
+                    return Err(CompileError::Generic(
+                        "set method expects a value argument".into(),
+                    ));
+                }
+                let value = match arguments[1] {
+                    BasicMetadataValueEnum::IntValue(iv) => iv,
+                    BasicMetadataValueEnum::PointerValue(pv) => self
+                        .generator
+                        .builder
+                        .build_ptr_to_int(pv, i64_ty, "set_value_handle")
+                        .map_err(|e| CompileError::LlvmError(format!("set value ptrtoint: {e}")))?,
+                    _ => i64_ty.const_zero(),
+                };
+                let runtime = match method_name {
+                    "contains" => self.generator.get_runtime_fn("mimi_set_contains")?,
+                    "insert" => self.generator.get_runtime_fn("mimi_set_insert")?,
+                    _ => self.generator.get_runtime_fn("mimi_set_remove")?,
+                };
+                let call_name = match method_name {
+                    "contains" => "set_contains",
+                    "insert" => "set_insert",
+                    _ => "set_remove",
+                };
+                let result = self
+                    .generator
+                    .build_call(
+                        runtime,
+                        &[
+                            BasicMetadataValueEnum::IntValue(handle),
+                            BasicMetadataValueEnum::IntValue(value),
+                        ],
+                        call_name,
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError(format!("{call_name} returned void")))?;
+                if method_name == "contains" {
+                    let one = i64_ty.const_int(1, false);
+                    let as_bool = self
+                        .generator
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            result.into_int_value(),
+                            one,
+                            "set_contains_bool",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("set contains cmp: {e}")))?;
+                    Ok(Some(as_bool.into()))
+                } else {
+                    Ok(Some(result))
+                }
+            }
+            "to_list" => {
+                let out_len = self.generator.build_alloca(i64_ty, "set_to_list_len")?;
+                let func = self.generator.get_runtime_fn("mimi_set_to_list")?;
+                let result = self
+                    .generator
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::IntValue(handle),
+                            BasicMetadataValueEnum::PointerValue(out_len),
+                        ],
+                        "set_to_list",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("mimi_set_to_list returned void".into())
+                    })?
+                    .into_pointer_value();
+                let len = self
+                    .generator
+                    .build_load(i64_ty, out_len, "set_to_list_len_val")?
+                    .into_int_value();
+                Ok(Some(self.generator.build_list_struct(len, result)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// ABI bridge: if the expected result type is String ({ptr, i64}) but the
     /// builtin returned a raw pointer, wrap it in a string struct.
     fn wrap_builtin_string_result(
@@ -4188,8 +4435,51 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // Single field: bitcast i64 to the field type.
                                 let (_field_id, sub_pattern) = &fields[0];
                                 let field_llvm_ty = self.lower_type(&sub_pattern.ty)?;
-                                let decoded =
-                                    self.convert_list_elem_i64(raw_payload, field_llvm_ty)?;
+                                // Custom enum string payloads follow the compact
+                                // enum packing convention: the i64 is
+                                // ptrtoint(heap_box{ptr,len}), not a raw C
+                                // string pointer as in list data.
+                                let decoded = match field_llvm_ty {
+                                    BasicTypeEnum::StructType(sty) => {
+                                        let fields = sty.get_field_types();
+                                        let is_string_shape = fields.len() == 2
+                                            && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                                            && matches!(&fields[1], BasicTypeEnum::IntType(bit)
+                                                if bit.get_bit_width() == 64);
+                                        if is_string_shape {
+                                            let ptr = self
+                                                .generator
+                                                .builder
+                                                .build_int_to_ptr(
+                                                    raw_payload,
+                                                    self.generator
+                                                        .context
+                                                        .ptr_type(inkwell::AddressSpace::default()),
+                                                    "enum_str_payload_ptr",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "enum string inttoptr: {e}"
+                                                    ))
+                                                })?;
+                                            self.generator
+                                                .builder
+                                                .build_load(
+                                                    BasicTypeEnum::StructType(sty),
+                                                    ptr,
+                                                    "enum_str_payload_struct",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "enum string payload load: {e}"
+                                                    ))
+                                                })?
+                                        } else {
+                                            self.convert_list_elem_i64(raw_payload, field_llvm_ty)?
+                                        }
+                                    }
+                                    _ => self.convert_list_elem_i64(raw_payload, field_llvm_ty)?,
+                                };
                                 self.bind_pattern(callable_body, sub_pattern, decoded, frame)?;
                             } else {
                                 // Multi-field: inttoptr + load heap struct.

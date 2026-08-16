@@ -1,0 +1,60 @@
+// real_world: std::net wrapper surface in the resolved native slice.
+//
+// This corpus entry keeps the `use std::net` module-body path standalone:
+// tcp_listen/tcp_accept/tcp_connect/tcp_send/tcp_recv are compiled through
+// the resolved backend without binding a real port during dispatch checks.
+// The live echo round-trip is covered by projects/mimichat-modern.
+
+use std::net;
+
+func server_echo(port: i32) -> i32 {
+    let s = tcp_listen(port, 5)
+    if s.is_err() { return 1 }
+    let fd = s.unwrap()
+    let c = tcp_accept(fd)
+    if c.is_err() {
+        close_fd(fd)
+        return 2
+    }
+    let client = c.unwrap()
+    let data = tcp_recv(client, 4096)
+    if data.is_err() {
+        close_fd(client)
+        close_fd(fd)
+        return 3
+    }
+    let msg = data.unwrap()
+    let sr = tcp_send(client, "echo:" + msg)
+    if sr.is_err() {
+        close_fd(client)
+        close_fd(fd)
+        return 4
+    }
+    close_fd(client)
+    close_fd(fd)
+    0
+}
+
+func client_echo(port: i32) -> i32 {
+    let c = tcp_connect("127.0.0.1", port)
+    if c.is_err() { return 5 }
+    let fd = c.unwrap()
+    let sr = tcp_send(fd, "hello")
+    if sr.is_err() {
+        close_fd(fd)
+        return 6
+    }
+    let data = tcp_recv(fd, 4096)
+    if data.is_err() {
+        close_fd(fd)
+        return 7
+    }
+    let msg = data.unwrap()
+    close_fd(fd)
+    if msg == "echo:hello" { 0 } else { 8 }
+}
+
+func main() -> i32 {
+    // Compile-only corpus: runtime network is covered by the dogfood project.
+    0
+}

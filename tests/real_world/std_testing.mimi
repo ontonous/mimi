@@ -1,0 +1,14 @@
+// real_world: std::testing assertions in the resolved native slice.
+
+use std::testing;
+
+func main() -> i32 {
+    assert_true(true)
+    assert_false(false)
+    assert_eq_int(1, 1)
+    assert_ne_int(1, 2)
+    assert_eq_string("a", "a")
+    assert_eq_bool(true, true)
+    assert_approx_eq_float(1.0, 1.0)
+    0
+}

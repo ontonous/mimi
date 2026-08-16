@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use crate::ast::{
     AstNodeMeta, AstOrigin, Block, Expr, File, Item, Lit, Pattern, PatternKind, Stmt,
 };
-use crate::core::resolved::{impl_method_owner, nested_function_owner, NodeIdBuilder};
+use crate::core::resolved::{
+    impl_method_owner, impl_qualified_name, nested_function_owner, NodeIdBuilder,
+};
 use crate::core::{NodeId, Origin};
 use crate::diagnostic::Diagnostic;
 use crate::span::SourceRegistry;
@@ -944,9 +946,11 @@ fn collect_items(
                 }
             }
             Item::Impl(impl_def) => {
-                let qualified = qualify(
+                let qualified = impl_qualified_name(
                     module,
-                    &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+                    &impl_def.trait_name,
+                    &impl_def.trait_args,
+                    &impl_def.type_name,
                 );
                 for method in &impl_def.methods {
                     let owner = impl_method_owner(&qualified, method);

@@ -1,0 +1,26 @@
+// real_world: std::text wrapper surface in the resolved native slice.
+//
+// This corpus also locks the camel_to_snake native fix: uppercase word breaks
+// use a fresh `"" + cts_ch` heap string instead of aliasing the loop-local
+// str_char_at temporary.
+
+use std::text;
+
+func main() -> i32 {
+    let b = is_blank(" ")
+    let n = is_numeric("42")
+    let sl = slugify("Hello World")
+    let ind = indent_text("a\nb", 2)
+    let wt = wrap_text("a b c", 2)
+    let cs = camel_to_snake("FooBar")
+    let cs2 = camel_to_snake("HelloWorld")
+
+    if !b { return 1 }
+    if !n { return 2 }
+    if sl != "hello-world" { return 3 }
+    if ind != "  a\n  b" { return 4 }
+    if len(wt) != 3 { return 5 }
+    if cs != "foo_bar" { return 6 }
+    if cs2 != "hello_world" { return 7 }
+    0
+}

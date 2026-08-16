@@ -801,7 +801,7 @@ impl<'a> Interpreter<'a> {
         trait_name: &str,
         type_name: &str,
     ) -> Option<Vec<String>> {
-        let key = format!("{}:for:{}", trait_name, type_name);
+        let key = crate::core::resolved::impl_qualified_key(trait_name, &[], type_name);
         self.resolved_impls
             .as_ref()
             .and_then(|map| map.get(&key).cloned())

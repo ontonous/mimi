@@ -51,7 +51,7 @@ impl TextExt for string {
             let cts_ch = str_char_at(self, cts_i)
             if str_to_upper(cts_ch) == cts_ch && cts_ch != str_to_lower(cts_ch) {
                 if len(cts_word) > 0 { push(cts_res, str_to_lower(cts_word)) }
-                cts_word = cts_ch
+                cts_word = "" + cts_ch
             } else {
                 cts_word = cts_word + cts_ch
             }
@@ -125,7 +125,7 @@ pub func camel_to_snake(s: string) -> string {
         let cts_ch = str_char_at(s, cts_i)
         if str_to_upper(cts_ch) == cts_ch && cts_ch != str_to_lower(cts_ch) {
             if len(cts_word) > 0 { push(cts_res, str_to_lower(cts_word)) }
-            cts_word = cts_ch
+            cts_word = "" + cts_ch
         } else {
             cts_word = cts_word + cts_ch
         }

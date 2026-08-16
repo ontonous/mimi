@@ -1,0 +1,33 @@
+// real_world: std::iter eager combinator surface in the resolved slice.
+//
+// The iter module is experimental but public; this corpus keeps its module
+// bodies inside the resolved native slice and verifies the full surface at
+// compile time. Runtime outputs are checked by a small main so the file can
+// also be executed as a native binary when desired.
+
+use std::iter;
+
+func main() -> i32 {
+    let a = ["3", "4", "5"]
+    let b = iter_range(0, 3)
+    let z = iter_zip(a, b)
+    let e = iter_enumerate(a)
+    let t = iter_take(a, 2)
+    let d = iter_drop(a, 1)
+    let c = iter_chain(a, b)
+    let r = iter_repeat("x", 3)
+    let rev = iter_reversed(a)
+    let cnt = iter_count(a, "4")
+    let uniq = iter_unique(["1", "1", "2"])
+
+    if len(z) != 3 { return 1 }
+    if len(e) != 3 { return 2 }
+    if len(t) != 2 { return 3 }
+    if len(d) != 2 { return 4 }
+    if len(c) != 6 { return 5 }
+    if len(r) != 3 { return 6 }
+    if len(rev) != 3 { return 7 }
+    if cnt != 1 { return 8 }
+    if len(uniq) != 2 { return 9 }
+    0
+}

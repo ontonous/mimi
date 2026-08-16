@@ -1375,7 +1375,18 @@ fn item_name(item: &Item) -> Option<String> {
         // std/strings `impl Str for string` + std/fs `impl FsOps for string`),
         // so `use std::strings` + `use std::fs` failed with "duplicate item
         // 'string'".
-        Item::Impl(i) => Some(format!("impl:{}:{}", i.trait_name, i.type_name)),
+        Item::Impl(i) => {
+            let trait_args = i
+                .trait_args
+                .iter()
+                .map(crate::core::fmt_type)
+                .collect::<Vec<_>>()
+                .join(",");
+            Some(format!(
+                "impl:{}:{}:{}",
+                i.trait_name, trait_args, i.type_name
+            ))
+        }
         Item::ExternBlock(_) => None,
         Item::Const { name, .. } => Some(name.clone()),
         Item::Flow(f) => Some(f.name.clone()),
