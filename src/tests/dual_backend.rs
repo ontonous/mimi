@@ -15142,7 +15142,7 @@ fn dual_mutex_cross_thread_no_lost_updates() {
     // mutual exclusion the final count would be less than 2000.
     dual_assert!(
         r#"
-        func increment(m: i64, n: i32) -> i32 {
+        func increment(m: Mutex<i64>, n: i32) -> i32 {
             let mut i = 0
             while i < n {
                 let g = mutex_lock(m)
@@ -15182,12 +15182,12 @@ fn dual_channel_cross_thread_send_recv_no_deadlock() {
     // so the sender could never acquire it and the program deadlocked.
     dual_assert!(
         r#"
-        func sender(ch: i64) -> i32 {
+        func sender(ch: Channel<i64>) -> i32 {
             channel_send(ch, 42)
             0
         }
 
-        func receiver(ch: i64) -> i32 {
+        func receiver(ch: Channel<i64>) -> i32 {
             let v = channel_recv(ch)
             println(v)
             0

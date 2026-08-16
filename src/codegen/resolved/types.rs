@@ -200,6 +200,15 @@ fn lower_resolved_type<'ctx>(
                 _v if item.as_str().ends_with("SessionChan") => {
                     Ok(BasicTypeEnum::IntType(context.i64_type()))
                 }
+                // 0.37 Phase C slice 1: concurrency primitive handles are
+                // nominal in the checker but remain opaque i64 handles at the
+                // LLVM/runtime layer (SD-2).
+                "builtin:type:AtomicI32"
+                | "builtin:type:AtomicI64"
+                | "builtin:type:AtomicBool"
+                | "builtin:type:Channel"
+                | "builtin:type:Mutex"
+                | "builtin:type:MutexGuard" => Ok(BasicTypeEnum::IntType(context.i64_type())),
                 // Future<T> is an opaque i8* handle in both legacy and
                 // resolved ABIs; keeping it i64 broke resolved `spawn`/`await`
                 // main functions when binding the future to a local.

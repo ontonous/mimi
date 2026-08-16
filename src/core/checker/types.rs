@@ -182,6 +182,13 @@ impl<'a> Checker<'a> {
             // v0.34.10a (golden §7.6): quote!/ast_eval produce/consume AST —
             // registered so `let a: AST = quote!{...}` type-checks.
             "AST".into(),
+            // 0.37 Phase C slice 1: concurrency primitive nominal handles.
+            "AtomicI32".into(),
+            "AtomicI64".into(),
+            "AtomicBool".into(),
+            "Channel".into(),
+            "Mutex".into(),
+            "MutexGuard".into(),
         ]
     }
 

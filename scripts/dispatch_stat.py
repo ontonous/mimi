@@ -11,7 +11,7 @@
   scripts/dispatch_stat.py sample [--limit N] [--program FILE] [--output FILE]
                                       # 跑 MIMI_VERBOSE=1，解析高频 resolved-skips
 
-基线语料 = demos/*.mimi + examples/*.mimi + tests/real_world/*.mimi。
+基线语料 = demos/*.mimi + examples/*.mimi + tests/real_world/*.mimi + projects/mimi-taskq|mimi-ledger/src/*.mimi。
 每个程序以 MIMI_STAT=1 独立 MIMI_STAT_OUT 目录编译，读取 DispatchStats JSON，
 以源文件名关联。
 
@@ -86,9 +86,15 @@ def classify_reason(reason: str) -> str:
 
 
 def corpus() -> list[Path]:
-    """基线语料：demos + examples + tests/real_world 的 .mimi 文件。"""
+    """基线语料：demos + examples + tests/real_world + 0.1.7 dogfood 工程。"""
     files: list[Path] = []
-    for d in (ROOT / "demos", ROOT / "examples", ROOT / "tests" / "real_world"):
+    for d in (
+        ROOT / "demos",
+        ROOT / "examples",
+        ROOT / "tests" / "real_world",
+        ROOT / "projects" / "mimi-taskq" / "src",
+        ROOT / "projects" / "mimi-ledger" / "src",
+    ):
         if d.is_dir():
             files.extend(sorted(d.rglob("*.mimi")))
     return files
@@ -219,7 +225,7 @@ def build_baseline_doc(results: dict) -> dict:
         }
     return {
         "baseline_version": "0.37.0",
-        "corpus": "demos/ + examples/ + tests/real_world/",
+        "corpus": "demos/ + examples/ + tests/real_world/ + 0.1.7 dogfood projects/",
         "aggregate": {
             "total_functions": total_fn,
             "eligible": total_eligible,

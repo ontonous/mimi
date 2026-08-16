@@ -8,6 +8,23 @@
 > `devdocs/v0.37/README.md`，高压规范见 `devdocs/v0.37/high-stress-testing-spec.md`，
 > 可用性宣言见 `devdocs/v0.37/usability-dx-manifesto.md`。
 
+### 0.37.50 — 并发原语名义类型化（Phase C 切片 1）+ dogfood dispatch 语料接入
+
+- 并发原语从裸 `i64` handle 升级为名义类型（运行时表示仍为 i64）：
+  - `AtomicI32` / `AtomicI64` / `AtomicBool` / `Mutex<T>` / `MutexGuard<T>` / `Channel<T>`
+  - 工厂/操作 builtin 在 checker 侧返回并消费对应名义类型
+  - 新增 handle family 交叉使用检查：`atomic_i32_load(channel_new())`、
+    `mutex_get(mutex_new(0))` 等混用现在于 `mimi check` 阶段报 E0242
+  - `AtomicI64` 与 `Channel` 的 i64 数据面保持不变；MutexGuard 的线性深整合
+    仍按计划留到 0.1.8（Phase C 范围铁律）
+  - resolved native slice 将新名义类型降为 opaque i64，双后端等价保持
+- `scripts/dispatch_stat.py` 语料纳入两个 0.1.7 dogfood 工程：
+  - `projects/mimi-taskq/src/main.mimi`
+  - `projects/mimi-ledger/src/main.mimi`
+  - `make test-dispatch-zero` 全语料 130 条，聚合 fallback_rate=0.0000
+- 新增 checker 正/负测试：合法名义类型表面可编译，跨 handle family 混用拒绝
+- 全量 `dual_` 999 项通过，`make test-dogfood` 通过
+
 ### 0.37.49 — 特性设计评估复盘落档 + 0.1.7 排期增补 + 0.1.8 规划锚定
 
 - 新增 `devdocs/v0.37/feature-design-review-0.37.md`：三证据流特性设计评估复盘
