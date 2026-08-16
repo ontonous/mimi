@@ -1,3 +1,5 @@
+use std::json;
+
 type Config { name: string, count: i64 }
 type JsonRecord { name: string, value: i32, flag: bool }
 

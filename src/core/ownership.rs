@@ -157,6 +157,11 @@ pub enum Availability {
 pub struct ResourceFact {
     pub availability: Availability,
     pub owner: Option<Place>,
+    /// Span where this resource obligation was introduced (e.g. the `let`
+    /// binding that created the linear capability). Used by E0256/E0304 to
+    /// point back to the resource origin, satisfying the DX manifest's
+    /// "resource introduced here" requirement.
+    pub introduced_span: Option<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

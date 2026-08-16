@@ -154,11 +154,11 @@ pub func json_error_to_string(e: JsonError) -> string {
 // collection_error_to_string: Convert CollectionError to a human-readable string.
 pub func collection_error_to_string(e: CollectionError) -> string {
     match e {
-         IndexOutOfBounds(idx, len) => "index out of bounds: " + int_to_string(idx) + " (length " + int_to_string(len) + ")",
+         IndexOutOfBounds(idx, len) => "index out of bounds: " + to_string(idx) + " (length " + to_string(len) + ")",
          KeyNotFound(key) => "key not found: " + key,
          EmptyCollection => "operation on empty collection",
          DuplicateKey(key) => "duplicate key: " + key,
-         InvalidSize(size) => "invalid size: " + int_to_string(size),
+         InvalidSize(size) => "invalid size: " + to_string(size),
     }
 }
 

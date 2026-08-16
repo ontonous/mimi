@@ -1,0 +1,16 @@
+// real_world: std::array wrapper surface in the resolved native slice.
+
+use std::array;
+
+func main() -> i32 {
+    let a = array_new(3, "x")
+    let a2 = array_set(a, 0, "y")
+    if array_len(a2) != 3 { return 1 }
+    if array_get(a2, 0) != "y" { return 2 }
+    let rev = array_reverse(["a", "b"])
+    if array_get(rev, 0) != "b" { return 3 }
+    let conc = array_concat(["a"], ["b"])
+    if len(conc) != 2 { return 4 }
+    if !array_contains(conc, "b") { return 5 }
+    0
+}

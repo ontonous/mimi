@@ -16,9 +16,9 @@ use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Param, Pattern, PatternKind, Stmt, UnOp,
 };
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, impl_method_owner, interpolation_role, map_entry_role,
-    match_arm_role, nested_function_owner, pattern_kind, pattern_sibling_role, stable_id_fragment,
-    stmt_anchor, stmt_kind, stmt_sibling_role, type_kind, NodeIdBuilder,
+    expr_kind, expr_sibling_role, impl_method_owner, impl_qualified_name, interpolation_role,
+    map_entry_role, match_arm_role, nested_function_owner, pattern_kind, pattern_sibling_role,
+    stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role, type_kind, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
@@ -452,11 +452,18 @@ fn collect_function_syntax<'a>(
             }
             Item::Impl(impl_def) => {
                 let qualified = if module.is_empty() {
-                    format!("{}:for:{}", impl_def.trait_name, impl_def.type_name)
+                    impl_qualified_name(
+                        module,
+                        &impl_def.trait_name,
+                        &impl_def.trait_args,
+                        &impl_def.type_name,
+                    )
                 } else {
-                    format!(
-                        "{module}::{}:for:{}",
-                        impl_def.trait_name, impl_def.type_name
+                    impl_qualified_name(
+                        module,
+                        &impl_def.trait_name,
+                        &impl_def.trait_args,
+                        &impl_def.type_name,
                     )
                 };
                 for method in &impl_def.methods {

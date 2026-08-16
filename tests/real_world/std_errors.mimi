@@ -1,0 +1,20 @@
+// real_world: std::errors wrapper surface + error-string helpers.
+
+use std::errors;
+
+func main() -> i32 {
+    let e = Fs(NotFound("x"))
+    if app_error_to_string(e) != "file not found: x" { return 1 }
+    let e2 = Custom("boom")
+    if app_error_to_string(e2) != "boom" { return 2 }
+    let j = Json(ParseError("bad"))
+    if app_error_to_string(j) != "JSON parse error: bad" { return 3 }
+    let c = Collection(IndexOutOfBounds(1, 4))
+    if app_error_to_string(c) != "index out of bounds: 1 (length 4)" { return 4 }
+    let m = Math(DivisionByZero)
+    if app_error_to_string(m) != "division by zero" { return 5 }
+    let n = Net(ConnectionFailed("refused"))
+    if app_error_to_string(n) != "connection failed: refused" { return 6 }
+    println("OK")
+    0
+}

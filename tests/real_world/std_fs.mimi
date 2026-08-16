@@ -1,12 +1,17 @@
-func main() -> i32 {
-    let path = "/tmp/mimi_rw_test.txt"
-    let _ = write_file(path, "hello world")
+// real_world: std::fs wrapper surface + native file system operations.
 
-    // Read back and verify content
-    match read_file(path) {
+use std::fs;
+
+func main() -> i32 {
+    let path = "/tmp/mimi_rw_test_fs.txt"
+    let _ = write(path, "hello world")
+    match read(path) {
         Ok(content) => {
-            if content != "hello world" { 2 }
-            else { 0 }
+            if content != "hello world" { return 2 }
+            if !exists(path) { return 3 }
+            let st = stat(path)
+            if st.size < 1 { return 4 }
+            0
         }
         Err(_) => 1
     }

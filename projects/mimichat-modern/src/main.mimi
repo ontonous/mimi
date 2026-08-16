@@ -1,0 +1,258 @@
+// mimichat-modern: 0.1.7 Phase D dogfood slice.
+use std::net;
+
+// Modern chat service-shaped project: Flow ChatSession + actor RoomService +
+// real thread channel worker + large payload record. This is the first
+// step toward rewriting the v0.28 mimichat with current Mimi idioms.
+
+type ChatMessage {
+    id: i64
+    room: string
+    sender: string
+    text: string
+    ts: i64
+    priority: i32
+    flags: List<string>
+}
+
+flow ChatSession {
+    state Idle { nick: string, token: i32 }
+    state Ready { nick: string, token: i32, room: string, unread: i32, transcript: List<string> }
+    state Left { nick: string, token: i32 }
+
+    transition join(Idle, room: string) -> Ready {
+        let empty: List<string> = []
+        return Ready {
+            nick: self.nick,
+            token: self.token,
+            room: room,
+            unread: 0,
+            transcript: empty,
+        }
+    }
+
+    transition accept(Ready, msg: string) -> Ready {
+        let src = self.transcript
+        let mut updated: List<string> = []
+        for x in src {
+            push(updated, x)
+        }
+        push(updated, msg)
+        return Ready {
+            nick: self.nick,
+            token: self.token,
+            room: self.room,
+            unread: self.unread + 1,
+            transcript: updated,
+        }
+    }
+
+    transition leave(Ready) -> Left {
+        return Left { nick: self.nick, token: self.token }
+    }
+}
+
+actor RoomService {
+    mut total: i64 = 0 as i64
+    mut rooms: i64 = 0 as i64
+    mut last_room: string = ""
+
+    func register(room: string) -> i64 {
+        self.rooms = self.rooms + 1
+        self.last_room = room
+        self.rooms
+    }
+
+    func post(id: i64) -> i64 {
+        self.total = self.total + id
+        self.total
+    }
+
+    func room_count() -> i64 {
+        self.rooms
+    }
+
+    func last() -> string {
+        self.last_room
+    }
+}
+
+func make_message(id: i64, room: string, sender: string) -> ChatMessage {
+    ChatMessage {
+        id: id,
+        room: room,
+        sender: sender,
+        text: "hello from " + sender,
+        ts: id * 1000,
+        priority: 1,
+        flags: ["new", "urgent"],
+    }
+}
+
+func message_flags(msg: ChatMessage) -> i64 {
+    len(msg.flags)
+}
+
+func send_id(ch: Channel<i64>, id: i64) {
+    channel_send(ch, id)
+    return
+}
+
+func echo_handler(client: i64) -> i32 {
+    let data = tcp_recv(client, 4096)
+    if data.is_err() {
+        close_fd(client)
+        return 1
+    }
+    let msg = data.unwrap()
+    let send_res = tcp_send(client, "echo:" + msg)
+    if send_res.is_err() {
+        close_fd(client)
+        return 2
+    }
+    close_fd(client)
+    0
+}
+
+func server_echo(port: i32, ready: Channel<i64>) -> i32 {
+    let s = tcp_listen(port, 8)
+    if s.is_err() {
+        return 1
+    }
+    let fd = s.unwrap()
+    channel_send(ready, 1)
+    let mut done = 0
+    while done < 3 {
+        let c = tcp_accept(fd)
+        if c.is_err() {
+            close_fd(fd)
+            return 2
+        }
+        let client = c.unwrap()
+        let _ = spawn echo_handler(client)
+        done = done + 1
+    }
+    close_fd(fd)
+    0
+}
+
+func client_echo(port: i32, id: i32) -> i32 {
+    let c = tcp_connect("127.0.0.1", port)
+    if c.is_err() {
+        return 3
+    }
+    let fd = c.unwrap()
+    let tag = "hello-" + to_string(id)
+    let _ = tcp_send(fd, tag)
+    let data = tcp_recv(fd, 4096)
+    if data.is_err() {
+        close_fd(fd)
+        return 4
+    }
+    let msg = data.unwrap()
+    close_fd(fd)
+    if msg == "echo:" + tag { 0 } else { 5 }
+}
+
+func main() -> i32 {
+    println("mimichat-modern v0.1.0 — Flow + Actor + Channel dogfood")
+
+    // Flow: large payload-style transcript lifecycle.
+    let id0 = Idle { nick: "alice", token: 7 }
+    let id1 = ChatSession::join(id0, "lobby")
+    let id2 = ChatSession::accept(id1, "hello")
+    let id3 = ChatSession::accept(id2, "world")
+    println("unread: " + to_string(id3.unread))
+    println("last line: " + id3.transcript[1])
+
+    let id4 = ChatSession::leave(id3)
+    println("left: " + id4.nick)
+
+    // Actor: room service state.
+    let svc = RoomService.spawn()
+    let r1 = svc.register("lobby")
+    let r2 = svc.register("general")
+    let t1 = svc.post(10 as i64)
+    let t2 = svc.post(20 as i64)
+    println("rooms: " + to_string(r2) + " total: " + to_string(t2) + " last: " + svc.last())
+
+    // Real-thread channel worker: typed Channel<i64> + spawn/await.
+    let ch = channel_new()
+    let t = spawn send_id(ch, 42)
+    await t
+    let got = channel_recv(ch)
+    println("channel: " + to_string(got))
+
+    // Net service smoke: real concurrent TCP echo through spawned server and
+    // three clients. The server signals readiness on a Channel, then accepts
+    // three connections and hands each client socket to its own echo thread.
+    let net_port = 19123
+    let net_ready = channel_new()
+    let net_server = spawn server_echo(net_port, net_ready)
+    let _ = channel_recv(net_ready)
+    let net_c1 = spawn client_echo(net_port, 1)
+    let net_c2 = spawn client_echo(net_port, 2)
+    let net_c3 = spawn client_echo(net_port, 3)
+    let net_srv_result = await net_server
+    let net_c1_result = await net_c1
+    let net_c2_result = await net_c2
+    let net_c3_result = await net_c3
+    channel_drop(net_ready)
+    println("net: " + to_string(net_srv_result) + "/" + to_string(net_c1_result) + "/" + to_string(net_c2_result) + "/" + to_string(net_c3_result))
+    if net_srv_result != 0 || net_c1_result != 0 || net_c2_result != 0 || net_c3_result != 0 {
+        return 2
+    }
+
+    // Large payload record is real data, not just a type annotation.
+    let msg = make_message(got, "lobby", "bob")
+    let flags = message_flags(msg)
+    if flags == 2 && msg.text == "hello from bob" {
+        0
+    } else {
+        1
+    }
+}
+
+// ---- dogfood test functions (mimi test) ----
+
+func test_flow_join_accept_leave() {
+    let s0 = Idle { nick: "carol", token: 1 }
+    let s1 = ChatSession::join(s0, "dev")
+    let s2 = ChatSession::accept(s1, "ping")
+    let s3 = ChatSession::accept(s2, "pong")
+    if s3.unread != 2 || len(s3.transcript) != 2 {
+        println("flow failed")
+        return
+    }
+    let s4 = ChatSession::leave(s3)
+    if s4.nick != "carol" {
+        println("flow leave failed")
+        return
+    }
+    println("flow-ok")
+}
+
+func test_actor_room_service() {
+    let svc = RoomService.spawn()
+    let r1 = svc.register("lobby")
+    let r2 = svc.register("general")
+    let t1 = svc.post(5 as i64)
+    let t2 = svc.post(6 as i64)
+    if r1 != 1 || r2 != 2 || t1 != 5 || t2 != 11 {
+        println("actor failed")
+        return
+    }
+    println("actor-ok")
+}
+
+func test_channel_worker() {
+    let ch = channel_new()
+    let t = spawn send_id(ch, 99)
+    await t
+    let got = channel_recv(ch)
+    if got != 99 {
+        println("channel failed")
+        return
+    }
+    println("channel-ok")
+}

@@ -76,16 +76,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // position that is a StateId/EventId variant compiles to a nominal
                 // variant value (build_nominal_variant). Panic { code } carries a
                 // single string payload; other variants are no-payload.
-                if let Some(enum_type) = self.nominal_variant_enum(name.as_str()) {
-                    let payload = if args.len() == 1 {
-                        match args[0].unlocated() {
-                            Expr::Literal(Lit::String(s)) => Some(s.clone()),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    return self.build_nominal_variant(&enum_type, name, payload.as_deref());
+                // 0.37.x: flow EventId/StateId bare-variant names must only be
+                // recognized while compiling a flow transition body. The old
+                // unscoped fallback made user transition names (e.g. `accept`)
+                // shadow same-named builtins in later plain functions, because
+                // every flow transition is also an EventId enum variant.
+                if !self.current_flow_name.is_empty() {
+                    if let Some(enum_type) = self.nominal_variant_enum(name.as_str()) {
+                        let payload = if args.len() == 1 {
+                            match args[0].unlocated() {
+                                Expr::Literal(Lit::String(s)) => Some(s.clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        return self.build_nominal_variant(&enum_type, name, payload.as_deref());
+                    }
                 }
 
                 self.compile_call(name, args, vars)

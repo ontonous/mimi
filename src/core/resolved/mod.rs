@@ -2453,9 +2453,11 @@ fn collect_items(
                 );
             }
             Item::Impl(impl_def) => {
-                let qualified = qualify(
+                let qualified = impl_qualified_name(
                     module,
-                    &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+                    &impl_def.trait_name,
+                    &impl_def.trait_args,
+                    &impl_def.type_name,
                 );
                 let span = declaration_span(impl_def.meta, impl_def.meta.span);
                 insert_item(
@@ -2554,7 +2556,17 @@ fn collect_items(
                         method_id.clone(),
                         ResolvedFunction {
                             node_id: method_id.clone(),
-                            qualified_name: format!("{}_{}", impl_def.type_name, method.name),
+                            qualified_name: impl_method_key(
+                                &impl_def.type_name,
+                                &method.name,
+                                &impl_def.trait_name,
+                                &impl_def.trait_args,
+                                &impl_def
+                                    .generics
+                                    .iter()
+                                    .map(|g| g.name.clone())
+                                    .collect::<Vec<_>>(),
+                            ),
                             params,
                             param_decls,
                             ret: method
@@ -4655,6 +4667,85 @@ fn extern_function_owner(block_owner: &NodeId, function: &crate::ast::ExternFunc
     ))
 }
 
+/// Format a checker/resolved method-slot key.
+///
+/// Ordinary impl methods keep the historical `Type_method` key.  Impls with
+/// concrete trait arguments (e.g. `From<FsError, AppError>` for AppError)
+/// append a stable trait-key suffix so multiple `from` conversion impls
+/// targeting the same type do not silently overwrite each other's
+/// checker-finalized signatures.
+pub(crate) fn impl_method_key(
+    type_name: &str,
+    method_name: &str,
+    trait_name: &str,
+    trait_args: &[crate::ast::Type],
+    impl_generics: &[String],
+) -> String {
+    let base = format!("{}_{}", type_name, method_name);
+    // Keep the historical `Type_method` key for generic impls such as
+    // `impl<T> Head<T> for List<T>`; only concrete trait instantiations
+    // (e.g. `From<FsError, AppError>` for AppError) need disambiguation.
+    let uses_impl_generic = trait_args.iter().any(|arg| {
+        matches!(arg.unlocated(), crate::ast::Type::Name(n, args)
+            if args.is_empty() && impl_generics.iter().any(|generic| generic == n))
+    });
+    if trait_args.is_empty() || uses_impl_generic {
+        base
+    } else {
+        format!(
+            "{}_{}<{}>",
+            base,
+            trait_name,
+            trait_args
+                .iter()
+                .map(crate::core::fmt_type)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+}
+
+/// Format the core impl key without the module prefix.
+///
+/// For ordinary impls this stays `Trait:for:Type`.  For generic traits with
+/// concrete arguments (e.g. `From<FsError, AppError>`) the args are folded in
+/// so multiple conversions targeting the same type do not collide.
+pub(crate) fn impl_qualified_key(
+    trait_name: &str,
+    trait_args: &[crate::ast::Type],
+    type_name: &str,
+) -> String {
+    if trait_args.is_empty() {
+        format!("{}:for:{}", trait_name, type_name)
+    } else {
+        format!(
+            "{}<{}>:for:{}",
+            trait_name,
+            trait_args
+                .iter()
+                .map(crate::core::fmt_type)
+                .collect::<Vec<_>>()
+                .join(","),
+            type_name
+        )
+    }
+}
+
+/// Format the fully qualified impl name with an optional module prefix.
+pub(crate) fn impl_qualified_name(
+    module: &str,
+    trait_name: &str,
+    trait_args: &[crate::ast::Type],
+    type_name: &str,
+) -> String {
+    let key = impl_qualified_key(trait_name, trait_args, type_name);
+    if module.is_empty() {
+        key
+    } else {
+        format!("{module}::{key}")
+    }
+}
+
 pub(crate) fn impl_method_owner(impl_qualified_name: &str, method: &crate::ast::FuncDef) -> NodeId {
     NodeId(format!(
         "function:{}::{}:{:016x}",
@@ -4927,9 +5018,11 @@ fn collect_item_meta(
             }
         }
         Item::Impl(impl_def) => {
-            let qualified = qualify(
+            let qualified = impl_qualified_name(
                 module,
-                &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+                &impl_def.trait_name,
+                &impl_def.trait_args,
+                &impl_def.type_name,
             );
             let node_id = NodeId(format!("impl:{qualified}"));
             let fallback = impl_def.meta.span;
@@ -7061,9 +7154,11 @@ fn collect_item_call_sites(
             }
         }
         Item::Impl(impl_def) => {
-            let qualified = qualify(
+            let qualified = impl_qualified_name(
                 module,
-                &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+                &impl_def.trait_name,
+                &impl_def.trait_args,
+                &impl_def.type_name,
             );
             let impl_span = declaration_span(impl_def.meta, impl_def.meta.span);
             for method in &impl_def.methods {
@@ -9321,6 +9416,57 @@ fn build_canonical_function_signatures(
                         type_arguments.insert(node_id.clone(), canonical);
                     }
                 }
+            }
+        }
+        // Persist every explicit type annotation owned by the transition,
+        // not only type operands attached to expressions. ResolvedBody uses
+        // this table to type local bindings and conversions without
+        // consulting raw `ast::Type` after construction. Without this,
+        // `let xs: List<string> = []` inside a Flow transition body fails
+        // with TOOL-RESOLUTION-001 ("explicit annotation has no
+        // checker-canonical type").
+        let owner_prefix = format!("{}/", transition.node_id.0);
+        let annotated_types = program
+            .node_meta
+            .iter()
+            .filter_map(|(node_id, meta)| {
+                meta.type_operand
+                    .as_ref()
+                    .filter(|_| node_id.0.starts_with(&owner_prefix))
+                    .map(|annotation| (node_id.clone(), annotation.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (node_id, annotation) in annotated_types {
+            if matches!(
+                annotation.unlocated(),
+                Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _) | Type::TyErr
+            ) {
+                continue;
+            }
+            let zonked = match ZonkedTy::from_resolved(annotation) {
+                Ok(annotation) => annotation,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition annotation '{}' is not zonked: {error}",
+                            node_id.0
+                        ),
+                        program.node_meta[&node_id].origin.user_span(),
+                    ));
+                    continue;
+                }
+            };
+            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                Ok(annotation) => {
+                    type_operands.insert(node_id.clone(), annotation);
+                }
+                Err(error) => errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: transition annotation '{}' is not canonical: {error}",
+                        node_id.0
+                    ),
+                    program.node_meta[&node_id].origin.user_span(),
+                )),
             }
         }
         let signature = crate::core::ResolvedSignature {

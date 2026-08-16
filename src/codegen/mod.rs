@@ -2289,33 +2289,47 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// entry-block alloca (register_heap_alloc); the RUNTIME ownership value
     /// is the slot's contents, so probe by loading the slot (entry allocas
     /// dominate every return point, and the new null-init makes untaken
-    /// branch slots load null — a safe no-match). `Slot` entries are
-    /// skipped: registration sites are not contract-uniform (some pass
-    /// loaded values instead of allocas as the base), and a struct GEP on
-    /// such a base crashes LLVM; missing them only means the probe falls
-    /// back to a heap copy (same semantics as the legacy Ident-return claim).
+    /// branch slots load null — a safe no-match). `Slot` entries are included
+    /// too: local string/list variables transfer their heap temp registration
+    /// into a struct field slot, and skipping them made returned nested
+    /// heap-owning values heap-copy the strings without freeing the original
+    /// slots (the callee drains the scope on return) — a per-call leak in
+    /// high-pressure soak tests.
     pub(super) fn heap_probe_candidates(&self) -> Vec<inkwell::values::IntValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let mut out = Vec::new();
-        let scopes = self.heap_allocs.borrow();
-        // Scan only the scopes above the innermost function boundary: scopes
-        // below belong to an enclosing/earlier callable and their values are
-        // dangling by now (probing them loads garbage and crashes LLVM).
         let boundary = self.heap_boundaries.borrow().last().copied().unwrap_or(0);
-        for scope in scopes.iter().skip(boundary) {
-            for entry in scope.iter() {
-                if let HeapEntry::Ptr(slot) = entry {
-                    let Ok(loaded) = self.build_load(ptr_ty, *slot, "res_ret_probe_ld") else {
+        let entries: Vec<HeapEntry<'ctx>> = {
+            let scopes = self.heap_allocs.borrow();
+            scopes
+                .iter()
+                .skip(boundary)
+                .flat_map(|scope| scope.iter().cloned())
+                .collect()
+        };
+        for entry in entries {
+            let slot = match entry {
+                HeapEntry::Ptr(slot) => slot,
+                HeapEntry::Slot(base, struct_ty, field) => {
+                    let Ok(gep) =
+                        self.gep()
+                            .build_struct_gep(struct_ty, base, field, "res_ret_probe_gep")
+                    else {
                         continue;
                     };
-                    let BasicValueEnum::PointerValue(pv) = loaded else {
-                        continue;
-                    };
-                    if let Ok(iv) = self.build_ptr_to_int(pv, i64_ty, "res_ret_cand_i") {
-                        out.push(iv);
-                    }
+                    gep
                 }
+                _ => continue,
+            };
+            let Ok(loaded) = self.build_load(ptr_ty, slot, "res_ret_probe_ld") else {
+                continue;
+            };
+            let BasicValueEnum::PointerValue(pv) = loaded else {
+                continue;
+            };
+            if let Ok(iv) = self.build_ptr_to_int(pv, i64_ty, "res_ret_cand_i") {
+                out.push(iv);
             }
         }
         out

@@ -86,7 +86,7 @@ def classify_reason(reason: str) -> str:
 
 
 def corpus() -> list[Path]:
-    """基线语料：demos + examples + tests/real_world + 0.1.7 dogfood 工程。"""
+    """基线语料：demos + examples + tests/real_world + 0.1.7 dogfood/回归工程。"""
     files: list[Path] = []
     for d in (
         ROOT / "demos",
@@ -94,6 +94,8 @@ def corpus() -> list[Path]:
         ROOT / "tests" / "real_world",
         ROOT / "projects" / "mimi-taskq" / "src",
         ROOT / "projects" / "mimi-ledger" / "src",
+        ROOT / "projects" / "mimichat" / "src",
+        ROOT / "projects" / "mimichat-modern" / "src",
     ):
         if d.is_dir():
             files.extend(sorted(d.rglob("*.mimi")))

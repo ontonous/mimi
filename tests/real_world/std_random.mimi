@@ -1,0 +1,28 @@
+// real_world: std::random surface in the resolved native slice.
+//
+// random() is a true runtime PRNG, so this corpus checks structural properties
+// instead of exact draws: random_choice returns a member, random_sample keeps
+// the requested length, shuffle preserves length, random_remove_ith preserves
+// the other elements, and scalar ranges stay in range.
+
+use std::random;
+
+func main() -> i32 {
+    let xs: List<i32> = [10, 20, 30, 40]
+
+    let b = random_bool()
+    let ri = random_int(1, 10)
+    let rf = random_float(0.0, 1.0)
+    let c = random_choice(xs)
+    if c.is_err() { return 1 }
+    let s = random_sample(xs, 2)
+    if len(s) != 2 { return 2 }
+    let sh = shuffle(xs)
+    if len(sh) != 4 { return 3 }
+    let rr = random_remove_ith(xs, 1)
+    if len(rr) != 3 { return 4 }
+
+    let ok = ri >= 1 && ri < 10 && rf >= 0.0 && rf < 1.0
+    if !ok { return 5 }
+    0
+}

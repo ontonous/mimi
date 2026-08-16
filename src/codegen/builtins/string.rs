@@ -1307,6 +1307,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Promote a value used as an Any handle to the runtime's i64 handle.
+    /// The runtime `mimi_any_to_int`/`mimi_any_to_float` signatures take i64;
+    /// passing a narrower integer directly creates invalid LLVM IR.
+    fn promote_any_handle_int(
+        &self,
+        iv: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> MimiResult<inkwell::values::IntValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        if iv.get_type().get_bit_width() == i64_ty.get_bit_width() {
+            return Ok(iv);
+        }
+        let promoted = if iv.get_type().get_bit_width() == 1 {
+            self.builder
+                .build_int_z_extend(iv, i64_ty, name)
+                .map_err(|e| CompileError::LlvmError(format!("{name}: {e}")))?
+        } else {
+            self.builder
+                .build_int_s_extend(iv, i64_ty, name)
+                .map_err(|e| CompileError::LlvmError(format!("{name}: {e}")))?
+        };
+        Ok(promoted)
+    }
+
     /// Emit a call to `mimi_any_to_int(value: i64) -> i64` (runtime heuristic:
     /// string handles are parsed via strtol, integers pass through).
     fn emit_any_to_int(
@@ -1314,6 +1338,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         iv: inkwell::values::IntValue<'ctx>,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         let i64_ty = self.context.i64_type();
+        let promoted = self.promote_any_handle_int(iv, "any_to_int_promote")?;
         let any_fn_ty = i64_ty.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
         let fn_any = self
             .module
@@ -1329,7 +1354,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(
                 fn_any,
-                &[BasicMetadataValueEnum::IntValue(iv)],
+                &[BasicMetadataValueEnum::IntValue(promoted)],
                 "any_to_int",
             )
             .map_err(|e| CompileError::LlvmError(format!("any_to_int: {}", e)))?
@@ -1346,6 +1371,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         let i64_ty = self.context.i64_type();
         let f64_ty = self.context.f64_type();
+        let promoted = self.promote_any_handle_int(iv, "any_to_float_promote")?;
         let any_fn_ty = f64_ty.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
         let fn_any = self
             .module
@@ -1361,7 +1387,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(
                 fn_any,
-                &[BasicMetadataValueEnum::IntValue(iv)],
+                &[BasicMetadataValueEnum::IntValue(promoted)],
                 "any_to_float",
             )
             .map_err(|e| CompileError::LlvmError(format!("any_to_float: {}", e)))?
@@ -1589,8 +1615,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         match &args[0] {
             BasicMetadataValueEnum::FloatValue(fv) => return Ok((*fv).into()),
             BasicMetadataValueEnum::IntValue(iv) => {
-                // See compile_to_int: i64 arguments may be Any string handles.
-                return self.emit_any_to_float(*iv);
+                // Typed i32 (and narrower) integers are definitely numeric,
+                // not Any handles, so convert directly like the VM does.
+                // Only i64 can also be an Any handle at the LLVM level and
+                // therefore keeps the runtime heuristic.
+                let bit_width = iv.get_type().get_bit_width();
+                if bit_width == 64 {
+                    return self.emit_any_to_float(*iv);
+                }
+                let f64_ty = self.context.f64_type();
+                let fv = self
+                    .builder
+                    .build_signed_int_to_float(*iv, f64_ty, "to_float_i32")
+                    .map_err(|e| CompileError::LlvmError(format!("to_float int->float: {}", e)))?;
+                return Ok(fv.into());
             }
             _ => {}
         }

@@ -1122,6 +1122,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.in_fails_transition = false;
             result?;
         }
+        // 0.37.x: flow-compilation state used to leak after compiling a Flow.
+        // `current_flow_name` stayed set while subsequent plain functions were
+        // compiled, so a builtin named like a Flow EventId variant (e.g. the
+        // network `accept(fd)` vs an `accept` transition) was miscompiled as
+        // the flow's EventId enum constructor and produced a struct in integer
+        // comparison. Clear the per-flow context when the Flow pass finishes.
+        self.current_flow_name = String::new();
+        self.current_persistent_fields = Vec::new();
+        self.current_from_state = String::new();
         Ok(())
     }
 

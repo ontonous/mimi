@@ -1,7 +1,25 @@
+// real_world: std::set wrapper surface in the resolved native slice.
+//
+// Set operations are in-place: insert/remove mutate the same underlying
+// handle and return it, matching the builtin Set semantics.
+//
+// Both non-Any wrappers (size/is_empty/to_list) and Any-handle wrappers
+// (insert/contains/remove) are exercised; DynamicAnyPack is in the resolved
+// native slice.
+
+use std::set;
+
 func main() -> i32 {
     let s: Set<i32> = {1, 2, 1}
-    let s2 = s.insert(3)
-    let sz = s2.size()
-    let has = s2.contains(2)
-    if sz == 3 && has { 0 } else { 1 }
+    let s2 = insert(s, 3)
+    if size(s2) != 3 { return 1 }
+    if !contains(s2, 2) { return 2 }
+    if is_empty(s2) { return 3 }
+    let l = to_list(s2)
+    if len(l) != 3 { return 4 }
+
+    let t: Set<i32> = {1, 2, 3}
+    let t2 = remove(t, 1)
+    if size(t2) != 2 { return 5 }
+    0
 }
