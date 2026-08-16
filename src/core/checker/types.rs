@@ -225,6 +225,38 @@ impl<'a> Checker<'a> {
                 self.set_span(previous_span);
             }
             Type::Name(name, args) => {
+                // 0.37 Phase C slice 1: concurrency nominal generics have a
+                // fixed arity even though they are builtin (not TypeDef).
+                match name.as_str() {
+                    "AtomicI32" | "AtomicI64" | "AtomicBool" => {
+                        if !args.is_empty() {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0438,
+                                format!(
+                                    "type '{}' expects 0 generic argument{}, found {} in {}",
+                                    name,
+                                    if args.len() == 1 { "" } else { "s" },
+                                    args.len(),
+                                    context
+                                ),
+                            );
+                        }
+                    }
+                    "Mutex" | "MutexGuard" | "Channel" => {
+                        if args.len() != 1 {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0438,
+                                format!(
+                                    "type '{}' expects 1 generic argument, found {} in {}",
+                                    name,
+                                    args.len(),
+                                    context
+                                ),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
                 // SessionChan<S>: S must name a declared session (v0.29.19).
                 if name == "SessionChan" || name == "session_chan" {
                     if let Some(Type::Name(s, _)) = args.first().map(Type::unlocated) {

@@ -1252,9 +1252,50 @@ impl<'a> Checker<'a> {
                             );
                         }
                         for a in &args[1..] {
-                            self.infer_expr(a, scopes);
+                            let t = self.infer_expr(a, scopes);
+                            if !is_int(&t) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "{} value slot expects integer, found {}",
+                                        name,
+                                        fmt_type(&t)
+                                    ),
+                                );
+                            }
                         }
                     }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "atomic_i64_compare_exchange" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 3 arguments (handle, expected, desired)", name),
+                        );
+                    } else {
+                        let handle = self.infer_expr(&args[0], scopes);
+                        if handle != Type::Name("AtomicI64".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects AtomicI64, found {}", name, fmt_type(&handle)),
+                            );
+                        }
+                        for a in &args[1..] {
+                            let t = self.infer_expr(a, scopes);
+                            if !is_int(&t) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "{} value slot expects integer, found {}",
+                                        name,
+                                        fmt_type(&t)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    // compare_exchange returns 1/0 (same as AtomicI32 CAS).
                     return Type::Name("i32".into(), vec![]);
                 }
                 "atomic_i64_load" | "atomic_i64_fetch_add" => {
@@ -1272,11 +1313,54 @@ impl<'a> Checker<'a> {
                             );
                         }
                         for a in &args[1..] {
-                            self.infer_expr(a, scopes);
+                            let t = self.infer_expr(a, scopes);
+                            if !is_int(&t) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "{} value slot expects integer, found {}",
+                                        name,
+                                        fmt_type(&t)
+                                    ),
+                                );
+                            }
                         }
                     }
                     // fetch_add returns i64, not i32 (runtime ABI).
                     return Type::Name("i64".into(), vec![]);
+                }
+                "atomic_bool_compare_exchange" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 3 arguments (handle, expected, desired)", name),
+                        );
+                    } else {
+                        let handle = self.infer_expr(&args[0], scopes);
+                        if handle != Type::Name("AtomicBool".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{} expects AtomicBool, found {}", name, fmt_type(&handle)),
+                            );
+                        }
+                        for a in &args[1..] {
+                            let t = self.infer_expr(a, scopes);
+                            if t != Type::Name("bool".into(), vec![])
+                                && t != Type::Name("i32".into(), vec![])
+                            {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "{} value slot expects bool or i32, found {}",
+                                        name,
+                                        fmt_type(&t)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    // compare_exchange returns 1/0 (same as other CAS builtins).
+                    return Type::Name("i32".into(), vec![]);
                 }
                 "atomic_bool_load" => {
                     if args.len() != 1 {
@@ -1316,7 +1400,16 @@ impl<'a> Checker<'a> {
                             );
                         }
                         for a in &args[1..] {
-                            self.infer_expr(a, scopes);
+                            let t = self.infer_expr(a, scopes);
+                            if name == "mutex_set" && !is_int(&t) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "mutex_set value slot expects integer, found {}",
+                                        fmt_type(&t)
+                                    ),
+                                );
+                            }
                         }
                     }
                     return if name == "mutex_get" {
@@ -1359,16 +1452,12 @@ impl<'a> Checker<'a> {
                 | "channel_drop"
                 | "actor_set_mailbox_depth"
                 | "actor_set_max_children" => {
-                    let handle_ty = if args.is_empty() {
-                        Type::TyErr
-                    } else {
-                        self.infer_expr(&args[0], scopes)
-                    };
-                    for a in &args[1..] {
-                        self.infer_expr(a, scopes);
+                    let mut arg_tys = Vec::with_capacity(args.len());
+                    for a in args {
+                        arg_tys.push(self.infer_expr(a, scopes));
                     }
-                    // Type-check the handle; value slots are checked by the
-                    // generic inference pass above (and by downstream codegen).
+                    let handle_ty = arg_tys.first().cloned().unwrap_or(Type::TyErr);
+                    // Type-check the handle family, then the value slot.
                     if !args.is_empty() {
                         let expected = match name {
                             "atomic_i32_store" | "atomic_i32_drop" => {
@@ -1403,6 +1492,28 @@ impl<'a> Checker<'a> {
                                     ),
                                 );
                             }
+                        }
+                    }
+                    if args.len() > 1 {
+                        let value_ty = &arg_tys[1];
+                        let (ok, what) = match name {
+                            "atomic_bool_store" => {
+                                (value_ty == &Type::Name("bool".into(), vec![]), "bool")
+                            }
+                            "atomic_i32_store" | "atomic_i64_store" | "channel_send"
+                            | "mutex_set" => (is_int(value_ty), "integer"),
+                            _ => (true, ""),
+                        };
+                        if !ok {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "{} value slot expects {}, found {}",
+                                    name,
+                                    what,
+                                    fmt_type(value_ty)
+                                ),
+                            );
                         }
                     }
                     return Type::Name("unit".into(), vec![]);
