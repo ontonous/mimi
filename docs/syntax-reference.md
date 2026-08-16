@@ -233,6 +233,10 @@ Primary := Int | Float | String | FString | true | false | unit
 MatchArm := Pattern [ 'if' Expr ] '=>' ( '{' Block '}' | Expr ) [ ',' ]   (* pattern.rs:6-66 *)
 ```
 
+> **0.1.7 Phase E 判死注记**：`quote` / `quote!` 与 `$(...)` 已裁决删除
+> （`feature-design-review-0.37.md` #1）。当前 parser 仍兼容以便迁移，
+> 删除提交属于 0.1.7 收尾；`comptime` 常量折叠保留。
+
 ### 5.4 后缀运算（parse_expr.rs:456-531）
 
 ```
@@ -278,6 +282,10 @@ Params := { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type [ '=' Expr ] ',' }   
 ```
 
 [事实] v0.34.18c（§4.2）：`with` 效果子句**已废除**——parser 拒绝（top_level.rs:774-781，"the `with` effect clause was abolished ... Remove `with ...`"），`with` 保留为 reserved 关键字（负测试）。原 `[ 'with' Ident { ',' Ident } ]` 产生式删除；E0254 双点死代码清理。spec §2.7 仅删 Effect 部分（0.34.18c 完成）。
+
+> **0.1.7 Phase E 判死注记**：`protocol` 声明 / `impl P` 表面语法已裁决删除
+> （`feature-design-review-0.37.md` #2）。当前 parser 仍兼容以便迁移；
+> checker-only 静态投影与 dyn 交给宿主语言，删除提交属于 0.1.7 收尾。
 
 ### 6.1 Flow（top_level.rs:920-1252）
 

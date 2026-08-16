@@ -1431,16 +1431,17 @@ Typed Mimi IR
 | `ffi shared T` | Typed shared handle; explicit clone/release |
 | `ffi weak T` | Does not extend lifetime; can upgrade |
 | `ffi handle T` | Opaque resource handle |
-| `ffi slice<T>` | `{ptr,len}` read-only view |
-| `ffi slice_mut<T>` | `{ptr,len}` exclusive view |
+| `ffi slice<T>` | ~~`{ptr,len}` read-only view~~ **REMOVED (0.1.7)** |
+| `ffi slice_mut<T>` | ~~`{ptr,len}` exclusive view~~ **REMOVED (0.1.7)** |
 | `ffi str` | UTF-8 `{ptr,len}` view |
 | `ffi owned_str` | Owned UTF-8 string with allocator/destructor |
 | `ffi c_str` | Explicit NUL-terminated C string |
-| `ffi buffer<T>` | owned `{ptr,len,cap,allocator}` buffer |
+| `ffi buffer<T>` | ~~owned `{ptr,len,cap,allocator}` buffer~~ **REMOVED (0.1.7)** |
 
-> **未实现（0.2 评估）**：`ffi slice`/`ffi slice_mut`/`ffi buffer` 为纸面特性——
-> 当前 parser/codegen 零支持（M-009 实证），与指针读写同属 0.2 Component IR
-> 特性轨（见 `devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md` §3 登记）。
+> **已判死删除（0.1.7 Phase E）**：`ffi slice`/`ffi slice_mut`/`ffi buffer`
+> 为纸面特性—— parser/codegen 零支持（M-009 实证），0.1.7 起从特性表移除；
+> 不进入 1.0 语言表面。与指针读写同属 0.2 Component IR 特性轨
+> （见 `devdocs/v0.34/dogfood-jupitune-eval-0.34.34.md` §3 登记）。
 > 语言层 `view/mutate/consume` 权限模型不受影响。
 
 The `ffi view/mutate/owned` are Component IR ABI modes. Mimi surface language continues to only use `view/mutate/consume`; no parallel permission mental model.
