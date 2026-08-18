@@ -28,3 +28,22 @@ fn stress_wire_fuzz_no_panic() {
     // Sanity: the loop really did work, not just compile-time empty.
     assert_eq!(tested, 1_000);
 }
+
+#[test]
+#[ignore = "heavy fuzz: 10,000,000 wire decode iterations"]
+fn stress_wire_fuzz_10m_no_panic() {
+    let mut state = 0xDECA_FBAD_1234_5678u64;
+    let mut tested = 0u64;
+    for _ in 0..10_000_000u64 {
+        let len = (next(&mut state) % 96) as usize;
+        let data: Vec<u8> = (0..len).map(|_| next(&mut state) as u8).collect();
+
+        let _ = WireEnvelope::from_bytes(&data);
+        let _ = WireType::I32.decode_value(&data);
+        let _ = WireType::U64.decode_value(&data);
+        let _ = WireType::decode_string(&data);
+        let _ = WireType::decode_bytes(&data);
+        tested += 1;
+    }
+    assert_eq!(tested, 10_000_000);
+}

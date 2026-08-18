@@ -1,10 +1,16 @@
 # Mimi 真实代码可用性评估结果
 
-**评估时间**：2026-07-19
-**Mimi 版本**：0.31.4-dev
-**最后更新**：2026-07-19
-**评估命令**：`cargo test real_world_cli_suite -- --test-threads=1` + 定向双后端 smoke
+**评估时间**：2026-07-19（0.31.4 基线）；0.1.7 状态更新见下
+**Mimi 版本**：0.31.4-dev → 0.1.7-dev
+**最后更新**：0.1.7
+**评估命令**：`cargo test --test real_world_cli -- --test-threads=1` + 定向双后端 smoke
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
+
+## 0.1.7 状态更新
+
+- `tests/real_world_cli.rs` 的 `KNOWN_GAPS` 已清空：`flow_order_system.mimi` 与 `flow_system_trace.mimi` 现在在 interpreter 与 codegen 双后端均通过。
+- 完整 CLI MCDD 套件通过：所有 `tests/real_world/*.mimi`（除 interpreter-only 的 `flow_test_macros.mimi`）均通过 `mimi run`、`mimi build` 和 native exec，且 stdout 与 interpreter 一致。
+- 新增 `std_mimispec_ast_typechecks` 回归：`mimi check std/mimispec/ast.mimi` 通过。
 
 ## v0.31.3 CFG / ownership 收口门禁
 
@@ -51,7 +57,6 @@
 | flow_reset_recover.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.13–14 |
 | flow_pinned.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.16→0.29.32 |
 | flow_subflow.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.17 |
-| flow_protocol.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.18→0.29.36 |
 | flow_session.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.19→0.29.34 |
 | flow_peer_fault.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.20 |
 | flow_mailbox_bp.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.21 |
@@ -75,7 +80,7 @@
 | 7 | delegate view/mutate/consume | 0.29.15 | ✅ | flow_reset_recover.mimi |
 | 8 | pinned { timeout } FFI 锚定 | 0.29.16→32 | ✅ | flow_pinned.mimi |
 | 9 | Subflow 同步嵌套 | 0.29.17 | ✅ | flow_subflow.mimi |
-| 10 | Protocol 接口抽象 | 0.29.18 | ✅ | flow_protocol.mimi |
+| 10 | Protocol 接口抽象 | 0.29.18 | 已删除（0.1.7 Phase E 移除 surface） | — |
 | 11 | Session Types 骨架 | 0.29.19 | ✅ | flow_session.mimi |
 | 12 | PeerFault 跨 Actor 传播 | 0.29.20 | ✅ | flow_peer_fault.mimi |
 | 13 | Mailbox 背压自动治理 | 0.29.21 | ✅ | flow_mailbox_bp.mimi |
@@ -84,8 +89,8 @@
 | 16 | Spawn 配额控制 | 0.29.24 | ✅ | flow_spawn_quota.mimi |
 | 17 | Flow 多态广播 dispatch | 0.29.25 | ✅ | flow_broadcast.mimi |
 | 18 | Session 双端运行时 | 0.29.34 | ✅ | flow_session.mimi |
-| 19 | Protocol VTable + broadcast Result | 0.29.35 | ✅ | flow_broadcast.mimi |
-| 20 | Payload 协变 + 保守投影 | 0.29.36 | ✅ | flow_protocol.mimi |
+| 19 | Protocol VTable + broadcast Result | 0.29.35 | 已删除（0.1.7 Phase E 移除 surface） | — |
+| 20 | Payload 协变 + 保守投影 | 0.29.36 | 已删除（0.1.7 Phase E 移除 surface） | — |
 | 21 | SystemKill 级联终止 | 0.29.37 | ✅ | flow_actor_lifecycle.mimi |
 | 22 | spawn detached 守护进程 | 0.29.37 | ✅ | flow_actor_lifecycle.mimi |
 | 23 | assert_state! 测试宏 | 0.29.38 | ✅ | flow_test_macros.mimi |

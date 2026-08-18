@@ -1,0 +1,27 @@
+// Representative 0.1.7 maps program: from_list / get / to_list / set over
+// List<(string, Any)>. Used by the Phase F CLI launch gate so interp and
+// native print the same observable (final size = 3).
+//
+// The typed std::maps `from_list(List<(string, Any)>)` wrapper cannot take
+// a `[("a", 1)]` list literal on the production resolved path (primitive
+// i32 cannot identity-erase into a tuple Any slot). The builtin
+// `map_from_list` has the same native tuple-slot lowering and accepts the
+// literal; `from_list(to_list(m))` then exercises the typed wrapper.
+use std::maps;
+
+func main() -> i32 {
+    let m = map_from_list([("a", 1), ("b", 2)])
+    if size(m) != 2 { return 1 }
+    let (found_a, va) = get(m, "a")
+    if !found_a || va != 1 { return 2 }
+    let (found_b, vb) = get(m, "b")
+    if !found_b || vb != 2 { return 3 }
+    let m2 = from_list(to_list(m))
+    if size(m2) != 2 { return 4 }
+    let (found_b2, vb2) = get(m2, "b")
+    if !found_b2 || vb2 != 2 { return 5 }
+    let m3 = set(m2, "c", 3)
+    if size(m3) != 3 { return 6 }
+    println(size(m3))
+    0
+}
