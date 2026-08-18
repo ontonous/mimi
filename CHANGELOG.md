@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] — 0.1.8-dev
+
+> 0.1.8 开发进行中：语义诚实 + 身份纯度（L1 spawn、生产 dual、Narrow、
+> 值 ABI、Flow S、Actor A、Session K、move-rest、拆 mimispec）。
+> 裁决 `devdocs/kernel-final-verdict-2026-08-18.md`；
+> 执行 `devdocs/v0.38/README.md`。
+> 0.1.7 已发布（2026-08-19，tag `0.1.7`）。
+
 ## [0.1.7] — 2026-08-19
 
 > **Wave-3 基建诚实收口已发布**。
