@@ -8,8 +8,8 @@
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
 > See `docs/language-support.toml` for 9-dimension capability matrix.
 >
-> Version: v0.1.7-dev (2026-08-16, synced from golden — 0.36.54 Phase D 定案)
-> Implementation: v0.1.7-dev (internal sprint 0.37.X)
+> Version: v0.1.7-dev (2026-08-19, Wave-3 基建诚实收口；synced from golden — 0.36.54 Phase D 定案)
+> Implementation: v0.1.7-dev (internal sprint 0.37.135)
 > Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
 > 渲染例外（与 golden 的有意差异）：golden 的标题/引言元块与 §7 差异台账不进入本副本；
 > §7 台账见 golden 原文（0.34.33 起差异归零）。
@@ -36,15 +36,15 @@
 | 布尔 | `true` / `false` | parse_expr.rs:278-287 |
 | 单元 | `()`（表达式与类型两处均归一化为 `unit`） | parse_expr.rs:288-292；parse_type.rs:139-140 |
 
-### 1.3 关键字（63 个 `=> TokenKind` 映射：60 硬关键字 + and/or/not 软关键字，keywords.rs:80-149；0.36.53 实测）
+### 1.3 关键字（61 个 `=> TokenKind` 映射：58 硬关键字 + and/or/not 软关键字，keywords.rs:80-149；0.37.109 实测）
 
 ```
 module type func fn actor newtype let const mut ref
 shared weak arena cap trait impl dyn where extern
 if else for fails in while return break continue
 match use pub drop defer await unsafe spawn
-quote comptime failure requires ensures invariant math old
-flow state transition protocol pinned persistent view mutate
+comptime failure requires ensures invariant math old
+flow state transition pinned persistent view mutate
 session dual end and or not loop as
 true false unit
 ```
@@ -55,11 +55,13 @@ v0.34.2 变更（golden-document.md §1.1/§1.3/§1.4）：
 - `delegate` **已软化为标识符**（tokenize 为 Ident，keywords.rs:242 测试断言；`let delegate = 5` / `func delegate()` 合法）；仅语句起始位置保留条款 2 拒绝诊断（parse_stmt.rs:131，与 `on` 同模式，parse_stmt.rs:182）。
 - **v0.36.52 已处置**：`reset`/`recover` 降为普通标识符（仅系统注入 transition 名）；`nothing` 已在前轮删除。
 - **v0.34.11 已删除**：`become`/`stay`（ADR-001，golden-document.md §1.2）——tokenize 为 Ident。
-- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **63 个** `=> TokenKind` 映射（实测 keywords.rs:80-149，含 and/or/not 软关键字映射；其中 60 个硬关键字，`is_keyword_kind` 判定）。
+- **v0.34.27 已删除**：`do`（语言评估：`do { X }` ≡ `{ X }`，零表达力；golden-document.md §1.3 修正）——tokenize 为 Ident。当前 **61 个** `=> TokenKind` 映射（实测 keywords.rs:80-149，含 and/or/not 软关键字映射；其中 58 个硬关键字，`is_keyword_kind` 判定）。
 - **v0.35.39 已删除**（僵尸关键字裁撤，13 个）：`c_shared`/`c_borrow`/`c_borrow_mut`/`local_shared`/`weak_local`/`raw_string`/`nothing`(token)/`alloc`/`async`(top-level)/`with`/`desc`/`rule`/`mms`——关键字表 80 → 67，共享收敛为 `shared`/`weak` 二态；`Type::Nothing` 保留为语义残差类型（无关键字）。
 - **v0.36.50 已软化**（Phase D 预演）：`parasteps` 从硬关键字降为**上下文标识符**——词法层不再保留（tokenize 为 `Ident`），parser 在语句起始且后随 `{` 时识别为并行块；`func parasteps()` / `let parasteps = 7` 合法。关键字表 67 → 66。
 - **v0.36.52 已软化**（Phase D 软关键字政策）：`reset`/`recover` 只是系统注入 transition 名，不是语法关键字——降为普通标识符，`let reset = 1` / `func recover()` 合法。关键字表 66 → 64。
 - **v0.36.53 已软化**（Phase D 软关键字政策）：`fault` 不再是全局关键字——`fault ErrorType` 在 flow body 内由 parser 上下文识别，`let fault = 1` / `func fault()` 合法。关键字表 64 → 63。
+- **v0.37.107（0.1.7 Phase E）已删除**：`quote` 从关键字表移除，tokenize 为 Ident；`quote!` / `$(...)` 由 parser 拒绝并提示迁移到 `comptime { ... }`。关键字表 63 → 62。
+- **v0.37.109（0.1.7 Phase E）已删除**：`protocol` 从关键字表移除，tokenize 为 Ident；顶层 `protocol` 声明与 Flow 内 `impl ProtocolName` 由 parser 拒绝。关键字表 62 → 61。
 
 ### 1.4 软关键字（pattern 位置可作绑定名，pattern.rs:196-212）
 
@@ -221,8 +223,6 @@ Primary := Int | Float | String | FString | true | false | unit
          | 'await' Expr (prec 12)          (* :350-355 *)
          | 'arena' '{' Block '}'           (* :356-363 *)
          | 'comptime' '{' Block '}'        (* :364-371 *)
-         | 'quote' [ '!' ] '{' Block '}'   (* :372-382 *)
-         | '$(' Expr ')'                   (* QuoteInterpolate，:383-394 *)
          | 'fn' '(' Params ')' [ '->' Type ] '{' Block '}'   (* Lambda 闭包，:400-420 *)
          | '{' map-literal | set-literal | Block '}'          (* :421-436 *)
          | Ident | 关键字即标识符（is_keyword_token 兜底，:437-443）
@@ -233,9 +233,9 @@ Primary := Int | Float | String | FString | true | false | unit
 MatchArm := Pattern [ 'if' Expr ] '=>' ( '{' Block '}' | Expr ) [ ',' ]   (* pattern.rs:6-66 *)
 ```
 
-> **0.1.7 Phase E 判死注记**：`quote` / `quote!` 与 `$(...)` 已裁决删除
-> （`feature-design-review-0.37.md` #1）。当前 parser 仍兼容以便迁移，
-> 删除提交属于 0.1.7 收尾；`comptime` 常量折叠保留。
+> **0.1.7 Phase E 已删除**：`quote` / `quote!` 与 `$(...)` 语法面已从 parser
+> 移除（`feature-design-review-0.37.md` #1）。parser 对历史写法给出迁移错误；
+> `comptime { ... }` 常量折叠保留。
 
 ### 5.4 后缀运算（parse_expr.rs:456-531）
 
@@ -269,8 +269,7 @@ Item := [ 'pub' ] [ Attributes ] (
         | 'extern' '"C"' 'func' FuncDef        (* Mimi → C 导出，:282-306 *)
         | 'extern' [ '"C"' ] '{' ExternFuncs '}'  (* C → Mimi 导入，:461-609 *)
         | 'flow' ...                          (* §6.1 *)
-        | 'protocol' ...                      (* §6.2 *)
-        | 'session' ...                       (* §6.3 *)
+        | 'session' ...                       (* §6.2 *)
 )
 ```
 
@@ -283,9 +282,10 @@ Params := { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type [ '=' Expr ] ',' }   
 
 [事实] v0.34.18c（§4.2）：`with` 效果子句**已废除**——parser 拒绝（top_level.rs:774-781，"the `with` effect clause was abolished ... Remove `with ...`"），`with` 保留为 reserved 关键字（负测试）。原 `[ 'with' Ident { ',' Ident } ]` 产生式删除；E0254 双点死代码清理。spec §2.7 仅删 Effect 部分（0.34.18c 完成）。
 
-> **0.1.7 Phase E 判死注记**：`protocol` 声明 / `impl P` 表面语法已裁决删除
-> （`feature-design-review-0.37.md` #2）。当前 parser 仍兼容以便迁移；
-> checker-only 静态投影与 dyn 交给宿主语言，删除提交属于 0.1.7 收尾。
+> **0.1.7 Phase E 已删除**：`protocol` 声明 / `impl P` 表面语法已从 parser
+> 移除（`feature-design-review-0.37.md` #2）。顶层 `protocol` 与 Flow 内
+> `impl ProtocolName` 现在给出迁移错误；checker-only 静态投影与 dyn 交给
+> 宿主语言。
 
 ### 6.1 Flow（top_level.rs:920-1252）
 
@@ -293,8 +293,7 @@ Params := { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type [ '=' Expr ] ',' }   
 Flow := 'flow' Ident generics
         { '@sparse' | '@mailbox' ['(' ['depth' '='] Int ')'] | '@max_children' ['(' ['children' '='] Int ')'] }
         '{'
-          { 'impl' Ident ';' }                (* :1048-1054 *)
-        | [ 'persistent' ] 'state' Ident [ '{' { Ident ':' Type ',' } '}' ] ';'   (* :1254-1287 *)
+          [ 'persistent' ] 'state' Ident [ '{' { Ident ':' Type ',' } '}' ] ';'   (* :1254-1287 *)
         | 'transition' Ident '(' FromIdent [ ',' { [ 'mut' ] Ident ':' [ ('view'|'mutate') ] Type } ] ')'
           '->' Ident { '|' Ident }            (* v0.34.1：仅 `|` 多目标分隔符；`|>` 已拒绝 *)
           [ 'fails' Type ]                    (* :1358-1364 *)
@@ -309,14 +308,11 @@ Flow := 'flow' Ident generics
 [事实] `fault Variant { ... }` 变体块语法全仓零匹配——仅 `fault Type`（golden-document.md §3.2）。
 [事实] v0.34.3：`for` 绑定为 Pattern（`for (k, v) in m` 解构；单标识符 = Pattern::Variable）——ast.rs For.var。
 
-### 6.2 Protocol（top_level.rs:1389-1468）
+### 6.2 Protocol（已删除）
 
-```
-Protocol := 'protocol' Ident generics '{'
-              { 'state' Ident [ '{' Ident ':' Type '}' ] ';' }   (* 单一 payload 字段 *)
-            | { 'transition' Ident '(' Ident ')' '->' Ident ';' }
-            '}'
-```
+> **0.1.7 Phase E**：`protocol` 声明与 Flow 内 `impl ProtocolName` 表面语法
+> 已从 parser 移除。原静态投影职责由 Flow 自身状态/转换拓扑承载；dyn 协议
+> 交给宿主语言。
 
 ### 6.3 Session（top_level.rs:1476-1542）
 
@@ -373,6 +369,5 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 | 属性 | top_level.rs:64-189 |
 | extern 块 | top_level.rs:461-609 |
 | actor | top_level.rs:611-692 |
-| protocol | top_level.rs:1389-1468 |
 | session | top_level.rs:1476-1542 |
 | 关键字表 | keywords.rs:92-177 |

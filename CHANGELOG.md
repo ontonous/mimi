@@ -2,11 +2,215 @@
 
 ## [Unreleased] — 0.1.7-dev
 
-> 0.1.7 开发进行中：深度可用性与高压可靠性 + Wave-3 结构性战役——核心特性深度
-> 可用与高压承载、编译器后端统一（Resolved Lowering 全量覆盖，Legacy Codegen 单向
-> 退役）、真实结构化并发运行时、堆内存即时确定性释放。路线见
-> `devdocs/v0.37/README.md`，高压规范见 `devdocs/v0.37/high-stress-testing-spec.md`，
-> 可用性宣言见 `devdocs/v0.37/usability-dx-manifesto.md`。
+> 0.1.7 Wave-3 基建诚实收口已完成（2026-08-19，0.37.135）。
+> 不宣称内核愿景已闭合、不宣称 VM≡native、不宣称 Flow 世代已实现。
+> `0.1.7` tag 尚未切；下一版本 0.1.8 见 `devdocs/kernel-roadmap-0.1.7-0.1.9.md`。
+> 终测报告 `devdocs/v0.37/quad-final-0.37.135.md`。
+
+### 0.37.135 — Phase F 终测与文档收口
+- 新增 `devdocs/v0.37/quad-final-0.37.135.md`，按 §4 逐条登记「不宣称」
+- README / AGENTS / gap-audit 从「开发进行中」改为「收口完成，待切 tag」
+- 不打 `0.1.7` tag、不发布 crates（本版本 Non-goal）
+
+### 0.37.130 — Wave-3 基建诚实收口 + native map from_list
+- 新增 `devdocs/v0.37/quad-final-0.37.135.md`：按 §4 列出全部「不宣称」
+- native `map_from_list` 按 `List<(string, Any)>` 的 `{ {ptr, len}, value }`
+  元组槽解码，不再把 string 长度误读成 map 值
+- ABI 声明的 C 字符串 map key 允许字节对齐（不再要求 8 字节对齐）
+- 双后端钉住 `from_list` / `to_list` / `get` / `set` 往返（stdout 同为最终 size）
+- Fault 表面：§3.12 为 0.1.7 权威；§4.3 rich variant 明确 deferred 0.2
+
+### 0.37.129 — 0.1.7/0.1.8/0.1.9 宏观重锚
+- 新增 `devdocs/kernel-roadmap-0.1.7-0.1.9.md`、`devdocs/v0.38/README.md`、
+  `devdocs/v0.39/README.md`
+- 0.1.7 DoD 改为诚实收口：不宣称 VM≡native、不宣称 Flow 世代已实现
+- 0.1.8 锁定为语义诚实 + 身份纯度（S/A/K、值 ABI、拆 mimispec）
+- 0.1.9 锁定为 `linear T` + cap std + 内核卡 + AI 评测
+- `feature-design-review` §6「等 dogfood 再裁」废止
+
+### 0.37.128 — .mimiabi 全语言 Bindgen 接入
+- 新增 `mimi abi emit-go` / `emit-node` / `emit-py` / `emit-java` / `emit-cpp`
+  - 通过 ComponentIR → AST 适配层，让旧语言后端都能以 `.mimiabi` 为统一输入
+  - Node 支持 `--ts-output`；Java 支持 `--java-output`
+  - 与 `emit-c` / `emit-rust` 共同覆盖 7 大语言 Bindgen 入口
+- 新增 CLI 单测：core `.mimiabi` 同时生成 Go/Node/Python/Java/C++ 输出
+- `MimiAbiType` / `MimiAbiTypeRef` 从 `mimi::component` 公开导出
+
+### 0.37.127 — 用户源码 ABI 到 C/Rust 生成端到端测试
+- 新增 CLI 单测：`mimi abi export` → `mimi abi emit-c` / `emit-rust`
+- 验证用户 `Point` struct 从 `.mimi` 源码进入 `.mimiabi` 并出现在 C Header 与 Rust bindings
+
+### 0.37.126 — 用户源码 ABI 导出包含类型定义
+- `mimi abi export` 现在同时导出用户类型
+  - repr(C) Record → AbiStruct
+  - 无 payload Enum → AbiEnum
+  - Alias / Newtype → AbiAlias
+- 单测覆盖：导出结果包含用户 `Point` struct
+
+### 0.37.125 — 用户源码 Component ABI 导出
+- 新增 `mimi abi export <source.mimi> [-o out]`
+  - 从 `.mimi` 源码提取 extern/exported 函数
+  - 叠加 core runtime ABI 后导出为标准 `.mimiabi` JSON
+  - 可将用户组件与本地 C/Rust 绑定生成、版本握手检查无缝衔接
+- 新增 1 个 CLI 单测：导出结果同时包含 user import、user export 与 core runtime export
+
+### 0.37.124 — 全量门禁一键复跑脚本
+- 新增 `scripts/check_all_gates.sh`
+  - 依次执行 fmt / clippy / lib tests / dispatch-zero / stress smoke / stress heavy /
+    dogfood / bin CLI tests / real-world CLI
+  - 任一失败即停止并返回非零
+- 便于 0.1.7 最终门禁复核与 CI 统一入口
+
+### 0.37.123 — ABI 版本握手检查 CLI
+- 新增 `mimi abi check <file>`：将给定 `.mimiabi` 与当前 core runtime ABI 比对
+  - 输出所有变更与 breaking 摘要
+  - 存在 breaking change 时失败退出，用于 Native ABI 版本握手
+- 新增 2 个 CLI 单测：当前 core ABI 自检通过、导出重命名触发 breaking 失败
+
+### 0.37.122 — Wire Schema 校验 CLI
+- 新增 `mimi wire validate-schema <file>`：读取并校验 WireSchema JSON
+  - 检查重复字段名/索引、索引连续 0-based 等语义
+- 新增 2 个 CLI 单测：clean schema 通过、non-contiguous index 拒绝
+
+### 0.37.121 — ABI CLI stdin/stdout 支持
+- `mimi abi * -` 可从 stdin 读取 `.mimiabi` JSON
+- `-o -` 可将 JSON/生成代码写到 stdout
+- 支持 `mimi abi core -o - | mimi abi validate -` 管道工作流
+
+### 0.37.120 — Wire CLI stdin/stdout 支持
+- `mimi wire encode -` / `mimi wire decode -`：从 stdin 读取输入
+- `-o -`：将二进制输出写到 stdout（默认 stdout）
+- 便于 shell 管道直接进行 Wire 封包/解包
+
+### 0.37.119 — Component `.mimiabi` CLI
+- 新增 `mimi abi core [-o out]`：导出 core runtime Component ABI 为 `.mimiabi` JSON
+- 新增 `mimi abi validate <file>`：校验 format version / enum / 语义字段
+- 新增 `mimi abi hash <file>`：打印 BLAKE3 内容哈希
+- 新增 `mimi abi diff <old> <new>`：输出 breaking/non-breaking 变更摘要
+- 新增 `mimi abi emit-c <file>` / `mimi abi emit-rust <file>`：从 `.mimiabi` 直接生成
+  Component IR 驱动的 C Header 与 Rust FFI 绑定
+- 新增 5 个 CLI 单测：core 导出/校验 roundtrip、坏 JSON 拒绝、identical diff、
+  emit-c/emit-rust、clap 解析
+- README CLI 表补充 `mimi abi`
+
+### 0.37.118 — Wire Schema CLI 接入
+- 新增 `mimi wire encode <payload> [-o out]`：将原始 payload 包装为二进制 Wire Envelope
+- 新增 `mimi wire decode <envelope> [-o out]`：解包并校验 Wire Envelope，输出原始 payload
+- 支持 stdout/文件输出，校验 magic/version/length/trailing data
+- 新增 3 个 CLI 单测：roundtrip、corrupt reject、clap 子命令解析
+- README CLI 表补充 `mimi wire encode|decode`
+
+### 0.37.117 — 0.1.7 Final Gate Evidence 快照
+- 新增 `docs/0.1.7-final-gate-evidence.md`
+- 汇总后端零回退、Valgrind/ASan/TSan、10M fuzz、10M event storm、
+  stress-heavy、dogfood、LSP 亚 10ms、Phase E 终检证据
+- 24h soak runner 已就绪，实际长时间运行在最终 Nightly 阶段执行
+
+### 0.37.116 — Nightly 24h Soak 运行脚本
+- 新增 `scripts/soak_nightly.sh`
+  - 默认执行 `MIMI_SOAK_SECONDS=86400` 的 native 内存稳定 soak
+  - 输出与日志自动落到 `devdocs/soak-<duration>s-<timestamp>.log`
+  - 支持 `MIMI_SOAK_SECONDS=900` 等短浸泡验证
+- soak 测试增加结束摘要：`duration_secs / samples / baseline_kb / peak_kb / growth_kb`
+
+### 0.37.115 — ASan / TSan Nightly Sanitizer 复核通过
+- 使用 `cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu`
+  + `RUSTFLAGS=-Z sanitizer=address` 复核：
+  - lexer 基础测试通过
+  - `tests::fuzz::target_parser::` 10 项通过
+  - `tests::property::` 44 项通过
+- 使用同一 nightly build-std + `RUSTFLAGS=-Z sanitizer=thread` 复核：
+  - `runtime::future::tests::` 5 项通过
+  - `ffi::runtime::tests::` 15 项通过
+  - `tests::actor_concurrent::` 11 项通过
+- 未发现 ASan 内存错误、泄漏或 TSan 数据竞争
+- 新增 `scripts/sanitize_ci.sh` 一键复跑：
+  - `scripts/sanitize_ci.sh asan`
+  - `scripts/sanitize_ci.sh tsan`
+  - `scripts/sanitize_ci.sh both`
+
+### 0.37.114 — Native 长时间内存稳定 Soak 门禁
+- 新增 `#[ignore]` 重载 soak 测试 `stress_soak_native_memory_stability_heavy`
+  - 编译为 native 二进制后运行无限分配循环（临时 List 反复分配/释放）
+  - 每 500ms 采样 `/proc/<pid>/status` VmRSS，判定峰值增长不超过有界阈值
+  - 默认 5s；`MIMI_SOAK_SECONDS=86400` 可驱动 24h Nightly soak
+- 验证：5s 与 60s soak 均通过，RSS 无失控增长
+- 新增 `build_native_only` 供长驻 native 进程测试复用
+
+### 0.37.113 — Makefile fuzz 目标统一 LLVM 前缀
+- `test-fuzz-quick` / `test-fuzz` / `test-fuzz-ci` 现在与其它门禁一致，
+  自动使用 `LLVM_SYS_181_PREFIX`，避免单独手动设置环境变量
+- `make test-fuzz-quick` 验证通过
+
+### 0.37.112 — Valgrind 全量成员复核通过
+- 运行 `cargo test --lib e2e_valgrind_ -- --test-threads=1`
+- 18 个 Valgrind 覆盖项全部通过：
+  string/list/recursion/closure/fault-heap-cleanup/large-struct-return/
+  shared/weak/parasteps/spawn/arena 等
+- 覆盖 compiler-native 路径堆分配、引用计数、Fault 回滚与并发 spawn 内存安全
+
+### 0.37.111 — Wire Fuzzing 10,000,000 次迭代
+- 新增 `#[ignore]` 重载 fuzz 门禁 `stress_wire_fuzz_10m_no_panic`
+  - 对随机/截断二进制 Wire Envelope 与 WireType 解码循环执行 10,000,000 次
+  - 只允许安全拒绝或成功解码，禁止 panic/崩溃
+- 实测 10M 次迭代约 8s 内完成
+- `make test-stress-heavy` 可直接纳入该 10M 重载门禁
+
+### 0.37.110 — LSP 10k 行项目亚 10ms 补全/悬停
+- 优化 `compute_completion`：一次 `parse_with_recovery` 结果复用到 top/type/
+  module/impl 分支，避免对大文件重复克隆 AST
+- 新增 `#[ignore]` 重载性能门禁
+  `e2e_perf_10k_line_completion_sub_10ms`
+  - 合成 10,003 行 / 267KB 单函数文件
+  - 实测 hover 中位数 ≈ 6.9ms、completion 中位数 ≈ 6.4ms（debug 构建）
+  - 断言 hover 与 completion 中位数 < 10ms
+- `cargo test --lib lsp_e2e` 常规 7 passed / 1 ignored；ignored 重载门禁通过
+
+### 0.37.109 — Phase E：移除 Protocol 表面语法
+- `protocol` 从关键字表移除，恢复普通标识符能力
+  - `protocol` 声明与 Flow 内 `impl ProtocolName` 由 parser 拒绝并给出 0.1.7
+    Phase E 迁移错误
+- 删除 `parse_protocol_def` 与 Flow 内 impl 收集路径
+- 删除 AST `Item::Protocol` / `ProtocolDef` / `FlowDef.impl_protocols`
+- parser recovery 同步 token 移除 `TokenKind::Protocol`
+- 清理 CheckedProgram / verifier / codegen / interpreter 中的 protocol 目录、
+  conformance 投影与 resolved/checked 访问器
+- 测试迁移：
+  - 移除 protocol 语法测试（flow_features、resolved）与
+    `tests/real_world/flow_protocol.mimi`
+  - 新增 `protocol_syntax_removed_at_parser`
+  - flow lexer 关键字表改断言 `protocol` 为普通标识符
+- 文档同步：`docs/syntax-reference.md` 关键字表 62 → 61、删除 §6.2 Protocol
+  产生式；`docs/language-spec.md` §3.9/§6.5 标记 surface removed；
+  `docs/phase-e-status-0.1.7.md` 标记 protocol 删除完成
+- 门禁：`cargo test --lib` 5421 passed / 6 ignored、clippy/fmt clean、
+  `make test-stress` 62 passed / 26 ignored、real_world_cli 通过
+
+### 0.37.108 — Phase E：移除 quote 语法面
+- `quote` 从关键字表移除，恢复普通标识符能力
+  - `func quote()` / `let quote = 1` 合法
+- parser 不再产生 `Expr::Quote` / `Expr::QuoteInterpolate`
+  - `quote! { ... }` 与 `$(...)` 现在给出 0.1.7 Phase E 迁移错误
+  - 提示改用 `comptime { ... }` 常量折叠
+- 删除 `parse_quote_block` 与 quote 专用 parser 路径
+- 测试迁移：
+  - quote 正用例迁移到 `comptime` 等价路径
+  - SD-7/SD-9 常量折叠回归改为 `comptime` 双后端验证
+  - 新增 `quote_syntax_removed_at_parser` / `quote_interpolation_removed_at_parser`
+  - 新增 `quote_is_ordinary_identifier_now`
+- 文档同步：`docs/syntax-reference.md` 关键字表 63 → 62、§5.3 移除 quote 产生式；
+  `docs/phase-e-status-0.1.7.md` 标记 quote 删除完成
+- `cargo test --lib`：5450 passed / 6 ignored
+
+
+### 0.37.107 — Flow 10,000,000 事件风暴原生重载
+- 新增 `stress_flow_event_storm_10m_native_heavy`
+- 使用 tail-recursive Flow driver 在每次递归传入新的线性 state 绑定，
+  checker 接受该写法，native codegen 将尾递归收紧为循环
+- 单 Flow 实例连续完成 10,000,000 次状态转移，实测约 12ms
+  - 验证 DoD 状态机承压：10,000,000 events，零乱序、零状态撕裂
+- 新增 PR 门禁级 `stress_flow_event_storm_native_smoke`：原生 100,000 次事件
+- `make test-stress` 覆盖 100K smoke，`make test-stress-heavy` 覆盖 10M heavy
 
 ### 0.37.106 — build-race 便捷门禁 + nested-spawn 文档
 - Makefile 新增 `make test-build-race`

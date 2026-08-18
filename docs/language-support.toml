@@ -1,7 +1,7 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "0.1.7-dev (internal sprint 0.37.X)"
+implementation_version = "0.1.7-dev (internal sprint 0.37.135, Wave-3 closeout)"
 
 # ⚠ 2026-08-02：本文件由 0.31.36 落后状态在 0.34.5 刷新版本号。
 # 与实现冲突时以 devdocs/v0.34/golden-document.md 与
@@ -180,7 +180,7 @@ verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test fault_ -- --test-threads=1"
-evidence = "Fault is not yet a complete per-Flow typed set and recovery verbs are still injected."
+evidence = "0.1.7 implements a single per-Flow typed error (`fault ErrorType`) plus the system Fault payload documented in language-spec.md §3.12. Rich per-Flow variant sets remain an explicit §4.3 forward design deferred to 0.2; reset/recover remain business-defined transitions rather than a separate variant-matching surface."
 
 [[support]]
 requirement = "FLOW-PROGRESSIVE-001"

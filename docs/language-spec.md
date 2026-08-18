@@ -438,38 +438,13 @@ Actor call failure must not return indistinguishable `0`. Call results distingui
 - Peer/system kill;
 - Runtime infrastructure failure.
 
-### 3.9 Protocol `[stable]`
+### 3.9 Protocol surface `[removed 0.1.7 Phase E]`
 
-Protocol is a static topology projection of a Flow, not an ordinary trait, nor a default runtime reflection object.
-
-This stable commitment is limited to `StaticProtocolProjection`: checker-verified topology, stable Protocol identity, and version handshake.
-
-- **0.36.21 定案（删除 "statically generated language interfaces" 承诺）**：Flow
-  声明已生成唯一的接口面（StateId/EventId 等，见 §3.4）；Protocol 投影只施加
-  check 约束，不产生第二套语言接口（0.36.16 证据：codegen protocol 拓扑表为死
-  存储、零消费者——投影无运行时/生成面）。
-- **`dyn Protocol` = 稳定逃生舱**：`unsafe_cast_protocol(flow)` 是与 `unsafe`
-  同级的显式边界动作（0.36.21 定案），双后端回归覆盖；Mimi 无独立
-  feature-flag 机制，逃生舱不以 feature gate 形式存在。
-- runtime VTable dispatch、heterogeneous collections、dynamic broadcast
-  **未实现**：capability gate 按稳定诊断报告（§9.5），维持 `experimental`。
-
-Stable Protocol describes:
-
-- Visible states;
-- Events allowed in each visible state;
-- Input and output payloads;
-- Permission/effect constraints;
-- Fault exposure strategy.
-
-Flow implementing Protocol: checker at least proves:
-
-- Required states and business edges exist;
-- Payload variance conforms to view/mutate/consume permissions;
-- Implementation does not expand prohibited effects;
-- Target state maintains Protocol's nominal identity mapping.
-
-String-based `protocol_methods("Name")` is not part of the stable type-safe model. `[removed]`
+`protocol` 声明 / `impl ProtocolName` 表面语法已在 0.1.7 Phase E 从 parser
+移除（`feature-design-review-0.37.md` #2）。原静态拓扑投影由 Flow 自身的
+state/transition 声明直接承载；checker-only 静态投影与 `dyn Protocol` 均交给
+宿主语言。保留的组件边界 Protocol 概念仅用于外部 ABI/schema 语义，不再是
+Mimi 语言内可写表面。
 
 ### 3.10 Session `[stable]` / `[experimental]`
 
@@ -561,20 +536,21 @@ flow Account {
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `last_state` | `string` | Name of the state the flow was in when the fault occurred. |
-| `unexpected_event` | `string` | The event that had no handling transition, or `"panic:<code>"` for an absorbed runtime panic (e.g. `"panic:E0801"` for division by zero). |
+| `last_state` | `flow::<F>::StateId` | Nominal identity of the state the flow was in when the fault occurred. |
+| `unexpected_event` | `flow::<F>::EventId` | Nominal identity of the unhandled event; an absorbed runtime panic is `Panic { code: ... }`. |
 | `snapshot` | `string` | A textual snapshot of the faulting state. |
-| `trace` | `SystemTrace` | Structured trace: `{ last_state_name, unexpected_event, snapshot, memory_dump, panic_payload }`. |
+| `trace` | `SystemTrace` | Structured diagnostics. Its `last_state_name` and `unexpected_event` are human-readable strings; state identity remains in the nominal fields above. |
 | `error` | `ErrorType` | Present only when `fault ErrorType` is declared; the per-flow typed error. |
 
 **Entering Fault.** A flow enters `Fault` through two channels:
 
 1. *Undefined event (auto-fallback).* Calling a declared event from a state that
    has no user-defined transition for it returns a `Fault` value whose
-   `last_state`/`unexpected_event` name the source state and the event.
+   `last_state`/`unexpected_event` identify the source state and event through
+   the flow's nominal `StateId`/`EventId` enums.
 2. *Absorbed panic.* A runtime panic inside a transition body (for example a
-   division by zero, `E0801`) is absorbed into `Fault` with
-   `unexpected_event = "panic:<code>"`. A panic that occurs while the flow is
+   division by zero, `E0801`) is absorbed into `Fault` as
+   `unexpected_event = Panic { code: ... }`. A panic that occurs while the flow is
    *already* in `Fault` propagates rather than being re-absorbed.
 
 **Recovery is a business-defined state transition.** Recovering from `Fault` is an
@@ -586,12 +562,15 @@ Recovery must not be default-value construction of fake external resources:
 func handle(f: Fault) -> i32 {
     match f {
         Fault { last_state, unexpected_event, snapshot: _, trace: _ } => {
-            if last_state == "Ready" {
-                if unexpected_event == "panic:E0801" {
-                    return 1  // route to a defined recovery path
+            match last_state {
+                Ready => {
+                    match unexpected_event {
+                        Panic { code: _ } => { return 1 }  // route to a defined recovery path
+                        _ => { return 0 }
+                    }
                 }
+                _ => { return 0 }
             }
-            0
         }
         _ => 0
     }
@@ -688,12 +667,20 @@ In transition body, `?` can only propagate to the transition's declared rollback
 - Implicitly turning `Err` into current Flow's Fault;
 - Using global side channel for function propagation.
 
-### 4.3 Typed Fault `[stable]`
+### 4.3 Rich Fault Sets (Forward Design) `[deferred to 0.2]`
 Fault represents a Flow's inability to maintain its state invariants, not a catch-all for all errors.
 
-Each Flow should declare or derive its own fault set:
+> **Status.** This section is the **long-term forward design sketch** for a rich
+> fault set. It is **deferred to 0.2**; it is not a claim of current 0.1.7
+> parser/checker support. The implemented 1.0/0.1.7 surface is the single
+> per-flow typed error (`fault ErrorType`) plus the system payload documented in
+> §3.12. Readers implementing or using 0.1.7 should follow §3.12, not the
+> variant-block syntax below.
+
+The 0.2 forward model may let each Flow declare or derive its own fault set:
 
 ```mimi
+// 0.2 forward-design sketch; not accepted by the 0.1.7 parser/checker.
 fault OrderFault {
     Storage(StorageError)
     Peer(PeerFault)
@@ -702,6 +689,12 @@ fault OrderFault {
     Panic(PanicPayload)
 }
 ```
+
+> **0.1.7 Phase E note.** The variant-block fault set above remains the
+> long-term model but is **deferred to 0.2**. The implemented 1.0/0.1.7
+> surface is the single per-flow typed error (`fault ErrorType`) plus the
+> system payload in §3.12. This section is retained as the forward design
+> sketch, not as a claim of current parser/checker support.
 
 #### Entering Fault
 
@@ -729,7 +722,7 @@ Fault payload at least includes:
 - Flow and instance ID;
 - Source state and generation;
 - Event and resolved transition ID;
-- Fault variant and business payload;
+- Typed fault/error payload (the single `ErrorType` in 0.1.7; future rich-variant payload in the deferred §4.3 model);
 - Source file/span;
 - Active resource summary;
 - Persistent/transaction state;
@@ -807,7 +800,7 @@ Must prove or dynamically guarantee:
 
 #### Recover
 
-Recover uses explicit Fault variant and recoverable data to construct target state.
+Recover uses the explicit typed Fault/error payload and recoverable data to construct target state. In 0.1.7 the typed payload is the single per-flow `ErrorType` described in §3.12; the rich fault-variant form remains deferred to 0.2 (see §4.3).
 
 Must declare:
 
@@ -967,7 +960,7 @@ The following get `NotInTrustedSubset`, cannot become abstract variables:
 - `spawn/await` and async;
 - Actor, Flow transition, Protocol dynamic dispatch, Session;
 - Mutex, Atomic, Channel;
-- Comptime, quote, and generated code;
+- Comptime and generated code;
 - Closure/lambda;
 - `old` on aggregate/alias;
 - Unknown or erased types.
@@ -1139,24 +1132,14 @@ func take(x: T)          // by-value consume
   typed Flow events);
 - Actor runtime holds unique Flow instance.
 
-### 6.5 Abstraction: trait and Protocol `[stable]`
+### 6.5 Abstraction: trait and Protocol `[stable]` / `[removed]`
 
 - `trait`: stateless value interface;
-- `protocol`: Flow's state topology, event, and permission projection;
 - `session`: communication endpoint message ordering.
 
-Three cannot assume each other's responsibilities.
-
-#### Protocol Convergence `[removed]`
-
-- Protocol state payload uses same record schema as Flow state;
-- Permissions written as view/mutate/consume constraints;
-- String-based runtime `protocol_methods("Name")`: **removed**;
-- Typed compile-time reflection can be provided in `comptime`;
-- Dynamic `dyn Protocol`（`unsafe_cast_protocol`）= **稳定逃生舱**（0.36.21 定案：
-  与 unsafe 同级显式边界动作，双后端回归覆盖）；typed VTable、event/result
-  ABI 未实现，维持 `experimental`——capability gate 稳定诊断报告（§9.5），
-  不承诺独立门禁。
+`protocol` 语言表面已删除（0.1.7 Phase E）：Flow 的状态/transition 拓扑直接
+构成其外部接口；不再提供 `protocol` 声明或 `impl ProtocolName` 投影语法。
+静态组件边界 Protocol 作为外部 ABI/schema 概念保留。
 
 ### 6.6 Session `[stable]` / `[experimental]`
 
@@ -1236,7 +1219,7 @@ General `math { Expr... }` blocks are a stable verifier channel (see §5.6).
 - If needing to associate MimiSpec, use documentation metadata, trivia attachment, or external mapping;
 - Unrecognized metadata must warning/error; must not pretend verified.
 
-### 6.10 Comptime and Quote `[stable]` / `[experimental]`
+### 6.10 Comptime `[stable]`
 
 #### `comptime`
 
@@ -1247,15 +1230,8 @@ General `math { Expr... }` blocks are a stable verifier channel (see §5.6).
 - Evaluation failure is hard error;
 - Runtime not generating comptime symbol is normal; no misleading warning.
 
-#### `quote`
-
-Quote/AST generation remains experimental until:
-
-- Can faithfully represent all allowed generated AST;
-- Does not silently filter contracts, Flow statement, or metadata;
-- Generated result re-passes complete parse/check/lower;
-- Span/hygiene/phase isolation explicit;
-- Generated code and verifier boundary explicit.
+> **0.1.7 Phase E 已删除**：`quote` / `quote!` / `$(...)` 语法面已从语言移除
+> （`feature-design-review-0.37.md` #1）。`comptime` 常量折叠保留。
 
 ### 6.11 Attribute and Keywords `[stable]`
 - Unknown attribute, repr, annotation: default hard error;
@@ -1276,7 +1252,6 @@ Quote/AST generation remains experimental until:
 - Result/Option/match/`?`;
 - view/mutate/consume;
 - Actor runs Flow;
-- Flat typed Protocol;
 - Minimum dual-end typed Session;
 - Typed Fault/PeerFault;
 - Function-exclusive contracts;
@@ -1287,8 +1262,6 @@ Quote/AST generation remains experimental until:
 
 #### Experimental
 
-- Dynamic Protocol/VTable/broadcast;
-- Quote/AST generation;
 - In-process FFI signal recovery and forced thread termination;
 - Compiler auto-synthesized recover (explicit typed reset/recover is stable);
 - Heterogeneous Actor collection;
