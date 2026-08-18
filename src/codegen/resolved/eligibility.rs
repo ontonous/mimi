@@ -183,7 +183,6 @@ pub(super) fn require_resolved_native_program(
     if user_flow_count != 0
         || !program.actors().is_empty()
         || !program.sessions().is_empty()
-        || !program.protocols().is_empty()
         || !program.capabilities().is_empty()
         || !program.traits().is_empty()
         || !program.impls().is_empty()
@@ -200,12 +199,11 @@ pub(super) fn require_resolved_native_program(
             &owner,
             format!(
                 "declaration kinds beyond plain functions are not in the resolved native slice \
-                 (flows={}, actors={}, sessions={}, protocols={}, caps={}, constants={}, traits={}, \
+                 (flows={}, actors={}, sessions={}, caps={}, constants={}, traits={}, \
                  impls={}, types={}, externs={})",
                 user_flow_count,
                 program.actors().len(),
                 program.sessions().len(),
-                program.protocols().len(),
                 program.capabilities().len(),
                 program.constants().len(),
                 program.traits().len(),
@@ -970,6 +968,7 @@ fn require_conversion(
             // representation is the same opaque handle, so the resolved
             // emitter already treats it as identity.
             | CheckedConversionKind::ContainerErase
+            | CheckedConversionKind::TupleErase
             // DynamicAnyPack: concrete values passed to stdlib Any-typed
             // wrappers. The resolved emitter lowers DynamicAny to i64 and
             // widens narrow ints; map/set runtime boxes already use the same

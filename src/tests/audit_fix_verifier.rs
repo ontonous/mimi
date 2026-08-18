@@ -371,7 +371,7 @@ fn audit2_vera_c6_tail_not_swallowed_by_valueless_if() {
     let src = r#"
 func f(c: bool, y: i32) -> i32 {
     ensures: result == 0
-    if c { let y2 = y + 1 }
+    if c { let y2 = y }
     y
 }
 "#;
@@ -394,7 +394,7 @@ fn audit2_vera_c6_tail_survives_and_proves() {
     let src = r#"
 func f(c: bool, y: i32) -> i32 {
     ensures: result == y
-    if c { let y2 = y + 1 }
+    if c { let y2 = y }
     y
 }
 "#;
@@ -868,5 +868,31 @@ func f(x: i32) -> bool {
         vars.get_bool("_match_fallback_bool").is_some(),
         "non-exhaustive bool match fallback must be an unconstrained \
          variable, not a hardcoded `false` (pre-§11-#48)"
+    );
+}
+
+/// batch4-08 P0-1: the AST fallback must not return Proven for a function
+/// whose body contains checked arithmetic in a non-tail statement. The old
+/// flow_ast path only proved definedness for the extracted tail expression,
+/// so a crashing `x / y` inside an `if` branch could be verified as safe.
+#[test]
+fn audit2_vera_p01_non_tail_arith_fails_closed() {
+    if !z3_or_skip() {
+        return;
+    }
+    let src = r#"
+func f(x: i32, y: i32) -> i32 {
+    requires: true
+    ensures: result == 0
+    if x > 0 { x / y; 0 } else { 0 }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = crate::verifier::verify_source(src).expect("verify_source");
+    assert_eq!(
+        status_of(&results, "f"),
+        Some(crate::verifier::VerifStatus::NotInTrustedSubset),
+        "non-tail checked arithmetic must fail closed: {:?}",
+        results
     );
 }

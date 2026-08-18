@@ -155,6 +155,43 @@ impl<'ctx> CodeGenerator<'ctx> {
         if args.len() != 2 {
             return Err("min/max expects 2 arguments".into());
         }
+        // VM parity: min/max accept f64 and use f64::min / f64::max.
+        if let (BasicMetadataValueEnum::FloatValue(a), BasicMetadataValueEnum::FloatValue(b)) =
+            (args[0], args[1])
+        {
+            let intrinsic = if name == "min" {
+                "llvm.minnum.f64"
+            } else {
+                "llvm.maxnum.f64"
+            };
+            let f64_ty = self.context.f64_type();
+            let maybe_fn = self.module.get_function(intrinsic);
+            let intrinsic_fn = if let Some(f) = maybe_fn {
+                f
+            } else {
+                let ty = f64_ty.fn_type(
+                    &[
+                        inkwell::types::BasicMetadataTypeEnum::FloatType(f64_ty),
+                        inkwell::types::BasicMetadataTypeEnum::FloatType(f64_ty),
+                    ],
+                    false,
+                );
+                self.module
+                    .add_function(intrinsic, ty, Some(inkwell::module::Linkage::External))
+            };
+            let call = self
+                .builder
+                .build_call(
+                    intrinsic_fn,
+                    &[
+                        BasicMetadataValueEnum::FloatValue(a),
+                        BasicMetadataValueEnum::FloatValue(b),
+                    ],
+                    &format!("{}_float", name),
+                )
+                .map_err(|e| format!("{} float call: {}", name, e))?;
+            return self.expect_basic_value(&call, name);
+        }
         let a = match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => {
@@ -195,6 +232,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         if args.len() != 1 {
             return Err("floor/ceil/round expects 1 argument".into());
         }
+        // VM parity: floor/ceil/round on an integer argument return the
+        // integer unchanged; only float arguments go through libm.
+        if let BasicMetadataValueEnum::IntValue(iv) = args[0] {
+            return Ok(BasicValueEnum::IntValue(iv));
+        }
+        let BasicMetadataValueEnum::FloatValue(fv) = args[0] else {
+            return Err(CompileError::TypeMismatch(
+                "floor/ceil/round expects a number".into(),
+            ));
+        };
         let fn_name = match name {
             "floor" => "floor",
             "ceil" => "ceil",
@@ -212,7 +259,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
         let call = self
             .builder
-            .build_call(c_fn, args, &format!("{}_call", fn_name))
+            .build_call(
+                c_fn,
+                &[BasicMetadataValueEnum::FloatValue(fv)],
+                &format!("{}_call", fn_name),
+            )
             .map_err(|e| format!("{} error: {}", fn_name, e))?;
         self.expect_basic_value(&call, fn_name)
     }
@@ -295,31 +346,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         _args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // Call libc random() and normalize to f64 in [0, 1)
+        // Call the shared runtime export so native code uses the same LCG as
+        // the bytecode VM (batch4-03 P2-8). Previously this called libc
+        // random(), producing a different algorithm/sequence.
         let f64_ty = self.context.f64_type();
-        let i64_ty = self.context.i64_type();
-        let random_fn = self.module.get_function("random").unwrap_or_else(|| {
-            let ty = i64_ty.fn_type(&[], false);
+        let random_fn = self.module.get_function("mimi_random").unwrap_or_else(|| {
+            let ty = f64_ty.fn_type(&[], false);
             self.module
-                .add_function("random", ty, Some(inkwell::module::Linkage::External))
+                .add_function("mimi_random", ty, Some(inkwell::module::Linkage::External))
         });
         let call = self
             .builder
             .build_call(random_fn, &[], "random_call")
             .map_err(|e| format!("random error: {}", e))?;
-        let raw = self.expect_basic_value(&call, "random")?.into_int_value();
-        let raw_f = self
-            .builder
-            .build_signed_int_to_float(raw, f64_ty, "rand_f")
-            .map_err(|e| format!("random int_to_float error: {}", e))?;
-        // glibc random() returns values through 2^31-1 inclusive. Divide by
-        // 2^31, not RAND_MAX, to preserve the documented half-open range.
-        let random_range = f64_ty.const_float(2147483648.0);
-        let result = self
-            .builder
-            .build_float_div(raw_f, random_range, "rand_norm")
-            .map_err(|e| format!("random div error: {}", e))?;
-        Ok(result.into())
+        self.expect_basic_value(&call, "mimi_random")
     }
 
     pub(super) fn compile_pi(
@@ -662,6 +702,47 @@ impl<'ctx> CodeGenerator<'ctx> {
         let a = self.expect_float_arg(args, 0, "is_close")?;
         let b = self.expect_float_arg(args, 1, "is_close")?;
         let eps = self.expect_float_arg(args, 2, "is_close")?;
+        // VM parity: a negative epsilon is a loud error, not a never-true
+        // comparison (interp/bytecode/builtins/math.rs builtin_is_close).
+        let zero = eps.get_type().const_float(0.0);
+        let is_negative = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OLT,
+                eps,
+                zero,
+                "is_close_eps_negative",
+            )
+            .map_err(|e| format!("is_close epsilon compare error: {}", e))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("is_close: no current function".into()))?;
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "is_close_neg_eps_bb");
+        let ok_bb = self.context.append_basic_block(function, "is_close_ok_bb");
+        self.builder
+            .build_conditional_branch(is_negative, trap_bb, ok_bb)
+            .map_err(|e| format!("is_close epsilon branch error: {}", e))?;
+        self.builder.position_at_end(trap_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(
+                "is_close: epsilon must be non-negative",
+                "is_close_neg_eps_msg",
+            )
+            .map_err(|e| format!("global string error: {}", e))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            "is_close_neg_eps_abort",
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| format!("unreachable error: {}", e))?;
+        self.builder.position_at_end(ok_bb);
         // |a - b| <= epsilon
         let diff = self
             .builder

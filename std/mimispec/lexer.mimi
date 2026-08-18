@@ -1,3 +1,8 @@
+// ⚠ EXPERIMENTAL: this subpackage is not part of the stable stdlib ABI.
+// It is a Rust-side parser reimplementation experiment and may fail to
+// compile with current language syntax. Do not `use std::mimispec::*` in
+// production code; keep it excluded from default stdlib loading.
+//
 // MimiSpec 词法分析器
 // 将 MimiSpec 源码转换为 Token 列表。
 // 布局敏感：跟踪 4 空格缩进，产生 Indent/Dedent 标记。
@@ -48,10 +53,23 @@ pub func keyword_kind(value: string) -> string {
     else { "ident" }
 }
 
-// tokenize: 将 MimiSpec 源码标记化为 Token 列表。
+// tokenize: 将 MimiSpec 源码标记化为 Token 列表（词法错误仅记录，不阻断）。
 pub func tokenize(source: string) -> List<(string, string, i32, i32)> {
-    let mut toks = [("", "", 0, 0)]
-    let mut errs = [("", 0, 0)]
+    tokenize_full(source).0
+}
+
+// tokenize_with_errors: 返回 Token 列表和词法错误列表。
+// 错误列表元素为 (message, line, col)；无错误时为空列表。
+pub func tokenize_with_errors(source: string) -> (List<(string, string, i32, i32)>, List<(string, i32, i32)>) {
+    tokenize_full(source)
+}
+
+// tokenize_full: 内部实现，同时产生 token 与 error 两个列表。
+func tokenize_full(source: string) -> (List<(string, string, i32, i32)>, List<(string, i32, i32)>) {
+    // Start with an empty token list: the old initial dummy token made every
+    // consumer see a phantom fragment before the real source.
+    let mut toks: List<(string, string, i32, i32)> = []
+    let mut errs: List<(string, i32, i32)> = []
     let src_sz = len(source)
     let mut pos: i32 = 0
     let mut ln: i32 = 1
@@ -143,6 +161,11 @@ pub func tokenize(source: string) -> List<(string, string, i32, i32)> {
                 }
             }
 
+            // The layout loop already emitted eof for empty/whitespace-only
+            // sources; break here so we don't emit a second eof in the tail.
+            if pos >= src_sz {
+                break
+            }
             continue
         }
 
@@ -301,5 +324,5 @@ pub func tokenize(source: string) -> List<(string, string, i32, i32)> {
         pos += 1; cl += 1
     }
 
-    toks
+    (toks, errs)
 }

@@ -1043,7 +1043,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // does not free the returned string before the caller can use it.
                 if let Some(expr) = expr {
                     if let Expr::Call(_, args) = expr.unlocated() {
-                        if Self::is_string_temp_expr(&args[0], &val) {
+                        if args.len() == 1 && Self::is_string_temp_expr(&args[0], &val) {
                             let _ = self.pop_last_heap_ptr();
                         }
                     }
@@ -2926,7 +2926,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 self.var_type_names
                                                     .insert(name.clone(), "bool".to_string());
                                             }
-                                            "getenv" | "base64_decode" => {
+                                            "getenv" | "base64_decode" | "try_input_line" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "Result<string,string>".to_string(),
@@ -4061,24 +4061,17 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // 0.35.23 deep-eval: native entry — seed the runtime CLI args so
         // args()/cli_args() work in the generated executable. The declare_func
-        // main signature carries (argc: i32, argv: ptr); zext argc to i64 for
-        // the runtime's mimi_args_init(i64, ptr).
+        // main signature carries (argc: i32, argv: ptr); pass argc as i32 to
+        // the runtime's mimi_args_init(i32, ptr).
         if func.name == "main" {
             if let Some(args_init_fn) = self.module.get_function("mimi_args_init") {
                 if let (Some(argc), Some(argv)) =
                     (function.get_nth_param(0), function.get_nth_param(1))
                 {
-                    let argc_64 = self
-                        .builder
-                        .build_int_z_extend(
-                            argc.into_int_value(),
-                            self.context.i64_type(),
-                            "main_argc_64",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("argc zext: {e}")))?;
+                    let argc_i32 = argc.into_int_value();
                     self.build_call(
                         args_init_fn,
-                        &[argc_64.into(), argv.into()],
+                        &[argc_i32.into(), argv.into()],
                         "mimi_args_init",
                     )?;
                 }

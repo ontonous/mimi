@@ -167,6 +167,9 @@ mod tests {
         // Regression: raw extern symbols must be in a submodule so wrappers can reuse function names.
         assert!(out.contains("mod ffi_raw"));
         assert!(out.contains("super::ffi_raw::add("));
+        // P2-3: StringBorrow wrappers must not panic on embedded NUL bytes.
+        assert!(out.contains(".bytes().filter(|&b| b != 0)"));
+
         // Regression (corrected FFI contract): `greet` returns a BORROWED string
         // (FfiRetContract::String) — the safe wrapper must copy it but must NOT
         // free the C pointer; C retains ownership. mimi_string_free calls are
@@ -175,6 +178,44 @@ mod tests {
         assert!(
             !out.contains("super::ffi_raw::mimi_string_free(raw)"),
             "borrowed String returns must NOT be freed by the generated wrapper"
+        );
+    }
+
+    #[test]
+    fn rust_binding_raw_pointer_wrappers_are_unsafe() {
+        // P0-13 (batch4/07, batch5/01): generated wrappers must not hide raw
+        // pointers behind a safe `pub fn`. A caller can pass a dangling/wild
+        // pointer; the wrapper itself can only uphold the contract if it is
+        // explicitly `pub unsafe fn`.
+        let gen = rust_bind::RustBindGenerator::new(HashMap::new(), "rawptr");
+        let funcs = vec![ExternFunc {
+            meta: fixture_meta(),
+            name: "inspect_ptr".to_string(),
+            params: vec![ExternParam {
+                meta: fixture_meta(),
+                name: "p".to_string(),
+                ty: Type::RawPtr(Box::new(Type::Name("i32".to_string(), vec![]))),
+                cap_mode: None,
+            }],
+            ret: Some(Type::RawPtr(Box::new(Type::Name(
+                "i32".to_string(),
+                vec![],
+            )))),
+            requires: None,
+            ensures: None,
+            variadic: false,
+            no_panic: false,
+            returns_errno: false,
+        }];
+        let out = gen.generate(&funcs).unwrap();
+        assert!(
+            out.contains("pub unsafe fn inspect_ptr(p: *const i32) -> *const i32"),
+            "raw-pointer wrapper must be unsafe, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("pub fn inspect_ptr(p: *const i32) -> *const i32 {"),
+            "raw-pointer wrapper must not be a safe pub fn"
         );
     }
 

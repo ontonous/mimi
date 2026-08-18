@@ -193,7 +193,121 @@ fn audit_str_index_of_char_index_dual() {
     );
 }
 
-// ── FIX 4: char_code is char-indexed + OOB traps (string.rs) ─────────
+// ── P1-13: contains/index_of must not truncate at embedded NUL ──────
+
+#[test]
+fn audit_nul_safe_contains_index_of_dual() {
+    // The C strstr implementation used by codegen stopped at the first NUL;
+    // explicit-length search keeps subtraction and chained fragments intact.
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let s = "a" + chr(0) + "b"
+            let t = chr(0) + "b"
+            println(str_contains(s, t))
+            println(option_value_or(str_index_of(s, t), 0 - 1))
+            println(str_contains(s, "b"))
+            println(str_contains(s, "x"))
+            println(str_starts_with(s, "a" + chr(0)))
+            println(str_starts_with(s, "a" + chr(0) + "b"))
+            println(str_starts_with(s, "b"))
+            println(str_ends_with(s, chr(0) + "b"))
+            println(str_ends_with(s, "b"))
+            println(str_ends_with(s, "a"))
+            0
+        }
+        "#,
+        "true\n1\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse",
+    );
+}
+
+#[test]
+fn audit_str_repeat_nul_safe_dual() {
+    // Concat must preserve embedded NULs through the length-aware runtime,
+    // and str_repeat must use the explicit {ptr,len} string ABI.
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let s = "a" + chr(0) + "b"
+            println(len(str_repeat(s, 2)))
+            0
+        }
+        "#,
+        "6",
+    );
+}
+
+#[test]
+fn audit_char_code_nul_safe_dual() {
+    // char_code must use the explicit string struct length so it can see
+    // characters after an embedded NUL.
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let s = "a" + chr(0) + "b"
+            println(char_code(s, 1))
+            println(char_code(s, 2))
+            0
+        }
+        "#,
+        "0\n98",
+    );
+}
+
+#[test]
+fn audit_str_char_at_after_nul_dual() {
+    // str_char_at must use the explicit string length so it can return the
+    // character after an embedded NUL.
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let s = "a" + chr(0) + "b"
+            println(str_char_at(s, 2))
+            0
+        }
+        "#,
+        "b",
+    );
+}
+
+#[test]
+fn audit_str_replace_nul_safe_dual() {
+    // str_replace must use explicit lengths so replacing an embedded NUL
+    // works and the result length is preserved.
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let s = "a" + chr(0) + "b"
+            let r = str_replace(s, chr(0), "x")
+            println(len(r))
+            println(r)
+            0
+        }
+        "#,
+        "3\naxb",
+    );
+}
+
+// ── Batch4-2 P2-3: contains must support List<f64> ─────────
+
+#[test]
+fn audit_contains_float_dual() {
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            println(contains([1.5, 2.5, -0.0], 2.5))
+            println(contains([1.5, 2.5, -0.0], 0.0))
+            println(contains([1.5, 2.5, -0.0], 1.0))
+            println(contains([1.5, 2.5, -0.0], 0.0 - 0.0))
+            0
+        }
+        "#,
+        "true
+true
+false
+true",
+    );
+}
 
 #[test]
 fn audit_char_code_unicode_dual() {
@@ -584,5 +698,23 @@ fn audit_to_int_scalar_and_string_forms_still_dual() {
         }
         "#,
         "48",
+    );
+}
+
+/// batch4-02 P1-1: str_join must preserve embedded NUL bytes in the
+/// separator. The runtime now has a length-aware _ll variant and codegen
+/// returns the explicit result length.
+#[test]
+fn audit_str_join_preserves_nul_in_separator_dual() {
+    assert_dual(
+        r#"
+        func main() -> i32 {
+            let parts: List<string> = ["a", "b"]
+            let sep = "x" + chr(0) + "y"
+            println(len(str_join(parts, sep)))
+            0
+        }
+        "#,
+        "5",
     );
 }

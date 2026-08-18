@@ -920,10 +920,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let data_i64 = self.load_list_data_i64(list_ptr)?;
 
         // handles: i8** = malloc(len * 8)  (B4: NULL-checked malloc)
-        let bytes = self
-            .builder
-            .build_int_mul(len, i64_ty.const_int(8, false), "handles_bytes")
-            .map_err(|e| format!("mul: {}", e))?;
+        let bytes = self.checked_list_alloc_size(len, 8, "broadcast")?;
         let handles_arr = self.malloc_or_abort(bytes, "handles_malloc")?;
 
         let function = self
@@ -1271,10 +1268,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         if args.len() != 3 {
             return Err("shadow_alloc expects 3 arguments".into());
         }
-        let size = args[0].into_int_value();
+        let size = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "shadow_alloc: size must be i64".to_string(),
+                ))
+            }
+        };
+        let tag_val = match args[1] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "shadow_alloc: tag must be i64".to_string(),
+                ))
+            }
+        };
         let tag = self
             .builder
-            .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
+            .build_int_truncate(tag_val, self.context.i8_type(), "tag_i8")
             .map_err(|e| format!("trunc: {}", e))?;
         let label_ptr = match &args[2] {
             BasicMetadataValueEnum::PointerValue(pv) => *pv,
@@ -1350,19 +1362,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
         let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
         if fn_name == "mimi_shadow_tag" || fn_name == "mimi_shadow_check" {
-            let ptr_int = args[0].into_int_value();
+            let ptr_int = match args[0] {
+                BasicMetadataValueEnum::IntValue(iv) => iv,
+                _ => {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{}: pointer must be i64",
+                        fn_name
+                    )))
+                }
+            };
             let ptr = self
                 .builder
                 .build_int_to_ptr(ptr_int, i8_ptr, "ptr_cast")
                 .map_err(|e| format!("inttoptr: {}", e))?;
+            let tag_val = match args[1] {
+                BasicMetadataValueEnum::IntValue(iv) => iv,
+                _ => {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{}: tag must be i64",
+                        fn_name
+                    )))
+                }
+            };
             let tag = self
                 .builder
-                .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
+                .build_int_truncate(tag_val, self.context.i8_type(), "tag_i8")
                 .map_err(|e| format!("trunc: {}", e))?;
             call_args.push(ptr.into());
             call_args.push(tag.into());
         } else if fn_name == "mimi_shadow_free" {
-            let ptr_int = args[0].into_int_value();
+            let ptr_int = match args[0] {
+                BasicMetadataValueEnum::IntValue(iv) => iv,
+                _ => {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "{}: pointer must be i64",
+                        fn_name
+                    )))
+                }
+            };
             let ptr = self
                 .builder
                 .build_int_to_ptr(ptr_int, i8_ptr, "ptr_cast")

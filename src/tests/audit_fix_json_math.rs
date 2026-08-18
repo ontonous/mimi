@@ -477,6 +477,43 @@ fn audit_log_base_valid_regression() {
 // ============================================================
 
 #[test]
+fn audit_is_close_negative_epsilon_traps_both_backends() {
+    // Batch4-3 P2-1 / batch5-3 P2-3: VM rejects negative epsilon before any
+    // float comparison; codegen used to silently return false for
+    // is_close(1.0, 2.0, -0.1).
+    let src = r#"
+        func main() -> i32 {
+            println(is_close(1.0, 2.0, -0.1))
+            0
+        }
+    "#;
+    assert_vm_traps(src, "epsilon must be non-negative");
+    if !can_link() {
+        return;
+    }
+    assert_codegen_traps(src, "epsilon must be non-negative");
+}
+
+#[test]
+fn audit_is_close_negative_epsilon_valid_regression() {
+    // Non-negative epsilon still works on both backends.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(is_close(1.0, 1.05, 0.1))
+            println(is_close(1.0, 1.2, 0.1))
+            0
+        }
+    "#,
+        "true
+false"
+    );
+}
+
+#[test]
 fn audit_to_json_float_shortest_round_trip() {
     // FIX-3: no more "%f" padding — 1.5 serializes as "1.5" (serde shortest
     // in the VM, Rust Display in codegen). RFC 8259 §6 numbers.

@@ -278,6 +278,27 @@ fn builtin_range(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
         Value::Int(v) => *v,
         _ => return Err(InterpError::new("range end must be integer")),
     };
+    // Guard against enormous ranges that would OOM the interpreter. Use the
+    // same element-count bound as codegen's checked_list_alloc_size for 8-byte
+    // elements (1 GiB / 8 = 125M), and reject overflow rather than panic.
+    let len = match end.checked_sub(start) {
+        Some(len) => len,
+        None => {
+            return Err(InterpError::new(
+                "range: length overflow (start/end too far apart)",
+            ))
+        }
+    };
+    if len < 0 {
+        return Ok(Value::List(Arc::new(Vec::new())));
+    }
+    const MAX_RANGE_ELEMS: i64 = 125_000_000;
+    if len > MAX_RANGE_ELEMS {
+        return Err(InterpError::new(format!(
+            "range: length {} exceeds cap {} (refusing unbounded allocation)",
+            len, MAX_RANGE_ELEMS
+        )));
+    }
     Ok(Value::List(Arc::new(
         (start..end).map(Value::Int).collect(),
     )))

@@ -63,10 +63,11 @@ pub(crate) fn mark_cold_trap_branch(
             b"branch_weights\0".as_ptr() as *const std::ffi::c_char,
             b"branch_weights".len() as u32,
         );
-        let md_str = context.metadata_string("branch_weights");
         let cold = context.i32_type().const_int(0, false);
         let hot = context.i32_type().const_int(1, false);
-        let node = context.metadata_node(&[md_str.into(), cold.into(), hot.into()]);
+        // branch_weights metadata is a list of integer weights, not an
+        // MDString + integers (batch3 P2-2).
+        let node = context.metadata_node(&[cold.into(), hot.into()]);
         let _ = branch.set_metadata(node, kind_id);
     }
 }

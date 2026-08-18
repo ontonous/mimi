@@ -31,23 +31,27 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     actor_test_pause_after_pin(true);
 
     let fields = 0u8;
-    let handle = mimi_actor_spawn(
-        &fields as *const u8 as *const c_void,
-        1,
-        Some(actor_dispatch),
-    );
+    let handle = unsafe {
+        mimi_actor_spawn(
+            &fields as *const u8 as *const c_void,
+            1,
+            Some(actor_dispatch),
+        )
+    };
     assert!(!handle.is_null());
 
     let call_handle = handle as usize;
     let call = std::thread::spawn(move || {
         let mut result = 0i64;
-        let size = mimi_actor_call(
-            call_handle as *mut c_void,
-            0,
-            std::ptr::null(),
-            0,
-            &mut result as *mut i64 as *mut c_void,
-        );
+        let size = unsafe {
+            mimi_actor_call(
+                call_handle as *mut c_void,
+                0,
+                std::ptr::null(),
+                0,
+                &mut result as *mut i64 as *mut c_void,
+            )
+        };
         (size, result)
     });
 
@@ -64,25 +68,31 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     let drop_finished_thread = Arc::clone(&drop_finished);
     let dropper = std::thread::spawn(move || {
         drop_started_thread.wait();
-        mimi_actor_drop(drop_handle as *mut c_void);
+        unsafe {
+            mimi_actor_drop(drop_handle as *mut c_void);
+        }
         drop_finished_thread.store(true, Ordering::Release);
     });
     drop_started.wait();
 
-    while mimi_actor_id(handle) != 0 {
-        std::thread::yield_now();
+    unsafe {
+        while mimi_actor_id(handle) != 0 {
+            std::thread::yield_now();
+        }
     }
 
     // Once detached, new calls must fail while the already-pinned call remains valid.
     let mut detached_result = 0i64;
     assert_eq!(
-        mimi_actor_call(
-            handle,
-            0,
-            std::ptr::null(),
-            0,
-            &mut detached_result as *mut i64 as *mut c_void,
-        ),
+        unsafe {
+            mimi_actor_call(
+                handle,
+                0,
+                std::ptr::null(),
+                0,
+                &mut detached_result as *mut i64 as *mut c_void,
+            )
+        },
         0
     );
     assert!(drop_finished.load(Ordering::Acquire));
@@ -112,7 +122,8 @@ fn actor_call_drop_l3_stress() {
 
     for _ in 0..256 {
         let fields = 0u8;
-        let handle = mimi_actor_spawn(&fields as *const u8 as *const c_void, 1, Some(dispatch));
+        let handle =
+            unsafe { mimi_actor_spawn(&fields as *const u8 as *const c_void, 1, Some(dispatch)) };
         assert!(!handle.is_null());
         let barrier = Arc::new(Barrier::new(5));
         let mut callers = Vec::new();
@@ -122,17 +133,21 @@ fn actor_call_drop_l3_stress() {
             callers.push(std::thread::spawn(move || {
                 barrier.wait();
                 let mut result = 0i64;
-                let _ = mimi_actor_call(
-                    call_handle as *mut c_void,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    &mut result as *mut i64 as *mut c_void,
-                );
+                let _ = unsafe {
+                    mimi_actor_call(
+                        call_handle as *mut c_void,
+                        0,
+                        std::ptr::null(),
+                        0,
+                        &mut result as *mut i64 as *mut c_void,
+                    )
+                };
             }));
         }
         barrier.wait();
-        mimi_actor_drop(handle);
+        unsafe {
+            mimi_actor_drop(handle);
+        }
         for caller in callers {
             caller.join().unwrap();
         }
@@ -174,23 +189,27 @@ unsafe extern "C" fn lifecycle_dispatch(
 #[test]
 fn actor_system_kill_cascades_but_preserves_detached_child() {
     let fields = 0u8;
-    let parent = mimi_actor_spawn(
-        &fields as *const u8 as *const c_void,
-        1,
-        Some(lifecycle_dispatch),
-    );
+    let parent = unsafe {
+        mimi_actor_spawn(
+            &fields as *const u8 as *const c_void,
+            1,
+            Some(lifecycle_dispatch),
+        )
+    };
     assert!(!parent.is_null());
 
     let spawn_child = |method_id| {
         let mut child = 0i64;
         assert_eq!(
-            mimi_actor_call(
-                parent,
-                method_id,
-                std::ptr::null(),
-                0,
-                &mut child as *mut i64 as *mut c_void,
-            ),
+            unsafe {
+                mimi_actor_call(
+                    parent,
+                    method_id,
+                    std::ptr::null(),
+                    0,
+                    &mut child as *mut i64 as *mut c_void,
+                )
+            },
             8
         );
         child as *mut c_void
@@ -198,34 +217,46 @@ fn actor_system_kill_cascades_but_preserves_detached_child() {
     let child = spawn_child(0);
     let detached = spawn_child(1);
 
-    mimi_actor_system_kill(parent);
+    unsafe {
+        mimi_actor_system_kill(parent);
+    }
 
     let mut result = 0i64;
-    assert_eq!(mimi_actor_id(parent), 0);
-    assert_eq!(mimi_actor_id(child), 0);
+    unsafe {
+        assert_eq!(mimi_actor_id(parent), 0);
+        assert_eq!(mimi_actor_id(child), 0);
+    }
     assert_eq!(
-        mimi_actor_call(
-            child,
-            0,
-            std::ptr::null(),
-            0,
-            &mut result as *mut i64 as *mut c_void,
-        ),
+        unsafe {
+            mimi_actor_call(
+                child,
+                0,
+                std::ptr::null(),
+                0,
+                &mut result as *mut i64 as *mut c_void,
+            )
+        },
         0
     );
-    assert_ne!(mimi_actor_id(detached), 0);
+    unsafe {
+        assert_ne!(mimi_actor_id(detached), 0);
+    }
     assert_eq!(
-        mimi_actor_call(
-            detached,
-            0,
-            std::ptr::null(),
-            0,
-            &mut result as *mut i64 as *mut c_void,
-        ),
+        unsafe {
+            mimi_actor_call(
+                detached,
+                0,
+                std::ptr::null(),
+                0,
+                &mut result as *mut i64 as *mut c_void,
+            )
+        },
         8
     );
     assert_eq!(result, 42);
-    mimi_actor_drop(detached);
+    unsafe {
+        mimi_actor_drop(detached);
+    }
 }
 
 #[test]

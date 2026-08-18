@@ -398,7 +398,10 @@ impl FfiArgContract {
                     "bool" => FfiArgContract::Int(FfiScalarType::Bool),
                     "f64" => FfiArgContract::Float,
                     "string" => FfiArgContract::StringBorrow,
-                    "unit" => FfiArgContract::Int(FfiScalarType::I64),
+                    // `unit` as an FFI argument has no portable C ABI shape;
+                    // reject it explicitly instead of silently passing an i64
+                    // placeholder (batch4-07 P3-1).
+                    "unit" => FfiArgContract::Unsupported("unit".to_string()),
                     "List" => FfiArgContract::Json,
                     other => {
                         if record_type_names.contains(other) {

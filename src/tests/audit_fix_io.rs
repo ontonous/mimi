@@ -183,6 +183,19 @@ func main() -> i32 {
         "line input must be right-trimmed, got {:?}",
         stdout2
     );
+
+    // Long line (batch4-01 P2-7): the old fgets-based codegen path used a
+    // fixed 4096-byte buffer and truncated input longer than that. The
+    // runtime helper reads unboundedly, so the full line must round-trip.
+    let long_line = format!("{}\n", "x".repeat(5000));
+    let (code3, stdout3, _stderr3) =
+        io_compile_link_exec(src, Some(long_line.as_bytes())).expect("exec failed");
+    assert_eq!(code3, 0);
+    assert_eq!(
+        stdout3,
+        format!("5000\n{}\n", "x".repeat(5000)),
+        "long input() line must not be truncated by codegen"
+    );
 }
 
 // ── FIX 2b [CRITICAL]: input() shape — VM must return `string`, not Result ──
@@ -250,6 +263,46 @@ func main() -> i32 {
         interp::Value::Int(1),
         "EOF input_line() must be Err via the empty-string sentinel"
     );
+}
+
+#[test]
+fn io_fix_input_line_empty_line_ok_dual() {
+    if !can_link() {
+        return;
+    }
+    let std_io = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/io.mimi"),
+    )
+    .expect("read std/io.mimi");
+    let src = r#"
+func main() -> i32 {
+    let r = input_line()
+    if r.is_ok() {
+        let s = r.unwrap_or("")
+        if s == "" {
+            println("EMPTY_OK")
+        } else {
+            println("VALUE:" + s)
+        }
+    } else {
+        println("ERR")
+    }
+    0
+}
+"#;
+    let combined = format!("{}\n{}", std_io, src);
+
+    // A blank line is a successful read of an empty string.
+    let (code, stdout, _stderr) =
+        io_compile_link_exec(&combined, Some(b"\n")).expect("empty line exec failed");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "EMPTY_OK\n", "empty input line must be Ok(\"\")");
+
+    // EOF is still an Err, so callers can distinguish the two.
+    let (code2, stdout2, _stderr2) =
+        io_compile_link_exec(&combined, None).expect("EOF exec failed");
+    assert_eq!(code2, 0);
+    assert_eq!(stdout2, "ERR\n", "EOF input_line must be Err");
 }
 
 // ── FIX 3 [HIGH]: assert(cond, msg) — message is data, not a format ──
@@ -719,4 +772,53 @@ func main() {
     assert!(cg_stdout.contains("Ok(1.5)"));
     assert!(cg_stdout.contains("Num(-42)"));
     assert!(cg_stdout.contains("Empty()"));
+}
+
+/// batch4-01 P2-6: write_file must use the Mimi string's explicit byte
+/// length, not strlen, so embedded NUL bytes are written to disk intact.
+#[test]
+fn audit_io_write_file_preserves_embedded_nul() {
+    if !can_link() {
+        return;
+    }
+    let path = format!(
+        "/tmp/mimi_io_write_nul_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    );
+    let src = format!(
+        r#"
+func main() -> i32 {{
+    let wr = write_file("{path}", "a" + chr(0) + "b")
+    if wr.is_err() {{ println("WRITE_ERR"); return 1 }}
+    match read_file("{path}") {{
+        Ok(s) => println(len(s)),
+        Err(e) => println("READ_ERR:" + e),
+    }}
+    println(len(read_file_bytes("{path}")))
+    println(len(read_file_partial("{path}", 100)))
+    write_file_bytes("{path}", "a" + chr(0) + "b")
+    println(len(read_file_bytes("{path}")))
+    append_file("{path}", "c" + chr(0) + "d")
+    println(len(read_file_bytes("{path}")))
+    0
+}}
+"#
+    );
+    let vm = run_source_with_stdout(&src).1;
+    let native = compile_and_run(&src).expect("codegen write_file NUL test failed");
+    assert_eq!(
+        vm.trim(),
+        "3\n3\n3\n3\n6",
+        "VM should write/read NUL bytes in all APIs: {vm:?}"
+    );
+    assert_eq!(
+        native.trim(),
+        "3\n3\n3\n3\n6",
+        "native should write/read NUL bytes in all APIs (not strlen-truncated): {native:?}"
+    );
+    let _ = std::fs::remove_file(&path);
 }

@@ -165,12 +165,8 @@ impl PyBindGenerator {
     }
 
     fn write_include_guard(&self, out: &mut String) -> Result<(), std::fmt::Error> {
-        let guard = format!(
-            "MIMI_PY_BIND_{}_H",
-            self.module_name
-                .to_uppercase()
-                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
-        );
+        let safe = sanitize_module_ident(&self.module_name).to_uppercase();
+        let guard = format!("MIMI_PY_BIND_{}_H", safe);
         writeln!(out, "#ifndef {}", guard)?;
         writeln!(out, "#define {}", guard)?;
         writeln!(out)?;
@@ -210,7 +206,11 @@ impl PyBindGenerator {
     }
 
     fn write_module_def(&self, out: &mut String) -> Result<(), std::fmt::Error> {
-        writeln!(out, "PYBIND11_MODULE({}, m) {{", self.module_name)?;
+        writeln!(
+            out,
+            "PYBIND11_MODULE({}, m) {{",
+            sanitize_module_ident(&self.module_name)
+        )?;
         writeln!(
             out,
             "    m.doc() = \"Mimi language FFI bindings (auto-generated)\";"
@@ -279,7 +279,15 @@ impl PyBindGenerator {
                         writeln!(out, "        return {};", default)?;
                     }
                     writeln!(out, "    }}")?;
-                    writeln!(out, "    return {}({});", slot, c_args.join(", "))?;
+                    writeln!(out, "    try {{")?;
+                    writeln!(out, "        return {}({});", slot, c_args.join(", "))?;
+                    writeln!(out, "    }} catch (...) {{")?;
+                    if default.is_empty() {
+                        writeln!(out, "        return;")?;
+                    } else {
+                        writeln!(out, "        return {};", default)?;
+                    }
+                    writeln!(out, "    }}")?;
                     writeln!(out, "}}")?;
                     writeln!(out)?;
                 }
@@ -529,13 +537,8 @@ impl PyBindGenerator {
     fn write_module_init(&self, out: &mut String) -> Result<(), std::fmt::Error> {
         writeln!(out, "}}")?;
         writeln!(out)?;
-        writeln!(
-            out,
-            "#endif // MIMI_PY_BIND_{}_H",
-            self.module_name
-                .to_uppercase()
-                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
-        )?;
+        let safe = sanitize_module_ident(&self.module_name).to_uppercase();
+        writeln!(out, "#endif // MIMI_PY_BIND_{}_H", safe)?;
         Ok(())
     }
 
@@ -709,6 +712,9 @@ pub fn generate_cmake_snippet(
     lib_path: &str,
     mimi_lib_path: &str,
 ) -> String {
+    // The module name is used as a CMake target/project identifier and as a
+    // pybind11 extension symbol; always sanitize it before embedding.
+    let module_name = sanitize_module_ident(module_name);
     let mimi_lib_link = if mimi_lib_path.is_empty() {
         String::new()
     } else {
@@ -841,6 +847,25 @@ mod tests {
     }
 
     #[test]
+    fn test_py_bind_sanitizes_unsafe_module_names() {
+        let gen = PyBindGenerator::new(HashMap::new(), "bad;\nname\"x");
+        let code = gen.generate(&[]).expect("empty py bind generation");
+        assert!(
+            code.contains("PYBIND11_MODULE(bad__name_x, m)"),
+            "module name should be sanitized to a C identifier"
+        );
+        assert!(
+            code.contains("#ifndef MIMI_PY_BIND_BAD__NAME_X_H"),
+            "include guard should use sanitized module name"
+        );
+        let cmake = generate_cmake_snippet("bad;\nname\"x", "/tmp", "/tmp", "");
+        assert!(
+            cmake.contains("pybind11_add_module(bad__name_x bindings.cpp)"),
+            "CMake target should use sanitized module name"
+        );
+    }
+
+    #[test]
     fn test_cmake_snippet() {
         let cmake =
             generate_cmake_snippet("my_mod", "/usr/local/include/mimi", "/usr/local/lib", "");
@@ -860,4 +885,24 @@ mod tests {
         assert!(cmake.contains("find_library(MIMI_USER_LIB"));
         assert!(cmake.contains("my_mod PRIVATE ${MIMI_USER_LIB}"));
     }
+}
+
+/// Convert arbitrary module names into a safe C/C++/CMake identifier.
+fn sanitize_module_ident(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        s.push('_');
+    } else if s.as_bytes()[0].is_ascii_digit() {
+        s.insert(0, '_');
+    }
+    s
 }

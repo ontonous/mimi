@@ -362,7 +362,6 @@ fn item_name(item: &Item) -> Option<String> {
         Item::ExternBlock(_) => None,
         Item::Const { name, .. } => Some(name.clone()),
         Item::Flow(f) => Some(f.name.clone()),
-        Item::Protocol(p) => Some(p.name.clone()),
         Item::Session(s) => Some(s.name.clone()),
     }
 }

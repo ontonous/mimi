@@ -96,7 +96,9 @@
 // any: @pure
 // all: @pure
 // partition: @pure
-// group_by: @pure
+// find_map: @pure
+// min_list_result: @pure
+// max_list_result: @pure
 // chunks: @pure
 // intersperse: @pure
 // min_list: @pure
@@ -177,13 +179,13 @@
 // base64_encode: @pure
 // base64_decode: @pure
 // hex_encode: @pure
-// hex_decode: @pure
+// is_valid_hex: @pure
 
 // ---------------------------------------------------------------------------
 // csv.mimi effects (all @pure)
 // ---------------------------------------------------------------------------
-// parse_csv: @pure
-// serialize_csv: @pure
+// parse: @pure
+// serialize: @pure
 
 // ---------------------------------------------------------------------------
 // template.mimi effects (all @pure)

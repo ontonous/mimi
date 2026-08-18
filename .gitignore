@@ -86,3 +86,6 @@ tests/real_world/**/*
 !/main
 /main
 docs/compose/
+
+# Free-form development scratch buffer
+.freebuff/

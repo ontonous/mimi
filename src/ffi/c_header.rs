@@ -123,7 +123,7 @@ impl CHeaderGenerator {
         writeln!(header)?;
 
         // String API
-        writeln!(header, "/** Get a C string pointer from a Mimi string (borrow). Caller must NOT free the result. */")?;
+        writeln!(header, "/** Get a C string pointer from a Mimi string (lease). Caller must call mimi_string_as_c_str_free() on the result when no longer needed. */")?;
         writeln!(
             header,
             "const char* mimi_string_as_c_str(void* mimi_string);"
@@ -213,7 +213,12 @@ impl CHeaderGenerator {
 
     /// Generate C type definitions for #[repr(C)] types
     fn generate_type_definitions(&self, header: &mut String) -> Result<(), std::fmt::Error> {
-        for (name, type_def) in &self.type_defs {
+        // Sort type definitions by name so generated headers are stable
+        // across runs (batch4-07 P3-2).
+        let mut names: Vec<&String> = self.type_defs.keys().collect();
+        names.sort();
+        for name in names {
+            let type_def = &self.type_defs[name];
             // Only generate for types with #[repr(C)] attribute
             if !type_def.attributes.contains(&TypeAttribute::ReprC) {
                 continue;

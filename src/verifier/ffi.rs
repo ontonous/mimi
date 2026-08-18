@@ -63,7 +63,20 @@ impl VerifierCtx {
                     }
                     session.push();
                     let mut vars = self.setup_ffi_func_vars(session, func);
-                    self.assert_func_requires(session, func, &mut vars);
+                    if let Some(msg) = self.assert_func_requires(session, func, &mut vars) {
+                        results.push(VerificationResult {
+                            func_name: func.name.clone(),
+                            status: VerifStatus::NotInTrustedSubset,
+                            message: msg,
+                            diagnostic: None,
+                            duration_us: 0,
+                            constraint_count: 0,
+                            artifact: None,
+                            trusted_subset_domain: None,
+                        });
+                        session.pop();
+                        continue;
+                    }
 
                     for (extern_name, args, call_span) in &calls {
                         if let Some(extern_func) = externs.get(extern_name.as_str()) {
@@ -383,7 +396,7 @@ impl VerifierCtx {
         }
     }
 
-    fn setup_ffi_func_vars(&mut self, _session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
+    fn setup_ffi_func_vars(&mut self, session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
         let mut vars = Z3VarMap::new();
         for p in &func.params {
             if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
@@ -403,6 +416,24 @@ impl VerifierCtx {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
         }
+        // batch4 P2-2: keep the FFI string abstraction consistent with the
+        // real string theory, matching the ordinary AST verifier path. This
+        // prevents len(s) > 0 / s != "" proofs from being vacuous when a
+        // caller requires a concrete string value.
+        for p in &func.params {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
+                if let Some(z3_s) = vars.get_string_var(p.name.as_str()) {
+                    if let Some(len_var) = vars.get_string_len(p.name.as_str()) {
+                        session.assert(z3_s.length().eq(len_var));
+                    }
+                    let empty = Z3String::from("");
+                    let nonempty_check = z3_s.ne(&empty);
+                    if let Some(ne_var) = vars.get_string_nonempty(p.name.as_str()) {
+                        session.assert(ne_var.eq(&nonempty_check));
+                    }
+                }
+            }
+        }
         vars
     }
 
@@ -411,23 +442,25 @@ impl VerifierCtx {
         session: &mut SolverSession,
         func: &FuncDef,
         vars: &mut Z3VarMap,
-    ) {
+    ) -> Option<String> {
         for stmt in &func.body {
             if let Stmt::Requires(expr, _) = stmt.unlocated() {
                 match expr::expr_to_z3_bool(expr, vars) {
                     Some(z3_bool) => session.assert(&z3_bool),
                     None => {
-                        // HIGH fix: previously silently dropped unencodable
-                        // requires. Now log a warning so users know their
-                        // precondition was not verified.
-                        eprintln!(
-                            "[mimi verify] WARN: could not encode requires in function '{}' — precondition not asserted",
-                            func.name
-                        );
+                        // batch4-08 P2-5: fail closed when a caller
+                        // precondition cannot be encoded, instead of warning
+                        // and silently proceeding without that obligation.
+                        return Some(format!(
+                            "could not encode requires in function '{}': {} (fail-closed)",
+                            func.name,
+                            crate::verifier::helpers::format_expr(expr)
+                        ));
                     }
                 }
             }
         }
+        None
     }
 
     fn check_extern_call(
@@ -594,7 +627,125 @@ fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
                 .map(|s| substitute_args_in_stmt(s, params, args))
                 .collect(),
         ),
-        Expr::Literal(_) => expr.clone(),
+        Expr::Literal(lit) => match lit {
+            Lit::FString(parts) => Expr::Literal(Lit::FString(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        crate::ast::FStringPart::Text(t) => {
+                            crate::ast::FStringPart::Text(t.clone())
+                        }
+                        crate::ast::FStringPart::Interp(e) => {
+                            crate::ast::FStringPart::Interp(substitute_args(e, params, args))
+                        }
+                    })
+                    .collect(),
+            )),
+            _ => expr.clone(),
+        },
+        Expr::Comprehension {
+            expr: cexpr,
+            var,
+            iter,
+            guard,
+        } => Expr::Comprehension {
+            expr: Box::new(substitute_args(cexpr, params, args)),
+            var: var.clone(),
+            iter: Box::new(substitute_args(iter, params, args)),
+            guard: guard
+                .as_ref()
+                .map(|g| Box::new(substitute_args(g, params, args))),
+        },
+        Expr::Match(scrutinee, arms) => Expr::Match(
+            Box::new(substitute_args(scrutinee, params, args)),
+            arms.iter()
+                .map(|arm| MatchArm {
+                    meta: arm.meta,
+                    pat: arm.pat.clone(),
+                    guard: arm.guard.as_ref().map(|g| substitute_args(g, params, args)),
+                    body: substitute_args(&arm.body, params, args),
+                })
+                .collect(),
+        ),
+        Expr::Record { ty, fields } => Expr::Record {
+            ty: ty.clone(),
+            fields: fields
+                .iter()
+                .map(|f| RecordFieldExpr {
+                    meta: f.meta,
+                    name: f.name.clone(),
+                    value: substitute_args(&f.value, params, args),
+                })
+                .collect(),
+        },
+        Expr::Try(inner) => Expr::Try(Box::new(substitute_args(inner, params, args))),
+        Expr::OptionalChain(inner, name) => {
+            Expr::OptionalChain(Box::new(substitute_args(inner, params, args)), name.clone())
+        }
+        Expr::Spawn(inner) => Expr::Spawn(Box::new(substitute_args(inner, params, args))),
+        Expr::Await(inner) => Expr::Await(Box::new(substitute_args(inner, params, args))),
+        Expr::TypeOf(inner) => Expr::TypeOf(Box::new(substitute_args(inner, params, args))),
+        Expr::Lambda {
+            params: lparams,
+            ret,
+            body,
+        } => Expr::Lambda {
+            params: lparams.clone(),
+            ret: ret.clone(),
+            body: body
+                .iter()
+                .map(|stmt| substitute_args_in_stmt(stmt, params, args))
+                .collect(),
+        },
+        Expr::SliceExpr { target, start, end } => Expr::SliceExpr {
+            target: Box::new(substitute_args(target, params, args)),
+            start: start
+                .as_ref()
+                .map(|s| Box::new(substitute_args(s, params, args))),
+            end: end
+                .as_ref()
+                .map(|e| Box::new(substitute_args(e, params, args))),
+        },
+        Expr::Turbofish(name, tys, call_args) => Expr::Turbofish(
+            name.clone(),
+            tys.clone(),
+            call_args
+                .iter()
+                .map(|a| substitute_args(a, params, args))
+                .collect(),
+        ),
+        Expr::TupleIndex(inner, idx) => {
+            Expr::TupleIndex(Box::new(substitute_args(inner, params, args)), *idx)
+        }
+        Expr::Arena(block) => Expr::Arena(
+            block
+                .iter()
+                .map(|stmt| substitute_args_in_stmt(stmt, params, args))
+                .collect(),
+        ),
+        Expr::MapLiteral { entries } => Expr::MapLiteral {
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        substitute_args(k, params, args),
+                        substitute_args(v, params, args),
+                    )
+                })
+                .collect(),
+        },
+        Expr::SetLiteral(items) => Expr::SetLiteral(
+            items
+                .iter()
+                .map(|i| substitute_args(i, params, args))
+                .collect(),
+        ),
+        Expr::NamedArg(name, value) => {
+            Expr::NamedArg(name.clone(), Box::new(substitute_args(value, params, args)))
+        }
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(substitute_args(inner, params, args)), ty.clone())
+        }
         _ => expr.clone(),
     }
 }

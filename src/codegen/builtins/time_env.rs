@@ -207,16 +207,47 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(err_gep, i64_ty.const_int(0, false))?;
         self.build_br(merge_bb)?;
 
-        // Err branch: disc=0, ok=zero, err=error message pointer
+        // Err branch: disc=0, ok=zero, err=heap {ptr,len} string handle
         self.builder.position_at_end(err_bb);
         let err_msg = self
             .builder
             .build_global_string_ptr("env var not set", "getenv_err_msg")
             .map_err(|e| format!("global string error: {}", e))?;
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let err_len = self
+            .builder
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    err_msg.as_pointer_value(),
+                )],
+                "getenv_err_len",
+            )
+            .map_err(|e| format!("strlen error: {}", e))?
+            .try_as_basic_value_opt()
+            .ok_or("getenv strlen returned void")?
+            .into_int_value();
+        let heap = self.malloc_or_abort(i64_ty.const_int(16, false), "getenv_err_heap")?;
+        let heap_ptr = self
+            .build_bit_cast(
+                heap.into(),
+                BasicTypeEnum::PointerType(i8_ptr),
+                "getenv_err_heap_ptr",
+            )?
+            .into_pointer_value();
+        let err_gep0 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 0, "getenv_err_heap_ptr_gep")
+            .map_err(|e| format!("gep error: {}", e))?;
+        self.build_store(err_gep0, err_msg.as_pointer_value())?;
+        let err_gep1 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 1, "getenv_err_heap_len_gep")
+            .map_err(|e| format!("gep error: {}", e))?;
+        self.build_store(err_gep1, err_len)?;
         self.build_store(disc_gep, bool_ty.const_int(0, false))?;
         self.build_store(ok_gep, string_ty.const_zero())?;
-        let err_ptr_int =
-            self.build_ptr_to_int(err_msg.as_pointer_value(), i64_ty, "err_ptr_int")?;
+        let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "err_ptr_int")?;
         self.build_store(err_gep, err_ptr_int)?;
         self.build_br(merge_bb)?;
 

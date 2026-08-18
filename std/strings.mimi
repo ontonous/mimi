@@ -98,8 +98,9 @@ pub func join(parts: List<string>, separator: string) -> string {
 }
 
 // repeat: Returns s repeated n times.
+// Non-positive n is defined as an empty string, never passed to the builtin.
 pub func repeat(s: string, n: i32) -> string {
-    str_repeat(s, n)
+    if n <= 0 { "" } else { str_repeat(s, n) }
 }
 
 // index_of: Returns Some(pos) if sub is found in s, else None.
@@ -243,8 +244,12 @@ pub func reverse_string(s: string) -> string {
 }
 
 // truncate: Returns s shortened to max_len with "..." suffix if needed.
+// Non-positive max_len has no room for any characters, so return an empty
+// string instead of relying on str_substring's negative/zero wrapping.
 pub func truncate(s: string, max_len: i32) -> string {
-    if len(s) <= max_len {
+    if max_len <= 0 {
+        ""
+    } else if len(s) <= max_len {
         s
     } else {
         str_substring(s, 0, max_len) + "..."
@@ -327,7 +332,9 @@ pub func brace(s: string) -> string {
 }
 
 // indent: Prepends n spaces to each line of s.
+// Non-positive n returns s unchanged (no negative repeat sent to builtin).
 pub func indent(s: string, n: i32) -> string {
+    if n <= 0 { return s }
     let prefix = str_repeat(" ", n)
     let mut indented: List<string> = []
     for line in lines(s) {

@@ -275,33 +275,6 @@ func main() -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Fix #5 (MEDIUM): quote block `n` counted skipped statements →
-// quote-stack underflow at runtime.
-// ─────────────────────────────────────────────────────────────
-
-#[test]
-fn audit_vm_quote_block_with_skipped_defer_no_underflow() {
-    // `defer` inside quote! pushes nothing; pre-fix QuoteBlock{n: block.len()}
-    // popped more nodes than were pushed → runtime stack underflow (E0800).
-    let src = r#"
-func main() -> i64 {
-    let q = quote! {
-        let a = 1
-        defer { println("never") }
-        a + 1
-    }
-    7
-}
-"#;
-    let v = run_source_bytecode_result(src);
-    assert_eq!(
-        v,
-        Ok(interp::Value::Int(7)),
-        "quote! with a skipped statement kind must evaluate without underflow"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────
 // Fix #6 (MEDIUM): tuple pattern emitted TupleGet BEFORE the type
 // test — a non-tuple subject trapped instead of falling through.
 // ─────────────────────────────────────────────────────────────

@@ -55,9 +55,15 @@ pub extern "C" fn mimi_socket(domain: i64, type_: i64, protocol: i64) -> i64 {
     }
 }
 
+///
+/// # Safety
+/// Host/data pointers must be valid for the documented C ABI;
+/// `out_len` must be null or point to a writable i64.
 #[no_mangle]
-pub extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64) -> i64 {
-    if host.is_null() || fd < 0 {
+pub unsafe extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64) -> i64 {
+    if host.is_null() || fd <= 2 {
+        // fd <= 2 are standard streams; connecting them would corrupt the
+        // process's stdio (batch4/06 P2).
         return -1;
     }
     // SAFETY: `host` was checked non-null above.
@@ -137,17 +143,21 @@ pub extern "C" fn mimi_bind(fd: i64, port: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_listen(fd: i64, backlog: i64) -> i64 {
-    if fd < 0 {
+    if fd <= 2 {
         return -1;
     }
+    let fd_i32 = match fd_to_i32(fd) {
+        Some(v) => v,
+        None => return -1,
+    };
+    // batch4/06 P2: reject i64 backlog values that cannot fit in the POSIX
+    // int parameter instead of silently truncating.
+    let backlog_i32 = match i32::try_from(backlog) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
     // SAFETY: direct POSIX calls with a validated file descriptor.
-    unsafe {
-        let fd_i32 = match fd_to_i32(fd) {
-            Some(v) => v,
-            None => return -1,
-        };
-        libc::listen(fd_i32, backlog as i32) as i64
-    }
+    unsafe { libc::listen(fd_i32, backlog_i32) as i64 }
 }
 
 #[no_mangle]
@@ -177,8 +187,12 @@ pub extern "C" fn mimi_accept(fd: i64) -> i64 {
 /// is rejected instead of handed to `send(2)` (audit 2026-08-05, H-28).
 const MAX_SEND_SIZE: i64 = 100 * 1024 * 1024; // 100MB
 
+///
+/// # Safety
+/// Host/data pointers must be valid for the documented C ABI;
+/// `out_len` must be null or point to a writable i64.
 #[no_mangle]
-pub extern "C" fn mimi_send(fd: i64, data: *const std::ffi::c_char, len: i64) -> i64 {
+pub unsafe extern "C" fn mimi_send(fd: i64, data: *const std::ffi::c_char, len: i64) -> i64 {
     // Audit fix (H-28, SECURITY): validate `len` BEFORE the usize cast and
     // before any fd use. A negative len wrapped `len as usize` to ~2^64-1,
     // making send(2) read out of bounds past `data` — a page fault (SIGSEGV)
@@ -214,8 +228,16 @@ pub extern "C" fn mimi_send(fd: i64, data: *const std::ffi::c_char, len: i64) ->
 /// (2026-08-05 full audit, HIGH).
 const MAX_RECV_SIZE: usize = 100 * 1024 * 1024; // 100MB
 
+///
+/// # Safety
+/// Host/data pointers must be valid for the documented C ABI;
+/// `out_len` must be null or point to a writable i64.
 #[no_mangle]
-pub extern "C" fn mimi_recv(fd: i64, buf_size: i64, out_len: *mut i64) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_recv(
+    fd: i64,
+    buf_size: i64,
+    out_len: *mut i64,
+) -> *mut std::ffi::c_char {
     // Audit fix: validate the size BEFORE any fd use so an absurd buf_size
     // returns null gracefully (no capacity-overflow panic across FFI, and no
     // fd is touched at all). Compared as i64 so it is correct on 32-bit too.
@@ -332,7 +354,18 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
         (host_part.to_string(), 80u16)
     };
 
-    Some((host, port, path_part.to_string()))
+    // batch4/06 P2: reject CR/LF/NUL in host or path so a crafted URL cannot
+    // inject request headers/request-line bytes into the HTTP/1.0 text
+    // protocol.
+    let host = host.to_string();
+    let path = path_part.to_string();
+    if host.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+        || path.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+    {
+        return None;
+    }
+
+    Some((host, port, path))
 }
 
 /// SSRF protection for the native (codegen) HTTP client. Mirrors the bytecode
@@ -610,8 +643,11 @@ fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
     Some(response[body_start..].to_vec())
 }
 
+///
+/// # Safety
+/// URL/body pointers must be valid NUL-terminated C strings (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if url.is_null() {
         return std::ptr::null_mut();
     }
@@ -645,8 +681,11 @@ pub extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::
     }
 }
 
+///
+/// # Safety
+/// URL/body pointers must be valid NUL-terminated C strings (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_http_post(
+pub unsafe extern "C" fn mimi_http_post(
     url: *const std::ffi::c_char,
     body: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -712,21 +751,41 @@ mod tests {
         // Size check is structurally first: `fd` is a plausible-but-unopened
         // descriptor and must never be touched for an out-of-range size.
         let mut out_len: i64 = 12345;
-        let p = mimi_recv(999_999, i64::MAX, &mut out_len);
+        let p = unsafe { mimi_recv(999_999, i64::MAX, &mut out_len) };
         assert!(p.is_null());
         assert_eq!(out_len, 12345); // untouched by the early return
 
         // One byte over the cap is rejected too.
-        let p = mimi_recv(999_999, MAX_RECV_SIZE as i64 + 1, &mut out_len);
+        let p = unsafe { mimi_recv(999_999, MAX_RECV_SIZE as i64 + 1, &mut out_len) };
         assert!(p.is_null());
         assert_eq!(out_len, 12345);
     }
 
     #[test]
     fn recv_invalid_size_or_fd_returns_null() {
-        assert!(mimi_recv(999_999, 0, std::ptr::null_mut()).is_null());
-        assert!(mimi_recv(999_999, -1, std::ptr::null_mut()).is_null());
-        assert!(mimi_recv(-1, 64, std::ptr::null_mut()).is_null());
+        unsafe {
+            assert!(mimi_recv(999_999, 0, std::ptr::null_mut()).is_null());
+            assert!(mimi_recv(999_999, -1, std::ptr::null_mut()).is_null());
+            assert!(mimi_recv(-1, 64, std::ptr::null_mut()).is_null());
+        }
+    }
+
+    #[test]
+    fn connect_and_listen_reject_standard_streams_and_overflow() {
+        let host = std::ffi::CString::new("localhost").unwrap();
+        unsafe {
+            // Connecting/closing/listening on stdio must be rejected.
+            assert_eq!(mimi_connect(0, host.as_ptr(), 80), -1);
+            assert_eq!(mimi_connect(1, host.as_ptr(), 80), -1);
+            assert_eq!(mimi_connect(2, host.as_ptr(), 80), -1);
+            assert_eq!(mimi_listen(0, 8), -1);
+            assert_eq!(mimi_listen(1, 8), -1);
+            assert_eq!(mimi_listen(2, 8), -1);
+            // i64 backlog that cannot fit in i32 must be rejected, not
+            // truncated (batch4/06 P2).
+            assert_eq!(mimi_listen(5, i64::MAX), -1);
+            assert_eq!(mimi_listen(5, i64::MIN), -1);
+        }
     }
 
     // ── 0.35.29 H4: SSRF guard must strip IPv6 brackets and decode numeric
@@ -810,6 +869,17 @@ mod tests {
             ssrf_validate_host("2130706434").is_none(),
             "2130706434 = 0x7f000002, still loopback"
         );
+    }
+
+    #[test]
+    fn http_url_rejects_crlf_injection() {
+        assert!(parse_http_url("http://example.com/\r\nX: y").is_none());
+        assert!(parse_http_url("http://evil\r\n.com/").is_none());
+        assert!(parse_http_url("http://example.com/\nHost: injected").is_none());
+        assert!(parse_http_url("http://example.com/\r").is_none());
+        assert!(parse_http_url("http://example.com:80/path\r\nInjected").is_none());
+        // Normal URLs still parse.
+        assert!(parse_http_url("http://example.com/path").is_some());
     }
 
     #[test]

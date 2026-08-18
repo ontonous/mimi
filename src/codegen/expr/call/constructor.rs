@@ -378,16 +378,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.build_ptr_to_int(heap_ptr, i64_ty, "err_str_heap_i64")?
                                     .into()
                             } else {
-                                let tag = self
-                                    .build_extract_value(sv.into(), 0, "enum_tag")?
-                                    .into_int_value();
-                                self.builder
-                                    .build_int_cast(tag, i64_ty, "err_tag_ext")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("int cast error: {}", e))
-                                    })?
+                                // P0-3: custom enum/record/tuple/list error payloads
+                                // are full LLVM structs. Heap-copy the struct and
+                                // store its pointer in the i64 error slot; match
+                                // and `?` reconstruct via inttoptr+load.
+                                let struct_ty = sv.get_type();
+                                let size_bytes = struct_ty
+                                    .size_of()
+                                    .and_then(|s| s.get_zero_extended_constant())
+                                    .unwrap_or(64)
+                                    .max(1);
+                                let heap_ptr = self.malloc_or_abort(
+                                    i64_ty.const_int(size_bytes, false),
+                                    "err_struct_malloc",
+                                )?;
+                                self.build_store(heap_ptr, sv)?;
+                                self.build_ptr_to_int(heap_ptr, i64_ty, "err_struct_heap_i64")?
                                     .into()
                             }
+                        }
+                        BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => {
+                            self.builder
+                                .build_bit_cast(
+                                    BasicValueEnum::FloatValue(fv),
+                                    BasicTypeEnum::IntType(i64_ty),
+                                    "err_f64_bits",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("err f64 bits: {}", e))
+                                })?
+                                .into()
                         }
                         _ => return Err("Err: unsupported error value type".into()),
                     };
@@ -473,17 +493,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_ptr_to_int(heap_ptr, i64_ty, "err_str_heap_i64")?
                         .into()
                 } else {
-                    // Custom enum values are {i32 tag, i64 payload}; Result stores
-                    // only the tag in its error slot.
-                    let tag = self
-                        .build_extract_value(sv.into(), 0, "enum_tag")?
-                        .into_int_value();
-                    self.builder
-                        .build_int_cast(tag, i64_ty, "err_tag_ext")
-                        .map_err(|e| CompileError::LlvmError(format!("int cast error: {}", e)))?
+                    // P0-3: full StructValue error payloads are heap-copied and
+                    // stored as a pointer, matching the match/inttoptr decode.
+                    let struct_ty = sv.get_type();
+                    let size_bytes = struct_ty
+                        .size_of()
+                        .and_then(|s| s.get_zero_extended_constant())
+                        .unwrap_or(64)
+                        .max(1);
+                    let heap_ptr = self.malloc_or_abort(
+                        i64_ty.const_int(size_bytes, false),
+                        "err_struct_malloc",
+                    )?;
+                    self.build_store(heap_ptr, sv)?;
+                    self.build_ptr_to_int(heap_ptr, i64_ty, "err_struct_heap_i64")?
                         .into()
                 }
             }
+            BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => self
+                .builder
+                .build_bit_cast(
+                    BasicValueEnum::FloatValue(fv),
+                    BasicTypeEnum::IntType(i64_ty),
+                    "err_f64_bits",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("err f64 bits: {}", e)))?
+                .into(),
             _ => return Err("Err: unsupported error value type".into()),
         };
         let struct_ty = match &self.pending_result_ok_ty {

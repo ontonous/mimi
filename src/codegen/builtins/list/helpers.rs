@@ -1,8 +1,8 @@
-use crate::codegen::CodeGenerator;
+use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::{BasicTypeEnum, StructType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, IntValue, PointerValue};
-use inkwell::AddressSpace;
+use inkwell::{AddressSpace, IntPredicate};
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// The canonical Mimi list struct type: `{ i64 len, i8* data }`.
@@ -18,9 +18,151 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
-    /// Size of a list element slot (i64) in bytes.
-    pub(in crate::codegen) fn list_elem_size(&self) -> IntValue<'ctx> {
-        self.context.i64_type().const_int(8, false)
+    /// Compute `len * elem_size` for a list data allocation with explicit
+    /// overflow and size-cap checks.
+    ///
+    /// This mirrors the runtime's 1,000,000-entry list/map/JSON cap.  For
+    /// zero-length lists the size is zero (malloc(0) may return a unique
+    /// pointer or null; either is fine for the existing list cleanup model).
+    pub(in crate::codegen) fn checked_list_alloc_size(
+        &self,
+        len: IntValue<'ctx>,
+        elem_size: u64,
+        label: &str,
+    ) -> MimiResult<IntValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
+        let max_elems = (1_000_000_000u64 / elem_size).max(1);
+        let zero = i64_ty.const_int(0, false);
+        let max = i64_ty.const_int(max_elems, false);
+
+        let is_neg = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, len, zero, &format!("{label}_neg"))
+            .map_err(|e| CompileError::LlvmError(format!("length compare: {e}")))?;
+        let is_big = self
+            .builder
+            .build_int_compare(IntPredicate::SGT, len, max, &format!("{label}_too_big"))
+            .map_err(|e| CompileError::LlvmError(format!("length compare: {e}")))?;
+        let bad = self
+            .builder
+            .build_or(is_neg, is_big, &format!("{label}_bad_size"))
+            .map_err(|e| CompileError::LlvmError(format!("or error: {e}")))?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for checked_list_alloc_size".into())
+        })?;
+        let bad_bb = self
+            .context
+            .append_basic_block(function, &format!("{label}_bad_size_bb"));
+        let mul_bb = self
+            .context
+            .append_basic_block(function, &format!("{label}_mul_bb"));
+        self.builder
+            .build_conditional_branch(bad, bad_bb, mul_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {e}")))?;
+
+        self.builder.position_at_end(bad_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(
+                "list allocation too large or negative length",
+                &format!("{label}_bad_msg"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {e}")))?;
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+                &format!("{label}_bad_abort"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("abort error: {e}")))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable: {e}")))?;
+
+        self.builder.position_at_end(mul_bb);
+        let elem_size_llvm = i64_ty.const_int(elem_size, false);
+        let mul_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(bool_ty),
+            ],
+            false,
+        );
+        let mul_fn = self
+            .module
+            .get_function("llvm.smul.with.overflow.i64")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "llvm.smul.with.overflow.i64",
+                    mul_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let mul = self
+            .builder
+            .build_call(
+                mul_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(len),
+                    BasicMetadataValueEnum::IntValue(elem_size_llvm),
+                ],
+                &format!("{label}_checked_mul"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("checked mul error: {e}")))?;
+        let mul_sv = mul
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("checked mul returned void".into()))?
+            .into_struct_value();
+        let product = self
+            .builder
+            .build_extract_value(mul_sv, 0, &format!("{label}_alloc_size"))
+            .map_err(|e| CompileError::LlvmError(format!("extract error: {e}")))?
+            .into_int_value();
+        let overflow = self
+            .builder
+            .build_extract_value(mul_sv, 1, &format!("{label}_overflow"))
+            .map_err(|e| CompileError::LlvmError(format!("extract error: {e}")))?
+            .into_int_value();
+        let ok_bb = self
+            .context
+            .append_basic_block(function, &format!("{label}_size_ok"));
+        let ovf_bb = self
+            .context
+            .append_basic_block(function, &format!("{label}_size_overflow_bb"));
+        self.builder
+            .build_conditional_branch(overflow, ovf_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {e}")))?;
+
+        self.builder.position_at_end(ovf_bb);
+        let ovf_msg = self
+            .builder
+            .build_global_string_ptr("list allocation overflow", &format!("{label}_ovf_msg"))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {e}")))?;
+        self.builder
+            .build_call(
+                abort_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    ovf_msg.as_pointer_value(),
+                )],
+                &format!("{label}_ovf_abort"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("abort error: {e}")))?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable: {e}")))?;
+
+        self.builder.position_at_end(ok_bb);
+        Ok(product)
     }
 
     /// Load the `len` field of a list struct pointer.

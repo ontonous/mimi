@@ -198,6 +198,12 @@ fn initialize(
             .and_then(|p| p.as_str())
             .map(PathBuf::from);
     }
+    // Normalize the workspace root so sandbox checks and cache writes use the
+    // canonical path rather than a client-supplied symlink/relative spelling
+    // (batch4/10 P3).
+    if let Some(root) = &server.workspace_root {
+        server.workspace_root = Some(root.canonicalize().unwrap_or_else(|_| root.clone()));
+    }
     server.load_cache();
     let result = serde_json::json!({
         "capabilities": {

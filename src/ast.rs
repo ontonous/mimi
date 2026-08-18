@@ -129,7 +129,6 @@ pub enum Item {
         pub_: bool,
     },
     Flow(FlowDef),
-    Protocol(ProtocolDef),
     /// Session type declaration: `session Name = !T . ?U . end`
     Session(SessionDef),
 }
@@ -1053,8 +1052,6 @@ pub struct FlowDef {
     pub annotations: Vec<FlowAnnotation>,
     pub states: Vec<StateDef>,
     pub transitions: Vec<TransitionDef>,
-    /// Protocol names this flow implements (e.g., `Sensor`)
-    pub impl_protocols: Vec<String>,
     /// Fields declared as `persistent` — survive Fault and recover
     pub persistent_fields: Vec<String>,
     /// v0.34.1: `transactional_fields` / `metadata_shadow_fields` removed —
@@ -1133,15 +1130,6 @@ pub struct TransitionDef {
     /// v0.29.42: True for injected FFI_Pinned enter/exit/crash transitions.
     /// User-written transitions always have `false`.
     pub is_ffi_pinned: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProtocolDef {
-    pub meta: AstNodeMeta,
-    pub name: String,
-    pub generics: Vec<GenericParam>,
-    pub states: Vec<ProtocolStateDef>,
-    pub transitions: Vec<ProtocolTransitionDef>,
 }
 
 /// Top-level session type alias: `session Name = SessionTypeExpr`.
@@ -1232,20 +1220,4 @@ impl PartialEq for SessionType {
             _ => false,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ProtocolStateDef {
-    pub meta: AstNodeMeta,
-    pub name: String,
-    pub payload_name: Option<String>,
-    pub payload_type: Option<Type>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProtocolTransitionDef {
-    pub meta: AstNodeMeta,
-    pub name: String,
-    pub from_state: String,
-    pub to_state: String,
 }

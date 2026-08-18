@@ -440,6 +440,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => return Err("map_set: third arg must be i64 value handle".into()),
         };
+        // VM maps are persistent: map_set returns a new map and leaves the
+        // old handle unchanged. Clone before mutating so codegen follows the
+        // same value semantics instead of rewriting the caller's map in place.
+        let clone_fn = self
+            .module
+            .get_function("mimi_map_clone")
+            .ok_or("mimi_map_clone not declared")?;
+        let clone_call = self
+            .builder
+            .build_call(
+                clone_fn,
+                &[BasicMetadataValueEnum::IntValue(map_handle)],
+                "map_set_clone",
+            )
+            .map_err(|e| format!("map_set clone: {}", e))?;
+        let cloned_handle = call_try_basic_value(&clone_call)
+            .ok_or("mimi_map_clone returned void")?
+            .into_int_value();
         let func = self
             .module
             .get_function("mimi_map_set")
@@ -448,14 +466,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::IntValue(map_handle),
+                    BasicMetadataValueEnum::IntValue(cloned_handle),
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                     BasicMetadataValueEnum::IntValue(value_handle),
                 ],
                 "map_set_call",
             )
             .map_err(|e| format!("map_set error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(map_handle))
+        Ok(BasicValueEnum::IntValue(cloned_handle))
     }
 
     pub(super) fn compile_map_remove(
@@ -472,6 +490,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let key_ptr = self
             .extract_string_ptr_from_arg(args[1])
             .map_err(|e| format!("map_remove: {}", e))?;
+        let clone_fn = self
+            .module
+            .get_function("mimi_map_clone")
+            .ok_or("mimi_map_clone not declared")?;
+        let clone_call = self
+            .builder
+            .build_call(
+                clone_fn,
+                &[BasicMetadataValueEnum::IntValue(map_handle)],
+                "map_remove_clone",
+            )
+            .map_err(|e| format!("map_remove clone: {}", e))?;
+        let cloned_handle = call_try_basic_value(&clone_call)
+            .ok_or("mimi_map_clone returned void")?
+            .into_int_value();
         let func = self
             .module
             .get_function("mimi_map_remove")
@@ -480,13 +513,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::IntValue(map_handle),
+                    BasicMetadataValueEnum::IntValue(cloned_handle),
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                 ],
                 "map_remove_call",
             )
             .map_err(|e| format!("map_remove error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(map_handle))
+        Ok(BasicValueEnum::IntValue(cloned_handle))
     }
 
     pub(super) fn compile_map_from_list(
@@ -551,11 +584,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| format!("bitcast error: {}", e))?
             .into_pointer_value();
-        let sizeof_pair = i64_ty.const_int(16, false);
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len, sizeof_pair, "map_from_list_alloc")
-            .map_err(|e| format!("mul error: {}", e))?;
+        let alloc_size = self.checked_list_alloc_size(list_len, 16, "map_from_list")?;
         // B4: use malloc_or_abort for NULL check.
         let keys_data = self.malloc_or_abort(alloc_size, "map_keys")?;
         let values_data = self.malloc_or_abort(alloc_size, "map_values")?;
@@ -618,21 +647,66 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(cmp, body_bb, done_bb)
             .map_err(|e| format!("branch error: {}", e))?;
         self.builder.position_at_end(body_bb);
-        let idx_2 = self
+        // `List<(string, Any)>` stores each tuple as a heap-packed pointer in
+        // one i64 slot. The previous implementation treated the list as two
+        // flat i64 slots per pair, so copying a non-empty map silently read the
+        // next tuple pointer as the previous value. Decode the canonical Mimi
+        // tuple layout before passing separate handles to the runtime.
+        let pair_ptr_elem = self
+            .gep()
+            .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "map_from_list_pair_elem")
+            .map_err(|e| format!("gep error: {}", e))?;
+        let pair_handle = self
             .builder
-            .build_int_add(idx, idx, "map_from_list_idx_2")
-            .map_err(|e| format!("add error: {}", e))?;
-        // SAFETY: data_ptr is i64* from bitcast; idx_2 is in-bounds (validated by loop).
-        let key_ptr_elem = {
-            self.gep()
-                .build_in_bounds_gep(i64_ty, data_ptr, &[idx_2], "map_from_list_key_elem")
-        }
-        .map_err(|e| format!("gep error: {}", e))?;
-        let key_handle = self
-            .builder
-            .build_load(i64_ty, key_ptr_elem, "map_from_list_key_val")
+            .build_load(i64_ty, pair_ptr_elem, "map_from_list_pair_handle")
             .map_err(|e| format!("load error: {}", e))?
             .into_int_value();
+        // Tuple expressions retain Mimi's length-aware string value as the
+        // first field, so the packed slot is `{ {ptr, len}, value }`, not a
+        // flat `{ptr, value}` pair.  Keep the nested layout here; flattening
+        // it would interpret the string length as the map value and produce
+        // an invalid key pointer on native codegen.
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let pair_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::StructType(string_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let pair_ptr = self
+            .builder
+            .build_int_to_ptr(
+                pair_handle,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "map_from_list_pair_ptr",
+            )
+            .map_err(|e| format!("inttoptr error: {}", e))?;
+        let pair = self
+            .builder
+            .build_load(pair_ty, pair_ptr, "map_from_list_pair")
+            .map_err(|e| format!("pair load error: {}", e))?
+            .into_struct_value();
+        let key_struct = self
+            .builder
+            .build_extract_value(pair, 0, "map_from_list_key_struct")
+            .map_err(|e| format!("key extract error: {}", e))?
+            .into_struct_value();
+        let key_handle = self
+            .builder
+            .build_extract_value(key_struct, 0, "map_from_list_key_ptr")
+            .map_err(|e| format!("key pointer extract error: {}", e))?
+            .into_pointer_value();
+        let key_handle = self
+            .builder
+            .build_ptr_to_int(key_handle, i64_ty, "map_from_list_key_handle")
+            .map_err(|e| format!("key ptrtoint error: {}", e))?;
         let key_dest = {
             self.gep()
                 .build_in_bounds_gep(i64_ty, keys_ptr, &[idx], "map_from_list_key_dest")
@@ -641,27 +715,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(key_dest, key_handle)
             .map_err(|e| format!("store error: {}", e))?;
-        let idx_2_plus_1 = self
-            .builder
-            .build_int_add(
-                idx_2,
-                i64_ty.const_int(1, false),
-                "map_from_list_idx_2_plus_1",
-            )
-            .map_err(|e| format!("add error: {}", e))?;
-        let val_ptr_elem = {
-            self.gep().build_in_bounds_gep(
-                i64_ty,
-                data_ptr,
-                &[idx_2_plus_1],
-                "map_from_list_val_elem",
-            )
-        }
-        .map_err(|e| format!("gep error: {}", e))?;
         let val_handle = self
             .builder
-            .build_load(i64_ty, val_ptr_elem, "map_from_list_val_val")
-            .map_err(|e| format!("load error: {}", e))?
+            .build_extract_value(pair, 1, "map_from_list_value")
+            .map_err(|e| format!("value extract error: {}", e))?
             .into_int_value();
         let val_dest = {
             self.gep()

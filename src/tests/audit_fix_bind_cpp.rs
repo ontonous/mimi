@@ -194,3 +194,33 @@ fn audit_cpp_callback_trampoline_uses_declared_widths() {
     ));
     assert!(out.contains("std::function<int32_t(int32_t, int64_t)> apply_cb_f_cb"));
 }
+
+// ---------------------------------------------------------------------------
+// batch5 P1-31: C++ callback trampolines must catch exceptions escaping the
+// user-provided std::function; otherwise they terminate across the C ABI.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn audit_cpp_callback_trampoline_catches_exceptions() {
+    let out = gen(&[func(
+        "apply_cb",
+        vec![param(
+            "f",
+            Type::Func(vec![i32_ty(), i64_ty()], Box::new(i32_ty())),
+        )],
+        Some(i32_ty()),
+    )]);
+    assert!(
+        out.contains("try {"),
+        "must guard callback invocation:\n{out}"
+    );
+    assert!(out.contains("return apply_cb_f_cb(arg0, arg1);"));
+    assert!(
+        out.contains("} catch (...) {"),
+        "must catch all C++ exceptions crossing extern \"C\":\n{out}"
+    );
+    assert!(
+        out.contains("return 0;"),
+        "default fallback must be returned"
+    );
+}

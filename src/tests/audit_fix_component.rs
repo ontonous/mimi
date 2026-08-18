@@ -359,6 +359,9 @@ fn audit_component_registry_symbol_existence_spotcheck() {
         "mimi_match_panic",
         "mimi_list_push_grow",
         "mimi_map_from_list",
+        "mimi_str_concat_ll",
+        "mimi_str_char_at_ll",
+        "mimi_read_stdin_line",
         "mimi_broadcast_free",
         "mimi_json_deserialize_free",
     ];

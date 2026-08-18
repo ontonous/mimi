@@ -1,6 +1,7 @@
 use crate::ast::{File, Item};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
+use std::time::Instant;
 use z3::ast::String as Z3String;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
@@ -211,6 +212,19 @@ impl ProofArtifact {
 
     /// Check if this artifact is compatible with the current compilation.
     pub fn is_compatible(&self, current: &ProofArtifact) -> bool {
+        // Program identity: the resolved engine uses resolved_ir_hash, the
+        // flow engine uses vir_hash; an artifact from a different program
+        // must never be reused (batch4-08 P2-4).
+        let self_identity = if self.vir_hash.is_empty() {
+            &self.resolved_ir_hash
+        } else {
+            &self.vir_hash
+        };
+        let current_identity = if current.vir_hash.is_empty() {
+            &current.resolved_ir_hash
+        } else {
+            &current.vir_hash
+        };
         self.semantics_version == current.semantics_version
             && self.integer_model == current.integer_model
             && self.float_model == current.float_model
@@ -218,6 +232,7 @@ impl ProofArtifact {
             // 0.34.44 (ADR-008 §2): engine identity is part of compatibility —
             // a flow_ast proof is never compatible with a resolved obligation.
             && self.engine == current.engine
+            && self_identity == current_identity
             && self.vir_hash == current.vir_hash
     }
 
@@ -614,6 +629,7 @@ impl SolverSession {
         }
         // H14-fix: distinguish Z3 crash from timeout. A crash (panic) is now
         // logged to stderr so verification incompleteness is visible.
+        let started = Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check()));
         match result {
             Ok(SatResult::Sat) => {
@@ -642,7 +658,11 @@ impl SolverSession {
                 std::mem::forget(old);
                 self.replaced = true; // skip next pop() — push was on old solver
                 self.poisoned = true; // B6: assertions lost, future checks unreliable
-                self.timeout_observed = true; // §11-#50: real Z3 unknown (timeout)
+                                      // batch4 P2-1: only classify a Z3 Unknown as a real timeout when
+                                      // the configured budget was actually exhausted; otherwise report
+                                      // a generic SolverUnknown rather than a misleading Timeout.
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                self.timeout_observed = self.timeout_ms != 0 && elapsed_ms >= self.timeout_ms;
                 SatResult::Unknown
             }
             Err(panic_payload) => {
@@ -849,13 +869,6 @@ pub struct VerifierCtx {
     pub(crate) checked_extern_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_extern_no_panic: std::collections::HashSet<String>,
     pub(crate) checked_extern_unsafe: std::collections::HashSet<String>,
-    /// Protocol names materialised from CheckedProgram.
-    pub(crate) checked_protocols: std::collections::HashSet<String>,
-    pub(crate) checked_protocol_transitions:
-        std::collections::HashMap<String, Vec<(String, String, String)>>,
-    pub(crate) checked_protocol_payloads: std::collections::HashMap<String, String>,
-    pub(crate) checked_protocol_states: std::collections::HashMap<String, Vec<String>>,
-    pub(crate) checked_protocol_state_payloads: std::collections::HashMap<String, (String, String)>,
     /// Trait names materialised from CheckedProgram.
     pub(crate) checked_traits: std::collections::HashSet<String>,
     pub(crate) checked_method_signatures: std::collections::HashMap<String, (usize, String)>,
@@ -880,7 +893,6 @@ pub struct VerifierCtx {
     pub(crate) checked_persistent_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_constants: std::collections::HashSet<String>,
     pub(crate) checked_constant_values: std::collections::HashMap<String, (Option<String>, String)>,
-    pub(crate) checked_flow_protocols: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_fallback_transitions: std::collections::HashSet<String>,
     pub(crate) checked_ffi_pinned_transitions: std::collections::HashSet<String>,
     pub(crate) checked_transition_param_arity: std::collections::HashMap<String, usize>,
@@ -1155,50 +1167,6 @@ impl Verifier {
         }
         self.ctx.checked_extern_no_panic = extern_no_panic;
         self.ctx.checked_extern_unsafe = extern_unsafe;
-        self.ctx.checked_protocols = program
-            .protocols()
-            .values()
-            .map(|protocol| protocol.qualified_name.clone())
-            .collect();
-        let mut protocol_transitions = std::collections::HashMap::new();
-        let mut protocol_payloads = std::collections::HashMap::new();
-        let mut protocol_states = std::collections::HashMap::new();
-        let mut protocol_state_payloads = std::collections::HashMap::new();
-        for protocol in program.protocols().values() {
-            protocol_transitions.insert(
-                protocol.qualified_name.clone(),
-                protocol
-                    .transition_records
-                    .iter()
-                    .map(|tr| {
-                        (
-                            tr.event.clone(),
-                            tr.from_state.clone(),
-                            tr.to_states.first().cloned().unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-            let mut state_names = protocol.states.clone();
-            state_names.sort();
-            protocol_states.insert(protocol.qualified_name.clone(), state_names);
-            for state in &protocol.state_payloads {
-                if let Some(ty) = &state.payload_type {
-                    protocol_payloads.insert(
-                        format!("{}.{}", protocol.qualified_name, state.name),
-                        ty.clone(),
-                    );
-                    protocol_state_payloads.insert(
-                        format!("{}.{}", protocol.qualified_name, state.name),
-                        (state.payload_name.clone().unwrap_or_default(), ty.clone()),
-                    );
-                }
-            }
-        }
-        self.ctx.checked_protocol_transitions = protocol_transitions;
-        self.ctx.checked_protocol_payloads = protocol_payloads;
-        self.ctx.checked_protocol_states = protocol_states;
-        self.ctx.checked_protocol_state_payloads = protocol_state_payloads;
         self.ctx.checked_traits = program
             .traits()
             .values()
@@ -1308,7 +1276,6 @@ impl Verifier {
                 crate::core::ResolvedItemKind::Module => "module",
                 crate::core::ResolvedItemKind::Actor => "actor",
                 crate::core::ResolvedItemKind::Flow => "flow",
-                crate::core::ResolvedItemKind::Protocol => "protocol",
                 crate::core::ResolvedItemKind::Session => "session",
             };
             item_kinds.insert(item.qualified_name.clone(), kind.to_string());
@@ -1338,13 +1305,6 @@ impl Verifier {
             );
         }
         self.ctx.checked_constant_values = constant_values;
-        let mut flow_protocols = std::collections::HashMap::new();
-        for flow in program.flows().values() {
-            if !flow.impl_protocols.is_empty() {
-                flow_protocols.insert(flow.id.0.clone(), flow.impl_protocols.clone());
-            }
-        }
-        self.ctx.checked_flow_protocols = flow_protocols;
         self.ctx.checked_fallback_transitions = program
             .transitions()
             .values()
@@ -1607,40 +1567,6 @@ impl Verifier {
     pub(crate) fn is_checked_extern_unsafe(&self, name: &str) -> bool {
         self.ctx.checked_extern_unsafe.contains(name)
     }
-
-    pub(crate) fn has_checked_protocol(&self, name: &str) -> bool {
-        self.ctx.checked_protocols.contains(name)
-    }
-
-    pub(crate) fn checked_protocol_transitions(
-        &self,
-        protocol: &str,
-    ) -> Option<Vec<(String, String, String)>> {
-        self.ctx.checked_protocol_transitions.get(protocol).cloned()
-    }
-
-    pub(crate) fn checked_protocol_payload(&self, protocol: &str, state: &str) -> Option<String> {
-        self.ctx
-            .checked_protocol_payloads
-            .get(&format!("{protocol}.{state}"))
-            .cloned()
-    }
-
-    pub(crate) fn checked_protocol_states(&self, protocol: &str) -> Option<Vec<String>> {
-        self.ctx.checked_protocol_states.get(protocol).cloned()
-    }
-
-    pub(crate) fn checked_protocol_state_payload(
-        &self,
-        protocol: &str,
-        state: &str,
-    ) -> Option<(String, String)> {
-        self.ctx
-            .checked_protocol_state_payloads
-            .get(&format!("{protocol}.{state}"))
-            .cloned()
-    }
-
     pub(crate) fn has_checked_trait(&self, name: &str) -> bool {
         self.ctx.checked_traits.contains(name)
     }
@@ -1739,10 +1665,6 @@ impl Verifier {
 
     pub(crate) fn checked_constant_value(&self, name: &str) -> Option<(Option<String>, String)> {
         self.ctx.checked_constant_values.get(name).cloned()
-    }
-
-    pub(crate) fn checked_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {
-        self.lookup_checked_field_set(&self.ctx.checked_flow_protocols, flow_name)
     }
 
     pub(crate) fn is_checked_fallback_transition(
@@ -2079,6 +2001,16 @@ mod tests {
         assert!(VerifStatus::Timeout.hint().is_some());
         assert!(VerifStatus::InfrastructureError.hint().is_some());
         assert!(VerifStatus::RuntimeOnlyContract.hint().is_some());
+    }
+
+    #[test]
+    fn unknown_status_only_reports_timeout_when_observed() {
+        let mut session = SolverSession::new(10).expect("solver session");
+        // Default: Z3 Unknown without elapsed timeout → generic SolverUnknown.
+        assert_eq!(session.unknown_status(), VerifStatus::SolverUnknown);
+        // Once a real timeout is observed, the status must be Timeout.
+        session.timeout_observed = true;
+        assert_eq!(session.unknown_status(), VerifStatus::Timeout);
     }
 
     #[test]

@@ -249,6 +249,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr("%ld", "json_int_fmt")
                     .map_err(|e| format!("fmt error: {}", e))?;
+                // C varargs `%ld` requires an i64 value; passing a narrow i32
+                // would be undefined behavior on non-x86_64 ABI. Sign-extend
+                // Mimi integers to i64 before snprintf.
+                let iv64 = if iv.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "json_int_sext")
+                        .map_err(|e| format!("sext error: {}", e))?
+                } else {
+                    iv
+                };
                 self.builder
                     .build_call(
                         snprintf_fn,
@@ -256,7 +266,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(buf),
                             BasicMetadataValueEnum::IntValue(alloc_size),
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::IntValue(iv),
+                            BasicMetadataValueEnum::IntValue(iv64),
                         ],
                         "json_snprintf_int",
                     )

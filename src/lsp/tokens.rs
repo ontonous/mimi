@@ -15,7 +15,6 @@ impl LspServer {
                 let line = (tok.line as u32).saturating_sub(1);
                 // Lexer col is 1-based; convert to UTF-16 for LSP (L-H10).
                 let line_text = lines.get(tok.line.saturating_sub(1)).copied().unwrap_or("");
-                let map = crate::lsp::position_map::PositionMap::new(line_text);
                 // Approximate byte offset: col-1 as char index → walk chars.
                 let byte_start = {
                     let target = tok.col.saturating_sub(1);
@@ -25,7 +24,10 @@ impl LspServer {
                         .map(|(i, _)| i)
                         .unwrap_or(line_text.len())
                 };
-                let start = map.byte_to_lsp(byte_start).1 as u32;
+                // Avoid rebuilding a PositionMap per token on long single-line
+                // documents (batch4 P2-4): convert this one byte offset to a
+                // UTF-16 column directly.
+                let start = utf16_col(line_text, byte_start);
 
                 // Calculate token length from kind (then convert to UTF-16 units)
                 let len_bytes = match &tok.kind {
@@ -122,7 +124,7 @@ impl LspServer {
 
                 // L-H10: length in UTF-16 code units.
                 let end_byte = (byte_start + len_bytes as usize).min(line_text.len());
-                let end_utf16 = map.byte_to_lsp(end_byte).1 as u32;
+                let end_utf16 = utf16_col(line_text, end_byte);
                 let len = end_utf16.saturating_sub(start);
 
                 let delta_line = line.saturating_sub(prev_line);
@@ -145,4 +147,13 @@ impl LspServer {
 
         tokens
     }
+}
+
+/// Convert a byte offset within `line` to a 0-based UTF-16 code-unit column.
+fn utf16_col(line: &str, byte_start: usize) -> u32 {
+    line.get(..byte_start)
+        .unwrap_or(line)
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum()
 }

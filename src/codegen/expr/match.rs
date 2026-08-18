@@ -331,7 +331,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     _ => None,
                                 };
                                 err_ty
-                                    .filter(|t| crate::core::helpers::is_string(t))
                                     .and_then(|t| {
                                         self.llvm_type_for(t).map(|llvm| (t.clone(), llvm))
                                     })
@@ -1392,30 +1391,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_builtin_result_or_option = matches!(variant_name, "Ok" | "Err" | "Some")
             && self.find_variant_owner(variant_name).is_none();
         if is_builtin_result_or_option {
-            if variant_name == "Err"
-                && matches!(payload_val, BasicValueEnum::IntValue(_))
-                && expected_ty
-                    .as_ref()
-                    .is_some_and(|t| matches!(t, BasicTypeEnum::StructType(_)))
-            {
-                let Some(ty) = expected_ty else {
-                    return Err(
-                        "decode_payload_struct: expected_ty is None for Err string payload".into(),
-                    );
-                };
-                let ptr = self
-                    .builder
-                    .build_int_to_ptr(
-                        payload_val.into_int_value(),
-                        self.context.ptr_type(inkwell::AddressSpace::default()),
-                        "err_str_ptr",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("err string inttoptr: {}", e)))?;
-                let loaded = self
-                    .builder
-                    .build_load(ty, ptr, "err_str_struct")
-                    .map_err(|e| CompileError::LlvmError(format!("err string load: {}", e)))?;
-                return Ok((loaded, ty));
+            if variant_name == "Err" && matches!(payload_val, BasicValueEnum::IntValue(_)) {
+                if let Some(t) = expected_ty {
+                    match t {
+                        BasicTypeEnum::StructType(_) => {
+                            let ptr = self
+                                .builder
+                                .build_int_to_ptr(
+                                    payload_val.into_int_value(),
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    "err_str_ptr",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("err string inttoptr: {}", e))
+                                })?;
+                            let loaded = self
+                                .builder
+                                .build_load(t, ptr, "err_str_struct")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("err string load: {}", e))
+                                })?;
+                            return Ok((loaded, t));
+                        }
+                        BasicTypeEnum::FloatType(ft) if ft.get_bit_width() == 64 => {
+                            let decoded = self
+                                .builder
+                                .build_bit_cast(
+                                    payload_val.into_int_value(),
+                                    BasicTypeEnum::FloatType(ft),
+                                    "err_f64_bits_back",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("err f64 bitcast: {}", e))
+                                })?;
+                            return Ok((decoded, BasicTypeEnum::FloatType(ft)));
+                        }
+                        _ => {}
+                    }
+                }
             }
             return Ok((payload_val, payload_val.get_type()));
         }

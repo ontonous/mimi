@@ -68,15 +68,15 @@ test-dogfood:
 
 # Quick fuzz: run each proptest target with minimal iterations
 test-fuzz-quick:
-	PROPTEST_CASES=10 cargo test fuzz_ -- --nocapture
+	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper} PROPTEST_CASES=10 cargo test fuzz_ -- --nocapture
 
 # Full fuzz: run each proptest target with standard iterations
 test-fuzz:
-	PROPTEST_CASES=100 cargo test fuzz_ -- --nocapture
+	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper} PROPTEST_CASES=100 cargo test fuzz_ -- --nocapture
 
 # CI fuzz: aggressive iterations for continuous integration
 test-fuzz-ci:
-	PROPTEST_CASES=1000 cargo test fuzz_ 2>&1
+	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper} PROPTEST_CASES=1000 cargo test fuzz_ 2>&1
 
 # Run all fuzz corpus seed tests
 test-fuzz-corpus:

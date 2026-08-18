@@ -337,6 +337,10 @@ pub struct CodeGenerator<'ctx> {
     /// reinterpret slots as f64 bit patterns instead of summing them as i64.
     /// Set at the call site (push-flag pattern), consumed by compile_sum.
     pending_sum_elem_type: Option<String>,
+    /// Deep-eval 2026-08-17 audit: inferred element type of the current
+    /// `pop(list)` call. List slots are type-erased i64; non-integer element
+    /// types must be decoded before the popped value can be used by later IR.
+    pending_pop_elem_type: Option<String>,
     /// 0.35.20 (#6): inferred product-tuple element type of the current
     /// `zip(a, b)` / `enumerate(xs)` call — e.g. `(string, i32)` / `(i32, i32)`.
     /// compile_zip/compile_enumerate use it to heap-pack each pair with the
@@ -357,6 +361,11 @@ pub struct CodeGenerator<'ctx> {
     /// (`{i1,ptr,i64}` vs `{i1,i64,i64}`) and the phi unification rejects them.
     pending_result_ok_ty: Option<Type>,
     pending_to_string_is_any: bool,
+    /// The inferred type of the argument passed to the current `to_string`
+    /// call. Used to distinguish aggregate pointers (List, etc.) from raw C
+    /// string pointers so `to_string` can render the value instead of
+    /// emitting a type-confused placeholder.
+    pending_to_string_arg_type: Option<String>,
     /// Set when `to_int`/`to_float` receives an `Any`-typed argument (e.g. a
     /// `map_get` value). `Any` is lowered to an untyped i64 handle at LLVM
     /// level, so conversion builtins must route through the runtime
@@ -443,12 +452,6 @@ pub struct CodeGenerator<'ctx> {
     /// Session names from CheckedProgram.
     resolved_sessions: Option<std::collections::HashSet<String>>,
     resolved_session_displays: Option<HashMap<String, String>>,
-    /// Protocol names from CheckedProgram.
-    resolved_protocols: Option<std::collections::HashSet<String>>,
-    resolved_protocol_transitions: Option<HashMap<String, Vec<(String, String, String)>>>,
-    resolved_protocol_payloads: Option<HashMap<String, String>>,
-    resolved_protocol_states: Option<HashMap<String, Vec<String>>>,
-    resolved_protocol_state_payloads: Option<HashMap<String, (String, String)>>,
     /// Actor method directory from CheckedProgram.
     resolved_actors: Option<HashMap<String, Vec<String>>>,
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
@@ -498,7 +501,6 @@ pub struct CodeGenerator<'ctx> {
     resolved_item_kinds: Option<HashMap<String, String>>,
     /// Persistent field sets from CheckedProgram.
     resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
-    resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
     /// 0.31.30: Component IR — typed ABI surface for runtime function validation.
     /// When present, get_runtime_fn validates names against the Component IR
     /// exports, catching typos and removed functions at compiler compile time.
@@ -701,10 +703,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             display_frees: std::cell::RefCell::new(Vec::new()),
             pending_push_elem_type: None,
             pending_sum_elem_type: None,
+            pending_pop_elem_type: None,
             pending_zip_pair_type: None,
             pending_list_elem_type: None,
             pending_result_ok_ty: None,
             pending_to_string_is_any: false,
+            pending_to_string_arg_type: None,
             pending_to_number_is_any: false,
             // 0.34.34: O1 is the default. 0.31.21 fixed the O1 codegen bugs
             // (try_expr i32-vs-i1 mismatch, extern wrapper name collision);
@@ -745,11 +749,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_session_displays: None,
-            resolved_protocols: None,
-            resolved_protocol_transitions: None,
-            resolved_protocol_payloads: None,
-            resolved_protocol_states: None,
-            resolved_protocol_state_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_actor_method_params: None,
@@ -787,7 +786,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_events: None,
             resolved_item_kinds: None,
             resolved_persistent_fields: None,
-            resolved_flow_protocols: None,
             component_ir: None,
             max_children: None,
             in_fails_transition: false,
@@ -803,38 +801,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_failed_functions: std::collections::HashSet::new(),
         }
     }
-
-    pub(crate) fn resolved_protocol_transitions(
-        &self,
-        protocol: &str,
-    ) -> Option<Vec<(String, String, String)>> {
-        self.resolved_protocol_transitions
-            .as_ref()
-            .and_then(|map| map.get(protocol).cloned())
-    }
-
-    pub(crate) fn resolved_protocol_payload(&self, protocol: &str, state: &str) -> Option<String> {
-        self.resolved_protocol_payloads
-            .as_ref()
-            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
-    }
-
-    pub(crate) fn resolved_protocol_states(&self, protocol: &str) -> Option<Vec<String>> {
-        self.resolved_protocol_states
-            .as_ref()
-            .and_then(|map| map.get(protocol).cloned())
-    }
-
-    pub(crate) fn resolved_protocol_state_payload(
-        &self,
-        protocol: &str,
-        state: &str,
-    ) -> Option<(String, String)> {
-        self.resolved_protocol_state_payloads
-            .as_ref()
-            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
-    }
-
     pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {
         self.resolved_method_signatures
             .as_ref()

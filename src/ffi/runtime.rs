@@ -444,10 +444,16 @@ pub extern "C" fn mimi_shared_get_ptr(handle: i64) -> *const Value {
 /// Free a Value that was obtained via `mimi_shared_get_ptr` or any other
 /// `mimi_value_new_*` constructor.
 /// This must be called for every non-null pointer returned by those functions.
+///
+/// # Safety
+/// `ptr` must be null or a pointer obtained from a `mimi_value_new_*` or
+/// `mimi_shared_get_ptr` call, and must not be freed more than once.
 #[no_mangle]
-pub extern "C" fn mimi_value_free(ptr: *const Value) {
+pub unsafe extern "C" fn mimi_value_free(ptr: *const Value) {
     if !ptr.is_null() {
-        // SAFETY: ptr is a non-null pointer to a heap-allocated Value, previously obtained via Box::into_raw.
+        // SAFETY: ptr is a non-null pointer to a heap-allocated Value, previously
+        // obtained via Box::into_raw.  This function is unsafe because arbitrary
+        // non-null pointers can be passed from safe Rust.
         unsafe {
             drop(Box::from_raw(ptr as *mut Value));
         }
@@ -504,8 +510,11 @@ pub unsafe extern "C" fn mimi_value_as_int(ptr: *const Value) -> i64 {
 /// M14-fix: Check if a Value pointer is null (not a valid value).
 /// This allows C callers to distinguish "no value" from "value is 0"
 /// when using mimi_value_as_int, which returns 0 for both cases.
+///
+/// # Safety
+/// Pointer arguments must be null or valid pointers obtained from the matching mimi C ABI calls.
 #[no_mangle]
-pub extern "C" fn mimi_value_is_null(ptr: *const Value) -> bool {
+pub unsafe extern "C" fn mimi_value_is_null(ptr: *const Value) -> bool {
     ptr.is_null()
 }
 
@@ -575,17 +584,20 @@ pub unsafe extern "C" fn mimi_shared_create(value_ptr: *mut Value) -> i64 {
     shared_table_create(arc)
 }
 
-/// Free a raw string that was obtained via `string.into_raw()`.
+/// Free a raw string that was obtained via `mimi_string_into_raw` or from
+/// C-allocated string-returning extern functions.
 ///
 /// # Safety
-/// `c_str` must be a non-null pointer previously returned by `mimi_string_into_raw` or a valid
-/// `CString::into_raw()` result. After this call, the pointer is invalidated.
+/// `c_str` must be a non-null pointer previously returned by
+/// `mimi_string_into_raw` (or another libc `malloc`-allocated C string the
+/// caller owns), and must not be freed more than once. After this call, the
+/// pointer is invalidated.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_string_free_raw(c_str: *mut std::ffi::c_char) {
     if !c_str.is_null() {
-        // SAFETY: c_str is a non-null pointer to a CString previously created via CString::into_raw (null-checked above).
+        // SAFETY: c_str is a libc malloc-allocated buffer (see Safety docs).
         unsafe {
-            drop(std::ffi::CString::from_raw(c_str));
+            libc::free(c_str as *mut libc::c_void);
         }
     }
 }
@@ -625,26 +637,16 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
                             // without mimi_string_as_c_str_free.
                             const MAX_PENDING: usize = 4096;
                             if pending.len() >= MAX_PENDING {
-                                // Drop oldest half so in-flight recent pointers
-                                // remain valid when possible.
-                                let drop_n = pending.len() / 2;
-                                // H7: remember the reclaimed pointers BEFORE
-                                // dropping them — a C caller may still hold
-                                // one and call _free later; free() then
-                                // reports the reclaimed pointer explicitly
-                                // (and refuses a use of freed memory) instead
-                                // of silently no-op'ing.
-                                RECLAIMED_C_STRINGS.with(|reclaimed| {
-                                    let mut reclaimed = reclaimed.borrow_mut();
-                                    for cs in pending.iter().take(drop_n) {
-                                        reclaimed.insert(cs.as_ptr());
-                                    }
-                                });
-                                pending.drain(0..drop_n);
+                                // Do NOT reclaim oldest entries: a C caller may
+                                // still hold those pointers, so freeing them is
+                                // a use-after-free. Reject the new request
+                                // instead; the caller sees a NULL sentinel and
+                                // can avoid using the result.
                                 eprintln!(
-                                    "[mimi] WARNING: PENDING_C_STRINGS exceeded {}; dropped {} oldest entries",
-                                    MAX_PENDING, drop_n
+                                    "[mimi] WARNING: PENDING_C_STRINGS reached {};                                      mimi_string_as_c_str returning NULL instead of                                      reclaiming in-use pointers",
+                                    MAX_PENDING
                                 );
+                                return std::ptr::null();
                             }
                             pending.push(c_str);
                             // L8: just pushed, so last is always Some.
@@ -669,8 +671,11 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
 
 /// Free the C string pointer obtained from `mimi_string_as_c_str`.
 /// Call this when the C string is no longer needed.
+///
+/// # Safety
+/// Pointer arguments must be null or valid pointers obtained from the matching mimi C ABI calls.
 #[no_mangle]
-pub extern "C" fn mimi_string_as_c_str_free(c_str: *const std::ffi::c_char) {
+pub unsafe extern "C" fn mimi_string_as_c_str_free(c_str: *const std::ffi::c_char) {
     if c_str.is_null() {
         return;
     }
@@ -776,19 +781,23 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
     unsafe {
         match &mut *mimi_string {
             Value::String(s) => {
-                match std::ffi::CString::new(s.as_str()) {
-                    Ok(c_str) => {
-                        let ptr = c_str.into_raw();
-                        Arc::make_mut(s).clear();
-                        ptr
-                    }
-                    Err(_) => {
-                        // Interior null bytes: don't modify the original string,
-                        // return null to signal the error.
-                        eprintln!("mimi_string_into_raw: string contains interior null bytes, returning null");
-                        std::ptr::null_mut()
-                    }
+                if s.bytes().any(|b| b == 0) {
+                    // Interior null bytes: don't modify the original string,
+                    // return null to signal the error.
+                    eprintln!(
+                        "mimi_string_into_raw: string contains interior null bytes, returning null"
+                    );
+                    return std::ptr::null_mut();
                 }
+                let len = s.len();
+                let ptr = libc::malloc(len + 1) as *mut u8;
+                if ptr.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::ptr::copy_nonoverlapping(s.as_ptr(), ptr, len);
+                *ptr.add(len) = 0;
+                Arc::make_mut(s).clear();
+                ptr as *mut std::ffi::c_char
             }
             _ => std::ptr::null_mut(),
         }
@@ -801,20 +810,23 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
 /// Note: This function allocates a new Value on the heap.
 ///
 /// # Safety
-/// `c_str` must be a non-null pointer previously obtained via `CString::into_raw()`. Ownership
-/// of the C string is transferred to this function; the caller must not use the pointer afterward.
+/// `c_str` must be a non-null pointer to a NUL-terminated, libc
+/// `malloc`-allocated C string (for example from `mimi_string_into_raw`).
+/// Ownership of the buffer is transferred to this function; the caller must
+/// not use the pointer afterward.
 #[no_mangle]
 // SAFETY: c_str is null-checked; ownership transfer is documented in # Safety.
 pub unsafe extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *mut Value {
     if c_str.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: `c_str` was null-checked above and must have been produced by `CString::into_raw`.
-    // Reconstructing the CString here takes ownership back from the caller; the caller must not use
-    // the pointer afterwards.
+    // SAFETY: `c_str` was null-checked above and must be a valid C string
+    // allocated with libc::malloc (see Safety docs).
     unsafe {
-        let c_str = std::ffi::CString::from_raw(c_str);
-        let s = c_str.to_string_lossy().into_owned();
+        let s = std::ffi::CStr::from_ptr(c_str)
+            .to_string_lossy()
+            .into_owned();
+        libc::free(c_str as *mut libc::c_void);
         let value = Box::new(Value::String(Arc::new(s)));
         Box::into_raw(value)
     }
@@ -893,6 +905,12 @@ impl MimiThreadPool {
                 pending: Arc::clone(&self.pending),
                 completion: Arc::clone(&self.completion),
             }) {
+                // Roll back the pending increment so join_all cannot wait
+                // forever for a task that was never queued.
+                *count -= 1;
+                if *count == 0 {
+                    self.completion.notify_all();
+                }
                 eprintln!("[mimi ffi] submit_raw: failed to send task: {}", e);
             }
         }
@@ -913,14 +931,24 @@ impl MimiThreadPool {
         unsafe impl Send for ClosureData {}
 
         extern "C" fn closure_trampoline(data_ptr: *mut u8) -> *mut u8 {
-            // SAFETY: data_ptr was created by Box::into_raw and is guaranteed to be a valid heap-allocated Box<dyn FnOnce() + Send>.
-            let data = unsafe { Box::from_raw(data_ptr as *mut Box<dyn FnOnce() + Send>) };
-            (*data)();
+            // SAFETY: data_ptr was created by Box::into_raw and is guaranteed
+            // to be a valid heap-allocated Option<Box<dyn FnOnce() + Send>>.
+            let mut data =
+                unsafe { Box::from_raw(data_ptr as *mut Option<Box<dyn FnOnce() + Send>>) };
+            // The trampoline is extern "C": a panic in the user closure must
+            // not cross the C ABI. Swallow it so the worker can complete the
+            // task and decrement the pending counter. `take()` moves the job
+            // out before invoking it, leaving `data` in a valid owned state.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(job) = data.take() {
+                    job();
+                }
+            }));
             // Return null — the task result is not used in the submit() path.
             std::ptr::null_mut()
         }
 
-        let boxed: Box<dyn FnOnce() + Send> = Box::new(job);
+        let boxed: Box<Option<Box<dyn FnOnce() + Send>>> = Box::new(Some(Box::new(job)));
         let data = Box::new(ClosureData {
             func: closure_trampoline,
             arg: Box::into_raw(boxed) as *mut u8,
@@ -943,6 +971,13 @@ impl MimiThreadPool {
                 pending: Arc::clone(&self.pending),
                 completion: Arc::clone(&self.completion),
             }) {
+                // The task was never queued; release the data and fix the
+                // pending counter so join_all returns instead of hanging.
+                let _ = unsafe { Box::from_raw(data as *mut ClosureData) };
+                *count -= 1;
+                if *count == 0 {
+                    self.completion.notify_all();
+                }
                 eprintln!("[mimi ffi] submit: failed to send task: {}", e);
             }
         }
@@ -1084,6 +1119,34 @@ mod tests {
     /// Creating and immediately dropping a pool (no tasks submitted) is a minimal
     /// smoke test that the drop path does not hang. The real regression test is
     /// that the Drop impl no longer calls join() — verified by code inspection.
+    /// batch5 P1-26: a panicking user closure must not cross the extern "C"
+    /// trampoline (aborting the process), and later tasks must still complete.
+    #[test]
+    fn submit_panicking_closure_is_contained_and_joinable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pool = MimiThreadPool::new(1);
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let first_for_task = Arc::clone(&first);
+        pool.submit(move || {
+            first_for_task.store(true, Ordering::SeqCst);
+            panic!("intentional submit panic");
+        });
+        let second_for_task = Arc::clone(&second);
+        pool.submit(move || {
+            second_for_task.store(true, Ordering::SeqCst);
+        });
+        pool.join_all();
+        assert!(
+            first.load(Ordering::SeqCst),
+            "panicking task ran before panicking"
+        );
+        assert!(
+            second.load(Ordering::SeqCst),
+            "task after panic still completes"
+        );
+    }
+
     #[test]
     fn test_thread_pool_drop_does_not_hang() {
         use std::time::{Duration, Instant};
@@ -1102,25 +1165,29 @@ mod tests {
     #[test]
     fn cap_c_api_lifecycle() {
         let name = std::ffi::CString::new("read").unwrap();
-        let id = mimi_cap_register(name.as_ptr());
+        let id = unsafe { mimi_cap_register(name.as_ptr()) };
         assert!(id > 0);
 
         // Check succeeds before consume, fails for wrong name.
-        assert!(mimi_cap_check(id, name.as_ptr()));
         let wrong = std::ffi::CString::new("write").unwrap();
-        assert!(!mimi_cap_check(id, wrong.as_ptr()));
+        unsafe {
+            assert!(mimi_cap_check(id, name.as_ptr()));
+            assert!(!mimi_cap_check(id, wrong.as_ptr()));
 
-        // Consume succeeds once and only with the correct name.
-        assert!(mimi_cap_consume(id, name.as_ptr()));
-        assert!(!mimi_cap_consume(id, name.as_ptr()));
-        assert!(!mimi_cap_check(id, name.as_ptr()));
+            // Consume succeeds once and only with the correct name.
+            assert!(mimi_cap_consume(id, name.as_ptr()));
+            assert!(!mimi_cap_consume(id, name.as_ptr()));
+            assert!(!mimi_cap_check(id, name.as_ptr()));
+        }
     }
 
     #[test]
     fn cap_c_api_invalid_id() {
         let name = std::ffi::CString::new("read").unwrap();
-        assert!(!mimi_cap_check(9999, name.as_ptr()));
-        assert!(!mimi_cap_consume(9999, name.as_ptr()));
+        unsafe {
+            assert!(!mimi_cap_check(9999, name.as_ptr()));
+            assert!(!mimi_cap_consume(9999, name.as_ptr()));
+        }
     }
 
     // ─── Shared handle C API tests ──────────────────────────────────────────
@@ -1141,7 +1208,9 @@ mod tests {
         unsafe {
             assert!(matches!(&*ptr, Value::Int(42)));
         }
-        mimi_value_free(ptr);
+        unsafe {
+            mimi_value_free(ptr);
+        }
 
         // Release twice to balance the initial + retain references.
         mimi_shared_release(id);
@@ -1168,7 +1237,9 @@ mod tests {
         unsafe {
             assert!(matches!(&*ptr, Value::Int(7)));
         }
-        mimi_value_free(ptr);
+        unsafe {
+            mimi_value_free(ptr);
+        }
 
         // Releasing an already-released handle is a no-op.
         mimi_shared_release(id);
@@ -1199,8 +1270,10 @@ mod tests {
             assert_eq!(std::ffi::CStr::from_ptr(c_str).to_str().unwrap(), "hello");
         }
 
-        mimi_string_as_c_str_free(c_str);
-        mimi_value_free(raw);
+        unsafe {
+            mimi_string_as_c_str_free(c_str);
+            mimi_value_free(raw);
+        }
     }
 
     #[test]
@@ -1215,7 +1288,53 @@ mod tests {
         // Free all pending strings; the individual pointer becomes invalid.
         mimi_string_as_c_str_free_all();
 
-        mimi_value_free(raw);
+        unsafe {
+            mimi_value_free(raw);
+        }
+    }
+
+    #[test]
+    fn string_into_raw_from_raw_use_libc_malloc_buffers() {
+        // SAFETY: fresh heap Value wrapping a String; ownership passes to raw.
+        let raw = Box::into_raw(Box::new(Value::String(Arc::new("hello".to_string()))));
+        // SAFETY: raw is a valid heap Value; ownership of string content transfers.
+        let c_str = unsafe { mimi_string_into_raw(raw) };
+        assert!(!c_str.is_null());
+        // SAFETY: c_str is a valid NUL-terminated buffer from mimi_string_into_raw.
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(c_str) }.to_str().unwrap(),
+            "hello"
+        );
+        // Free with the matching StringTransfer deallocator (libc free).
+        // SAFETY: c_str came from mimi_string_into_raw and is freed exactly once.
+        unsafe {
+            mimi_string_free_raw(c_str);
+            mimi_value_free(raw);
+        }
+
+        // Round-trip through mimi_string_from_raw should consume the libc buffer.
+        // SAFETY: fresh heap Value wrapping a String.
+        let raw2 = Box::into_raw(Box::new(Value::String(Arc::new("world".to_string()))));
+        // SAFETY: raw2 is a valid heap Value; ownership of string content transfers.
+        let c_str2 = unsafe { mimi_string_into_raw(raw2) };
+        assert!(!c_str2.is_null());
+        // SAFETY: c_str2 is an owned malloc buffer; from_raw takes ownership.
+        let value = unsafe { mimi_string_from_raw(c_str2) };
+        assert!(!value.is_null());
+        // SAFETY: value is a valid heap Value.
+        let out = unsafe { mimi_string_as_c_str(value) };
+        assert!(!out.is_null());
+        // SAFETY: out is a NUL-terminated string owned by the pending registry.
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(out) }.to_str().unwrap(),
+            "world"
+        );
+        unsafe { mimi_string_as_c_str_free(out) };
+        // SAFETY: value is a valid heap Value freed once.
+        unsafe {
+            mimi_value_free(value);
+            mimi_value_free(raw2);
+        }
     }
 
     #[test]
@@ -1225,7 +1344,7 @@ mod tests {
         // SAFETY: null input is explicitly handled by the function.
         assert!(unsafe { mimi_string_as_c_str(std::ptr::null()) }.is_null());
         // Free on null / unknown pointer should be a no-op.
-        mimi_string_as_c_str_free(std::ptr::null());
+        unsafe { mimi_string_as_c_str_free(std::ptr::null()) };
     }
 
     // ─── Value C API tests ──────────────────────────────────────────────────
@@ -1237,21 +1356,27 @@ mod tests {
         assert_eq!(unsafe { mimi_value_as_int(int_val) }, 42);
         // SAFETY: int_val is a freshly created valid Mimi value.
         assert!(unsafe { mimi_value_as_bool(int_val) }); // non-zero int is truthy
-        mimi_value_free(int_val);
+        unsafe {
+            mimi_value_free(int_val);
+        }
 
         let bool_val = mimi_value_new_bool(true);
         // SAFETY: bool_val is a freshly created valid Mimi value.
         assert!(unsafe { mimi_value_as_bool(bool_val) });
         // SAFETY: bool_val is a freshly created valid Mimi value.
         assert_eq!(unsafe { mimi_value_as_int(bool_val) }, 1);
-        mimi_value_free(bool_val);
+        unsafe {
+            mimi_value_free(bool_val);
+        }
 
         let float_val = mimi_value_new_float(2.5);
         // SAFETY: float_val is a freshly created valid Mimi value.
         assert!((unsafe { mimi_value_as_float(float_val) } - 2.5).abs() < 0.001);
         // SAFETY: float_val is a freshly created valid Mimi value.
         assert_eq!(unsafe { mimi_value_as_int(float_val) }, 2);
-        mimi_value_free(float_val);
+        unsafe {
+            mimi_value_free(float_val);
+        }
 
         // Null inputs are safe.
         // SAFETY: null input is explicitly handled by the function.
@@ -1260,7 +1385,9 @@ mod tests {
         assert!(!unsafe { mimi_value_as_bool(std::ptr::null()) });
         // SAFETY: null input is explicitly handled by the function.
         assert_eq!(unsafe { mimi_value_as_float(std::ptr::null()) }, 0.0);
-        mimi_value_free(std::ptr::null());
+        unsafe {
+            mimi_value_free(std::ptr::null());
+        }
     }
 
     #[test]
@@ -1274,7 +1401,9 @@ mod tests {
         assert!(!ptr.is_null());
         // SAFETY: ptr came from a valid shared value.
         assert_eq!(unsafe { mimi_value_as_int(ptr) }, 123);
-        mimi_value_free(ptr);
+        unsafe {
+            mimi_value_free(ptr);
+        }
 
         mimi_shared_release(id);
         assert!(mimi_shared_get_ptr(id).is_null());
@@ -1286,15 +1415,12 @@ mod tests {
         assert_eq!(unsafe { mimi_shared_create(std::ptr::null_mut()) }, 0);
     }
 
-    /// H7: when PENDING_C_STRINGS overflows, the drain frees the oldest
-    /// CStrings while a C caller may still hold the pointer. A later
-    /// `mimi_string_as_c_str_free` on a reclaimed pointer must be REPORTED
-    /// (not a silent no-op) — the reclaimed registry records the hazard.
+    /// batch5 P1-25: when PENDING_C_STRINGS reaches its cap, the API must
+    /// reject new allocations (return NULL) instead of reclaiming entries
+    /// that a C caller may still be holding.
     #[test]
-    fn free_after_overflow_drain_is_diagnosed_not_silent() {
-        // Tests share the thread-local registry across test threads
-        // (--test-threads reuse); start from a clean slate so the drain
-        // accounting below is deterministic.
+    fn as_c_str_overflow_returns_null_without_reclaiming() {
+        // Start from a clean slate so the accounting below is deterministic.
         PENDING_C_STRINGS.with(|p| p.borrow_mut().clear());
         RECLAIMED_C_STRINGS.with(|r| r.borrow_mut().clear());
 
@@ -1304,58 +1430,41 @@ mod tests {
             Box::into_raw(v)
         };
 
-        // Fill past MAX_PENDING (4096): the 4097th call triggers a drain
-        // of half the registry, reclaiming the oldest pointers.
+        // Fill exactly MAX_PENDING: every returned pointer must remain
+        // valid until explicitly freed.
         let mut ptrs = Vec::new();
-        for _ in 0..(4096 + 64) {
+        for _ in 0..4096 {
             let v = make_value();
             // SAFETY: v is a valid heap Value.
             let p = unsafe { mimi_string_as_c_str(v) };
-            assert!(!p.is_null());
+            assert!(!p.is_null(), "pending slots beneath the cap must succeed");
             ptrs.push(p);
-            // v is freed after its C-string was registered; the string bytes
-            // are copied by CString::new.
+            // SAFETY: v is freed after the C-string copy was registered.
+            unsafe {
+                mimi_value_free(v);
+            }
+        }
+
+        // The next request over the cap fails closed instead of dropping
+        // any earlier, potentially in-use pointer.
+        let v = make_value();
+        // SAFETY: v is a valid heap Value.
+        let overflow = unsafe { mimi_string_as_c_str(v) };
+        assert!(
+            overflow.is_null(),
+            "overflow must return NULL, got {:?}",
+            overflow
+        );
+        // SAFETY: v is a valid heap Value.
+        unsafe {
             mimi_value_free(v);
         }
 
-        // The first pointers must have been reclaimed by the drain.
-        let first = ptrs[0];
-        let reclaimed_before = RECLAIMED_C_STRINGS.with(|r| r.borrow().contains(&first));
-        assert!(
-            reclaimed_before,
-            "overflow drain must record the reclaimed pointer in RECLAIMED_C_STRINGS"
-        );
-
-        // Freeing a reclaimed pointer: must retire the registry entry —
-        // the warning fires, the pointer is consumed from the hazard list.
-        mimi_string_as_c_str_free(first);
-        let reclaimed_after = RECLAIMED_C_STRINGS.with(|r| r.borrow().contains(&first));
-        assert!(
-            !reclaimed_after,
-            "freeing a reclaimed pointer must remove it from the hazard registry"
-        );
-
-        // A fresh (non-drained) pointer still frees normally and is
-        // removed from PENDING. NOTE: we deliberately do NOT assert "not in
-        // the reclaimed registry" — the allocator may reuse an address that
-        // a drained CString freed (exactly the hazard class the registry
-        // tracks), so address equality proves nothing about liveness.
-        let last = *ptrs.last().unwrap();
-        mimi_string_as_c_str_free(last);
-        let still_pending = PENDING_C_STRINGS.with(|p| {
-            p.borrow()
-                .iter()
-                .any(|cs| cs.as_ptr() == last || first == cs.as_ptr())
-        });
-        assert!(
-            !still_pending,
-            "freed pointers must leave PENDING_C_STRINGS"
-        );
-
-        // Clean up the middle pointers so the thread-local drains quietly
-        // (no leak warnings across tests).
-        for &p in ptrs.iter().skip(1).take(ptrs.len() - 2) {
-            mimi_string_as_c_str_free(p);
+        // Every pre-overflow pointer is still pending and frees normally.
+        for &p in &ptrs {
+            unsafe { mimi_string_as_c_str_free(p) };
         }
+        let remaining = PENDING_C_STRINGS.with(|p| p.borrow().len());
+        assert_eq!(remaining, 0, "all accepted pointers must be freed");
     }
 }

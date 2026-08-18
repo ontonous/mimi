@@ -1248,10 +1248,9 @@ func main() -> i32 {
     );
 }
 
-// ── SD-7/SD-9: codegen quote! constant-fold hygiene (2026-08-04) ──
+// ── SD-7/SD-9: comptime constant-fold hygiene (2026-08-04) ──
 //
-// codegen's fold_const_binary / fold_const_unary (the quote! fast path)
-// used to:
+// codegen's fold_const_binary / fold_const_unary used to:
 //   * fold integer add/sub/mul with wrapping_* (silent wrap, SD-7 violation)
 //   * fold integer div/mod with raw `/` `%` (i64::MIN / -1 PANICS in debug)
 //   * fold float arithmetic without a finiteness guard (Inf baked in, SD-9)
@@ -1259,25 +1258,28 @@ func main() -> i32 {
 //   * fold i64 bitwise &/| as boolean truthiness (6 & 3 folded to 1)
 // All of these now refuse to fold (return None) so the checked runtime
 // semantics (E0802/E0813 traps) or the bytecode-VM fallback decide.
+// The 0.1.7 Phase E removal of `quote!` moved these regressions to the
+// surviving `comptime { ... }` constant-folding path.
 
 #[test]
-fn sd7_quote_const_fold_overflow_rejected_by_both_backends() {
+fn sd7_comptime_const_fold_overflow_rejected_by_both_backends() {
     // 4611686018427387904 * 2 overflows i64. Neither backend may silently
     // wrap it: the VM traps (checked_add), codegen refuses the fast fold and
     // its VM fallback traps too — both must fail, not produce a value.
     let src = r#"
 func main() -> i32 {
-    println(ast_eval(quote! { 4611686018427387904 + 4611686018427387904 }));
+    let v = comptime { 4611686018427387904 + 4611686018427387904 }
+    println(v)
     0
 }
 "#;
     let vm = std::panic::catch_unwind(|| run_source(src));
     assert!(
         vm.is_err(),
-        "bytecode VM must trap on quote! const overflow, not wrap"
+        "bytecode VM must trap on comptime const overflow, not wrap"
     );
     let cg =
-        compile_and_run(src).expect_err("codegen must not silently wrap a quote! const overflow");
+        compile_and_run(src).expect_err("codegen must not silently wrap a comptime const overflow");
     assert!(
         cg.contains("overflow"),
         "codegen error must surface the overflow trap (E0802), got: {cg}"
@@ -1285,19 +1287,19 @@ func main() -> i32 {
 }
 
 #[test]
-fn sd7_quote_const_fold_min_div_neg1_rejected_by_both_backends() {
+fn sd7_comptime_const_fold_min_div_neg1_rejected_by_both_backends() {
     // i64::MIN / -1 overflows. Construct MIN via in-range folds. Before the
     // fix, codegen's raw `a / b` would PANIC the compiler process in debug
     // builds; now checked_div refuses the fold and both backends trap.
     let src = r#"
 func main() -> i32 {
-    println(ast_eval(quote! { 0 - 9223372036854775807 - 1 }));
-    println(ast_eval(quote! { (0 - 9223372036854775807 - 1) / -1 }));
+    let a = comptime { 0 - 9223372036854775807 - 1 }
+    let b = comptime { (0 - 9223372036854775807 - 1) / -1 }
+    println(a)
+    println(b)
     0
 }
 "#;
-    // Sanity: MIN itself is representable and prints identically.
-    // (Division by -1 then traps on both backends.)
     let vm = std::panic::catch_unwind(|| run_source(src));
     assert!(vm.is_err(), "bytecode VM must trap on MIN / -1, not wrap");
     let cg = compile_and_run(src).expect_err("codegen must reject MIN / -1, not panic or wrap");
@@ -1308,19 +1310,20 @@ func main() -> i32 {
 }
 
 #[test]
-fn sd9_quote_const_fold_float_infinity_rejected_by_both_backends() {
+fn sd9_comptime_const_fold_float_infinity_rejected_by_both_backends() {
     // 1e308 + 1e308 = +Inf. The old codegen fold baked the Inf constant in
     // silently; the finiteness invariant (SD-9) requires a trap (E0813).
     let src = r#"
 func main() -> i32 {
-    println(ast_eval(quote! { 1e308 + 1e308 }));
+    let v = comptime { 1e308 + 1e308 }
+    println(v)
     0
 }
 "#;
     let vm = std::panic::catch_unwind(|| run_source(src));
     assert!(
         vm.is_err(),
-        "bytecode VM must trap on Inf-producing quote! fold"
+        "bytecode VM must trap on Inf-producing comptime fold"
     );
     let cg =
         compile_and_run(src).expect_err("codegen must not fold 1e308+1e308 into an Inf constant");
@@ -1331,34 +1334,35 @@ func main() -> i32 {
 }
 
 #[test]
-fn sd7_quote_const_fold_signed_comparison_now_correct() {
+fn sd7_comptime_const_fold_signed_comparison_now_correct() {
     // fold_const_binary used get_zero_extended_constant() (u64) and compared
     // unsigned, folding `-1 < 1` to false. The VM evaluates it correctly.
-    // Value assertion per backend (bool display through ast_eval diverges:
-    // VM prints "true", codegen prints "1" — tracked separately).
+    // `comptime { ... }` is the surviving constant-folding surface after the
+    // Phase E `quote!` removal.
     let vm = run_source(
         r#"
 func main() -> i32 {
-    let ast = quote! { -1 < 1 };
-    ast_eval(ast)
+    println(comptime { -1 < 1 })
+    println(comptime { -5 <= -10 })
+    0
 }
 "#,
     );
     assert_eq!(
         vm,
-        interp::Value::Bool(true),
-        "VM must evaluate -1 < 1 as true"
+        interp::Value::Int(0),
+        "comptime bool comparison must execute"
     );
     let codegen = compile_and_run(
         r#"
 func main() -> i32 {
-    println(ast_eval(quote! { -1 < 1 }));
-    println(ast_eval(quote! { -5 <= -10 }));
+    println(comptime { -1 < 1 })
+    println(comptime { -5 <= -10 })
     0
 }
 "#,
     )
-    .expect("codegen must compile signed-comparison quote folds");
+    .expect("codegen must compile signed-comparison comptime folds");
     assert_eq!(
         codegen.trim(),
         "true\nfalse",

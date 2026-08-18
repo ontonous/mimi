@@ -1171,6 +1171,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 src.starts_with("List").then_some(src)
             }
             "range" => Some("List<i64>".to_string()),
+            // Map collection builtins have concrete list element types. Keep
+            // these visible to tuple lowering so `keys(m)[i]` is wrapped as a
+            // length-aware Mimi string rather than a raw pointer field.
+            "keys" => Some("List<string>".to_string()),
+            "values" => Some("List<Any>".to_string()),
             // zip: List<(A, B)> — pair of the two source lists' element types.
             // compile_zip now heap-packs each pair (16-byte {a,b} allocation
             // referenced by an 8-byte slot), matching the product-tuple
@@ -1469,7 +1474,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn infer_call_return_type_name(&self, name: &str) -> Option<String> {
         // Built-ins whose return type is not obvious from the name alone.
         match name {
-            "getenv" | "base64_decode" => return Some("Result<string,string>".to_string()),
+            "getenv" | "base64_decode" | "try_input_line" => {
+                return Some("Result<string,string>".to_string())
+            }
             "str_index_of" => return Some("Option<i32>".to_string()),
             "str_count_substring" => return Some("i32".to_string()),
             "str_replace" | "str_substring" | "str_join" | "str_trim" | "str_to_upper"
@@ -1555,6 +1562,56 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicValueEnum::PointerValue(pv) => Ok(pv),
                     _ => Err("string struct field 0 is not a pointer".into()),
                 }
+            }
+            _ => Err("expected a string argument".into()),
+        }
+    }
+
+    /// Extract a raw C string pointer and its explicit byte length from a
+    /// Mimi string argument.
+    ///
+    /// For `{i8*, i64}` string variables this returns the stored length, so
+    /// embedded NUL bytes are not truncated by `strlen`. For raw C string
+    /// pointers (literals and external C strings) it falls back to `strlen`.
+    pub(super) fn extract_raw_str_ptr_len(
+        &self,
+        arg: &BasicMetadataValueEnum<'ctx>,
+    ) -> Result<
+        (
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::values::IntValue<'ctx>,
+        ),
+        CompileError,
+    > {
+        match arg {
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                let strlen_fn = self.get_runtime_fn("strlen")?;
+                let len = self
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(*pv)],
+                        "cstr_len",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                    .into_int_value();
+                Ok((*pv, len))
+            }
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let ftys = sv.get_type().get_field_types();
+                let is_str_layout = ftys.len() == 2
+                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
+                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if !is_str_layout {
+                    return Err("string struct expected (found a non-string struct)".into());
+                }
+                let ptr = self
+                    .build_extract_value((*sv).into(), 0, "str_ptr")?
+                    .into_pointer_value();
+                let len = self
+                    .build_extract_value((*sv).into(), 1, "str_len")?
+                    .into_int_value();
+                Ok((ptr, len))
             }
             _ => Err("expected a string argument".into()),
         }

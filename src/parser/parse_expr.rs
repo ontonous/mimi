@@ -203,8 +203,6 @@ impl Parser {
                 | TokenKind::Await
                 | TokenKind::Arena
                 | TokenKind::Comptime
-                | TokenKind::Quote
-                | TokenKind::DollarParen
                 | TokenKind::Fn
                 | TokenKind::Minus
                 | TokenKind::Star
@@ -517,28 +515,13 @@ impl Parser {
                 let comptime = self.parsed_expr_from(start_pos, Expr::Comptime(body));
                 return self.parse_postfix(comptime, start_pos);
             }
-            TokenKind::Quote => {
-                self.advance();
-                if self.at(&TokenKind::Bang) {
-                    self.advance();
-                }
-                self.skip_newlines();
-                self.expect(TokenKind::LBrace, "`{` for quote! body")?;
-                let body = self.parse_quote_block()?;
-                let quote = self.parsed_expr_from(start_pos, Expr::Quote(body));
-                return self.parse_postfix(quote, start_pos);
-            }
             TokenKind::DollarParen => {
-                self.advance();
-                let inner = self.parse_expr(0)?;
-                // v0.28.21 — The `$(` token is a single DollarParen
-                // token, so the closing `)` is still in the stream and
-                // must be consumed here. `parse_postfix` does not eat
-                // stray `)`s, so this is the canonical place.
-                self.expect(TokenKind::RParen, "`)` to close $(...) interpolation")?;
-                let interpolation =
-                    self.parsed_expr_from(start_pos, Expr::QuoteInterpolate(Box::new(inner)));
-                return self.parse_postfix(interpolation, start_pos);
+                let (line, col) = (self.peek().line, self.peek().col);
+                return Err(ParseError::new(
+                    "quote interpolation `$(...)` has been removed in 0.1.7 Phase E; use `comptime { ... }` for constant folding or plain expressions",
+                    line,
+                    col,
+                ));
             }
             TokenKind::Old => {
                 self.advance();
@@ -833,34 +816,24 @@ impl Parser {
         Ok(fields)
     }
 
-    fn parse_quote_block(&mut self) -> Result<Block, ParseError> {
-        let mut stmts = Vec::new();
-        self.skip_newlines();
-        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
-            self.skip_newlines();
-            if self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof) {
-                break;
-            }
-            if self.at(&TokenKind::DollarParen) {
-                let interpolation_start = self.pos;
-                self.advance();
-                let inner = self.parse_expr(0)?;
-                self.expect(TokenKind::RParen, "`)`")?;
-                let interpolation = Expr::QuoteInterpolate(Box::new(inner));
-                let expr = self.parsed_expr_from(interpolation_start, interpolation);
-                stmts.push(
-                    Stmt::Expr(expr)
-                        .with_meta(self.consumed_meta(interpolation_start, AstOrigin::User)),
-                );
-            } else {
-                stmts.push(self.parse_stmt()?);
-            }
-        }
-        self.expect(TokenKind::RBrace, "`}`")?;
-        Ok(stmts)
-    }
     fn parse_ident_primary(&mut self, name: String) -> Result<Expr, ParseError> {
         let start_pos = self.pos;
+        let next_is_bang = self
+            .tokens
+            .get(self.pos + 1)
+            .is_some_and(|t| matches!(t.kind, TokenKind::Bang));
+        if name == "quote" && next_is_bang {
+            let next = self
+                .tokens
+                .get(self.pos + 1)
+                .expect("quote! lookahead token");
+            let (line, col) = (next.line, next.col);
+            return Err(ParseError::new(
+                "`quote! { ... }` has been removed in 0.1.7 Phase E; use `comptime { ... }` for constant folding",
+                line,
+                col,
+            ));
+        }
         self.advance();
         let ident = self.parsed_expr_from(start_pos, Expr::Ident(name.clone()));
         if name == "type_name" && self.at(&TokenKind::LParen) {
@@ -940,9 +913,6 @@ impl Parser {
                     } else if self.at(&TokenKind::Await) {
                         self.advance();
                         Ok("await".to_string())
-                    } else if self.at(&TokenKind::Quote) {
-                        self.advance();
-                        Ok("quote".to_string())
                     } else {
                         self.expect_ident()
                     }?;

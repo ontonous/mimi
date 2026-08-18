@@ -1375,6 +1375,14 @@ fn lower_branch_block(stmts: &[crate::ast::Stmt], ctx: &mut LoweringCtx) -> Opti
                     failed = true;
                     break;
                 };
+                // P0-1: a non-tail expression statement still executes at
+                // runtime, even though its value is discarded. A checked
+                // operation there can trap (div-by-zero/overflow); dropping it
+                // would let a crashing function verify as Proven.
+                if pos != last_index && vexpr.contains_checked_arith() {
+                    failed = true;
+                    break;
+                }
                 value = Some(vexpr);
             }
             Stmt::Return(Some(e)) => {

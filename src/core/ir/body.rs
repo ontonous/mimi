@@ -146,6 +146,10 @@ pub enum CheckedConversionKind {
     /// A checked slice expression reuses the source sequence ABI while
     /// narrowing its visible bounds.
     SliceView,
+    /// Tuple-level transparent conversion admitted when each element is
+    /// identity or a no-code DynamicAnyPack (used by std/mimispec parser
+    /// returning `(Record, i32)` as `(Any, i32)`).
+    TupleErase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1253,6 +1257,16 @@ impl BodyValidator<'_> {
         }
         if conversion.kind == CheckedConversionKind::Identity && conversion.from != conversion.to {
             self.error(owner, "identity conversion changes the canonical type");
+        }
+        if conversion.kind == CheckedConversionKind::TupleErase {
+            match (
+                self.types.get(&conversion.from),
+                self.types.get(&conversion.to),
+            ) {
+                (Some(ResolvedType::Tuple(from_elems)), Some(ResolvedType::Tuple(to_elems)))
+                    if from_elems.len() == to_elems.len() => {}
+                _ => self.error(owner, "TupleErase conversion changes tuple shape"),
+            }
         }
         if conversion.kind == CheckedConversionKind::ContainerAliasErase {
             // Full audit 2026-08-05 (#7): the lowering may erase container

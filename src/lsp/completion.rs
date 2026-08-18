@@ -229,7 +229,7 @@ impl LspServer {
                     }));
                 }
                 // Also add user-defined types from AST
-                if let Some(file) = self.parse_with_recovery(text) {
+                if let Some(file) = file.as_ref() {
                     for item in &file.items {
                         if let Item::Type(t) = item {
                             items.push(serde_json::json!({
@@ -244,7 +244,7 @@ impl LspServer {
             }
             "module" => {
                 // Module name completions after `use`
-                if let Some(file) = self.parse_with_recovery(text) {
+                if let Some(file) = file.as_ref() {
                     for item in &file.items {
                         if let Item::Module(m) = item {
                             items.push(serde_json::json!({
@@ -269,7 +269,7 @@ impl LspServer {
                 return items;
             }
             "impl" => {
-                if let Some(file) = self.parse_with_recovery(text) {
+                if let Some(file) = file.as_ref() {
                     for item in &file.items {
                         match item {
                             Item::Trait(t) => {
@@ -399,7 +399,7 @@ impl LspServer {
         }
 
         // User-defined functions, types, modules, traits, actors from AST
-        if let Some(file) = self.parse_with_recovery(text) {
+        if let Some(file) = file {
             for item in &file.items {
                 match item {
                     Item::Func(f) => {

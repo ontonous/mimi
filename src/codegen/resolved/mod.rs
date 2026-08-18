@@ -657,18 +657,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 if let (Some(argc), Some(argv)) =
                     (function.get_nth_param(0), function.get_nth_param(1))
                 {
-                    let argc_64 = self
-                        .generator
-                        .builder
-                        .build_int_z_extend(
-                            argc.into_int_value(),
-                            self.generator.context.i64_type(),
-                            "main_argc_64",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("argc zext: {e}")))?;
+                    let argc_i32 = argc.into_int_value();
                     self.generator.build_call(
                         args_init_fn,
-                        &[argc_64.into(), argv.into()],
+                        &[argc_i32.into(), argv.into()],
                         "mimi_args_init",
                     )?;
                 }
@@ -4716,32 +4708,49 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     && matches!(payload_val, BasicValueEnum::IntValue(_))
                                 {
                                     let target_llvm = self.lower_type(&sub_pattern.ty)?;
-                                    if matches!(target_llvm, BasicTypeEnum::StructType(_)) {
-                                        let ptr = self
-                                            .generator
-                                            .builder
-                                            .build_int_to_ptr(
-                                                payload_val.into_int_value(),
-                                                self.generator
-                                                    .context
-                                                    .ptr_type(inkwell::AddressSpace::default()),
-                                                "err_payload_ptr",
-                                            )
-                                            .map_err(|e| {
-                                                CompileError::LlvmError(format!(
-                                                    "inttoptr err: {e}"
-                                                ))
-                                            })?;
-                                        self.generator
-                                            .builder
-                                            .build_load(target_llvm, ptr, "err_payload_val")
-                                            .map_err(|e| {
-                                                CompileError::LlvmError(format!(
-                                                    "load err payload: {e}"
-                                                ))
-                                            })?
-                                    } else {
-                                        payload_val
+                                    match target_llvm {
+                                        BasicTypeEnum::StructType(_) => {
+                                            let ptr = self
+                                                .generator
+                                                .builder
+                                                .build_int_to_ptr(
+                                                    payload_val.into_int_value(),
+                                                    self.generator
+                                                        .context
+                                                        .ptr_type(inkwell::AddressSpace::default()),
+                                                    "err_payload_ptr",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "inttoptr err: {e}"
+                                                    ))
+                                                })?;
+                                            self.generator
+                                                .builder
+                                                .build_load(target_llvm, ptr, "err_payload_val")
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "load err payload: {e}"
+                                                    ))
+                                                })?
+                                        }
+                                        BasicTypeEnum::FloatType(ft)
+                                            if ft.get_bit_width() == 64 =>
+                                        {
+                                            self.generator
+                                                .builder
+                                                .build_bit_cast(
+                                                    payload_val.into_int_value(),
+                                                    BasicTypeEnum::FloatType(ft),
+                                                    "err_f64_bits_back",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "err f64 bitcast: {e}"
+                                                    ))
+                                                })?
+                                        }
+                                        _ => payload_val,
                                     }
                                 } else {
                                     payload_val
@@ -4923,6 +4932,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             | CheckedConversionKind::NewtypeWrap
             | CheckedConversionKind::NewtypeUnwrap
             | CheckedConversionKind::ContainerErase
+            | CheckedConversionKind::TupleErase
             // Ownership annotations are runtime-transparent: shared/weak
             // values share the target's LLVM representation.
             | CheckedConversionKind::OwnershipWrap
@@ -5214,6 +5224,18 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let i64_ty = self.generator.context.i64_type();
         match value {
+            BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => {
+                let bits = self
+                    .generator
+                    .builder
+                    .build_bit_cast(
+                        BasicValueEnum::FloatValue(fv),
+                        BasicTypeEnum::IntType(i64_ty),
+                        "err_f64_bits",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("err f64 bitcast: {e}")))?;
+                Ok(bits)
+            }
             BasicValueEnum::IntValue(iv) => {
                 let bw = iv.get_type().get_bit_width();
                 let widened = if bw == 1 {
@@ -5289,17 +5311,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         "err_str_heap_i64",
                     )?))
                 } else {
-                    // Custom enum: store the i32 tag in the error slot.
-                    let tag = self
-                        .generator
-                        .build_extract_value(sv.into(), 0, "enum_tag")?
-                        .into_int_value();
-                    Ok(BasicValueEnum::IntValue(
-                        self.generator
-                            .builder
-                            .build_int_cast(tag, i64_ty, "err_tag_ext")
-                            .map_err(|e| CompileError::LlvmError(format!("err tag ext: {e}")))?,
-                    ))
+                    // P0-3: full StructValue error payloads are heap-copied and
+                    // stored as a pointer, matching the match/inttoptr decode.
+                    let struct_ty = sv.get_type();
+                    let size_bytes = struct_ty
+                        .size_of()
+                        .and_then(|s| s.get_zero_extended_constant())
+                        .unwrap_or(64)
+                        .max(1);
+                    let heap_ptr = self.generator.malloc_or_abort(
+                        i64_ty.const_int(size_bytes, false),
+                        "err_struct_malloc",
+                    )?;
+                    self.generator.build_store(heap_ptr, sv)?;
+                    Ok(BasicValueEnum::IntValue(self.generator.build_ptr_to_int(
+                        heap_ptr,
+                        i64_ty,
+                        "err_struct_heap_i64",
+                    )?))
                 }
             }
             _ => Err(CompileError::Unsupported(format!(
@@ -7667,45 +7696,60 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             let ret_val: BasicValueEnum<'ctx> = result.into();
             self.generator.build_return(Some(&ret_val))?;
         } else {
-            // Built-in Result/Option: runtime exit on Err/None (legacy-compatible
-            // codegen path; the VM uses return-early for builtin errors).
-            let try_exit_fn = self.generator.get_runtime_fn("mimi_try_exit")?;
-            // For Result, the error slot is field 2; Option has no error slot.
-            let err_val = if matches!(inner_kind, TryInnerKind::ResolvedBuiltinResult) {
+            // 0.1.7 audit P0-2: built-in Result/Option propagates when the
+            // enclosing function returns the same built-in type, matching the
+            // VM's return-early semantics.
+            let same_return_type = self
+                .program
+                .callable(&frame.owner)
+                .map(|c| c.signature.result == value.ty)
+                .unwrap_or(false);
+            if same_return_type {
+                let ret_val: BasicValueEnum<'ctx> = BasicValueEnum::StructValue(sv);
+                self.generator.build_return(Some(&ret_val))?;
+            } else {
+                // Built-in Result/Option: runtime exit on Err/None
+                // (legacy-compatible codegen path).
+                let try_exit_fn = self.generator.get_runtime_fn("mimi_try_exit")?;
+                // For Result, the error slot is field 2; Option has no error slot.
+                let err_val = if matches!(inner_kind, TryInnerKind::ResolvedBuiltinResult) {
+                    self.generator
+                        .builder
+                        .build_extract_value(sv, 2, "try_err_val")
+                        .map_err(|e| CompileError::LlvmError(format!("try err extract: {e}")))?
+                } else {
+                    BasicValueEnum::IntValue(i64_ty.const_zero())
+                };
+                let err_int = match err_val {
+                    BasicValueEnum::IntValue(iv) => {
+                        // Ensure i64.
+                        if iv.get_type().get_bit_width() < 64 {
+                            self.generator
+                                .builder
+                                .build_int_z_extend(iv, i64_ty, "try_err_zext")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("try err zext: {e}"))
+                                })?
+                        } else {
+                            iv
+                        }
+                    }
+                    _ => i64_ty.const_zero(),
+                };
                 self.generator
                     .builder
-                    .build_extract_value(sv, 2, "try_err_val")
-                    .map_err(|e| CompileError::LlvmError(format!("try err extract: {e}")))?
-            } else {
-                BasicValueEnum::IntValue(i64_ty.const_zero())
-            };
-            let err_int = match err_val {
-                BasicValueEnum::IntValue(iv) => {
-                    // Ensure i64.
-                    if iv.get_type().get_bit_width() < 64 {
-                        self.generator
-                            .builder
-                            .build_int_z_extend(iv, i64_ty, "try_err_zext")
-                            .map_err(|e| CompileError::LlvmError(format!("try err zext: {e}")))?
-                    } else {
-                        iv
-                    }
-                }
-                _ => i64_ty.const_zero(),
-            };
-            self.generator
-                .builder
-                .build_call(
-                    try_exit_fn,
-                    &[inkwell::values::BasicMetadataValueEnum::IntValue(err_int)],
-                    "try_exit_call",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("try_exit call: {e}")))?;
-            // mimi_try_exit is noreturn — emit unreachable.
-            self.generator
-                .builder
-                .build_unreachable()
-                .map_err(|e| CompileError::LlvmError(format!("try unreachable: {e}")))?;
+                    .build_call(
+                        try_exit_fn,
+                        &[inkwell::values::BasicMetadataValueEnum::IntValue(err_int)],
+                        "try_exit_call",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("try_exit call: {e}")))?;
+                // mimi_try_exit is noreturn — emit unreachable.
+                self.generator
+                    .builder
+                    .build_unreachable()
+                    .map_err(|e| CompileError::LlvmError(format!("try unreachable: {e}")))?;
+            }
         }
 
         // ── Ok path: position at ok_bb, recover payload. ──

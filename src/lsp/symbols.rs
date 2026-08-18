@@ -107,17 +107,26 @@ impl LspServer {
             .collect();
 
         if let Some(root) = &self.workspace_root {
-            if let Ok(entries) = std::fs::read_dir(root) {
+            let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+            if let Ok(entries) = std::fs::read_dir(&root_canon) {
                 // Collect into Vec first to drop ReadDir immediately, preventing fd leak.
                 let entries: Vec<_> = entries.flatten().collect();
                 for entry in entries {
                     let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("mimi") {
-                        let uri = format!("file://{}", encode_path_for_uri(&path));
-                        if !self.documents.contains_key(&uri) {
-                            if let Ok(text) = crate::path_safety::read_source_capped(&path) {
-                                sources.push((uri, text));
-                            }
+                    if path.extension().and_then(|e| e.to_str()) != Some("mimi") {
+                        continue;
+                    }
+                    // P2-7: canonicalize before reading. A symlink inside the
+                    // workspace pointing to a .mimi file outside the sandbox
+                    // must not be followed for workspace symbols.
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    if !canonical.starts_with(&root_canon) {
+                        continue;
+                    }
+                    let uri = format!("file://{}", encode_path_for_uri(&path));
+                    if !self.documents.contains_key(&uri) {
+                        if let Ok(text) = crate::path_safety::read_source_capped(&path) {
+                            sources.push((uri, text));
                         }
                     }
                 }
@@ -799,13 +808,6 @@ fn visit_item_for_refs(item: &Item, name: &str, count: &mut usize) {
                 }
                 if let Some(body) = &transition.body {
                     visit_block_for_refs(body, name, count);
-                }
-            }
-        }
-        Item::Protocol(protocol) => {
-            for state in &protocol.states {
-                if let Some(ty) = &state.payload_type {
-                    visit_type_for_refs(ty, name, count);
                 }
             }
         }

@@ -1,3 +1,12 @@
+// NOTE (batch5-03 P1-3): the raw builtins `map_set`/`map_remove` still have
+// divergent backend semantics — the VM treats them as copy-on-write while the
+// native/codegen backend mutates the input Record in place. The stdlib
+// functions in this file (`set`, `remove`, `merge`, `update`, `omit`) now
+// explicitly copy the input before calling those builtins, so they preserve
+// the original Record on both backends. Direct callers of the raw builtins
+// should make an explicit copy first until the codegen map operations are
+// aligned.
+
 // MapExt: Trait for Record (dictionary) operations.
 trait MapExt {
     func get(key: string) -> (bool, Any)
@@ -19,9 +28,15 @@ trait MapExt {
 // MapExt implementation for built-in Record type.
 impl MapExt for Record {
     func get(key: string) -> (bool, Any) { map_get(self, key) }
-    func set(key: string, value: Any) -> Record { map_set(self, key, value) }
+    func set(key: string, value: Any) -> Record {
+        let mut result = map_from_list(to_list(self))
+        map_set(result, key, value)
+    }
     func has_key(key: string) -> bool { map_get(self, key).0 }
-    func remove(key: string) -> Record { map_remove(self, key) }
+    func remove(key: string) -> Record {
+        let mut result = map_from_list(to_list(self))
+        map_remove(result, key)
+    }
     func size() -> i32 { map_size(self) }
     func is_empty() -> bool { map_size(self) == 0 }
     func get_or_default(key: string, default: Any) -> Any {
@@ -30,7 +45,7 @@ impl MapExt for Record {
     }
     func merge(other: Record) -> Record {
         let b_keys = keys(other)
-        let mut result = self
+        let mut result = map_from_list(to_list(self))
         for bk in b_keys {
             let bv = map_get(other, bk)
             result = map_set(result, bk, bv.1)
@@ -69,7 +84,12 @@ impl MapExt for Record {
     }
     func update(key: string, f: func(Any) -> Any) -> Record {
         let uv = map_get(self, key)
-        if uv.0 { map_set(self, key, f(uv.1)) } else { self }
+        if uv.0 {
+            let mut result = map_from_list(to_list(self))
+            map_set(result, key, f(uv.1))
+        } else {
+            self
+        }
     }
     func pick(ks: List<string>) -> Record {
         let mut result = map_new()
@@ -81,7 +101,7 @@ impl MapExt for Record {
     }
     func omit(ks: List<string>) -> Record {
         let all_keys = keys(self)
-        let mut result = self
+        let mut result = map_from_list(to_list(self))
         for ok in all_keys {
             if contains(ks, ok) { result = map_remove(result, ok) }
         }
@@ -102,8 +122,10 @@ pub func get(m: Record, key: string) -> (bool, Any) {
 }
 
 // set: Sets key to value in map m, returns updated map.
+// Preserves the original map on both VM and native backends by copying first.
 pub func set(m: Record, key: string, value: Any) -> Record {
-    map_set(m, key, value)
+    let mut result = map_from_list(to_list(m))
+    map_set(result, key, value)
 }
 
 // has_key: Returns true if key exists in m.
@@ -112,8 +134,10 @@ pub func has_key(m: Record, key: string) -> bool {
 }
 
 // remove: Removes key from map m, returns updated map.
+// Preserves the original map on both VM and native backends by copying first.
 pub func remove(m: Record, key: string) -> Record {
-    map_remove(m, key)
+    let mut result = map_from_list(to_list(m))
+    map_remove(result, key)
 }
 
 // size: Returns the number of entries in map m.
@@ -140,7 +164,7 @@ pub func get_or_default(m: Record, key: string, default: Any) -> Any {
 // merge: Returns a new map with all entries from a and b (b overwrites a).
 pub func merge(a: Record, b: Record) -> Record {
     let b_keys = keys(b)
-    let mut result = a
+    let mut result = map_from_list(to_list(a))
     for bk in b_keys {
         let bv = map_get(b, bk)
         result = map_set(result, bk, bv.1)
@@ -187,7 +211,12 @@ pub func map_values(m: Record, f: func(Any) -> Any) -> Record {
 // update: Applies f to the value at key, returns updated map.
 pub func update(m: Record, key: string, f: func(Any) -> Any) -> Record {
     let uv = map_get(m, key)
-    if uv.0 { map_set(m, key, f(uv.1)) } else { m }
+    if uv.0 {
+        let mut result = map_from_list(to_list(m))
+        map_set(result, key, f(uv.1))
+    } else {
+        m
+    }
 }
 
 // pick: Returns a new map with only the specified keys.
@@ -203,7 +232,7 @@ pub func pick(m: Record, ks: List<string>) -> Record {
 // omit: Returns a new map without the specified keys.
 pub func omit(m: Record, ks: List<string>) -> Record {
     let all_keys = keys(m)
-    let mut result = m
+    let mut result = map_from_list(to_list(m))
     for ok in all_keys {
         if contains(ks, ok) { result = map_remove(result, ok) }
     }

@@ -33,6 +33,7 @@ trait JsonExt {
     func get_float(key: string) -> Result<f64, string>
     func has_key(key: string) -> bool
     func is_valid() -> bool
+    // Placeholder: see top-level to_string_pretty note; does not reformat yet.
     func to_string_pretty() -> string
     func get_object(key: string) -> string
     func get_array(key: string) -> string
@@ -45,9 +46,9 @@ impl JsonExt for string {
     func get_int(key: string) -> i64 { json_get_int(self, key) }
     func get_element(index: i32) -> string { json_get_element(self, index) }
     func get_bool(key: string) -> Result<bool, string> {
+        if !json_has_key(self, key) { return Err("key not found") }
         let v = json_get_string(self, key)
-        if v == "" { Err("key not found") }
-        else if v == "true" { Ok(true) }
+        if v == "true" { Ok(true) }
         else if v == "false" { Ok(false) }
         else { Err("not a boolean") }
     }
@@ -97,9 +98,9 @@ pub func get_element(json: string, index: i32) -> string {
 // get_bool: Gets a boolean field from a JSON object by key.
 // Returns Ok(true/false) if key exists, Err if key missing or not boolean.
 pub func get_bool(json: string, key: string) -> Result<bool, string> {
+    if !json_has_key(json, key) { return Err("key not found") }
     let v = json_get_string(json, key)
-    if v == "" { Err("key not found") }
-    else if v == "true" { Ok(true) }
+    if v == "true" { Ok(true) }
     else if v == "false" { Ok(false) }
     else { Err("not a boolean") }
 }
@@ -124,7 +125,10 @@ pub func is_valid_json(s: string) -> bool {
 }
 
 // to_string_pretty: Pretty-prints a JSON string with indentation.
-// Currently a placeholder — returns input unchanged.
+// NOTE (batch5-04 P3): this is still a compatibility placeholder and does
+// NOT actually reformat the JSON yet — it returns the input unchanged.
+// Do not rely on it for pretty output; prefer `to_string` until a real
+// pretty-printer is implemented.
 pub func to_string_pretty(json: string) -> string {
     json
 }

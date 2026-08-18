@@ -49,12 +49,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_add(old_len, i64_ty.const_int(1, false), "new_len")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
 
-        // new_alloc_size = new_len * 8 (each element is i64-sized slot — 8 bytes)
-        let sizeof_i64 = i64_ty.const_int(8, false);
-        let alloc_size = self
-            .builder
-            .build_int_mul(new_len, sizeof_i64, "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        // new_alloc_size = new_len * 8 (checked)
+        let alloc_size = self.checked_list_alloc_size(new_len, 8, "push")?;
 
         // realloc the data array to accommodate the new element (B4: NULL → abort)
         let new_data = self.realloc_or_abort(old_data, alloc_size, "push")?;
@@ -262,7 +258,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // runtime expects the element slot to hold the data pointer, not
                 // a pointer to the struct. Other struct types (e.g. nested lists)
                 // are stored as pointers to a temporary alloca.
-                let is_string_struct = fields.len() == 2
+                let is_string_struct = self
+                    .pending_push_elem_type
+                    .as_deref()
+                    .map_or(true, |element_type| element_type == "string")
+                    && fields.len() == 2
                     && matches!(fields[0], BasicTypeEnum::PointerType(_))
                     && matches!(fields[1], BasicTypeEnum::IntType(_));
                 if is_string_struct {
@@ -275,17 +275,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_extract_value(sv, 0, "push_str_data")
                         .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
                         .into_pointer_value();
-                    let strlen_fn = self.get_runtime_fn("strlen")?;
                     let len = self
                         .builder
-                        .build_call(
-                            strlen_fn,
-                            &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
-                            "push_strlen",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("strlen returned void")?
+                        .build_extract_value(sv, 1, "push_str_len")
+                        .map_err(|e| CompileError::LlvmError(format!("extract len error: {}", e)))?
                         .into_int_value();
                     let alloc_size = self
                         .builder
@@ -342,8 +335,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
                             .into_pointer_value();
                         let bytes = self
-                            .builder
-                            .build_int_mul(len, i64_ty.const_int(8, false), "push_list_val_bytes")
+                            .checked_list_alloc_size(len, 8, "push_list_val")
                             .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
                         let new_data = self.malloc_or_abort(bytes, "push_list_val_data")?;
                         let memcpy_fn = self.get_runtime_fn("memcpy")?;
@@ -586,7 +578,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(in crate::codegen) fn compile_pop(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         // pop(list) - remove and return last element
@@ -694,7 +686,56 @@ impl<'ctx> CodeGenerator<'ctx> {
         let elem_val = self
             .builder
             .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr_i64, "elem_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+
+        // Decode type-erased list slots before returning. This mirrors
+        // access.rs convert_list_elem_by_type and fixes pop(List<f64>) /
+        // pop(List<string>) / pop(List<record>) type confusion.
+        let elem_out: BasicValueEnum<'ctx> = match self.pending_pop_elem_type.as_deref() {
+            Some("f64") | Some("f32") => BasicValueEnum::FloatValue(
+                self.build_bit_cast(
+                    BasicValueEnum::IntValue(elem_val),
+                    BasicTypeEnum::FloatType(self.context.f64_type()),
+                    "pop_i64_to_f64",
+                )?
+                .into_float_value(),
+            ),
+            Some("string") => BasicValueEnum::PointerValue(self.build_int_to_ptr(
+                elem_val,
+                i8_ptr,
+                "pop_str_ptr",
+            )?),
+            Some(et)
+                if !et.is_empty()
+                    && !matches!(
+                        et,
+                        "i32" | "i64" | "i8" | "i16" | "bool" | "unit" | "Any" | "any"
+                    ) =>
+            {
+                if let Some(ty) = crate::codegen::expr::call::helpers::parse_type_str(et)
+                    .and_then(|t| self.llvm_type_for(&t))
+                {
+                    match ty {
+                        BasicTypeEnum::StructType(sty) => {
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let elem_ptr =
+                                self.build_int_to_ptr(elem_val, ptr_ty, "pop_struct_ptr")?;
+                            self.build_load(
+                                BasicTypeEnum::StructType(sty),
+                                elem_ptr,
+                                "pop_struct_val",
+                            )?
+                        }
+                        _ => BasicValueEnum::IntValue(elem_val),
+                    }
+                } else {
+                    BasicValueEnum::IntValue(elem_val)
+                }
+            }
+            _ => BasicValueEnum::IntValue(elem_val),
+        };
+        self.pending_pop_elem_type = None;
 
         // new_len = old_len - 1
         let new_len = self
@@ -748,10 +789,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // realloc path: new_len > 0, shrink the allocation (B4: NULL → abort)
         self.builder.position_at_end(realloc_bb);
-        let new_alloc_size = self
-            .builder
-            .build_int_mul(new_len, self.list_elem_size(), "new_alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let new_alloc_size = self.checked_list_alloc_size(new_len, 8, "pop_shrink")?;
         let realloc_result = self.realloc_or_abort(old_data, new_alloc_size, "pop")?;
         self.builder
             .build_store(data_gep, realloc_result)
@@ -772,9 +810,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(merge_bb);
         let phi = self
             .builder
-            .build_phi(BasicTypeEnum::IntType(i64_ty), "pop_result")
+            .build_phi(elem_out.get_type(), "pop_result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-        phi.add_incoming(&[(&elem_val, realloc_merge_bb)]);
+        phi.add_incoming(&[(&elem_out, realloc_merge_bb)]);
         Ok(phi.as_basic_value())
     }
 
@@ -792,11 +830,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
         // Allocate new array
-        let sizeof_i64 = self.list_elem_size();
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len, sizeof_i64, "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(list_len, 8, "reverse")?;
         // B4: OOM-safe allocation for reverse buffer.
         let new_data = self.malloc_or_abort(alloc_size, "reverse_data")?;
         let new_data_i64 = self
@@ -899,10 +933,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // bubble-sorted the CALLER's buffer in place. Copy the data buffer
         // and sort the copy instead.
         let data_raw = self.load_list_data_raw(list_ptr)?;
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len, self.list_elem_size(), "sort_copy_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(list_len, 8, "sort")?;
         // B4: OOM-safe allocation for the sort copy.
         let copy_raw = self.malloc_or_abort(alloc_size, "sort_copy")?;
         let memcpy_fn = self.get_runtime_fn("memcpy")?;
@@ -1117,10 +1148,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_ptr = self.require_list_pointer(args[0], "sort_f64")?;
         let list_len = self.load_list_len(list_ptr)?;
         let data_raw = self.load_list_data_raw(list_ptr)?;
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len, self.list_elem_size(), "sort_f64_copy_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(list_len, 8, "sort_f64")?;
         // B4: OOM-safe allocation for the sort copy.
         let copy_raw = self.malloc_or_abort(alloc_size, "sort_f64_copy")?;
         let memcpy_fn = self.get_runtime_fn("memcpy")?;
@@ -1174,10 +1202,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // For List<string>, data is *mut *mut c_char — load as i8* (raw).
         let data_raw = self.load_list_data_raw(list_ptr)?;
         // Copy the pointer-slot buffer (each slot is i64-sized).
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len, self.list_elem_size(), "sort_str_copy_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(list_len, 8, "sort_str")?;
         // B4: OOM-safe allocation for the sort copy.
         let copy_raw = self.malloc_or_abort(alloc_size, "sort_str_copy")?;
         let memcpy_fn = self.get_runtime_fn("memcpy")?;

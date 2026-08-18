@@ -22,13 +22,15 @@ fn audit_quote_drop_deep_chain_no_stack_overflow() {
     let mut node = mimi_quote_new_leaf(tag_int, 1);
     assert!(!node.is_null());
     for _ in 0..100_000 {
-        node = mimi_quote_new_node(tag_unary, node, std::ptr::null_mut(), 0);
+        node = unsafe { mimi_quote_new_node(tag_unary, node, std::ptr::null_mut(), 0) };
         assert!(!node.is_null());
     }
     // Would stack-overflow (abort the test process) with the old recursion.
-    mimi_quote_drop(node);
-    // Double-drop is a documented no-op (live-quote registry).
-    mimi_quote_drop(node);
+    unsafe {
+        mimi_quote_drop(node);
+        // Double-drop is a documented no-op (live-quote registry).
+        mimi_quote_drop(node);
+    }
 }
 
 #[test]
@@ -49,14 +51,18 @@ fn audit_quote_drop_variable_arity_children_freed() {
     for c in &children {
         assert!(!c.is_null());
     }
-    let list = mimi_quote_new_list(tag_list, children.as_ptr(), 3);
+    let list = unsafe { mimi_quote_new_list(tag_list, children.as_ptr(), 3) };
     assert!(!list.is_null());
-    assert_eq!(mimi_quote_list_child(list, 1), children[1]);
-    mimi_quote_drop(list);
+    unsafe {
+        assert_eq!(mimi_quote_list_child(list, 1), children[1]);
+        mimi_quote_drop(list);
+    }
     // Children were owned by the list node; after drop their live tokens
     // are gone, so the registry-guarded accessor rejects them.
     for c in &children {
-        assert_eq!(mimi_quote_tag(*c), -1);
+        unsafe {
+            assert_eq!(mimi_quote_tag(*c), -1);
+        }
     }
 }
 
@@ -66,12 +72,14 @@ fn audit_quote_new_list_argc_overflow_rejected() {
     let tag_list = crate::runtime::QuotedAstTag::QastList as i32;
     // len = i32::MAX + 1 cannot fit the i32 `argc` field. Old code silently
     // truncated; fixed code rejects (children null → nothing to leak).
-    let node = mimi_quote_new_list(tag_list, std::ptr::null_mut(), i32::MAX as i64 + 1);
+    let node = unsafe { mimi_quote_new_list(tag_list, std::ptr::null_mut(), i32::MAX as i64 + 1) };
     assert!(node.is_null());
     // Within range still works.
-    let ok = mimi_quote_new_list(tag_list, std::ptr::null_mut(), 0);
+    let ok = unsafe { mimi_quote_new_list(tag_list, std::ptr::null_mut(), 0) };
     assert!(!ok.is_null());
-    crate::runtime::mimi_quote_drop(ok);
+    unsafe {
+        crate::runtime::mimi_quote_drop(ok);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +91,21 @@ fn audit_quote_new_list_argc_overflow_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn audit_mutex_invalid_guard_fails_loud_without_abort() {
+    use crate::runtime::{
+        mimi_mutex_get, mimi_mutex_guard_valid, mimi_mutex_set, mimi_mutex_unlock,
+    };
+
+    // Invalid/after-unlock handles must not abort the host process; they log
+    // and return a safe sentinel so recovered FFI code can continue.
+    assert_eq!(unsafe { mimi_mutex_guard_valid(1234567) }, 0);
+    assert_eq!(unsafe { mimi_mutex_get(1234567) }, 0);
+    unsafe { mimi_mutex_set(1234567, 9) };
+    unsafe { mimi_mutex_unlock(1234567) };
+    unsafe { mimi_mutex_unlock(1234567) };
+}
+
+#[test]
 fn audit_mutex_guard_same_thread_roundtrip() {
     use crate::runtime::{
         mimi_mutex_drop, mimi_mutex_get, mimi_mutex_lock, mimi_mutex_new, mimi_mutex_set,
@@ -91,18 +114,18 @@ fn audit_mutex_guard_same_thread_roundtrip() {
 
     let m = mimi_mutex_new(7);
     assert!(m != 0);
-    let g = mimi_mutex_lock(m);
+    let g = unsafe { mimi_mutex_lock(m) };
     assert!(g != 0);
-    assert_eq!(mimi_mutex_get(g), 7);
-    mimi_mutex_set(g, 42);
-    assert_eq!(mimi_mutex_get(g), 42);
-    mimi_mutex_unlock(g);
+    assert_eq!(unsafe { mimi_mutex_get(g) }, 7);
+    unsafe { mimi_mutex_set(g, 42) };
+    assert_eq!(unsafe { mimi_mutex_get(g) }, 42);
+    unsafe { mimi_mutex_unlock(g) };
     // Re-lock after unlock works (a fresh guard handle).
-    let g2 = mimi_mutex_lock(m);
+    let g2 = unsafe { mimi_mutex_lock(m) };
     assert!(g2 != 0);
-    assert_eq!(mimi_mutex_get(g2), 42);
-    mimi_mutex_unlock(g2);
-    mimi_mutex_drop(m);
+    assert_eq!(unsafe { mimi_mutex_get(g2) }, 42);
+    unsafe { mimi_mutex_unlock(g2) };
+    unsafe { mimi_mutex_drop(m) };
 }
 
 // ── 0.35.29 H13: close_fd must not close standard streams ──
@@ -237,7 +260,9 @@ fn audit_m8_buf_nul_terminate_positive_writes_exact_nul() {
     assert!(!buf.is_null());
     // SAFETY: freshly allocated buffer, write within bounds.
     unsafe { std::ptr::write_bytes(buf, b'x', 8) };
-    mimi_runtime_buf_nul_terminate(buf, 7, 8);
+    unsafe {
+        mimi_runtime_buf_nul_terminate(buf, 7, 8);
+    }
     // SAFETY: buffer was allocated above; reads are within bounds.
     unsafe {
         assert_eq!(*buf.offset(7), 0, "NUL must be written at offset 7");
@@ -303,7 +328,9 @@ fn audit_m8_oob_abort_helper() {
     // SAFETY: 4-byte buffer; offset 7 (with NUL) exceeds alloc_size 4.
     let buf = unsafe { libc::malloc(4) } as *mut u8;
     assert!(!buf.is_null());
-    mimi_runtime_buf_nul_terminate(buf, 7, 4);
+    unsafe {
+        mimi_runtime_buf_nul_terminate(buf, 7, 4);
+    }
     // SAFETY: unreachable when the guard works; frees in case it doesn't.
     unsafe { libc::free(buf as *mut libc::c_void) };
 }

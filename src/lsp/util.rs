@@ -197,13 +197,21 @@ pub(crate) fn non_code_byte_ranges(text: &str) -> Vec<Vec<(usize, usize)>> {
     let mut byte = 0usize;
     let mut open: Option<(usize, usize)> = None;
     for (ch, region) in SourceScanner::new(text).scan() {
+        // Line-bomb hardening: stop building per-line vectors after the hard
+        // cap. Large documents still receive useful ranges for the prefix and
+        // the server is protected from unbounded Vec allocation.
+        if line > crate::lsp::MAX_LSP_DOCUMENT_LINES {
+            break;
+        }
         if ch == '\n' {
             if let Some(span) = open.take() {
                 ranges[line].push(span);
             }
             line += 1;
             byte = 0;
-            ranges.push(Vec::new());
+            if line <= crate::lsp::MAX_LSP_DOCUMENT_LINES {
+                ranges.push(Vec::new());
+            }
             continue;
         }
         if region == Region::Code {
@@ -222,8 +230,10 @@ pub(crate) fn non_code_byte_ranges(text: &str) -> Vec<Vec<(usize, usize)>> {
         }
         byte += ch.len_utf8();
     }
-    if let Some(span) = open {
-        ranges[line].push(span);
+    if line <= crate::lsp::MAX_LSP_DOCUMENT_LINES {
+        if let Some(span) = open {
+            ranges[line].push(span);
+        }
     }
     ranges
 }
@@ -295,7 +305,15 @@ pub fn word_range_at(text: &str, line: usize, character: usize) -> Option<(usize
     // Find word boundaries in byte space
     let word_start_byte = before_cursor
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
-        .map(|i| i + 1)
+        .map(|i| {
+            // `rfind` returns the byte offset of the separator's first byte.
+            // For multi-byte separators (e.g. Chinese comma, emoji) i+1 can
+            // land inside a UTF-8 code point and cause a slicing panic.
+            i + before_cursor[i..]
+                .chars()
+                .next()
+                .map_or(1, |c| c.len_utf8())
+        })
         .unwrap_or(0);
 
     let word_end_byte = after_cursor

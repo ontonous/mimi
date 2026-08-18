@@ -148,8 +148,10 @@ fn go_callback_slots_guarded_by_mutex() {
     )];
     let out = gen.generate(&funcs).unwrap();
 
-    // sync imported only when callbacks exist.
+    // sync imported only when callbacks exist; fmt/os support panic logging.
     assert!(out.contains("import \"sync\""));
+    assert!(out.contains("import \"fmt\""));
+    assert!(out.contains("import \"os\""));
     // Slot declaration kept; per-slot mutex added.
     assert!(out.contains("var apply_callback_f_cb_slot Apply_callback_f_cb"));
     assert!(out.contains("var apply_callback_f_cb_slot_mu sync.Mutex"));
@@ -158,7 +160,11 @@ fn go_callback_slots_guarded_by_mutex() {
     assert!(out.contains(
         "\tapply_callback_f_cb_slot_mu.Lock()\n\tcb := apply_callback_f_cb_slot\n\tapply_callback_f_cb_slot_mu.Unlock()"
     ));
-    assert!(out.contains("return C.int(cb(int32(arg0), int32(arg1)))"));
+    // Panic recovery keeps the deferred default-return pattern; the actual
+    // callback result is assigned to a named variable first.
+    assert!(out.contains("var mimi_cb_ret C.int"));
+    assert!(out.contains("mimi_cb_ret = C.int(cb(int32(arg0), int32(arg1)))"));
+    assert!(out.contains("return mimi_cb_ret"));
 
     // Caller: set under mutex, deferred clear under mutex via LIFO ordering.
     assert!(out.contains(

@@ -91,7 +91,6 @@ fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
             is_fallback: false,
             is_ffi_pinned: false,
         }],
-        impl_protocols: vec![],
         persistent_fields: vec![],
         fault_type: None,
     }
@@ -246,7 +245,6 @@ mod tests {
                 payload: None,
             }],
             transitions: vec![],
-            impl_protocols: vec![],
             persistent_fields: vec![],
             fault_type: None,
         }));

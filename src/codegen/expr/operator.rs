@@ -725,14 +725,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             (BasicValueEnum::PointerValue(l), BasicValueEnum::PointerValue(r))
                 if op == BinOp::Add =>
             {
-                self.compile_string_binop(l, r)
+                self.compile_string_binop(lhs, rhs)
             }
             _ => {
                 if op == BinOp::Add {
-                    if let (Some(l), Some(r)) =
+                    if let (Some(_), Some(_)) =
                         (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs))
                     {
-                        return self.compile_string_binop(l, r);
+                        return self.compile_string_binop(lhs, rhs);
                     }
                 }
                 let msg = match op {
@@ -1138,20 +1138,60 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// String concatenation (`+`).
     fn compile_string_binop(
         &self,
-        l: PointerValue<'ctx>,
-        r: PointerValue<'ctx>,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let concat_fn = self.get_runtime_fn("mimi_str_concat")?;
+        // Use the explicit {ptr,len} string ABI so embedded NUL bytes are not
+        // truncated by the legacy C-string mimi_str_concat (batch4/02 P1-1).
+        let l_meta = BasicMetadataValueEnum::from(lhs);
+        let r_meta = BasicMetadataValueEnum::from(rhs);
+        let (l_ptr, l_len) = self.extract_string_arg_ptr_len(&l_meta, "string concatenation")?;
+        let (r_ptr, r_len) = self.extract_string_arg_ptr_len(&r_meta, "string concatenation")?;
+        let concat_fn = self.get_runtime_fn("mimi_str_concat_ll")?;
+        let i64_ty = self.context.i64_type();
         let raw_result = self
-            .build_call(concat_fn, &[l.into(), r.into()], "str_concat")?
+            .build_call(
+                concat_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(l_ptr),
+                    BasicMetadataValueEnum::IntValue(l_len),
+                    BasicMetadataValueEnum::PointerValue(r_ptr),
+                    BasicMetadataValueEnum::IntValue(r_len),
+                ],
+                "str_concat_ll_call",
+            )?
             .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("mimi_str_concat returned void".to_string()))?;
+            .ok_or_else(|| {
+                CompileError::LlvmError("mimi_str_concat_ll returned void".to_string())
+            })?;
         let raw_ptr = raw_result.into_pointer_value();
         // Register the heap allocation so it is freed at scope exit when the
         // result is used directly. `let` bindings transfer ownership by popping
         // this entry and registering the variable slot instead.
         self.register_heap_alloc(raw_ptr);
-        self.wrap_c_string(raw_ptr)
+        // Build the struct with the exact combined byte length instead of
+        // calling wrap_c_string, which would strlen-truncate embedded NULs.
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let total = self
+            .builder
+            .build_int_add(l_len, r_len, "concat_total")
+            .map_err(|e| CompileError::LlvmError(format!("concat total: {e}")))?;
+        let str_val = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), raw_ptr, 0, "concat_str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("insert concat ptr: {e}")))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, total, 1, "concat_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert concat len: {e}")))?;
+        Ok(str_val.into_struct_value().into())
     }
 
     /// Equality and inequality (`==`, `!=`).

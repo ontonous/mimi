@@ -14,7 +14,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_repeat expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_repeat")?;
+        // Use the explicit {ptr,len} string ABI so embedded NUL bytes are not
+        // truncated by strlen (batch4/02 P1-1).
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_repeat")?;
         let n_raw = require_int_arg(&args[1], "str_repeat: second arg must be integer count")?;
 
         let i8_ty = self.context.i8_type();
@@ -27,7 +29,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             n_raw
         };
-        let s_len = self.string_len(s_ptr)?;
         // CG-H2 (deep audit): guard against negative / overflowing repeat counts.
         // A negative `n` or an `s_len * n` that overflows i64 would yield a
         // negative alloc_size and out-of-bounds writes. Clamp `n` to a
@@ -124,7 +125,26 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.builder.position_at_end(done_bb);
         self.null_terminate(buf, total)?;
-        Ok(buf.into())
+        self.register_heap_alloc(buf);
+        // Build the Mimi string struct with the explicit repeated length;
+        // wrap_c_string would recompute via strlen and truncate embedded NUL.
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let str_val = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), buf, 0, "repeat_str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("insert repeat ptr: {}", e)))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, total, 1, "repeat_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert repeat len: {}", e)))?;
+        Ok(str_val.into_struct_value().into())
     }
 
     pub(in crate::codegen) fn compile_str_trim(
@@ -181,7 +201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// compiler instead of failing loud — match the field types and return a
     /// TypeMismatch so codegen degrades gracefully (VM parity: E0800 at
     /// runtime; the checker deliberately does not constrain these params).
-    fn extract_string_arg_ptr_len(
+    pub(in crate::codegen) fn extract_string_arg_ptr_len(
         &self,
         arg: &BasicMetadataValueEnum<'ctx>,
         context: &str,
@@ -388,6 +408,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        // KNOWN LIMITATION (batch5-03 P1-1 / string NUL tracking):
+        // mimi_str_split returns a List<string> whose elements are raw
+        // NUL-terminated C string pointers. Embedded NUL bytes in the input
+        // or delimiter therefore cannot be represented faithfully inside the
+        // resulting list elements. A length-aware string list element
+        // representation is required to close this gap.
         if args.len() != 2 {
             return Err(CompileError::WrongArgCount(
                 "str_split expects 2 arguments (string, delimiter)".to_string(),
@@ -421,21 +447,50 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let list_ptr = self.coerce_list_to_ptr(args[0], "str_join")?;
-        let delim_ptr = self.extract_string_arg(&args[1], "str_join")?;
-        let func = self.get_runtime_fn("mimi_str_join")?;
+        let (delim_ptr, delim_len) = self.extract_string_arg_ptr_len(&args[1], "str_join")?;
+        let i64_ty = self.context.i64_type();
+        let out_len = self.build_alloca(i64_ty, "str_join_out_len")?;
+        self.build_store(out_len, i64_ty.const_int(0, false))?;
+        let func = self.get_runtime_fn("mimi_str_join_ll")?;
         let result_ptr = self
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(list_ptr),
                     BasicMetadataValueEnum::PointerValue(delim_ptr),
+                    BasicMetadataValueEnum::IntValue(delim_len),
+                    BasicMetadataValueEnum::PointerValue(out_len),
                 ],
                 "str_join_call",
             )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_join returned void")?
+            .ok_or("mimi_str_join_ll returned void")?
             .into_pointer_value();
-        Ok(result_ptr.into())
+        self.register_heap_alloc(result_ptr);
+        let result_len = self
+            .builder
+            .build_load(BasicTypeEnum::IntType(i64_ty), out_len, "str_join_len")
+            .map_err(|e| CompileError::LlvmError(format!("load join len: {}", e)))?
+            .into_int_value();
+        // Build the string struct with the exact result length so embedded
+        // NUL bytes in the separator survive (batch4-02 P1-1).
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let str_val = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), result_ptr, 0, "join_str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("insert join ptr: {}", e)))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, result_len, 1, "join_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert join len: {}", e)))?;
+        Ok(str_val.into_struct_value().into())
     }
 
     pub(in crate::codegen) fn compile_str_replace(
@@ -447,24 +502,59 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_replace expects 3 arguments (s, old, new)".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_replace")?;
-        let old_ptr = self.extract_string_arg(&args[1], "str_replace")?;
-        let new_ptr = self.extract_string_arg(&args[2], "str_replace")?;
-        let func = self.get_runtime_fn("mimi_str_replace")?;
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_replace")?;
+        let (old_ptr, old_len) = self.extract_string_arg_ptr_len(&args[1], "str_replace")?;
+        let (new_ptr, new_len) = self.extract_string_arg_ptr_len(&args[2], "str_replace")?;
+        let func = self.get_runtime_fn("mimi_str_replace_ll")?;
+        let i64_ty = self.context.i64_type();
+        let out_len_alloca = self.build_alloca(i64_ty, "str_replace_out_len")?;
+        self.build_store(out_len_alloca, i64_ty.const_int(0, false))?;
         let result_ptr = self
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
                     BasicMetadataValueEnum::PointerValue(old_ptr),
+                    BasicMetadataValueEnum::IntValue(old_len),
                     BasicMetadataValueEnum::PointerValue(new_ptr),
+                    BasicMetadataValueEnum::IntValue(new_len),
+                    BasicMetadataValueEnum::PointerValue(out_len_alloca),
                 ],
                 "str_replace_call",
             )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_replace returned void")?
+            .ok_or("mimi_str_replace_ll returned void")?
             .into_pointer_value();
-        Ok(result_ptr.into())
+        self.register_heap_alloc(result_ptr);
+        let result_len = self
+            .builder
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                out_len_alloca,
+                "str_replace_len",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("load replace len: {}", e)))?
+            .into_int_value();
+        // Build the struct with the exact result length so embedded NUL bytes
+        // survive (wrap_c_string would strlen-truncate them).
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let str_val = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), result_ptr, 0, "replace_str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("insert replace ptr: {}", e)))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, result_len, 1, "replace_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert replace len: {}", e)))?;
+        Ok(str_val.into_struct_value().into())
     }
 
     // -------------------------------------------------------------------------
@@ -561,6 +651,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_struct_ty = self.list_struct_type();
+        // The runtime helper returns NULL on OOM (mimi_str_split follows the
+        // same convention). GEP/load on a null list pointer would be UB, so
+        // fail loud instead (batch4-02 P2-4).
+        let is_null = self
+            .builder
+            .build_is_null(result_ptr, "str_split_null")
+            .map_err(|e| CompileError::LlvmError(format!("is_null: {}", e)))?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("copy_list_struct_fields: no function".into())
+        })?;
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "str_split_null_bb");
+        let ok_bb = self.context.append_basic_block(function, "str_split_ok_bb");
+        self.builder
+            .build_conditional_branch(is_null, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr: {}", e)))?;
+        self.builder.position_at_end(trap_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr("str_split: internal allocation failed", "str_split_msg")
+            .map_err(|e| CompileError::LlvmError(format!("global string: {}", e)))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            "str_split_abort",
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable: {}", e)))?;
+        self.builder.position_at_end(ok_bb);
         let list_ptr = self.build_pointer_cast(
             result_ptr,
             self.context.ptr_type(inkwell::AddressSpace::default()),

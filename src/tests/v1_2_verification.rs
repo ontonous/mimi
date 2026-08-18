@@ -586,7 +586,7 @@ fn verify_audit40_tail_if_let_without_value_is_not_fake_proven() {
 func f(opt: Option<i32>) -> i32 {
     ensures: result == 0
     if let Some(x) = opt {
-        let y = x + 1
+        let y = x
     }
     7
 }

@@ -150,7 +150,6 @@ pub enum ResolvedItemKind {
     Module,
     Actor,
     Flow,
-    Protocol,
     Session,
 }
 
@@ -414,7 +413,6 @@ pub struct ResolvedFlow {
     pub max_children: Option<usize>,
     pub mailbox_depth: Option<usize>,
     pub persistent_fields: Vec<String>,
-    pub impl_protocols: Vec<String>,
     pub origin: Origin,
 }
 
@@ -461,31 +459,6 @@ pub struct ResolvedSession {
     pub body: crate::ast::SessionType,
     /// Pretty-printed residual session type for directory consumers.
     pub body_display: String,
-    pub origin: Origin,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedProtocolState {
-    pub name: String,
-    pub payload_name: Option<String>,
-    pub payload_type: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedProtocolTransition {
-    pub event: String,
-    pub from_state: String,
-    pub to_states: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedProtocol {
-    pub node_id: NodeId,
-    pub qualified_name: String,
-    pub states: Vec<String>,
-    pub state_payloads: Vec<ResolvedProtocolState>,
-    pub transitions: Vec<(String, String, Vec<String>)>, // (event, from, to_states)
-    pub transition_records: Vec<ResolvedProtocolTransition>,
     pub origin: Origin,
 }
 
@@ -691,7 +664,6 @@ pub struct CheckedProgram {
     transitions: HashMap<TransitionId, ResolvedTransition>,
     functions: HashMap<NodeId, ResolvedFunction>,
     sessions: HashMap<NodeId, ResolvedSession>,
-    protocols: HashMap<NodeId, ResolvedProtocol>,
     actors: HashMap<NodeId, ResolvedActor>,
     capabilities: HashMap<NodeId, ResolvedCapability>,
     constants: HashMap<NodeId, ResolvedConstant>,
@@ -987,7 +959,6 @@ impl CheckedProgram {
         let mut call_sites = HashMap::new();
         let mut functions = HashMap::new();
         let mut sessions = HashMap::new();
-        let mut protocols = HashMap::new();
         let mut actors = HashMap::new();
         let mut capabilities = HashMap::new();
         let mut constants = HashMap::new();
@@ -1024,7 +995,6 @@ impl CheckedProgram {
             &mut node_meta,
             &mut functions,
             &mut sessions,
-            &mut protocols,
             &mut actors,
             &mut capabilities,
             &mut constants,
@@ -1080,9 +1050,6 @@ impl CheckedProgram {
         for session in sessions.values() {
             origin_catalog.register(&session.node_id, &session.origin, &mut errors);
         }
-        for protocol in protocols.values() {
-            origin_catalog.register(&protocol.node_id, &protocol.origin, &mut errors);
-        }
         for actor in actors.values() {
             origin_catalog.register(&actor.node_id, &actor.origin, &mut errors);
         }
@@ -1117,7 +1084,6 @@ impl CheckedProgram {
             transitions,
             functions,
             sessions,
-            protocols,
             actors,
             capabilities,
             constants,
@@ -1307,37 +1273,6 @@ impl CheckedProgram {
     pub fn session_body_display(&self, qualified_name: &str) -> Option<&str> {
         self.session(qualified_name)
             .map(|session| session.body_display.as_str())
-    }
-
-    pub fn protocols(&self) -> &HashMap<NodeId, ResolvedProtocol> {
-        &self.protocols
-    }
-
-    pub fn protocol(&self, qualified_name: &str) -> Option<&ResolvedProtocol> {
-        self.protocols
-            .values()
-            .find(|protocol| protocol.qualified_name == qualified_name)
-    }
-
-    pub fn protocol_state_payload(
-        &self,
-        protocol_name: &str,
-        state_name: &str,
-    ) -> Option<&ResolvedProtocolState> {
-        self.protocol(protocol_name).and_then(|protocol| {
-            protocol
-                .state_payloads
-                .iter()
-                .find(|state| state.name == state_name)
-        })
-    }
-
-    pub fn protocol_transition_records(
-        &self,
-        protocol_name: &str,
-    ) -> Option<&[ResolvedProtocolTransition]> {
-        self.protocol(protocol_name)
-            .map(|protocol| protocol.transition_records.as_slice())
     }
 
     pub fn actors(&self) -> &HashMap<NodeId, ResolvedActor> {
@@ -1940,7 +1875,6 @@ fn collect_items(
     node_meta: &mut HashMap<NodeId, NodeMeta>,
     functions: &mut HashMap<NodeId, ResolvedFunction>,
     sessions: &mut HashMap<NodeId, ResolvedSession>,
-    protocols: &mut HashMap<NodeId, ResolvedProtocol>,
     actors: &mut HashMap<NodeId, ResolvedActor>,
     capabilities: &mut HashMap<NodeId, ResolvedCapability>,
     constants: &mut HashMap<NodeId, ResolvedConstant>,
@@ -1976,7 +1910,6 @@ fn collect_items(
                     node_meta,
                     functions,
                     sessions,
-                    protocols,
                     actors,
                     capabilities,
                     constants,
@@ -3002,83 +2935,6 @@ fn collect_items(
                     },
                 );
             }
-            Item::Protocol(protocol) => {
-                let qualified = qualify(module, &protocol.name);
-                let span = declaration_span(protocol.meta, protocol.meta.span);
-                insert_item(
-                    resolved_items,
-                    ResolvedItemKind::Protocol,
-                    &qualified,
-                    protocol.meta,
-                    span,
-                    errors,
-                );
-                let node_id = NodeId(format!("protocol:{}", qualified));
-                let states = protocol
-                    .states
-                    .iter()
-                    .map(|state| state.name.clone())
-                    .collect::<Vec<_>>();
-                let mut state_payloads = Vec::new();
-                for state in &protocol.states {
-                    if let Some(ty) = &state.payload_type {
-                        if contains_unresolved_type(ty) {
-                            errors.push(Diagnostic::error(
-                                format!(
-                                    "TOOL-RESOLUTION-001: unresolved payload type in protocol '{}' state '{}'",
-                                    qualified,
-                                    state.name
-                                ),
-                                span,
-                            ));
-                        }
-                    }
-                    state_payloads.push(ResolvedProtocolState {
-                        name: state.name.clone(),
-                        payload_name: state.payload_name.clone(),
-                        payload_type: state.payload_type.as_ref().map(crate::core::fmt_type),
-                    });
-                }
-                let transitions = protocol
-                    .transitions
-                    .iter()
-                    .map(|transition| {
-                        (
-                            transition.name.clone(),
-                            transition.from_state.clone(),
-                            vec![transition.to_state.clone()],
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let transition_records = protocol
-                    .transitions
-                    .iter()
-                    .map(|transition| ResolvedProtocolTransition {
-                        event: transition.name.clone(),
-                        from_state: transition.from_state.clone(),
-                        to_states: vec![transition.to_state.clone()],
-                    })
-                    .collect::<Vec<_>>();
-                protocols.insert(
-                    node_id.clone(),
-                    ResolvedProtocol {
-                        node_id: node_id.clone(),
-                        qualified_name: qualified.clone(),
-                        states,
-                        state_payloads,
-                        transitions,
-                        transition_records,
-                        origin: resolve_named_origin(
-                            ResolvedItemKind::Protocol,
-                            &qualified,
-                            &node_id,
-                            protocol.meta,
-                            span,
-                            errors,
-                        ),
-                    },
-                );
-            }
             Item::Session(session) => {
                 let qualified = qualify(module, &session.name);
                 let span = declaration_span(session.meta, session.meta.span);
@@ -3769,7 +3625,6 @@ fn insert_item(
         ResolvedItemKind::Module => "module",
         ResolvedItemKind::Actor => "actor",
         ResolvedItemKind::Flow => "flow",
-        ResolvedItemKind::Protocol => "protocol",
         ResolvedItemKind::Session => "session",
     };
     let node_id = NodeId(format!("{}:{}", kind_name, qualified_name));
@@ -5261,68 +5116,6 @@ fn collect_item_meta(
                 }
             }
         }
-        Item::Protocol(protocol) => {
-            let qualified = qualify(module, &protocol.name);
-            let node_id = NodeId(format!("protocol:{qualified}"));
-            let fallback = protocol.meta.span;
-            insert_canonical_meta(
-                node_id.clone(),
-                ResolvedItemKind::Protocol,
-                &qualified,
-                protocol.meta,
-                fallback,
-                out,
-                errors,
-            );
-            let span = declaration_span(protocol.meta, fallback);
-            for generic in &protocol.generics {
-                collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
-            }
-            for state in &protocol.states {
-                let state_id = NodeId(format!(
-                    "{}/state:{}",
-                    node_id.0,
-                    stable_id_fragment(&state.name)
-                ));
-                insert_node_meta(
-                    state_id.clone(),
-                    state.meta.origin,
-                    state.meta.parent,
-                    ast_meta_anchor(state.meta),
-                    span,
-                    &node_id,
-                    None,
-                    out,
-                    errors,
-                );
-                if let Some(payload) = &state.payload_type {
-                    collect_type_meta(payload, &state_id, "payload_type", span, ids, out, errors);
-                }
-            }
-            for transition in &protocol.transitions {
-                let signature = format!(
-                    "{}:{}->{}",
-                    transition.name, transition.from_state, transition.to_state
-                );
-                let transition_id = NodeId(format!(
-                    "{}/transition:{}:{:016x}",
-                    node_id.0,
-                    stable_id_fragment(&transition.name),
-                    stable_text_hash(&signature)
-                ));
-                insert_node_meta(
-                    transition_id,
-                    transition.meta.origin,
-                    transition.meta.parent,
-                    ast_meta_anchor(transition.meta),
-                    span,
-                    &node_id,
-                    None,
-                    out,
-                    errors,
-                );
-            }
-        }
         Item::Session(session) => {
             let qualified = qualify(module, &session.name);
             let node_id = NodeId(format!("session:{qualified}"));
@@ -6812,7 +6605,6 @@ fn collect_flow(
         max_children,
         mailbox_depth,
         persistent_fields: flow.persistent_fields.clone(),
-        impl_protocols: flow.impl_protocols.clone(),
         origin: resolve_named_origin(
             ResolvedItemKind::Flow,
             qualified_name,
@@ -8528,13 +8320,6 @@ fn build_canonical_function_signatures(
                 .or_default()
                 .insert(state.node_id.0.clone());
         }
-    }
-    for protocol in program.protocols.values() {
-        register_nominal(
-            &mut nominal_catalog,
-            &protocol.qualified_name,
-            &protocol.node_id,
-        );
     }
     for session in program.sessions.values() {
         register_nominal(

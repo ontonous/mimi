@@ -521,8 +521,22 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
+    gen.export("mimi_str_concat_ll", |f| {
+        f.param("a", ptr(prim(U8)))
+            .param("a_len", prim(I64))
+            .param("b", ptr(prim(U8)))
+            .param("b_len", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
     gen.export("mimi_str_char_at", |f| {
         f.param("s", ptr(prim(U8)))
+            .param("index", prim(I64))
+            .returns(ptr(prim(U8)))
+    });
+    gen.export("mimi_str_char_at_ll", |f| {
+        f.param("s", ptr(prim(U8)))
+            .param("s_len", prim(I64))
             .param("index", prim(I64))
             .returns(ptr(prim(U8)))
     });
@@ -537,6 +551,14 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("s", ptr(prim(U8)))
             .param("delim", ptr(prim(U8)))
             .returns(handle("ListHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_join_ll", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("sep", ptr(prim(U8)))
+            .param("sep_len", prim(I64))
+            .param("out_len", ptr(prim(I64)))
+            .returns(ptr(prim(U8)))
             .effect("alloc")
     });
     gen.export("mimi_str_join", |f| {
@@ -569,6 +591,9 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("arg7", ptr(prim(U8)))
             .returns(ptr(prim(U8)))
             .effect("alloc")
+    });
+    gen.export("mimi_read_stdin_line", |f| {
+        f.returns(ptr(prim(U8))).effect("alloc")
     });
     gen.export("mimi_to_string_i64", |f| {
         f.param("val", prim(I64))
@@ -805,11 +830,34 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .effect("io")
             .effect("alloc")
     });
+    gen.export("mimi_read_file_bytes_ll", |f| {
+        // real: (path: *const c_char, out_len: *mut i64) -> *mut c_char
+        f.param("path", ptr(prim(U8)))
+            .param("out_len", ptr(prim(I64)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_write_file_bytes_ll", |f| {
+        // real: (path, data: *const c_char, len: i64) -> i32
+        f.param("path", ptr(prim(U8)))
+            .param("data", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I32))
+            .effect("io")
+    });
     gen.export("mimi_write_file_bytes", |f| {
         // real: (path, data: *const c_char) -> i32 (binary_io.rs:73)
         f.param("path", ptr(prim(U8)))
             .param("data", ptr(prim(U8)))
             .returns(prim(I32))
+            .effect("io")
+    });
+    gen.export("mimi_append_file_ll", |f| {
+        f.param("path", ptr(prim(U8)))
+            .param("content", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
             .effect("io")
     });
     gen.export("mimi_append_file", |f| {
@@ -1323,6 +1371,15 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         // real: (path: *const c_char, max_bytes: i64) -> *mut c_char (binary_io.rs:19)
         f.param("path", ptr(prim(U8)))
             .param("max_bytes", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_read_file_partial_ll", |f| {
+        // real: (path: *const c_char, max_bytes: i64, out_len: *mut i64) -> *mut c_char
+        f.param("path", ptr(prim(U8)))
+            .param("max_bytes", prim(I64))
+            .param("out_len", ptr(prim(I64)))
             .returns(ptr(prim(U8)))
             .effect("io")
             .effect("alloc")

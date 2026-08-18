@@ -110,6 +110,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get(name)
                 .map(|t| t == "string")
                 .unwrap_or(false),
+            // `keys(m)[i]` is a string even when the surrounding legacy
+            // variable tracker has not materialized the List<string> name.
+            // Preserve the `{ptr, len}` field when this expression enters a
+            // product tuple (for example MapExt::to_list).
+            Expr::Index(obj, _) => match obj.unlocated() {
+                Expr::Call(callee, _) if matches!(callee.unlocated(), Expr::Ident(name) if name == "keys") => {
+                    true
+                }
+                Expr::Ident(name) => self
+                    .var_type_names
+                    .get(name)
+                    .and_then(|t| Self::strip_list_element_type(t))
+                    .is_some_and(|elem| elem == "string"),
+                _ => false,
+            },
             Expr::Call(callee, _) => {
                 if let Expr::Ident(name) = callee.unlocated() {
                     if matches!(
@@ -876,11 +891,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let result_alloca = self.build_alloca(result_ty, "map_result")?;
         // Allocate output data array (same len)
-        let elem_size = i64_ty.const_int(8, false);
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len.into_int_value(), elem_size, "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(list_len.into_int_value(), 8, "hof")?;
         let out_ptr = self.malloc_or_abort(alloc_size, "out_malloc")?;
         let out_i64 = self
             .build_bit_cast(

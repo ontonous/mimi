@@ -46,8 +46,11 @@ pub extern "C" fn __mimi_extern_test_positive(x: i32) -> i32 {
     x
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn __mimi_extern_test_callback(
+pub unsafe extern "C" fn __mimi_extern_test_callback(
     x: i32,
     cb: Option<unsafe extern "C" fn(i32) -> i32>,
 ) -> i32 {
@@ -83,8 +86,11 @@ pub extern "C" fn __mimi_extern_test_timespec_sum(t: __mimi_TimespecStruct) -> i
     t.sec + t.nsec
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn __mimi_extern_test_strlen(s: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn __mimi_extern_test_strlen(s: *const std::ffi::c_char) -> i32 {
     if s.is_null() {
         return -1;
     }
@@ -96,8 +102,11 @@ pub extern "C" fn __mimi_extern_test_strlen(s: *const std::ffi::c_char) -> i32 {
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_nop() {}
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn __mimi_extern_test_parse_int(json: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn __mimi_extern_test_parse_int(json: *const std::ffi::c_char) -> i32 {
     if json.is_null() {
         return -1;
     }
@@ -132,8 +141,11 @@ pub extern "C" fn __mimi_extern_test_greet(x: i32) -> *mut std::ffi::c_char {
     alloc_c_string(&msg)
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> i32 {
     if json.is_null() {
         return -1;
     }
@@ -199,8 +211,11 @@ pub extern "C" fn test_float_identity(x: f64) -> f64 {
     __mimi_extern_test_float_identity(x)
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn test_strlen(s: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn test_strlen(s: *const std::ffi::c_char) -> i32 {
     __mimi_extern_test_strlen(s)
 }
 
@@ -209,13 +224,19 @@ pub extern "C" fn test_nop() {
     __mimi_extern_test_nop()
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn test_parse_int(json: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn test_parse_int(json: *const std::ffi::c_char) -> i32 {
     __mimi_extern_test_parse_int(json)
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn test_json_sum(json: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn test_json_sum(json: *const std::ffi::c_char) -> i32 {
     __mimi_extern_test_json_sum(json)
 }
 
@@ -266,8 +287,14 @@ pub extern "C" fn test_greet(x: i32) -> *mut std::ffi::c_char {
     __mimi_extern_test_greet(x)
 }
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn test_callback(x: i32, cb: Option<unsafe extern "C" fn(i32) -> i32>) -> i32 {
+pub unsafe extern "C" fn test_callback(
+    x: i32,
+    cb: Option<unsafe extern "C" fn(i32) -> i32>,
+) -> i32 {
     __mimi_extern_test_callback(x, cb)
 }
 
@@ -287,8 +314,11 @@ pub extern "C" fn test_callback(x: i32, cb: Option<unsafe extern "C" fn(i32) -> 
 // The cross-thread path is interpreter-only because the codegen callback
 // trampoline does not yet implement cross-thread closure evaluation.
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn test_threaded_callback(
+pub unsafe extern "C" fn test_threaded_callback(
     x: i32,
     cb: Option<unsafe extern "C" fn(i32) -> i32>,
 ) -> i32 {
@@ -323,8 +353,13 @@ pub extern "C" fn test_threaded_callback(
 static DELAYED_CB: std::sync::Mutex<Option<unsafe extern "C" fn(i32) -> i32>> =
     std::sync::Mutex::new(None);
 
+///
+/// # Safety
+/// Pointer/function-pointer arguments must be valid C ABI values supplied by the FFI test harness.
 #[no_mangle]
-pub extern "C" fn test_delayed_callback_store(cb: Option<unsafe extern "C" fn(i32) -> i32>) -> i32 {
+pub unsafe extern "C" fn test_delayed_callback_store(
+    cb: Option<unsafe extern "C" fn(i32) -> i32>,
+) -> i32 {
     let mut slot = DELAYED_CB.lock().unwrap_or_else(|e| e.into_inner());
     *slot = cb;
     1

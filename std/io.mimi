@@ -74,14 +74,12 @@ pub func print_list<T>(xs: List<T>) {
 
 // input_bool: Reads a bool from stdin (true/false/yes/no/1/0). Returns Err on failure.
 
-// input_line: Reads a line from stdin. Returns Err on empty input.
+// input_line: Reads a line from stdin. Returns Err on EOF/read error;
+// a successfully read empty line is Ok("").
 pub func input_line() -> Result<string, string> {
-    let line = input()
-    if line == "" {
-        Err("input: failed to read line")
-    } else {
-        Ok(line)
-    }
+    // try_input_line distinguishes EOF/read errors from a successfully read
+    // empty line, so an empty line is not reported as a failure.
+    try_input_line()
 }
 
 // input_int: Reads a line from stdin and parses it as an integer.

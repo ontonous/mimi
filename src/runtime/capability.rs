@@ -47,10 +47,10 @@ struct CapTableData {
 /// never transferred is removed when its owner drops it. OnceLock: the map
 /// cannot be constructed in a const context (HashMap::new is not const),
 /// matching the actor.rs / quote.rs pattern.
-static CAP_OWNERSHIP: std::sync::OnceLock<Mutex<HashMap<i64, std::thread::ThreadId>>> =
+static CAP_OWNERSHIP: std::sync::OnceLock<Mutex<HashMap<i64, Vec<std::thread::ThreadId>>>> =
     std::sync::OnceLock::new();
 
-fn cap_ownership() -> &'static Mutex<HashMap<i64, std::thread::ThreadId>> {
+fn cap_ownership() -> &'static Mutex<HashMap<i64, Vec<std::thread::ThreadId>>> {
     CAP_OWNERSHIP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -67,8 +67,11 @@ fn warn_cross_thread(cap: i64, owner: std::thread::ThreadId, action: &str) {
     );
 }
 
+///
+/// # Safety
+/// `name` must be null or a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
     let n = if name.is_null() {
         String::new()
     } else {
@@ -86,10 +89,10 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
         });
         id
     });
-    cap_ownership()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, std::thread::current().id());
+    let mut ownership = cap_ownership().lock().unwrap_or_else(|e| e.into_inner());
+    let here = std::thread::current().id();
+    ownership.entry(id).or_default().push(here);
+    drop(ownership);
     id
 }
 
@@ -102,28 +105,37 @@ pub extern "C" fn mimi_cap_drop(cap: i64) {
         before != state.entries.len()
     });
     if dropped {
-        // Owner thread dropped it — release the ownership record too, so
-        // the registry does not grow with dropped caps.
-        cap_ownership()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&cap);
+        // Owner thread dropped it — release this thread's ownership record
+        // too, so the registry does not grow with dropped caps.
+        let here = std::thread::current().id();
+        let mut ownership = cap_ownership().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(owners) = ownership.get_mut(&cap) {
+            owners.retain(|owner| *owner != here);
+            if owners.is_empty() {
+                ownership.remove(&cap);
+            }
+        }
     } else {
         // H6: not in this thread's table. If it belongs to another thread,
         // this drop is a silent no-op that never frees the entry — say so.
-        let owner = cap_ownership()
+        let here = std::thread::current().id();
+        let owners = cap_ownership()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&cap)
-            .copied();
-        if let Some(owner) = owner {
+            .cloned()
+            .unwrap_or_default();
+        if let Some(owner) = owners.iter().copied().find(|owner| *owner != here) {
             warn_cross_thread(cap, owner, "drop");
         }
     }
 }
 
+///
+/// # Safety
+/// `name` must be null or a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> bool {
+pub unsafe extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> bool {
     let n = if name.is_null() {
         ""
     } else {
@@ -140,23 +152,25 @@ pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> boo
     if !found {
         // H6: distinguish cross-thread misuse (owned elsewhere) from an
         // ordinary unknown/consumed cap.
-        let owner = cap_ownership()
+        let here = std::thread::current().id();
+        let owners = cap_ownership()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&cap)
-            .copied();
-        if let Some(owner) = owner {
-            let here = std::thread::current().id();
-            if owner != here {
-                warn_cross_thread(cap, owner, "check");
-            }
+            .cloned()
+            .unwrap_or_default();
+        if let Some(owner) = owners.iter().copied().find(|owner| *owner != here) {
+            warn_cross_thread(cap, owner, "check");
         }
     }
     found
 }
 
+///
+/// # Safety
+/// `name` must be null or a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> bool {
+pub unsafe extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> bool {
     let n = if name.is_null() {
         ""
     } else {
@@ -180,16 +194,15 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
     if !consumed {
         // H6: same cross-thread diagnosis as check — a consume from the
         // wrong thread is a failed authorization, not "cap unknown".
-        let owner = cap_ownership()
+        let here = std::thread::current().id();
+        let owners = cap_ownership()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&cap)
-            .copied();
-        if let Some(owner) = owner {
-            let here = std::thread::current().id();
-            if owner != here {
-                warn_cross_thread(cap, owner, "consume");
-            }
+            .cloned()
+            .unwrap_or_default();
+        if let Some(owner) = owners.iter().copied().find(|owner| *owner != here) {
+            warn_cross_thread(cap, owner, "consume");
         }
     }
     consumed
@@ -209,30 +222,36 @@ mod tests {
     /// semantics. The registry must also not leak ownership for dropped caps.
     #[test]
     fn cross_thread_cap_usage_is_diagnosed_not_silent() {
-        let cap = mimi_cap_register(cname("io"));
+        let cap = unsafe { mimi_cap_register(cname("io")) };
         // Owner thread: happy path.
-        assert!(mimi_cap_check(cap, cname("io")));
-        assert!(mimi_cap_consume(cap, cname("io")));
-        assert!(!mimi_cap_check(cap, cname("io"))); // consumed
+        unsafe {
+            assert!(mimi_cap_check(cap, cname("io")));
+            assert!(mimi_cap_consume(cap, cname("io")));
+            assert!(!mimi_cap_check(cap, cname("io"))); // consumed
+        }
 
         // Still in the owner's table: consume marks it, drop must release.
         mimi_cap_drop(cap);
+        let owners = cap_ownership()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&cap)
+            .cloned()
+            .unwrap_or_default();
         assert!(
-            cap_ownership()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&cap)
-                .is_none(),
-            "ownership record must be removed on owner-drop"
+            !owners
+                .iter()
+                .any(|owner| *owner == std::thread::current().id()),
+            "this thread's ownership record must be removed on owner-drop"
         );
 
         // Cross-thread: register on this thread, operate on another.
-        let cap2 = mimi_cap_register(cname("net"));
+        let cap2 = unsafe { mimi_cap_register(cname("net")) };
         let handle = std::thread::spawn(move || {
             // Thread-local table on the spawned thread is EMPTY — the cap
             // belongs to the parent. All three call sites must diagnose.
-            let check = mimi_cap_check(cap2, cname("net"));
-            let consume = mimi_cap_consume(cap2, cname("net"));
+            let check = unsafe { mimi_cap_check(cap2, cname("net")) };
+            let consume = unsafe { mimi_cap_consume(cap2, cname("net")) };
             let drop_seen = {
                 mimi_cap_drop(cap2);
                 cap_ownership()
@@ -251,8 +270,42 @@ mod tests {
         );
         // Back on the owner thread the cap must still be live and consumable
         // — the cross-thread drop must not have freed it.
-        assert!(mimi_cap_check(cap2, cname("net")));
-        assert!(mimi_cap_consume(cap2, cname("net")));
-        mimi_cap_drop(cap2);
+        unsafe {
+            assert!(mimi_cap_check(cap2, cname("net")));
+            assert!(mimi_cap_consume(cap2, cname("net")));
+            mimi_cap_drop(cap2);
+        }
+    }
+
+    /// P2 (batch4/06): thread-local cap ids can collide across threads. A
+    /// global ownership map keyed only by cap id would let one thread's drop
+    /// erase another thread's ownership record. The map must retain per-thread
+    /// owners for the same numeric id.
+    #[test]
+    fn duplicate_cap_id_on_two_threads_keeps_other_owner() {
+        let main_cap = unsafe { mimi_cap_register(cname("dup")) };
+        let thread_cap = std::thread::spawn(move || unsafe { mimi_cap_register(cname("dup")) })
+            .join()
+            .unwrap();
+        // Both thread-local id counters start at 1, so the ids collide in the
+        // shared diagnostic ownership map.
+        assert_eq!(main_cap, thread_cap);
+        mimi_cap_drop(main_cap);
+        let owners = cap_ownership()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&main_cap)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !owners.is_empty(),
+            "the spawned thread's ownership must survive the main thread's drop"
+        );
+        // Clean up the spawned thread's ownership entry from the diagnostic
+        // registry (the thread has already exited without dropping its cap).
+        cap_ownership()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&main_cap);
     }
 }

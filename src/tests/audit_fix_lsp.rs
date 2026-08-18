@@ -410,6 +410,88 @@ fn audit2_tool_prepare_rename_range_is_utf16_not_bytes() {
 }
 
 #[test]
+fn audit2_tool_inlay_param_hints_use_utf16_columns() {
+    // Non-BMP characters before an argument (here inside the first string
+    // argument) must count as 2 UTF-16 units in the second hint's position.
+    let src = "func f(a: i64, b: i64) -> i64 {\n    f(\"😀\", [1])\n    a + b\n}\nfunc main() -> i64 {\n    f(1, 2)\n    0\n}\n";
+    let server = crate::lsp::LspServer::new();
+    let hints = server.compute_inlay_hints(src);
+    let b_hint = hints
+        .iter()
+        .find(|h| h["label"] == "b:")
+        .unwrap_or_else(|| panic!("expected b: param hint, got {:?}", hints));
+    assert_eq!(b_hint["position"]["line"], 1);
+    // 4 spaces + `f("` + 😀(2) + `"` + `,` = 11 UTF-16 units. A scalar-based
+    // count would have been 10 because 😀 is one char but two UTF-16 units.
+    assert_eq!(
+        b_hint["position"]["character"], 11,
+        "inlay hint must use UTF-16 columns: {:?}",
+        b_hint
+    );
+}
+
+#[test]
+fn audit2_tool_signature_help_uses_utf16_cursor_prefix() {
+    // A non-BMP emoji occupies 2 UTF-16 units but 1 Rust char. The cursor at
+    // UTF-16 column 6 is immediately before `(`, so signature help must NOT
+    // fire. The old `chars().take(character)` consumed 6 Rust chars and
+    // included `(`, incorrectly activating signature help.
+    let src = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() { 😀 add(1, 2) }\n";
+    let mut server = crate::lsp::LspServer::new();
+    let result = server.compute_signature_help(src, 1, 6);
+    assert!(
+        result.is_none(),
+        "cursor before opening paren must not trigger signature help: {:?}",
+        result
+    );
+}
+
+#[test]
+fn audit2_tool_workspace_symbols_do_not_follow_symlink_escape() {
+    // P2-7: a .mimi symlink inside the workspace pointing outside must not be
+    // read by compute_workspace_symbols.
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_ws_symlink_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    let outside = std::env::temp_dir().join(format!(
+        "mimi_lsp_outside_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(1)
+    ));
+    std::fs::create_dir_all(&root).expect("create workspace root");
+    std::fs::create_dir_all(&outside).expect("create outside dir");
+    let inside_file = root.join("inside.mimi");
+    let outside_file = outside.join("outside.mimi");
+    std::fs::write(&inside_file, "func inside_symbol() -> i64 { 0 }\n").expect("write inside");
+    std::fs::write(&outside_file, "func outside_symbol() -> i64 { 0 }\n").expect("write outside");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_file, root.join("evil.mimi")).expect("symlink");
+
+    let mut server = crate::lsp::LspServer::new();
+    server.set_workspace_root_for_test(root.clone());
+    let symbols = server.compute_workspace_symbols("");
+    let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert!(
+        names.contains(&"inside_symbol"),
+        "workspace symbols must include the real in-workspace file: {names:?}"
+    );
+    assert!(
+        !names.contains(&"outside_symbol"),
+        "workspace symbols must not follow symlink escapes: {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
 fn audit2_tool_formatting_range_covers_trailing_newline_and_utf16() {
     // PoC (two defects): document ends with '\n' → lines() drops the final
     // empty line, so the old end position stopped before the trailing newline
@@ -510,8 +592,10 @@ fn audit2_tool_definition_param_range_is_zero_based() {
         .expect("definition of param `n`");
     let range = &result["range"];
     assert_eq!(range["start"]["line"], 0);
-    assert_eq!(range["start"]["character"], 0, "0-based column: {result}");
-    assert_eq!(range["end"]["character"], 1, "single-char name: {result}");
+    // The parameter definition must point at the `n` in `id(n: i64)`, i.e.
+    // character 8, not at the enclosing `func` keyword (character 0).
+    assert_eq!(range["start"]["character"], 8, "0-based column: {result}");
+    assert_eq!(range["end"]["character"], 9, "single-char name: {result}");
 }
 
 // --- X-4 (MED): Z3 dynamic timeout formula ---
@@ -605,4 +689,37 @@ fn audit2_tool_count_text_references_whole_word() {
     assert_eq!(count_text_references(text, "foobar"), 1);
     assert_eq!(count_text_references("", "foo"), 0);
     assert_eq!(count_text_references("anything", ""), 0);
+}
+
+// --- 0.1.7 audit P1-36/P1-37: LSP memory-bomb guards ---
+
+#[test]
+fn audit_lsp_line_bomb_ranges_are_bounded() {
+    // A 16MB line-bomb document used to allocate millions of per-line Vecs.
+    let text = "x\n".repeat(crate::lsp::MAX_LSP_DOCUMENT_LINES * 2);
+    let ranges = crate::lsp::util::non_code_byte_ranges(&text);
+    assert!(
+        ranges.len() <= crate::lsp::MAX_LSP_DOCUMENT_LINES + 1,
+        "line-bomb ranges must be bounded, got {} lines",
+        ranges.len()
+    );
+}
+
+#[test]
+fn audit_lsp_document_cache_enforces_hard_total_bytes() {
+    let mut server = crate::lsp::LspServer::new();
+    for i in 0..10 {
+        server.cache_put(format!("file:///seed{i}"), format!("doc {i}"));
+    }
+    // Simulate an existing cache close to the hard total cap without
+    // allocating hundreds of megabytes in the test.
+    server.total_doc_bytes = crate::lsp::MAX_DOCUMENT_BYTES_TOTAL;
+    server.cache_put("file:///new".to_string(), "another doc".to_string());
+    assert!(
+        server.total_doc_bytes <= crate::lsp::MAX_DOCUMENT_BYTES_TOTAL,
+        "total cache bytes must stay capped: {} > {}",
+        server.total_doc_bytes,
+        crate::lsp::MAX_DOCUMENT_BYTES_TOTAL
+    );
+    assert!(server.documents.contains_key("file:///new"));
 }

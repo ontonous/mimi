@@ -8,6 +8,16 @@ use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 use std::sync::Arc;
 
+/// RAII close guard so HTTP helpers never leak the socket on early errors.
+struct FdGuard(i32);
+
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard owns the descriptor and closes it exactly once.
+        unsafe { libc::close(self.0) };
+    }
+}
+
 pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc {
         name: "socket",
@@ -205,6 +215,9 @@ fn builtin_bind(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
     let port = args[1]
         .as_int()
         .ok_or_else(|| InterpError::new("bind: port must be i32"))?;
+    if !(0..=65535).contains(&port) {
+        return Err(InterpError::new("bind: port must be in 0..=65535"));
+    }
     // SAFETY: zeroed 初始化 POD sockaddr_in，字段随后显式赋值。
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     addr.sin_family = libc::AF_INET as libc::sa_family_t;
@@ -450,6 +463,8 @@ fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
 }
 
 fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
+    // RAII close: all early-return paths below must not leak the fd.
+    let _fd_guard = FdGuard(fd as i32);
     // H12: set send+recv timeouts on the socket (mirrors the runtime's
     // set_read_timeout/set_write_timeout) so a stalled peer errors out
     // instead of blocking the VM forever.
@@ -469,7 +484,6 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
         )
     };
     if rc < 0 {
-        unsafe { libc::close(fd as i32) };
         return Err(InterpError::new(format!(
             "http: setsockopt(SO_RCVTIMEO) failed: {}",
             std::io::Error::last_os_error()
@@ -485,7 +499,6 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
         )
     };
     if rc < 0 {
-        unsafe { libc::close(fd as i32) };
         return Err(InterpError::new(format!(
             "http: setsockopt(SO_SNDTIMEO) failed: {}",
             std::io::Error::last_os_error()
@@ -500,8 +513,6 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
     )?;
     let mut buf = Vec::new();
     recv_all_into(fd as i32, &mut buf)?;
-    // SAFETY: fd 为 socket() 返回的有效描述符，close 释放一次。
-    unsafe { libc::close(fd as i32) };
     if buf.is_empty() {
         return Err(InterpError::new("http: empty response"));
     }
@@ -509,6 +520,13 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
 }
 
 fn validate_http_url(url: &str) -> Result<(), InterpError> {
+    // Reject control characters that could split the HTTP request line/headers
+    // (batch2 P2-7; runtime parse_http_url already rejects these).
+    if url.contains(['\r', '\n', '\0']) {
+        return Err(InterpError::new(
+            "http_get/http_post: URL must not contain CR/LF/NUL control characters",
+        ));
+    }
     let lower = url.to_lowercase();
     if lower.starts_with("https://") {
         // TLS is not implemented; accepting https:// here would be a false

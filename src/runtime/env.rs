@@ -32,8 +32,12 @@ fn init_cli_args() {
     });
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings/argv arrays
+/// supplied by the C runtime or a matching mimi call.
 #[no_mangle]
-pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
+pub unsafe extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     init_cli_args();
     // M11: use get_or_init instead of get+expect to handle the case where
     // init_cli_args was already called but the OnceLock was not yet initialized
@@ -84,8 +88,12 @@ pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     args.argc = args.argv.len() as i32;
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings/argv arrays
+/// supplied by the C runtime or a matching mimi call.
 #[no_mangle]
-pub extern "C" fn mimi_getenv(name: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_getenv(name: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     // SAFETY: cstr_to_string safely handles null pointers.
     let n = unsafe { cstr_to_string(name) };
     // Audit fix (env.rs:76 vs fs.rs:641): take the same SETENV_LOCK that
@@ -245,7 +253,9 @@ mod tests {
     /// Reset the process-global CLI_ARGS to the default (empty) state so the
     /// tests leave no residue for other test modules.
     fn reset_cli_args() {
-        mimi_args_init(0, std::ptr::null_mut());
+        unsafe {
+            mimi_args_init(0, std::ptr::null_mut());
+        }
     }
 
     #[test]
@@ -253,7 +263,9 @@ mod tests {
         let _serial = CLI_ARGS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Old behavior stored argc=5 with an empty argv vector, and
         // mimi_args_list then indexed `argv[i]` out of bounds (panic).
-        mimi_args_init(5, std::ptr::null_mut());
+        unsafe {
+            mimi_args_init(5, std::ptr::null_mut());
+        }
         assert_eq!(mimi_args_count(), 0);
         assert!(mimi_args_get(0).is_null());
         let list = mimi_args_list();
@@ -263,7 +275,9 @@ mod tests {
             assert_eq!((*list).len, 0);
         }
         // Freeing an empty list must not read data[-8] (list_cap guards null).
-        crate::runtime::mimi_list_free(list, true);
+        unsafe {
+            crate::runtime::mimi_list_free(list, true);
+        }
         reset_cli_args();
     }
 
@@ -278,7 +292,9 @@ mod tests {
             a1.as_ptr() as *mut _,
             a2.as_ptr() as *mut _,
         ];
-        mimi_args_init(3, argv.as_mut_ptr());
+        unsafe {
+            mimi_args_init(3, argv.as_mut_ptr());
+        }
 
         assert_eq!(mimi_args_count(), 2);
 
@@ -314,7 +330,9 @@ mod tests {
         // The old Vec-buffer ABI failed exactly here: list_cap read data[-8]
         // OOB and mimi_list_free freed a Vec buffer via libc::free. With the
         // has_header flag the free goes straight to the malloc'd base.
-        crate::runtime::mimi_list_free(list, true);
+        unsafe {
+            crate::runtime::mimi_list_free(list, true);
+        }
         reset_cli_args();
     }
 
@@ -325,10 +343,10 @@ mod tests {
         let key = std::ffi::CString::new("MIMI_AUDIT_ENV_SUB").unwrap();
         let val = std::ffi::CString::new("hello-audit").unwrap();
         assert_eq!(
-            crate::runtime::fs::mimi_set_env(key.as_ptr(), val.as_ptr()),
+            unsafe { crate::runtime::fs::mimi_set_env(key.as_ptr(), val.as_ptr()) },
             1
         );
-        let p = mimi_getenv(key.as_ptr());
+        let p = unsafe { mimi_getenv(key.as_ptr()) };
         assert!(!p.is_null());
         // SAFETY: p is non-null (checked) and owned by alloc_c_string.
         assert_eq!(unsafe { cstr_to_string(p) }, "hello-audit");
