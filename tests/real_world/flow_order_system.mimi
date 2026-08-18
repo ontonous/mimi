@@ -9,12 +9,9 @@
 // the Result to handle success (continue pipeline) or failure (inspect
 // source state + error message).
 //
-// ⚠ KNOWN LIMITATION (E0304): matching on Result<Target, (Source, E)>
-// triggers "resource consumed on only some CFG paths" because the Ok arm
-// consumes the state through transitions while the Err arm reads fields.
-// This is a resource analysis gap — match arms are mutually exclusive,
-// so consumption on one arm should not require consumption on the other.
-// When fixed, this test should pass without modification.
+// This case used to be a known resource-analysis gap (E0304) but now passes
+// in both interpreter and codegen; keep it as a regression for Result match
+// arms that consume state in one arm and read fields in another.
 
 func validate_price(price: i32) -> Result<i32, string> {
     if price <= 0 {

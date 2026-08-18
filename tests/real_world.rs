@@ -267,9 +267,6 @@ fn real_world_strings_module() {
 
 // ===================== Standard library: collections =====================
 
-// TODO(v0.28.27): codegen reduce_list/reduce over List<i32> fails with
-// "reduce: first arg must be a list".
-
 #[test]
 fn real_world_collections_module() {
     run_both(

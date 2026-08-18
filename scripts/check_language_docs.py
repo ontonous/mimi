@@ -258,6 +258,60 @@ def check_fault_nominal_gate(errors: list[str]) -> None:
                     )
 
 
+def check_fault_surface_gate(errors: list[str]) -> None:
+    """Keep the 0.1.7 Fault surface distinct from the deferred rich model.
+
+    The normative spec intentionally retains a 0.2 design sketch. These pins
+    prevent that sketch from being read as parser/checker support again, while
+    ensuring §3.12 remains the implementation authority for 0.1.7.
+    """
+    spec_text = SPEC.read_text(encoding="utf-8")
+    section_312 = re.search(
+        r"^### 3\.12 Fault and Recovery `\[stable\]`\s*\n(?P<body>.*?)(?=^### 3\.13 )",
+        spec_text,
+        re.MULTILINE | re.DOTALL,
+    )
+    section_43 = re.search(
+        r"^### 4\.3 Rich Fault Sets \(Forward Design\) `\[deferred to 0\.2\]`\s*\n"
+        r"(?P<body>.*?)(?=^### 4\.4 )",
+        spec_text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if section_312 is None:
+        fail(errors, "language-spec.md §3.12 Fault and Recovery stable section is missing")
+    else:
+        body = section_312.group("body")
+        for required in (
+            "fault ErrorType",
+            "single per-flow typed error",
+            "flow::<F>::StateId",
+            "flow::<F>::EventId",
+            "Panic { code:",
+            "Deferred to 0.2",
+        ):
+            if required not in body:
+                fail(errors, f"language-spec.md §3.12 is missing Fault surface anchor {required!r}")
+        for forbidden in ('last_state == "', 'unexpected_event == "'):
+            if forbidden in body:
+                fail(
+                    errors,
+                    f"language-spec.md §3.12 reintroduced string comparison {forbidden!r}; "
+                    "match the nominal StateId/EventId variants instead",
+                )
+    if section_43 is None:
+        fail(errors, "language-spec.md §4.3 rich Fault section must be marked deferred to 0.2")
+    else:
+        body = section_43.group("body")
+        for required in (
+            "long-term forward design sketch",
+            "not a claim of current 0.1.7",
+            "not accepted by the 0.1.7 parser/checker",
+            "per-flow typed error (`fault ErrorType`)",
+        ):
+            if required not in body:
+                fail(errors, f"language-spec.md §4.3 is missing deferred-surface anchor {required!r}")
+
+
 def main() -> int:
     errors: list[str] = []
     spec_text = SPEC.read_text(encoding="utf-8")
@@ -374,6 +428,7 @@ def main() -> int:
     check_semantic_freshness(errors)
     check_philosophy_anchor(errors)
     check_phase_d_syntax_gate(errors)
+    check_fault_surface_gate(errors)
     check_fault_nominal_gate(errors)
 
     if errors:

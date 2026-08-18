@@ -533,3 +533,97 @@ fn stress_soak_memory_alloc_loop_smoke() {
         "allocation loop max RSS exceeded 1 GiB: {max_rss_kb} KiB"
     );
 }
+
+#[test]
+#[ignore = "heavy soak: native memory-stability soak (default 5s; set MIMI_SOAK_SECONDS for nightly 24h)"]
+fn stress_soak_native_memory_stability_heavy() {
+    use std::time::Duration;
+
+    // Continuous allocation loop in a compiled native binary. Each iteration
+    // allocates a temporary list; a memory leak in any of the resolved/native
+    // ownership paths causes VmRSS to grow without bound.
+    let source = r#"func main() -> i32 {
+    let mut i = 0
+    let mut acc = 0
+    while true {
+        i = i + 1
+        let xs = [i, i + 1, i + 2]
+        acc += len(xs)
+        if i % 10000 == 0 {
+            println(acc)
+        }
+    }
+    0
+}"#;
+
+    let Some((dir, exe_path)) = super::build_native_only(source) else {
+        eprintln!("SKIP: native build not available");
+        return;
+    };
+
+    let duration_secs: u64 = std::env::var("MIMI_SOAK_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let duration = Duration::from_secs(duration_secs);
+
+    let mut child = match std::process::Command::new(&exe_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("failed to spawn soak binary: {e}");
+        }
+    };
+
+    // Let the first 500ms serve as the baseline after startup.
+    std::thread::sleep(Duration::from_millis(500));
+    let mut rss_samples: Vec<u64> = Vec::new();
+    let start = std::time::Instant::now();
+    while start.elapsed() < duration {
+        if let Some(rss) = read_vmrss_kb(child.id()) {
+            rss_samples.push(rss);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // Stop the infinite loop.
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let baseline = *rss_samples.first().unwrap_or(&0);
+    let peak = *rss_samples.iter().max().unwrap_or(&baseline);
+    let growth_kb = peak.saturating_sub(baseline);
+    // 5s should stay far below 128 MiB; 24h nightly allows a comfortable but
+    // still bounded 512 MiB envelope.
+    let allowed_kb = if duration_secs >= 3600 {
+        512 * 1024
+    } else {
+        128 * 1024
+    };
+    assert!(
+        growth_kb < allowed_kb,
+        "soak RSS grew {growth_kb} KiB (baseline {baseline} KiB, peak {peak} KiB) after {duration_secs}s; memory stability violated"
+    );
+    println!(
+        "soak_ok duration_secs={duration_secs} samples={} baseline_kb={baseline} peak_kb={peak} growth_kb={growth_kb}",
+        rss_samples.len()
+    );
+}
+
+fn read_vmrss_kb(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("VmRSS:")?
+                .trim()
+                .strip_suffix(" kB")
+        })
+        .and_then(|v| v.trim().parse().ok())
+}

@@ -272,6 +272,30 @@ pub(crate) fn build_and_run_native_with_max_rss_kb(source: &str) -> Option<(Stri
     Some((stdout, max_rss))
 }
 
+/// Build a Mimi source into a native executable for long-running/probing use.
+/// Returns `(temp_dir, exe_path)`; the caller is responsible for terminating
+/// the executable and removing `temp_dir`.
+pub(crate) fn build_native_only(source: &str) -> Option<(PathBuf, PathBuf)> {
+    let dir = temp_dir();
+    let src_path = dir.join("stress_case.mimi");
+    let exe_path = dir.join("stress_case_bin");
+    fs::write(&src_path, source).ok()?;
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .ok()?;
+    if !build.status.success() {
+        let _ = fs::remove_dir_all(&dir);
+        return None;
+    }
+    Some((dir, exe_path))
+}
+
 /// Generate a Flow chain source with `n` consecutive transition events.
 /// This exercises typing, lowering/codegen, and runtime transition dispatch
 /// without relying on unstable mutable Flow state.

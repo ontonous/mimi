@@ -46,6 +46,6 @@ python3 run_suite.py
 
 ## 与 cargo test 的关系
 
-本目录由 Python 驱动，用于快速本地评估。已有的 `tests/real_world.rs` 是更严格的 cargo integration test，包含 10 个硬编码端到端用例。两者互补：
+本目录由 Python 驱动，用于快速本地评估。已有的 `tests/real_world.rs` 是更严格的 cargo integration test，包含 31 个硬编码端到端用例。两者互补：
 - `tests/real_world.rs`：CI 门禁，断言必须全部通过。
 - `tests/real_world/*.mimi`：特性矩阵扫描，允许记录已知差距。
