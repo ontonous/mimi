@@ -1,16 +1,22 @@
 # Changelog
 
-## [Unreleased] — 0.1.7-dev
+## [0.1.7] — 2026-08-19
 
-> 0.1.7 Wave-3 基建诚实收口已完成（2026-08-19，0.37.135）。
-> 不宣称内核愿景已闭合、不宣称 VM≡native、不宣称 Flow 世代已实现。
-> `0.1.7` tag 尚未切；下一版本 0.1.8 见 `devdocs/kernel-roadmap-0.1.7-0.1.9.md`。
-> 终测报告 `devdocs/v0.37/quad-final-0.37.135.md`。
+> **Wave-3 基建诚实收口已发布**。
+> 0.1.7 里程碑：默认语料 dispatch 0 fallback、确定性 Drop-glue、native 真线程、
+> Phase E 边缘出清（`quote!` / `$(...)` / `protocol` / `impl Protocol`）、
+> Component ABI/Wire CLI、dogfood 与高压套件。
+> **不宣称**内核愿景已闭合、不宣称 VM≡native、不宣称 Flow 世代已实现。
+> 终测报告 `devdocs/v0.37/quad-final-0.37.135.md`。下一版本 0.1.8。
+
+### 0.37.136 — chore(release): 0.1.7
+- Cargo.toml / Cargo.lock：`0.1.7-dev` → `0.1.7`
+- CHANGELOG / README 同步为已发布
+- 附注 tag `0.1.7`
 
 ### 0.37.135 — Phase F 终测与文档收口
 - 新增 `devdocs/v0.37/quad-final-0.37.135.md`，按 §4 逐条登记「不宣称」
 - README / AGENTS / gap-audit 从「开发进行中」改为「收口完成，待切 tag」
-- 不打 `0.1.7` tag、不发布 crates（本版本 Non-goal）
 
 ### 0.37.130 — Wave-3 基建诚实收口 + native map from_list
 - 新增 `devdocs/v0.37/quad-final-0.37.135.md`：按 §4 列出全部「不宣称」

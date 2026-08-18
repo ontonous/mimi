@@ -1,7 +1,7 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "0.1.7-dev (internal sprint 0.37.135, Wave-3 closeout)"
+implementation_version = "0.1.7 (internal sprint 0.37.136)"
 
 # ⚠ 2026-08-02：本文件由 0.31.36 落后状态在 0.34.5 刷新版本号。
 # 与实现冲突时以 devdocs/v0.34/golden-document.md 与
