@@ -20,6 +20,7 @@ impl TextExt for string {
         str_join(sl_parts, "-")
     }
     func indent_text(n: i32) -> string {
+        if n <= 0 { return self }
         let it_lines = str_split(self, "\n")
         let mut it_res: List<string> = []
         for it_line in it_lines {
@@ -90,6 +91,7 @@ pub func slugify(s: string) -> string {
 // indent_text: Prepends n spaces to each line of s.
 // Duplicate of strings::indent — kept for compatibility.
 pub func indent_text(s: string, n: i32) -> string {
+    if n <= 0 { return s }
     let it_lines = str_split(s, "\n")
     let mut it_res: List<string> = []
     for it_line in it_lines {

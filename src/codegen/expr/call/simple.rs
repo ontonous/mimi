@@ -433,6 +433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name == "to_string" && args.len() == 1 {
             let arg_type = self.infer_object_type(&args[0], vars);
             self.pending_to_string_is_any = arg_type == "Any" || arg_type == "any";
+            self.pending_to_string_arg_type = Some(arg_type);
         }
         if (name == "to_int" || name == "to_float") && args.len() == 1 {
             let arg_type = self.infer_object_type(&args[0], vars);
@@ -453,6 +454,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name == "sum" && args.len() == 1 {
             let list_type = self.infer_object_type(&args[0], vars);
             self.pending_sum_elem_type = Self::strip_list_element_type(&list_type);
+        }
+        // Audit P0-06: pop(List<f64>/string/record) must decode the type-erased
+        // slot instead of returning the raw i64/bit pattern.
+        if name == "pop" && args.len() == 1 {
+            let list_type = self.infer_object_type(&args[0], vars);
+            self.pending_pop_elem_type = Self::strip_list_element_type(&list_type);
         }
         // 0.35.20 (#6): zip/enumerate — hand the product-tuple element type to
         // the builtin so pairs are heap-packed with the formatter's layout

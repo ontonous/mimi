@@ -365,6 +365,73 @@ func main() -> i64 {
 }
 
 #[test]
+fn loader_stdlib_tuple_any_return_typechecks() {
+    // The resolved lowerer must admit tuple-level `(Record, i32) -> (Any, i32)`
+    // when every element conversion is transparent (TupleErase). This is the
+    // compiler fix that makes std/mimispec/parser.mimi typecheck again.
+    let dir = temp_dir("tuple_any");
+    let path = dir.join("tuple_any_check.mimi");
+    fs::write(
+        &path,
+        r#"
+func make() -> (Any, i32) {
+    (map_new(), 0)
+}
+"#,
+    )
+    .expect("write tuple_any_check.mimi");
+    std::env::set_var("MIMI_STDLIB", &dir);
+    let src = fs::read_to_string(&path).expect("read tuple_any_check.mimi");
+    let tokens = crate::lexer::Lexer::new(&src)
+        .tokenize()
+        .expect("tuple_any lex should succeed");
+    let (file, parse_errors) = crate::loader::parser_for_path(tokens, &path)
+        .expect("parser_for_path should succeed")
+        .parse_file_with_recovery();
+    assert!(
+        parse_errors.is_empty(),
+        "tuple_any parse errors: {:?}",
+        parse_errors
+    );
+    let result = crate::core::check_program(&file);
+    assert!(
+        result.is_ok(),
+        "tuple Any return should typecheck: {:?}",
+        result.err()
+    );
+    std::env::remove_var("MIMI_STDLIB");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimispec_ast_lexer_typecheck() {
+    // Keep the non-parser mimispec files type-checkable as a unit.
+    for name in ["ast.mimi", "lexer.mimi"] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("std/mimispec")
+            .join(name);
+        let src = fs::read_to_string(&path).expect("read mimispec file");
+        let tokens = crate::lexer::Lexer::new(&src)
+            .tokenize()
+            .expect("mimispec lex should succeed");
+        let (file, parse_errors) = crate::loader::parser_for_path(tokens, &path)
+            .expect("parser_for_path should succeed")
+            .parse_file_with_recovery();
+        assert!(
+            parse_errors.is_empty(),
+            "{name} parse errors: {:?}",
+            parse_errors
+        );
+        let result = crate::core::check_program(&file);
+        assert!(
+            result.is_ok(),
+            "{name} should typecheck: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
 fn loader_std_set_import_typechecks() {
     // C3 (audit 2026-08-03): `use std::set` previously exploded into ~55
     // E0407s ("unknown type 'Any'") because std/set.mimi spells its

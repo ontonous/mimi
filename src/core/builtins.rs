@@ -45,6 +45,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "mms_parse"
             | "ast_eval"
             | "input"
+            | "try_input_line"
             | "file_exists"
             | "read_file"
             | "write_file"
@@ -372,6 +373,7 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "input_float" => Some(0),
         "input_int" => Some(0),
         "input_line" => Some(0),
+        "try_input_line" => Some(0),
         "insert" => Some(usize::MAX),
         "int" => Some(1),
         "int_to_string" => Some(1),

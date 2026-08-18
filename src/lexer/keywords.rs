@@ -52,7 +52,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Comptime
             | TokenKind::Spawn
             | TokenKind::Await
-            | TokenKind::Quote
             | TokenKind::Loop
             | TokenKind::As
             | TokenKind::True
@@ -61,7 +60,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Flow
             | TokenKind::State
             | TokenKind::Transition
-            | TokenKind::Protocol
             | TokenKind::Pinned
             | TokenKind::Persistent
             | TokenKind::View
@@ -110,7 +108,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "await" => TokenKind::Await,
         "unsafe" => TokenKind::Unsafe,
         "spawn" => TokenKind::Spawn,
-        "quote" => TokenKind::Quote,
         "comptime" => TokenKind::Comptime,
         "failure" => TokenKind::Failure,
         "requires" => TokenKind::Requires,
@@ -121,7 +118,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "flow" => TokenKind::Flow,
         "state" => TokenKind::State,
         "transition" => TokenKind::Transition,
-        "protocol" => TokenKind::Protocol,
         "pinned" => TokenKind::Pinned,
         "persistent" => TokenKind::Persistent,
         "view" => TokenKind::View,
@@ -211,7 +207,6 @@ mod tests {
             "await",
             "unsafe",
             "spawn",
-            "quote",
             "comptime",
             "failure",
             "requires",
@@ -222,7 +217,6 @@ mod tests {
             "flow",
             "state",
             "transition",
-            "protocol",
             "pinned",
             "persistent",
             "view",
@@ -239,7 +233,7 @@ mod tests {
             "false",
             "unit",
         ];
-        assert_eq!(all.len(), 63, "keyword table must be exactly 63 entries");
+        assert_eq!(all.len(), 61, "keyword table must be exactly 61 entries");
         let soft_operators = ["and", "or", "not"];
         for name in all {
             let kind = keyword_or_ident(name);
@@ -254,6 +248,8 @@ mod tests {
                 "{name:?}: hard/soft classification mismatch"
             );
         }
+        assert!(matches!(keyword_or_ident("quote"), TokenKind::Ident(_)));
+        assert!(!is_keyword_kind(&TokenKind::Quote));
         assert!(matches!(keyword_or_ident("parasteps"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("fault"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("reset"), TokenKind::Ident(_)));

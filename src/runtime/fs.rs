@@ -13,6 +13,13 @@ use std::ffi::CStr;
 use super::libc;
 use super::{alloc_c_string, cstr_to_string, ListElementKind, MimiList};
 
+/// Maximum recursion depth for `mimi_walk_dir`. Prevents unbounded stack
+/// growth on pathological directory trees (batch4/06 P2).
+const MAX_WALK_DEPTH: usize = 64;
+/// Maximum number of paths returned by `mimi_walk_dir`. Prevents a hostile
+/// filesystem from exhausting memory through an enormous file count.
+const MAX_WALK_RESULTS: usize = 1_000_000;
+
 // ─── Directory & path operations ───────────────────────────────
 
 /// Free element pointers previously produced by `alloc_c_string`.
@@ -69,8 +76,14 @@ fn malloc_c_string_array(items: Vec<*mut std::ffi::c_char>) -> *mut *mut std::ff
 
 /// Returns a Mimi List of entry names in the given directory.
 /// Returns an empty list on error (not a directory, permission denied, etc.).
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
+pub unsafe extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
     let path_str = if path.is_null() {
         return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
     } else {
@@ -116,8 +129,14 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
 }
 
 /// Returns 1 if path is a directory, 0 otherwise.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_is_dir(path: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_is_dir(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
@@ -134,8 +153,14 @@ pub extern "C" fn mimi_is_dir(path: *const std::ffi::c_char) -> i64 {
 }
 
 /// Returns 1 if path is a regular file, 0 otherwise.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_is_file(path: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_is_file(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
@@ -152,8 +177,14 @@ pub extern "C" fn mimi_is_file(path: *const std::ffi::c_char) -> i64 {
 }
 
 /// Joins two path components. Returns a new allocated string.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_path_join(
+pub unsafe extern "C" fn mimi_path_join(
     a: *const std::ffi::c_char,
     b: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -177,8 +208,14 @@ pub extern "C" fn mimi_path_join(
 }
 
 /// Returns the file extension (without dot). Returns "" if none.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_path_ext(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_path_ext(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if path.is_null() {
         return alloc_c_string("");
     }
@@ -195,8 +232,16 @@ pub extern "C" fn mimi_path_ext(path: *const std::ffi::c_char) -> *mut std::ffi:
 }
 
 /// Returns the filename component of a path.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_path_basename(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_path_basename(
+    path: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     if path.is_null() {
         return alloc_c_string("");
     }
@@ -213,8 +258,14 @@ pub extern "C" fn mimi_path_basename(path: *const std::ffi::c_char) -> *mut std:
 }
 
 /// Returns the directory component of a path.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if path.is_null() {
         return alloc_c_string("");
     }
@@ -231,8 +282,14 @@ pub extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::
 }
 
 /// Recursively walks a directory and returns all file paths (as a Mimi List).
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList {
+pub unsafe extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList {
     let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
     let path_str = if path.is_null() {
         return empty();
@@ -244,7 +301,8 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
         }
     };
     let mut results = Vec::new();
-    walk_dir_recursive(path_str, &mut results);
+    let mut visited = std::collections::HashSet::new();
+    walk_dir_recursive(path_str, &mut results, 0, &mut visited);
     let len = results.len() as i64;
     let items: Vec<*mut std::ffi::c_char> =
         results.into_iter().map(|s| alloc_c_string(&s)).collect();
@@ -268,16 +326,35 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
     )))
 }
 
-fn walk_dir_recursive(dir: &str, results: &mut Vec<String>) {
+fn walk_dir_recursive(
+    dir: &str,
+    results: &mut Vec<String>,
+    depth: usize,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+) {
+    if depth > MAX_WALK_DEPTH || results.len() >= MAX_WALK_RESULTS {
+        return;
+    }
+    // Canonicalize each directory before recursing so symlink cycles cannot
+    // make the walk loop forever (batch4/06 P2).
+    let Ok(canon) = std::fs::canonicalize(dir) else {
+        return;
+    };
+    if !visited.insert(canon) {
+        return;
+    }
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return,
     };
     for entry in rd.flatten() {
+        if results.len() >= MAX_WALK_RESULTS {
+            break;
+        }
         let path = entry.path();
         let path_str = path.to_string_lossy().into_owned();
         if path.is_dir() {
-            walk_dir_recursive(&path_str, results);
+            walk_dir_recursive(&path_str, results, depth + 1, visited);
         } else {
             results.push(path_str);
         }
@@ -285,8 +362,14 @@ fn walk_dir_recursive(dir: &str, results: &mut Vec<String>) {
 }
 
 /// Creates a directory and all parent directories. Returns 1 on success, 0 on failure.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_mkdir_p(path: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_mkdir_p(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
@@ -303,8 +386,14 @@ pub extern "C" fn mimi_mkdir_p(path: *const std::ffi::c_char) -> i64 {
 }
 
 /// Removes a file. Returns 1 on success, 0 on failure.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_remove_file(path: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_remove_file(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
@@ -398,14 +487,25 @@ pub(crate) fn run_exec_capped(cmd: &mut std::process::Command) -> (Vec<u8>, Vec<
 /// use `mimi_exec` with trusted, hard-coded command strings. For
 /// untrusted input, use `mimi_exec_safe` which avoids the shell.
 /// Caller must free with `mimi_exec_free`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
+pub unsafe extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
     // RT-H5: optional hard refuse under MIMI_EXEC_STRICT / MIMI_FFI_STRICT.
-    if std::env::var("MIMI_EXEC_STRICT")
-        .or_else(|_| std::env::var("MIMI_FFI_STRICT"))
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
+    // Read the strictness flags under SETENV_LOCK: setenv may reallocate the
+    // global environ while mimi_set_env is writing.
+    let strict = {
+        let _lock = SETENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::var("MIMI_EXEC_STRICT")
+            .or_else(|_| std::env::var("MIMI_FFI_STRICT"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    };
+    if strict {
         let res = Box::new(MimiExecResult {
             exit_code: -1,
             stdout: alloc_c_string(""),
@@ -467,8 +567,14 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
 /// stdout/stderr are allocated by alloc_c_string (mimi_alloc), so they are
 /// freed through mimi_free — the matching deallocator under both normal and
 /// miri builds (audit 2026-08-05, N-1).
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
+pub unsafe extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
     if res.is_null() {
         return;
     }
@@ -486,8 +592,14 @@ pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
 
 /// Frees only the MimiExecResult struct, NOT the stdout/stderr strings.
 /// Used by codegen after extracting string pointers into ExecResult struct.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
+pub unsafe extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
     if res.is_null() {
         return;
     }
@@ -503,8 +615,14 @@ pub extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
 /// On error, returns an empty string.
 /// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
 /// `mimi_exec_safe` instead which runs a single program without shell.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if cmd.is_null() {
         return alloc_c_string("");
     }
@@ -527,8 +645,14 @@ pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi:
 /// `prog` is the program path, `args` are the arguments (excluding argv[0]).
 /// Returns a `MimiExecResult` struct. Caller must free with `mimi_exec_free`.
 /// No shell injection risk: the program is executed directly via `execvp`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_exec_safe(
+pub unsafe extern "C" fn mimi_exec_safe(
     prog: *const std::ffi::c_char,
     args: *mut MimiList,
 ) -> *mut MimiExecResult {
@@ -568,6 +692,19 @@ pub extern "C" fn mimi_exec_safe(
     }
     // SAFETY: args was checked non-null above.
     let lst = unsafe { &*args };
+    // batch4/06 P2: validate the list prefix before dereferencing data. A
+    // malformed list (negative len, or null data with non-zero len) must not
+    // be read as a C string array. Note: codegen passes a two-field {len,
+    // data} list through the MimiListAbiPrefix ABI, so element_kind is not
+    // part of that contract and cannot be inspected here.
+    if lst.len < 0 || (lst.len > 0 && lst.data.is_null()) {
+        let res = Box::new(MimiExecResult {
+            exit_code: -1,
+            stdout: alloc_c_string(""),
+            stderr: alloc_c_string("exec_safe error: invalid args list"),
+        });
+        return Box::into_raw(res);
+    }
     let mut cmd = std::process::Command::new(&prog_str);
     for i in 0..lst.len as isize {
         // SAFETY: i is within bounds (0..lst.len).
@@ -601,8 +738,14 @@ pub struct MimiStatResult {
 }
 
 /// Frees a MimiStatResult allocated by mimi_file_stat.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_file_stat_free(res: *mut MimiStatResult) {
+pub unsafe extern "C" fn mimi_file_stat_free(res: *mut MimiStatResult) {
     if res.is_null() {
         return;
     }
@@ -614,8 +757,14 @@ pub extern "C" fn mimi_file_stat_free(res: *mut MimiStatResult) {
 
 /// Stats a file. Returns a heap-allocated MimiStatResult, or null on error.
 /// On error, sets *err_out to an allocated error string (caller must free with mimi_string_free).
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_file_stat(
+pub unsafe extern "C" fn mimi_file_stat(
     path: *const std::ffi::c_char,
     err_out: *mut *mut std::ffi::c_char,
 ) -> *mut MimiStatResult {
@@ -667,9 +816,58 @@ pub extern "C" fn mimi_file_stat(
     }
 }
 
-/// Appends content to a file. Returns 1 on success, 0 on failure.
+/// Appends content to a file with an explicit byte length. Returns 1 on
+/// success, 0 on failure. Length-aware variant used by codegen so embedded
+/// NUL bytes are appended intact.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// `content` must be valid for `len` bytes, and result/free pointers must
+/// come from matching mimi runtime calls.
 #[no_mangle]
-pub extern "C" fn mimi_append_file(
+pub unsafe extern "C" fn mimi_append_file_ll(
+    path: *const std::ffi::c_char,
+    content: *const std::ffi::c_char,
+    len: i64,
+) -> i64 {
+    if path.is_null() || content.is_null() || len < 0 {
+        return 0;
+    }
+    // SAFETY: `path` was checked non-null above.
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    // SAFETY: `content` is non-null and the caller guarantees it is valid for
+    // `len` bytes; the length is checked non-negative above.
+    let content_bytes = unsafe { std::slice::from_raw_parts(content as *const u8, len as usize) };
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path_str)
+    {
+        Ok(mut file) => {
+            if file.write_all(content_bytes).is_ok() {
+                1
+            } else {
+                0
+            }
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Appends content to a file. Returns 1 on success, 0 on failure.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_append_file(
     path: *const std::ffi::c_char,
     content: *const std::ffi::c_char,
 ) -> i64 {
@@ -716,8 +914,14 @@ pub(super) static SETENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Sets an environment variable. Returns 1 on success, 0 on failure.
 /// Thread-safe: uses a global mutex to serialize env var modifications,
 /// preventing data races when called from multiple actor threads.
+///
+/// # Safety
+/// Pointer arguments must be valid for the C ABI contract:
+/// C strings must be NUL-terminated (unless documented otherwise),
+/// result/free pointers must come from matching mimi runtime calls,
+/// and lists/stat handles must be live values created by this runtime.
 #[no_mangle]
-pub extern "C" fn mimi_set_env(
+pub unsafe extern "C" fn mimi_set_env(
     key: *const std::ffi::c_char,
     value: *const std::ffi::c_char,
 ) -> i64 {
@@ -793,7 +997,7 @@ mod tests {
     fn listdir_survives_mimi_list_free() {
         let dir = make_tree("listdir");
         let c_path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
-        let list = mimi_listdir(c_path.as_ptr());
+        let list = unsafe { mimi_listdir(c_path.as_ptr()) };
         assert!(!list.is_null());
         // H-26 flag contract: header-less owning list.
         // SAFETY: `list` was just returned by mimi_listdir.
@@ -805,7 +1009,9 @@ mod tests {
         assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);
         // The old Vec-buffer ABI failed exactly here: list_cap read data[-8]
         // OOB and mimi_list_free freed a Vec buffer via libc::free.
-        crate::runtime::mimi_list_free(list, true);
+        unsafe {
+            crate::runtime::mimi_list_free(list, true);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -813,7 +1019,7 @@ mod tests {
     fn walk_dir_survives_mimi_list_free() {
         let dir = make_tree("walk");
         let c_path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
-        let list = mimi_walk_dir(c_path.as_ptr());
+        let list = unsafe { mimi_walk_dir(c_path.as_ptr()) };
         assert!(!list.is_null());
         let mut paths = list_to_strings(list);
         paths.sort();
@@ -822,19 +1028,105 @@ mod tests {
         assert!(paths.iter().any(|p| p.ends_with("b.txt")));
         let c_suffix = std::path::MAIN_SEPARATOR.to_string() + "c.txt";
         assert!(paths.iter().any(|p| p.ends_with(&c_suffix)));
-        crate::runtime::mimi_list_free(list, true);
+        unsafe {
+            crate::runtime::mimi_list_free(list, true);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_dir_does_not_follow_symlink_cycle() {
+        let dir = make_tree("walk_cycle");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dir, dir.join("sub").join("back")).unwrap();
+        let c_path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let list = unsafe { mimi_walk_dir(c_path.as_ptr()) };
+        assert!(!list.is_null());
+        let paths = list_to_strings(list);
+        // The cycle must not make the walker loop; it should still terminate
+        // with the original three real files.
+        assert_eq!(
+            paths.len(),
+            3,
+            "walk must not follow symlink cycle: {paths:?}"
+        );
+        unsafe {
+            crate::runtime::mimi_list_free(list, true);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn listdir_missing_dir_is_empty_not_null() {
         let c_path = std::ffi::CString::new("/nonexistent/mimi/audit/path").unwrap();
-        let list = mimi_listdir(c_path.as_ptr());
+        let list = unsafe { mimi_listdir(c_path.as_ptr()) };
         assert!(!list.is_null());
         // SAFETY: list just allocated by mimi_listdir.
         unsafe {
             assert_eq!((*list).len, 0);
         }
-        crate::runtime::mimi_list_free(list, true);
+        unsafe {
+            crate::runtime::mimi_list_free(list, true);
+        }
+    }
+
+    #[test]
+    fn exec_safe_rejects_malformed_args_list() {
+        let prog = std::ffi::CString::new("/bin/true").unwrap();
+        // Negative len: must fail without touching data.
+        let mut bad_len = MimiList {
+            len: -1,
+            data: std::ptr::null_mut(),
+            owns_data: false,
+            element_kind: ListElementKind::String,
+            has_header: false,
+        };
+        let res = unsafe { mimi_exec_safe(prog.as_ptr(), &mut bad_len) };
+        assert!(!res.is_null());
+        // SAFETY: res is a valid MimiExecResult from mimi_exec_safe.
+        unsafe {
+            let stderr = CStr::from_ptr((*res).stderr).to_string_lossy().into_owned();
+            assert!(
+                stderr.contains("invalid args list"),
+                "negative len must be rejected, stderr={stderr}"
+            );
+            mimi_exec_free(res);
+        }
+
+        // Non-null data is required when len > 0.
+        let mut null_data = MimiList {
+            len: 1,
+            data: std::ptr::null_mut(),
+            owns_data: false,
+            element_kind: ListElementKind::String,
+            has_header: false,
+        };
+        let res = unsafe { mimi_exec_safe(prog.as_ptr(), &mut null_data) };
+        assert!(!res.is_null());
+        // SAFETY: res is a valid MimiExecResult from mimi_exec_safe.
+        unsafe {
+            let stderr = CStr::from_ptr((*res).stderr).to_string_lossy().into_owned();
+            assert!(
+                stderr.contains("invalid args list"),
+                "null data with len>0 must be rejected, stderr={stderr}"
+            );
+            mimi_exec_free(res);
+        }
+
+        // An empty list is always safe to run with no args, regardless of
+        // element_kind (codegen lists only provide the {len, data} prefix).
+        let mut empty = MimiList {
+            len: 0,
+            data: std::ptr::null_mut(),
+            owns_data: false,
+            element_kind: ListElementKind::I64,
+            has_header: false,
+        };
+        let res = unsafe { mimi_exec_safe(prog.as_ptr(), &mut empty) };
+        assert!(!res.is_null());
+        // SAFETY: res is a valid MimiExecResult from mimi_exec_safe.
+        unsafe {
+            mimi_exec_free(res);
+        }
     }
 }

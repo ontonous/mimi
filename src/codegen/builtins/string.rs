@@ -32,7 +32,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // - StructValue: {i8*, i64} (builtin function results)
         // 2026-08-06 (audit 1): layout-checked extraction — a `List` `{i64,ptr}`
         // struct used to reach `into_pointer_value()` and panic the compiler.
-        let data_ptr = self.extract_string_arg(&args[0], "str_char_at")?;
+        let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(&args[0], "str_char_at")?;
         // CG-H1: Unicode scalar indexing via runtime (matches interpreter).
         let i64_ty = self.context.i64_type();
         let index_i64 = if index.get_type().get_bit_width() < 64 {
@@ -42,12 +42,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             index
         };
-        let char_at_fn = self.get_runtime_fn("mimi_str_char_at")?;
+        let char_at_fn = self.get_runtime_fn("mimi_str_char_at_ll")?;
         let raw_result = self
             .build_call(
                 char_at_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(byte_len),
                     BasicMetadataValueEnum::IntValue(index_i64),
                 ],
                 "str_char_at_call",
@@ -78,17 +79,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Handle both string representations:
         // - PointerValue: char* directly (literal strings)
         // - StructValue: {i8*, i64} (builtin function results)
-        let data_ptr = match &args[0] {
+        let (data_ptr, byte_len_opt) = match &args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => {
                 // Literal string: pv is already a char*
-                *pv
+                (*pv, None)
             }
             BasicMetadataValueEnum::StructValue(sv) => {
-                // Builtin string struct {i8*, i64}: extract field 0 (data pointer)
-                self.builder
+                // Builtin string struct {i8*, i64}: extract field 0 (data
+                // pointer) and field 1 (explicit byte length). Guard against
+                // struct layouts whose first field is not a pointer
+                // (e.g. List<i32> is {i64, ptr}); the checker accepts these
+                // calls today and previously this produced a Rust panic in
+                // into_pointer_value().
+                let field0 = self
+                    .builder
                     .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?;
+                let field1 = self
+                    .builder
+                    .build_extract_value(*sv, 1, "str_len")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str len: {}", e)))?;
+                match field0 {
+                    BasicValueEnum::PointerValue(pv) => {
+                        let len = match field1 {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => {
+                                return Err(CompileError::TypeMismatch(
+                                    "char_code: string struct length field must be i64".to_string(),
+                                ))
+                            }
+                        };
+                        (pv, Some(len))
+                    }
+                    _ => {
+                        return Err(CompileError::TypeMismatch(
+                            "char_code: first arg must be a string, not a list/struct".to_string(),
+                        ))
+                    }
+                }
             }
             _ => {
                 return Err(CompileError::TypeMismatch(
@@ -115,7 +143,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             index
         };
         // OOB gate: index < 0 || index >= char_count.
-        let n_chars = self.count_utf8_chars(data_ptr, None)?;
+        let n_chars = self.count_utf8_chars(data_ptr, byte_len_opt)?;
         let neg = self
             .builder
             .build_int_compare(inkwell::IntPredicate::SLT, index64, zero, "cc_neg")

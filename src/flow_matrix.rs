@@ -1228,7 +1228,6 @@ mod tests {
                 is_fallback: false,
                 is_ffi_pinned: false,
             }],
-            impl_protocols: vec![],
             persistent_fields: vec![],
             fault_type: None,
         }

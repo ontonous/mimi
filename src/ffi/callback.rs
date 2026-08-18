@@ -155,7 +155,10 @@ pub unsafe extern "C" fn callback_trampoline(
                     }
                     val
                 };
-                return invoker(callback_id, &[arg1, arg2, userdata_i64]);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    invoker(callback_id, &[arg1, arg2, userdata_i64])
+                }));
+                return result.unwrap_or(-1);
             }
         }
         -1
@@ -198,7 +201,10 @@ pub unsafe extern "C" fn qsort_trampoline(
     with_callback_table(|table| {
         if let Some(handle) = table.get(callback_id) {
             if let Some(ref invoker) = handle.invoker {
-                return invoker(callback_id, &[a_val, b_val]) as i32;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    invoker(callback_id, &[a_val, b_val]) as i32
+                }));
+                return result.unwrap_or(0);
             }
         }
         #[cfg(debug_assertions)]
@@ -235,6 +241,31 @@ mod tests {
         // SAFETY: callback_trampoline is a safe-to-call extern "C" function; id is a valid registered callback ID and args are simple integers.
         let result = unsafe { callback_trampoline(id, 3, 4, std::ptr::null_mut()) };
         assert_eq!(result, 7);
+        table.remove(id);
+    }
+
+    #[test]
+    fn test_panicking_callback_returns_sentinel() {
+        let table = global_callback_table();
+        let id = table.register(Some(Box::new(|_id: i64, _args: &[i64]| -> i64 {
+            panic!("intentional callback panic");
+        })));
+        // SAFETY: registration is valid; callback_id and null userdata are valid.
+        let result = unsafe { callback_trampoline(id, 1, 2, std::ptr::null_mut()) };
+        assert_eq!(result, -1, "callback panic must not cross extern C");
+        table.remove(id);
+    }
+
+    #[test]
+    fn test_panicking_qsort_callback_returns_zero() {
+        let table = global_callback_table();
+        let id = table.register(Some(Box::new(|_id: i64, _args: &[i64]| -> i64 {
+            panic!("intentional qsort callback panic");
+        })));
+        let id_addr = &id as *const i64 as *mut std::ffi::c_void;
+        // SAFETY: id_addr points to a valid i64 callback id with matching alignment.
+        let result = unsafe { qsort_trampoline(std::ptr::null(), std::ptr::null(), id_addr) };
+        assert_eq!(result, 0, "qsort callback panic must not cross extern C");
         table.remove(id);
     }
 }

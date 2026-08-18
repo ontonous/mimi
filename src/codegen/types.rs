@@ -29,6 +29,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         Type::Name(name, args) => match name.as_str() {
             "i32" => Some(BasicTypeEnum::IntType(ctx.i32_type())),
             "i64" => Some(BasicTypeEnum::IntType(ctx.i64_type())),
+            "f32" => Some(BasicTypeEnum::FloatType(ctx.f32_type())),
             "f64" => Some(BasicTypeEnum::FloatType(ctx.f64_type())),
             "bool" => Some(BasicTypeEnum::IntType(ctx.bool_type())),
             "string" => {

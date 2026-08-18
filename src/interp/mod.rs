@@ -53,13 +53,6 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
     pub(in crate::interp) resolved_session_displays: Option<HashMap<String, String>>,
-    pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
-    pub(in crate::interp) resolved_protocol_transitions:
-        Option<HashMap<String, Vec<(String, String, String)>>>,
-    pub(in crate::interp) resolved_protocol_payloads: Option<HashMap<String, String>>,
-    pub(in crate::interp) resolved_protocol_states: Option<HashMap<String, Vec<String>>>,
-    pub(in crate::interp) resolved_protocol_state_payloads:
-        Option<HashMap<String, (String, String)>>,
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     pub(in crate::interp) resolved_actor_method_signatures:
         Option<HashMap<String, (usize, String)>>,
@@ -106,7 +99,6 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_flow_events: Option<HashMap<String, Vec<String>>>,
     pub(in crate::interp) resolved_item_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
-    pub(in crate::interp) resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -189,51 +181,6 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_sessions = Some(sessions);
         interp.resolved_session_displays = Some(session_displays);
-        let protocols = program
-            .protocols()
-            .values()
-            .map(|protocol| protocol.qualified_name.clone())
-            .collect();
-        interp.resolved_protocols = Some(protocols);
-        let mut protocol_transitions = HashMap::new();
-        let mut protocol_payloads = HashMap::new();
-        let mut protocol_states = HashMap::new();
-        let mut protocol_state_payloads = HashMap::new();
-        for protocol in program.protocols().values() {
-            protocol_transitions.insert(
-                protocol.qualified_name.clone(),
-                protocol
-                    .transition_records
-                    .iter()
-                    .map(|tr| {
-                        (
-                            tr.event.clone(),
-                            tr.from_state.clone(),
-                            tr.to_states.first().cloned().unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-            let mut state_names: Vec<String> = protocol.states.clone();
-            state_names.sort();
-            protocol_states.insert(protocol.qualified_name.clone(), state_names);
-            for state in &protocol.state_payloads {
-                if let Some(ty) = &state.payload_type {
-                    protocol_payloads.insert(
-                        format!("{}.{}", protocol.qualified_name, state.name),
-                        ty.clone(),
-                    );
-                    protocol_state_payloads.insert(
-                        format!("{}.{}", protocol.qualified_name, state.name),
-                        (state.payload_name.clone().unwrap_or_default(), ty.clone()),
-                    );
-                }
-            }
-        }
-        interp.resolved_protocol_transitions = Some(protocol_transitions);
-        interp.resolved_protocol_payloads = Some(protocol_payloads);
-        interp.resolved_protocol_states = Some(protocol_states);
-        interp.resolved_protocol_state_payloads = Some(protocol_state_payloads);
         let mut actors = HashMap::new();
         let mut actor_method_signatures = HashMap::new();
         let mut actor_method_params = HashMap::new();
@@ -540,7 +487,6 @@ impl<'a> Interpreter<'a> {
                 crate::core::ResolvedItemKind::Module => "module",
                 crate::core::ResolvedItemKind::Actor => "actor",
                 crate::core::ResolvedItemKind::Flow => "flow",
-                crate::core::ResolvedItemKind::Protocol => "protocol",
                 crate::core::ResolvedItemKind::Session => "session",
             };
             item_kinds.insert(item.qualified_name.clone(), kind.to_string());
@@ -553,13 +499,6 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_persistent_fields = Some(persistent_fields);
-        let mut flow_protocols = HashMap::new();
-        for flow in program.flows().values() {
-            if !flow.impl_protocols.is_empty() {
-                flow_protocols.insert(flow.id.0.clone(), flow.impl_protocols.clone());
-            }
-        }
-        interp.resolved_flow_protocols = Some(flow_protocols);
         interp
     }
 
@@ -598,11 +537,6 @@ impl<'a> Interpreter<'a> {
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_session_displays: None,
-            resolved_protocols: None,
-            resolved_protocol_transitions: None,
-            resolved_protocol_payloads: None,
-            resolved_protocol_states: None,
-            resolved_protocol_state_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_actor_method_params: None,
@@ -640,7 +574,6 @@ impl<'a> Interpreter<'a> {
             resolved_flow_events: None,
             resolved_item_kinds: None,
             resolved_persistent_fields: None,
-            resolved_flow_protocols: None,
         }
     }
 
@@ -681,44 +614,6 @@ impl<'a> Interpreter<'a> {
             .as_ref()
             .and_then(|map| map.get(qualified_name).map(String::as_str))
     }
-
-    pub(crate) fn has_resolved_protocol(&self, qualified_name: &str) -> bool {
-        self.resolved_protocols
-            .as_ref()
-            .is_some_and(|set| set.contains(qualified_name))
-    }
-
-    pub(crate) fn resolved_protocol_transitions(
-        &self,
-        protocol: &str,
-    ) -> Option<Vec<(String, String, String)>> {
-        self.resolved_protocol_transitions
-            .as_ref()
-            .and_then(|map| map.get(protocol).cloned())
-    }
-
-    pub(crate) fn resolved_protocol_payload(&self, protocol: &str, state: &str) -> Option<String> {
-        self.resolved_protocol_payloads
-            .as_ref()
-            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
-    }
-
-    pub(crate) fn resolved_protocol_states(&self, protocol: &str) -> Option<Vec<String>> {
-        self.resolved_protocol_states
-            .as_ref()
-            .and_then(|map| map.get(protocol).cloned())
-    }
-
-    pub(crate) fn resolved_protocol_state_payload(
-        &self,
-        protocol: &str,
-        state: &str,
-    ) -> Option<(String, String)> {
-        self.resolved_protocol_state_payloads
-            .as_ref()
-            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
-    }
-
     pub(crate) fn resolved_actor_methods(&self, qualified_name: &str) -> Option<Vec<String>> {
         self.resolved_actors
             .as_ref()
@@ -1070,10 +965,6 @@ impl<'a> Interpreter<'a> {
                 .filter(|bare| *bare == flow_name)
                 .map(|_| fields.clone())
         })
-    }
-
-    pub(crate) fn resolved_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {
-        Self::resolved_field_set(&self.resolved_flow_protocols, flow_name)
     }
 
     pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {

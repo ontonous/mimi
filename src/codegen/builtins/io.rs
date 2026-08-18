@@ -734,12 +734,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         let arg_types: Vec<String> = self.pending_print_arg_types.clone();
-        if args.is_empty() {
-            return Err(CompileError::WrongArgCount(
-                "println expects at least 1 argument".to_string(),
-            ));
-        }
         let i64_ty = self.context.i64_type();
+        if args.is_empty() {
+            let puts = self.get_runtime_fn("puts")?;
+            let empty = self
+                .builder
+                .build_global_string_ptr("", "println_empty")
+                .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+            self.build_call(
+                puts,
+                &[BasicMetadataValueEnum::PointerValue(
+                    empty.as_pointer_value(),
+                )],
+                "println_empty_call",
+            )?;
+            return Ok(i64_ty.const_int(0, false).into());
+        }
         // Single string pointer: use puts (which appends newline automatically).
         // Skip this fast path for list/record pointers, which need formatting.
         if args.len() == 1 {
@@ -791,7 +801,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(i64_ty.const_int(0, false).into())
     }
 
-    fn extract_print_arg(
+    pub(super) fn extract_print_arg(
         &self,
         arg: &BasicMetadataValueEnum<'ctx>,
         i64_ty: inkwell::types::IntType<'ctx>,
@@ -2651,7 +2661,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// on the full `List<...>` type name. Extracted from the print path so
     /// nested containers inside product tuples (e.g. `(List<i32>, List<i32>)`)
     /// can reuse the same element-kind dispatch.
-    fn emit_list_typed_to_string(
+    pub(super) fn emit_list_typed_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
         list_ty: &str,
@@ -8508,59 +8518,65 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        if args.is_empty() {
-            return Err(CompileError::WrongArgCount(
-                "print expects at least 1 argument".to_string(),
-            ));
-        }
+        // VM parity: print() prints nothing; print(a, b, ...) prints all
+        // arguments separated by a single space.
         let i64_ty = self.context.i64_type();
-        let arg_type = self
-            .pending_print_arg_types
-            .first()
-            .cloned()
-            .unwrap_or_default();
-        let (print_arg, fmt_spec) = self.extract_print_arg(&args[0], i64_ty, &arg_type)?;
+        if args.is_empty() {
+            return Ok(i64_ty.const_int(0, false).into());
+        }
+        let arg_types: Vec<String> = self.pending_print_arg_types.clone();
+        let mut print_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut fmt_str = String::new();
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                fmt_str.push(' ');
+            }
+            let arg_type = arg_types.get(i).cloned().unwrap_or_default();
+            let (print_arg, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
+            print_args.push(print_arg);
+            fmt_str.push_str(&spec);
+        }
         let fmt_global = self
             .builder
-            .build_global_string_ptr(&fmt_spec, "fmt")
+            .build_global_string_ptr(&fmt_str, "print_fmt")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         let mut printf_args = vec![BasicMetadataValueEnum::PointerValue(
             fmt_global.as_pointer_value(),
         )];
-        printf_args.push(print_arg);
+        printf_args.extend(print_args);
         let printf = self.get_runtime_fn("printf")?;
-        self.build_call(printf, &printf_args, "printf_call")?;
-        // Q2: release display buffers consumed by this printf call.
+        self.build_call(printf, &printf_args, "print_call")?;
         self.flush_display_frees()?;
-        Ok(self.context.i64_type().const_int(0, false).into())
+        Ok(i64_ty.const_int(0, false).into())
     }
 
     pub(super) fn compile_eprintln(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        if args.is_empty() {
-            return Err(CompileError::WrongArgCount(
-                "eprintln expects at least 1 argument".to_string(),
-            ));
-        }
+        // VM parity: eprintln() prints a newline to stderr; eprintln(a, b, ...)
+        // prints all arguments separated by a single space plus a newline.
         let i64_ty = self.context.i64_type();
-        let arg_type = self
-            .pending_print_arg_types
-            .first()
-            .cloned()
-            .unwrap_or_default();
-        let (print_arg, mut fmt_spec) = self.extract_print_arg(&args[0], i64_ty, &arg_type)?;
-        fmt_spec.push('\n');
+        let mut fmt_str = String::new();
+        let mut print_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        if !args.is_empty() {
+            let arg_types: Vec<String> = self.pending_print_arg_types.clone();
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    fmt_str.push(' ');
+                }
+                let arg_type = arg_types.get(i).cloned().unwrap_or_default();
+                let (print_arg, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
+                print_args.push(print_arg);
+                fmt_str.push_str(&spec);
+            }
+        }
+        fmt_str.push('\n');
         let fmt_global = self
             .builder
-            .build_global_string_ptr(&fmt_spec, "efmt")
+            .build_global_string_ptr(&fmt_str, "efmt")
             .map_err(|e| CompileError::LlvmError(format!("efmt error: {}", e)))?;
-        // Wave-1 audit fix (§8, FIX: eprintln wrote stdout): emit
-        // `fprintf(stderr, …)` instead of `printf(…)` so the message goes to
-        // the standard error stream. `fprintf` is declared in
-        // register_libc (builtins/mod.rs); the `stderr` FILE* global follows
-        // the same external-global pattern `compile_input` uses for `stdin`.
+        // stderr, not stdout (Wave-1 audit fix §8).
         let stderr_stream = self.get_stream_global("stderr")?;
         let fprintf = self
             .module
@@ -8570,11 +8586,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::PointerValue(stderr_stream),
             BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
         ];
-        fprintf_args.push(print_arg);
+        fprintf_args.extend(print_args);
         self.build_call(fprintf, &fprintf_args, "eprintf_call")?;
-        // Q2: release display buffers consumed by this eprintf call.
         self.flush_display_frees()?;
-        Ok(self.context.i64_type().const_int(0, false).into())
+        Ok(i64_ty.const_int(0, false).into())
     }
 
     pub(super) fn compile_assert(
@@ -9114,49 +9129,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // the bytecode VM returns a bare `Value::String` (trimmed, io.rs
         // builtin_input_line), and codegen returns the {ptr,len} string
         // with the trailing newline trimmed. On EOF/error codegen returns
-        // an EMPTY string (deterministic, matching VM's empty read), instead
-        // of strlen-ing an uninitialized 4096-byte buffer (the pre-audit UB).
+        // an EMPTY string (deterministic, matching VM's empty read).
+        //
+        // Batch4-01 P2-7: the old implementation used a fixed 4096-byte
+        // fgets buffer and truncated long input lines. The runtime helper
+        // reads with Rust's unbounded read_line and applies the same
+        // trim_end as the VM.
         let i64_ty = self.context.i64_type();
-        let i8_ty = self.context.i8_type();
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Allocate buffer (4096 bytes)
-        let buf_size = i64_ty.const_int(4096, false);
-        // B4: use malloc_or_abort for NULL check.
-        let buf = self.malloc_or_abort(buf_size, "input_buf")?;
-        // NOTE: not registered — returned value owns the allocation.
-        // Defensive NUL so the buffer is a valid C string before fgets runs.
-        self.build_store(buf, i8_ty.const_int(0, false))?;
-        // fgets(buf, 4096, stdin)
-        let stdin_val = self.get_stream_global("stdin")?;
-        let fgets_fn = self.module.get_function("fgets").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let ty = i8_ptr.fn_type(
-                &[
-                    BasicMetadataTypeEnum::PointerType(i8_ptr),
-                    BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                    BasicMetadataTypeEnum::PointerType(i8_ptr),
-                ],
-                false,
-            );
-            self.module
-                .add_function("fgets", ty, Some(inkwell::module::Linkage::External))
-        });
-        // Wave-1 audit fix (§8, FIX: fgets return value ignored): fgets
-        // returns NULL on EOF/error; the buffer contents are then
-        // indeterminate. Check the result and fall through to a
-        // deterministic empty string on NULL.
-        let fgets_ret = self
-            .build_call(
-                fgets_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::IntValue(buf_size),
-                    BasicMetadataValueEnum::PointerValue(stdin_val),
-                ],
-                "fgets_call",
-            )?
+        let read_line_fn = self.get_runtime_fn("mimi_read_stdin_line")?;
+        let raw = self
+            .build_call(read_line_fn, &[], "read_stdin_line_call")?
             .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("fgets returned void".into()))?
+            .ok_or_else(|| CompileError::LlvmError("mimi_read_stdin_line returned void".into()))?
             .into_pointer_value();
 
         // Build string struct { i8*, i64 } (result slot shared by both arms).
@@ -9183,23 +9168,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let eof_bb = self.context.append_basic_block(function, "input_eof");
         let ok_bb = self.context.append_basic_block(function, "input_ok");
         let merge_bb = self.context.append_basic_block(function, "input_merge");
-        let fgets_null = self
+        let raw_null = self
             .builder
-            .build_is_null(fgets_ret, "input_fgets_null")
+            .build_is_null(raw, "input_raw_null")
             .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
-        self.build_cond_br(fgets_null, eof_bb, ok_bb)?;
+        self.build_cond_br(raw_null, eof_bb, ok_bb)?;
 
         // EOF/error arm: deterministic empty string.
         self.builder.position_at_end(eof_bb);
-        // The line buffer is useless on this arm — release it (the returned
-        // empty string is a static global, not the heap buffer).
-        if let Ok(free_fn) = self.get_runtime_fn("free") {
-            self.build_call(
-                free_fn,
-                &[BasicMetadataValueEnum::PointerValue(buf)],
-                "input_eof_free",
-            )?;
-        }
         let empty_lit = self
             .builder
             .build_global_string_ptr("", "input_empty")
@@ -9208,8 +9184,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(len_gep, i64_ty.const_int(0, false))?;
         self.build_br(merge_bb)?;
 
-        // Success arm: strip trailing whitespace. The VM `input()` applies
-        // `trim_end`; mirror it for the ASCII whitespace set.
+        // Success arm: runtime helper already trimmed trailing whitespace and
+        // NUL-terminated the heap buffer.
         self.builder.position_at_end(ok_bb);
         let strlen_fn = self
             .module
@@ -9218,90 +9194,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let str_len = self
             .build_call(
                 strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(buf)],
+                &[BasicMetadataValueEnum::PointerValue(raw)],
                 "strlen_call",
             )?
             .try_as_basic_value_opt()
             .ok_or("strlen returned void")?
             .into_int_value();
-        let len_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "input_len")?;
-        self.build_store(len_alloca, str_len)?;
-        let trim_bb = self.context.append_basic_block(function, "input_trim");
-        let trim_stop_bb = self.context.append_basic_block(function, "input_trim_stop");
-        self.build_br(trim_bb)?;
-        self.builder.position_at_end(trim_bb);
-        let cur_len = self
-            .build_load(i64_ty, len_alloca, "input_trim_len")?
-            .into_int_value();
-        let has_chars = self
-            .builder
-            .build_int_compare(
-                IntPredicate::UGT,
-                cur_len,
-                i64_ty.const_int(0, false),
-                "input_trim_has",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let trim_body_bb = self.context.append_basic_block(function, "input_trim_body");
-        self.build_cond_br(has_chars, trim_body_bb, trim_stop_bb)?;
-        self.builder.position_at_end(trim_body_bb);
-        let last_idx = self
-            .builder
-            .build_int_sub(cur_len, i64_ty.const_int(1, false), "input_last_idx")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        // SAFETY: byte-offset GEP into `buf`; last_idx = cur_len - 1 and
-        // cur_len <= strlen(buf) < 4096 by construction (fgets bound).
-        let last_ptr = self
-            .gep()
-            .build_gep(i8_ty, buf, &[last_idx], "input_last_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let last_ch = self
-            .build_load(i8_ty, last_ptr, "input_last_ch")?
-            .into_int_value();
-        // is_ws = ch == '\n' || ch == '\r' || ch == '\t' || ch == ' '
-        let mut is_ws = self
-            .builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                last_ch,
-                i8_ty.const_int(10, false),
-                "input_ws_nl",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        for (ws_name, ws_byte) in [("cr", 13u64), ("tab", 9), ("sp", 32)] {
-            let eq = self
-                .builder
-                .build_int_compare(
-                    IntPredicate::EQ,
-                    last_ch,
-                    i8_ty.const_int(ws_byte, false),
-                    &format!("input_ws_{}", ws_name),
-                )
-                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-            is_ws = self
-                .builder
-                .build_or(is_ws, eq, &format!("input_ws_or_{}", ws_name))
-                .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        }
-        let trim_dec_bb = self.context.append_basic_block(function, "input_trim_dec");
-        self.build_cond_br(is_ws, trim_dec_bb, trim_stop_bb)?;
-        self.builder.position_at_end(trim_dec_bb);
-        self.build_store(len_alloca, last_idx)?;
-        self.build_br(trim_bb)?;
-        self.builder.position_at_end(trim_stop_bb);
-        let final_len = self
-            .build_load(i64_ty, len_alloca, "input_final_len")?
-            .into_int_value();
-        // Re-terminate the trimmed buffer (no-op when nothing was trimmed).
-        // SAFETY: byte-offset GEP; final_len <= strlen(buf) < 4096, so
-        // buf[final_len] is inside the 4096-byte allocation.
-        let term_ptr = self
-            .gep()
-            .build_gep(i8_ty, buf, &[final_len], "input_term_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(term_ptr, i8_ty.const_int(0, false))?;
-        self.build_store(ptr_gep, buf)?;
-        self.build_store(len_gep, final_len)?;
+        self.build_store(ptr_gep, raw)?;
+        self.build_store(len_gep, str_len)?;
         self.build_br(merge_bb)?;
 
         self.builder.position_at_end(merge_bb);
@@ -9315,6 +9215,154 @@ impl<'ctx> CodeGenerator<'ctx> {
             "input_result",
         )?;
         Ok(loaded)
+    }
+
+    pub(super) fn compile_try_input_line(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if !args.is_empty() {
+            return Err(CompileError::WrongArgCount(
+                "try_input_line expects 0 arguments".to_string(),
+            ));
+        }
+
+        // Mirrors compile_getenv's Result<string,string> lowering. The
+        // runtime helper returns null on EOF/read error and a heap string on
+        // a successful line (including empty lines), so the two cases are
+        // distinguishable.
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        // Result<string,string> layout: {i1 disc, string ok, i64 err}
+        let result_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::StructType(string_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+
+        let read_line_fn = self.get_runtime_fn("mimi_read_stdin_line")?;
+        let raw = self
+            .build_call(read_line_fn, &[], "try_input_line_call")?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("mimi_read_stdin_line returned void".into()))?
+            .into_pointer_value();
+
+        let str_alloca = self.build_alloca(string_ty, "try_input_str")?;
+        let result_alloca = self.build_alloca(result_ty, "try_input_result")?;
+
+        let str_ptr_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let str_len_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(str_ptr_gep, i8_ptr.const_null())?;
+        self.build_store(str_len_gep, i64_ty.const_int(0, false))?;
+
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 0, "res_disc")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let ok_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 1, "res_ok")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let err_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 2, "res_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+
+        let is_null = self
+            .builder
+            .build_is_null(raw, "try_input_is_null")
+            .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for try_input_line".into())
+        })?;
+        let ok_bb = self.context.append_basic_block(function, "try_input_ok");
+        let err_bb = self.context.append_basic_block(function, "try_input_err");
+        let merge_bb = self.context.append_basic_block(function, "try_input_merge");
+        self.build_cond_br(is_null, err_bb, ok_bb)?;
+
+        // Ok branch: disc=1, ok=string, err=0
+        self.builder.position_at_end(ok_bb);
+        let strlen_fn = self
+            .module
+            .get_function("strlen")
+            .ok_or_else(|| "strlen not declared".to_string())?;
+        let str_len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(raw)],
+                "try_input_strlen",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("strlen returned void")?
+            .into_int_value();
+        self.build_store(str_ptr_gep, raw)?;
+        self.build_store(str_len_gep, str_len)?;
+        self.build_store(disc_gep, bool_ty.const_int(1, false))?;
+        let str_val = self.build_load(string_ty, str_alloca, "try_input_str_val")?;
+        self.build_store(ok_gep, str_val)?;
+        self.build_store(err_gep, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+
+        // Err branch: disc=0, ok=zero, err=heap {ptr,len} string handle
+        self.builder.position_at_end(err_bb);
+        let err_msg = self
+            .builder
+            .build_global_string_ptr("input: EOF or read error", "try_input_err_msg")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        let err_len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    err_msg.as_pointer_value(),
+                )],
+                "try_input_err_len",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("try_input strlen returned void")?
+            .into_int_value();
+        let heap = self.malloc_or_abort(i64_ty.const_int(16, false), "try_input_err_heap")?;
+        let heap_ptr = self
+            .build_bit_cast(
+                heap.into(),
+                BasicTypeEnum::PointerType(i8_ptr),
+                "try_input_err_heap_ptr",
+            )?
+            .into_pointer_value();
+        let err_gep0 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 0, "try_input_err_heap_ptr_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(err_gep0, err_msg.as_pointer_value())?;
+        let err_gep1 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 1, "try_input_err_heap_len_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(err_gep1, err_len)?;
+        self.build_store(disc_gep, bool_ty.const_int(0, false))?;
+        self.build_store(ok_gep, string_ty.const_zero())?;
+        let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "try_input_err_ptr_int")?;
+        self.build_store(err_gep, err_ptr_int)?;
+        self.build_br(merge_bb)?;
+
+        self.builder.position_at_end(merge_bb);
+        self.build_load(result_ty, result_alloca, "try_input_result_loaded")
     }
 
     pub(super) fn compile_file_exists(
@@ -9568,6 +9616,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             &[BasicMetadataValueEnum::PointerValue(file)],
             "rewind_call",
         )?;
+        // Guard against i64::MAX + 1 wrapping (batch4-01 P2-5). Real files
+        // never reach this size, but a hostile/truncated ftell must not turn
+        // the +1 into a negative malloc size.
+        let is_max_size = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                file_size,
+                i64_ty.const_int(i64::MAX as u64, false),
+                "read_file_size_is_max",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("read_file: no current function".into()))?;
+        let size_ok_bb = self.context.append_basic_block(function, "read_size_ok_bb");
+        let size_trap_bb = self
+            .context
+            .append_basic_block(function, "read_size_trap_bb");
+        self.builder
+            .build_conditional_branch(is_max_size, size_trap_bb, size_ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        self.builder.position_at_end(size_trap_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let size_msg = self
+            .builder
+            .build_global_string_ptr("read_file: file size too large", "read_size_msg")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                size_msg.as_pointer_value(),
+            )],
+            "read_size_abort",
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+        self.builder.position_at_end(size_ok_bb);
         // malloc(file_size + 1)
         let one = i64_ty.const_int(1, false);
         let alloc_size = self
@@ -9590,22 +9678,31 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fread", ty, Some(inkwell::module::Linkage::External))
         });
-        self.build_call(
-            fread_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
-                BasicMetadataValueEnum::IntValue(file_size),
-                BasicMetadataValueEnum::PointerValue(file),
-            ],
-            "fread_call",
-        )?;
+        let fread_ret = self
+            .build_call(
+                fread_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
+                    BasicMetadataValueEnum::IntValue(file_size),
+                    BasicMetadataValueEnum::PointerValue(file),
+                ],
+                "fread_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("fread returned void")?
+            .into_int_value();
+        // The file may have been truncated or read short between stat and
+        // fread. Use the actual byte count for both the terminator and the
+        // returned string length, never uninitialized tail bytes (batch4-01
+        // P2-4). fread cannot legally return more than the requested count.
+        let read_len = fread_ret;
         // Null-terminate
         let null_gep = self
             .build_in_bounds_gep(
                 BasicTypeEnum::IntType(self.context.i8_type()),
                 buf,
-                &[file_size],
+                &[read_len],
                 "null_byte",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -9624,7 +9721,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Build string struct {i8*, i64} and store into Ok
         self.build_store(str_ptr_gep, buf)?;
-        self.build_store(str_len_gep, file_size)?;
+        self.build_store(str_len_gep, read_len)?;
 
         self.build_store(disc_gep, bool_ty.const_int(1, false))?;
         let str_val = self.build_load(string_ty, str_alloca, "str_val")?;
@@ -9654,9 +9751,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_os_error_message void")?
             .into_pointer_value();
-        // The message buffer is consumed by concat / display before the
-        // function-boundary free; register it so it is released exactly once.
-        self.register_heap_alloc(err_msg);
+        // NOTE: Ownership intentionally stays with the returned Result value.
+        // Registering these pointers in the function-level heap scope would free
+        // them on an early return/function boundary, causing use-after-free when
+        // the caller decodes the Err string. Leaks on local-only errors are
+        // tracked separately (audit P2); correctness/UAF must win.
         self.build_store(disc_gep, bool_ty.const_int(0, false))?;
         self.build_store(ok_gep, string_ty.const_zero())?;
         // Err(string) must store a heap {ptr,len} handle — the contract that
@@ -9693,7 +9792,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(string_ty, heap_ptr, 1, "read_err_heap_len_gep")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.build_store(err_gep1, err_len)?;
-        self.register_heap_box(heap_ptr);
         let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "err_ptr_int")?;
         self.build_store(err_gep, err_ptr_int)?;
         self.build_br(merge_bb)?;
@@ -9713,7 +9811,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let content_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let (content_ptr, content_len) = self.extract_raw_str_ptr_len(&args[1])?;
         // fopen(path, "w")
         let mode_str = self
             .builder
@@ -9814,7 +9912,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_os_error_message void")?
             .into_pointer_value();
-        self.register_heap_alloc(err_msg);
+        // Do not register in the function-level heap scope: like compile_read_file,
+        // registering would free the Err string on an early return/function boundary
+        // while the returned Result still references it.
         self.build_store(disc_gep, bool_ty.const_int(0, false))?;
         self.build_store(ok_gep, i64_ty.const_int(0, false))?;
         // Err(string) must use a heap {ptr,len} handle (see compile_read_file)
@@ -9857,27 +9957,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(string_struct_ty, heap_ptr, 1, "write_err_heap_len_gep")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.build_store(werr_gep1, werr_len)?;
-        self.register_heap_box(heap_ptr);
         let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "err_ptr_int")?;
         self.build_store(err_gep, err_ptr_int)?;
         self.build_br(merge_bb)?;
         // ── Ok branch: fopen succeeded ──
         self.builder.position_at_end(write_bb);
-        // strlen(content) for length
-        let strlen_fn = self
-            .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let content_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(content_ptr)],
-                "strlen_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?;
+        // Use the Mimi string's explicit byte length so embedded NUL bytes
+        // are written intact (batch4-01 P2-6).
         // fwrite(content, 1, len, file)
         let fwrite_fn = self.module.get_function("fwrite").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -9893,16 +9979,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fwrite", ty, Some(inkwell::module::Linkage::External))
         });
-        self.build_call(
+        let fwrite_result = self.build_call(
             fwrite_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(content_ptr),
                 BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(1, false)),
-                BasicMetadataValueEnum::IntValue(content_len.into_int_value()),
+                BasicMetadataValueEnum::IntValue(content_len),
                 BasicMetadataValueEnum::PointerValue(file),
             ],
             "fwrite_call",
         )?;
+        let fwrite_int = fwrite_result
+            .try_as_basic_value_opt()
+            .ok_or("fwrite returned void")?
+            .into_int_value();
         // fclose(file)
         let i32_ty = self.context.i32_type();
         let fclose_fn = self.module.get_function("fclose").unwrap_or_else(|| {
@@ -9911,11 +10001,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fclose", ty, Some(inkwell::module::Linkage::External))
         });
-        self.build_call(
+        let fclose_result = self.build_call(
             fclose_fn,
             &[BasicMetadataValueEnum::PointerValue(file)],
             "fclose_call",
         )?;
+        let fclose_int = fclose_result
+            .try_as_basic_value_opt()
+            .ok_or("fclose returned void")?
+            .into_int_value();
+        // A short fwrite or a failed fclose must be reported as Err, not
+        // silently reported as a successful write.
+        let wrote_short = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                fwrite_int,
+                content_len,
+                "write_wrote_short",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let close_failed = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                fclose_int,
+                i32_ty.const_int(0, false),
+                "write_close_failed",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let write_failed = self
+            .builder
+            .build_or(wrote_short, close_failed, "write_failed")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let write_success_bb = self
+            .context
+            .append_basic_block(function, "write_success_bb");
+        self.builder
+            .build_conditional_branch(write_failed, null_check_bb, write_success_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        self.builder.position_at_end(write_success_bb);
         // Result Ok: {i1 true, i64 0, i64 0}
         self.build_store(disc_gep, bool_ty.const_int(1, false))?;
         self.build_store(ok_gep, i64_ty.const_int(0, false))?;
@@ -10421,12 +10546,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(is_null, null_bb, nonnull_bb)
             .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
 
-        // Null path: use default values
+        // Null path: use default values. Release the runtime error string if
+        // one was written into err_out (batch4-01 P2-3).
         self.builder.position_at_end(null_bb);
         let null_size = neg_one_i64;
         let null_mod = zero_i64;
         let null_isf = false_val;
         let null_isd = false_val;
+        let err_out = self
+            .build_load(i8_ptr, err_alloca, "stat_err_out")
+            .map_err(|e| CompileError::LlvmError(format!("load err_out: {}", e)))?
+            .into_pointer_value();
+        let free_fn = self.get_runtime_fn("free")?;
+        self.build_call(
+            free_fn,
+            &[BasicMetadataValueEnum::PointerValue(err_out)],
+            "stat_free_err_out",
+        )?;
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
@@ -10551,21 +10687,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let content_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let (content_ptr, content_len) = self.extract_raw_str_ptr_len(&args[1])?;
 
-        let append_fn = self.get_runtime_fn("mimi_append_file")?;
+        let append_fn = self.get_runtime_fn("mimi_append_file_ll")?;
         let ret = self
             .build_call(
                 append_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(path_ptr),
                     BasicMetadataValueEnum::PointerValue(content_ptr),
+                    BasicMetadataValueEnum::IntValue(content_len),
                 ],
                 "append_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("append_file error: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("mimi_append_file returned void")?
+            .ok_or("mimi_append_file_ll returned void")?
             .into_int_value();
 
         // Convert i64 to bool (i64): ret != 0
@@ -10784,6 +10921,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 || arg_type.starts_with("Set<")
                 || arg_type == "set";
             if !is_handle {
+                // VM parity: bool renders as "true"/"false", not "1"/"0".
+                let is_bool = arg_type == "bool" || iv.get_type().get_bit_width() == 1;
+                if is_bool {
+                    let true_ptr = self
+                        .builder
+                        .build_global_string_ptr("true", &format!("fmt_true_{idx}"))
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let false_ptr = self
+                        .builder
+                        .build_global_string_ptr("false", &format!("fmt_false_{idx}"))
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    return Ok(self
+                        .builder
+                        .build_select(
+                            *iv,
+                            true_ptr.as_pointer_value(),
+                            false_ptr.as_pointer_value(),
+                            &format!("fmt_bool_ptr_{idx}"),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_pointer_value());
+                }
                 let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
                 let bw = iv.get_type().get_bit_width();
                 let iv64 = if bw == 1 {
@@ -10871,6 +11030,27 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     // === Binary I/O & streaming line reading (codegen) ===
 
+    /// Trap with a static message via `mimi_runtime_abort`. Used when
+    /// binary/stream IO runtime helpers return NULL to signal an error that
+    /// the old code silently mapped to an empty string / empty array.
+    fn emit_io_trap(&self, message: &str, label: &str) -> MimiResult<()> {
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(message, &format!("{}_msg", label))
+            .map_err(|e| format!("global string error: {}", e))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            &format!("{}_abort", label),
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| format!("unreachable error: {}", e))?;
+        Ok(())
+    }
+
     pub(super) fn compile_read_file_partial(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -10889,21 +11069,73 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let func = self.get_runtime_fn("mimi_read_file_partial")?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let out_len = self.build_alloca(i64_ty, "read_file_partial_len")?;
+        let func = self.get_runtime_fn("mimi_read_file_partial_ll")?;
         let raw_ptr = self
+            .builder
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(path_ptr),
                     BasicMetadataValueEnum::IntValue(max_bytes),
+                    BasicMetadataValueEnum::PointerValue(out_len),
                 ],
                 "read_file_partial_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("read_file_partial error: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("mimi_read_file_partial returned void")?
+            .ok_or("mimi_read_file_partial_ll returned void")?
             .into_pointer_value();
-        self.wrap_c_string(raw_ptr)
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function".to_string())?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                raw_ptr,
+                i8_ptr_ty.const_null(),
+                "read_file_partial_is_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "read_file_partial_null_bb");
+        let ok_bb = self
+            .context
+            .append_basic_block(function, "read_file_partial_ok_bb");
+        self.builder
+            .build_conditional_branch(is_null, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        self.builder.position_at_end(trap_bb);
+        self.emit_io_trap(
+            "read_file_partial: file not found or read failed",
+            "read_file_partial_null",
+        )?;
+        self.builder.position_at_end(ok_bb);
+        let len = self
+            .build_load(i64_ty, out_len, "read_file_partial_len_val")?
+            .into_int_value();
+        // Build Mimi string struct {i8*, i64} directly so embedded NUL bytes
+        // survive (batch4-01 P2-6).
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let str_val = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), raw_ptr, 0, "str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("insert ptr error: {}", e)))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, len, 1, "str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert len error: {}", e)))?;
+        Ok(str_val.into_struct_value().into())
     }
 
     pub(super) fn compile_read_file_bytes(
@@ -10916,18 +11148,72 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let func = self.get_runtime_fn("mimi_read_file_bytes")?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let out_len = self.build_alloca(i64_ty, "read_file_bytes_len")?;
+        let func = self.get_runtime_fn("mimi_read_file_bytes_ll")?;
         let raw_ptr = self
+            .builder
             .build_call(
                 func,
-                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                &[
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::PointerValue(out_len),
+                ],
                 "read_file_bytes_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("read_file_bytes error: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("mimi_read_file_bytes returned void")?
+            .ok_or("mimi_read_file_bytes_ll returned void")?
             .into_pointer_value();
-        self.wrap_c_string(raw_ptr)
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function".to_string())?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                raw_ptr,
+                i8_ptr_ty.const_null(),
+                "read_file_bytes_is_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "read_file_bytes_null_bb");
+        let ok_bb = self
+            .context
+            .append_basic_block(function, "read_file_bytes_ok_bb");
+        self.builder
+            .build_conditional_branch(is_null, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        self.builder.position_at_end(trap_bb);
+        self.emit_io_trap(
+            "read_file_bytes: file not found or read failed",
+            "read_file_bytes_null",
+        )?;
+        self.builder.position_at_end(ok_bb);
+        let len = self
+            .build_load(i64_ty, out_len, "read_file_bytes_len_val")?
+            .into_int_value();
+        // Build Mimi string struct {i8*, i64} directly so embedded NUL bytes
+        // survive (batch4-01 P2-6).
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let str_val = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), raw_ptr, 0, "str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("insert ptr error: {}", e)))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, len, 1, "str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert len error: {}", e)))?;
+        Ok(str_val.into_struct_value().into())
     }
 
     pub(super) fn compile_write_file_bytes(
@@ -10940,22 +11226,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let data_ptr = self.extract_raw_str_ptr(&args[1])?;
-        let func = self.get_runtime_fn("mimi_write_file_bytes")?;
+        let (data_ptr, data_len) = self.extract_raw_str_ptr_len(&args[1])?;
+        let func = self.get_runtime_fn("mimi_write_file_bytes_ll")?;
         let result = self
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(path_ptr),
                     BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(data_len),
                 ],
                 "write_file_bytes_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("write_file_bytes error: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("mimi_write_file_bytes returned void")?
+            .ok_or("mimi_write_file_bytes_ll returned void")?
             .into_int_value();
-        let zero = self.context.i64_type().const_int(0, false);
+        let zero = self.context.i32_type().const_int(0, false);
         let cmp = self
             .builder
             .build_int_compare(
@@ -10989,6 +11276,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_read_lines_json returned void")?
             .into_pointer_value();
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function".to_string())?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                raw_ptr,
+                i8_ptr_ty.const_null(),
+                "read_lines_json_is_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let trap_bb = self
+            .context
+            .append_basic_block(function, "read_lines_json_null_bb");
+        let ok_bb = self
+            .context
+            .append_basic_block(function, "read_lines_json_ok_bb");
+        self.builder
+            .build_conditional_branch(is_null, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        self.builder.position_at_end(trap_bb);
+        self.emit_io_trap(
+            "read_lines_json: file not found or read failed",
+            "read_lines_json_null",
+        )?;
+        self.builder.position_at_end(ok_bb);
         self.wrap_c_string(raw_ptr)
     }
 
@@ -11007,6 +11322,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let prog_ptr = self.extract_raw_str_ptr(&args[0])?;
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
+        let mut argv_data: Option<inkwell::values::PointerValue<'ctx>> = None;
         let args_list = if args.len() == 1 {
             i8_ptr.const_null()
         } else {
@@ -11053,6 +11369,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
                 data_raw,
             )?;
+            argv_data = Some(data_raw);
             list_alloca
         };
         let exec_fn = self.get_runtime_fn("mimi_exec_safe")?;
@@ -11069,6 +11386,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_exec_safe returned void")?
             .into_pointer_value();
+        // The argv data array is only a transient marshalling buffer:
+        // mimi_exec_safe consumes the list synchronously, so it can be freed
+        // immediately after the call (batch4-01 P2-2).
+        if let Some(argv_data) = argv_data {
+            let free_fn = self.get_runtime_fn("free")?;
+            self.build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(argv_data)],
+                "exec_safe_free_argv",
+            )?;
+        }
 
         // Reuse the same MimiExecResult → ExecResult lowering as compile_exec.
         let res_ty = self.context.struct_type(

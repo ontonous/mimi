@@ -387,8 +387,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn coerce_to_list_storage(
         &mut self,
         val: BasicValueEnum<'ctx>,
-        _elem_expr: &Expr,
-        _vars: &HashMap<String, VarEntry<'ctx>>,
+        elem_expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
         // When packing into a typed List<Result/Option/...>, inflate so Ok and
         // Err share one layout (Err is often {i1,i64,i64} while Ok is wider).
@@ -428,10 +428,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_i64")
             }
             BasicValueEnum::StructValue(sv) => {
-                // Mimi string struct {ptr, i64}: extract the raw C string
-                // pointer and store it directly (no malloc).
+                // A Mimi string struct {ptr, i64} stores only the raw C string
+                // pointer in a list slot. However other {ptr, i64} structs
+                // (notably product tuples such as `(string, i64)`) share the
+                // same LLVM shape and must be heap-packed as one opaque slot;
+                // use the inferred Mimi element type rather than shape alone.
+                let elem_type = self.infer_object_type(elem_expr, vars);
                 let sv_fields = sv.get_type().get_field_types();
-                if sv_fields.len() == 2
+                if elem_type == "string"
+                    && sv_fields.len() == 2
                     && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
                     && matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
                 {

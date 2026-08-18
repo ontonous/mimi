@@ -589,6 +589,19 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("string".into(), vec![]);
                 }
+                "try_input_line" => {
+                    if !args.is_empty() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "try_input_line expects 0 arguments",
+                        );
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("string".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+
                 "map" => {
                     if args.len() != 2 {
                         self.emit_code(
@@ -3468,6 +3481,7 @@ fn is_impure_builtin(name: &str) -> bool {
             | "eprintln"
             | "input"
             | "input_line"
+            | "try_input_line"
             | "input_int"
             | "input_float"
             | "input_bool"
@@ -3574,6 +3588,7 @@ mod tests {
             "print_format",
             "print_err",
             "input_line",
+            "try_input_line",
             "input_int",
             "input_float",
             "input_bool",

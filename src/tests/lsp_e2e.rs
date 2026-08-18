@@ -421,3 +421,57 @@ fn e2e_perf_open_file_under_200ms() {
 
     client.shutdown();
 }
+
+#[test]
+#[ignore = "heavy LSP performance gate: ~85s debug didOpen on 10k-line synthetic file"]
+fn e2e_perf_10k_line_completion_sub_10ms() {
+    let mut client = LspClientSim::new();
+    client.initialize();
+
+    let mut lines = vec!["func main() -> i32 {".to_string()];
+    for i in 0..10_000 {
+        lines.push(format!("    let v{i}: i32 = {i};"));
+    }
+    lines.push("    v9999".to_string());
+    lines.push("}".to_string());
+    let src = lines.join("\n");
+    let diags = client.open_doc("file:///perf-10k.mimi", &src);
+    assert!(diags.is_empty(), "10k-line file should have no diagnostics");
+
+    // Warmup: parse cache and stdlib completion table are already hot after didOpen,
+    // but keep the first request out of the measured median.
+    let _ = client.hover("file:///perf-10k.mimi", 1000, 10);
+    let _ = client.completion("file:///perf-10k.mimi", 1000, 5);
+
+    let mut hover_ms = Vec::new();
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let _ = client.hover("file:///perf-10k.mimi", 1000, 10);
+        hover_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let mut comp_ms = Vec::new();
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let _ = client.completion("file:///perf-10k.mimi", 1000, 5);
+        comp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    println!("hover_ms={hover_ms:?}");
+    println!("comp_ms={comp_ms:?}");
+
+    let mut hover_sorted = hover_ms.clone();
+    hover_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut comp_sorted = comp_ms.clone();
+    comp_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let hover_median = hover_sorted[2];
+    let comp_median = comp_sorted[2];
+    assert!(
+        hover_median < 10.0,
+        "10k-line hover median must be <10ms, got {hover_median:.3}ms"
+    );
+    assert!(
+        comp_median < 10.0,
+        "10k-line completion median must be <10ms, got {comp_median:.3}ms"
+    );
+
+    client.shutdown();
+}

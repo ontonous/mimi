@@ -18,6 +18,22 @@ fn byte_col_to_utf16(line: &str, byte: usize) -> usize {
         .1
 }
 
+/// Return the prefix of `s` containing at most `max_units` UTF-16 code units.
+/// LSP character offsets are UTF-16 based, not Rust `char` counts (batch4 P2-5).
+fn utf16_prefix(s: &str, max_units: usize) -> String {
+    let mut units = 0usize;
+    let mut out = String::new();
+    for c in s.chars() {
+        let c_units = c.len_utf16();
+        if units + c_units > max_units {
+            break;
+        }
+        units += c_units;
+        out.push(c);
+    }
+    out
+}
+
 impl LspServer {
     pub fn compute_definition(
         &self,
@@ -113,29 +129,23 @@ impl LspServer {
             for item in &file.items {
                 if let Item::Func(f) = item {
                     // Check function parameters
-                    if f.params.iter().any(|p| p.name == word) {
+                    if let Some(param) = f.params.iter().find(|p| p.name == word) {
                         // Parameter definition is at the function signature.
-                        // X-7: same conversion as the func arm above — the
-                        // 1-indexed char column must become a 0-indexed UTF-16
-                        // character before it is emitted as LSP `character`.
-                        let def_line = f.meta.span.start_line.saturating_sub(1);
+                        // X-7: use the parser-provided param span so the range
+                        // points at the parameter name itself, not at the
+                        // enclosing `func` keyword.
+                        let def_line = param.meta.span.start_line.saturating_sub(1);
                         let def_line_text = text.lines().nth(def_line).unwrap_or("");
                         let start_byte = crate::lsp::util::char_col_to_byte(
                             def_line_text,
-                            f.meta.span.start_col.saturating_sub(1),
+                            param.meta.span.start_col.saturating_sub(1),
                         );
-                        let param_offset = f
-                            .params
-                            .iter()
-                            .take_while(|p| p.name != word)
-                            .map(|p| p.name.len() + 2) // "name, " per param
-                            .sum::<usize>();
-                        // Parameter names are ASCII (V-10), so byte addition is exact.
+                        let end_byte = start_byte + word.len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, start_byte + param_offset) },
-                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, start_byte + param_offset + word.len()) }
+                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, start_byte) },
+                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, end_byte) }
                             }
                         }));
                     }
@@ -457,7 +467,7 @@ impl LspServer {
         let current_line = lines.get(line)?;
 
         // Find the function call: look backward for '(' and the function name
-        let before_cursor: String = current_line.chars().take(character).collect();
+        let before_cursor: String = utf16_prefix(current_line, character);
         let paren_pos = before_cursor.rfind('(')?;
         let before_paren = before_cursor[..paren_pos].trim_end();
 

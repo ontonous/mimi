@@ -31,7 +31,13 @@ trait IntMath {
 impl IntMath for i32 {
     func square() -> i32 { self * self }
     func cube() -> i32 { self * self * self }
-    func abs() -> i32 { if self < 0 { -self } else { self } }
+    func abs() -> i32 {
+        if self < 0 {
+            if self == -2147483647 - 1 { -1 } else { -self }
+        } else {
+            self
+        }
+    }
     func sign() -> i32 { if self > 0 { 1 } else if self < 0 { -1 } else { 0 } }
     func factorial() -> i32 {
         // CRITICAL #19 fix: guard against i32 overflow. 13! = 6,227,020,800
@@ -49,6 +55,7 @@ impl IntMath for i32 {
     func fibonacci() -> i32 {
         if self <= 0 { return 0 }
         if self == 1 { return 1 }
+        if self > 46 { return -1 } // F_47 overflows i32
         let mut fib_a = 0
         let mut fib_b = 1
         let mut fib_k = 2
@@ -65,7 +72,7 @@ impl IntMath for i32 {
         if self == 2 { return true }
         if self % 2 == 0 { return false }
         let mut prime_d = 3
-        while prime_d * prime_d <= self {
+        while prime_d <= self / prime_d {
             if self % prime_d == 0 { return false }
             prime_d += 2
         }
@@ -74,15 +81,15 @@ impl IntMath for i32 {
     func mod_pow(exp: i32, modulus: i32) -> i32 {
         // HIGH fix: guard against division by zero when modulus == 0.
         if modulus == 0 { return 0 }
-        let mut mp_acc = 1
-        let mut mp_bv = self % modulus
+        let mut mp_acc: i64 = 1
+        let mut mp_bv: i64 = (self % modulus) as i64
         let mut mp_ev = exp
         while mp_ev > 0 {
-            if mp_ev % 2 == 1 { mp_acc = (mp_acc * mp_bv) % modulus }
-            mp_bv = (mp_bv * mp_bv) % modulus
+            if mp_ev % 2 == 1 { mp_acc = (mp_acc * mp_bv) % (modulus as i64) }
+            mp_bv = (mp_bv * mp_bv) % (modulus as i64)
             mp_ev = mp_ev / 2
         }
-        mp_acc
+        mp_acc as i32
     }
     func is_power_of_two() -> bool {
         if self <= 0 { return false }
@@ -95,6 +102,7 @@ impl IntMath for i32 {
     }
     func next_power_of_two() -> i32 {
         if self <= 0 { return 1 }
+        if self > 1073741824 { return -1 } // next power would exceed i32::MAX
         let mut np_p = 1
         while np_p < self { np_p = np_p * 2 }
         np_p
@@ -102,7 +110,7 @@ impl IntMath for i32 {
     func count_digits() -> i32 {
         if self == 0 { return 1 }
         let mut cd_cnt = 0
-        let mut cd_val = if self < 0 { -self } else { self }
+        let mut cd_val = if self == -2147483647 - 1 { 2147483647 } else if self < 0 { -self } else { self }
         while cd_val > 0 {
             cd_cnt += 1
             cd_val = cd_val / 10
@@ -110,7 +118,7 @@ impl IntMath for i32 {
         cd_cnt
     }
     func digit_at(pos: i32) -> i32 {
-        let mut da_val = if self < 0 { -self } else { self }
+        let mut da_val = if self == -2147483647 - 1 { 2147483647 } else if self < 0 { -self } else { self }
         let mut da_p = 0
         while da_p < pos {
             da_val = da_val / 10
@@ -120,7 +128,7 @@ impl IntMath for i32 {
     }
     func sum_digits() -> i32 {
         let mut sd_acc = 0
-        let mut sd_val = if self < 0 { -self } else { self }
+        let mut sd_val = if self == -2147483647 - 1 { 2147483647 } else if self < 0 { -self } else { self }
         while sd_val > 0 {
             sd_acc += sd_val % 10
             sd_val = sd_val / 10
@@ -128,13 +136,16 @@ impl IntMath for i32 {
         sd_acc
     }
     func reverse_number() -> i32 {
-        let mut rn_acc = 0
-        let mut rn_val = if self < 0 { -self } else { self }
+        // Use i64 so large reversals (e.g. 2147483647 -> 7463847412) do not
+        // overflow before the final i32 narrowing. Unrepresentable results
+        // return -1 as the documented sentinel.
+        let mut rn_acc: i64 = 0
+        let mut rn_val = if self == -2147483647 - 1 { 2147483647 } else if self < 0 { -self } else { self }
         while rn_val > 0 {
-            rn_acc = rn_acc * 10 + rn_val % 10
+            rn_acc = rn_acc * 10 + (rn_val % 10) as i64
             rn_val = rn_val / 10
         }
-        rn_acc
+        if rn_acc > 2147483647 { -1 } else { rn_acc as i32 }
     }
     func is_palindrome() -> bool {
         if self < 0 { return false }
@@ -148,14 +159,22 @@ impl IntMath for i32 {
         let mut cs_cnt = 0
         let mut cs_val = self
         while cs_val != 1 {
-            if cs_val % 2 == 0 { cs_val = cs_val / 2 } else { cs_val = 3 * cs_val + 1 }
+            if cs_val % 2 == 0 {
+                cs_val = cs_val / 2
+            } else {
+                if cs_val > 715827882 { return -1 }
+                let cs_next = 3 * cs_val + 1
+                cs_val = cs_next
+            }
             cs_cnt += 1
         }
         cs_cnt
     }
     func gcd(other: i32) -> i32 {
-        let mut g_x = self
-        let mut g_y = other
+        // Match the free function's non-negative convention. Using abs()
+        // also keeps i32::MIN in the same sentinel/safe path as gcd(a,b).
+        let mut g_x = abs(self)
+        let mut g_y = abs(other)
         while g_y != 0 {
             let g_tmp = g_y
             g_y = g_x % g_y
@@ -164,10 +183,16 @@ impl IntMath for i32 {
         g_x
     }
     func lcm(other: i32) -> i32 {
-        // HIGH fix: guard against intermediate overflow. self * other can
-        // overflow even if the final result fits in i32. Use the identity
-        // lcm(a,b) = |a| * (|b| / gcd(a,b)) to avoid intermediate overflow.
-        if self == 0 || other == 0 { 0 } else { self * (other / self.gcd(other)) }
+        // HIGH fix: guard against intermediate overflow. Use i64 arithmetic so
+        // self / gcd does not overflow before multiplying by other. If the
+        // final least common multiple cannot be represented as i32, return -1
+        // instead of narrowing into a wrapped value.
+        if self == 0 || other == 0 { return 0 }
+        let mut lcm_a: i64 = if self < 0 { -(self as i64) } else { self as i64 }
+        let mut lcm_b: i64 = if other < 0 { -(other as i64) } else { other as i64 }
+        let g: i64 = gcd(self, other) as i64
+        let lcm_val: i64 = lcm_a / g * lcm_b
+        if lcm_val > 2147483647 { -1 } else { lcm_val as i32 }
     }
     func is_even() -> bool { self % 2 == 0 }
     func is_odd() -> bool { self % 2 != 0 }
@@ -224,7 +249,7 @@ impl FloatMath for f64 {
 
 // abs: Absolute value for integers.
 pub func abs(x: i32) -> i32 {
-    if x < 0 { -x } else { x }
+    if x < 0 { if x == -2147483647 - 1 { -1 } else { -x } } else { x }
 }
 
 // abs_float: Absolute value for floats.
@@ -259,6 +284,7 @@ pub func factorial(n: i32) -> i32 {
 pub func fibonacci(n: i32) -> i32 {
     if n <= 0 { return 0 }
     if n == 1 { return 1 }
+    if n > 46 { return -1 } // F_47 overflows i32
     let mut fib_a = 0
     let mut fib_b = 1
     let mut fib_k = 2
@@ -277,7 +303,7 @@ pub func is_prime(n: i32) -> bool {
     if n == 2 { return true }
     if n % 2 == 0 { return false }
     let mut prime_d = 3
-    while prime_d * prime_d <= n {
+    while prime_d <= n / prime_d {
         if n % prime_d == 0 { return false }
         prime_d += 2
     }
@@ -294,15 +320,15 @@ pub func random_int(lo: i32, hi: i32) -> i32 {
 // mod_pow: Modular exponentiation: (base^exp) % modulus.
 pub func mod_pow(base: i32, exp: i32, modulus: i32) -> i32 {
     if modulus == 0 { return 0 }
-    let mut mp_acc = 1
-    let mut mp_bv = base % modulus
+    let mut mp_acc: i64 = 1
+    let mut mp_bv: i64 = (base % modulus) as i64
     let mut mp_ev = exp
     while mp_ev > 0 {
-        if mp_ev % 2 == 1 { mp_acc = (mp_acc * mp_bv) % modulus }
-        mp_bv = (mp_bv * mp_bv) % modulus
+        if mp_ev % 2 == 1 { mp_acc = (mp_acc * mp_bv) % (modulus as i64) }
+        mp_bv = (mp_bv * mp_bv) % (modulus as i64)
         mp_ev = mp_ev / 2
     }
-    mp_acc
+    mp_acc as i32
 }
 
 // deg_to_rad: Converts degrees to radians.
@@ -334,6 +360,7 @@ pub func is_power_of_two(n: i32) -> bool {
 // next_power_of_two: Returns smallest power of two >= n.
 pub func next_power_of_two(n: i32) -> i32 {
     if n <= 0 { return 1 }
+    if n > 1073741824 { return -1 } // next power would exceed i32::MAX
     let mut np_p = 1
     while np_p < n { np_p = np_p * 2 }
     np_p
@@ -343,14 +370,14 @@ pub func next_power_of_two(n: i32) -> i32 {
 pub func count_digits(n: i32) -> i32 {
     if n == 0 { return 1 }
     let mut cd_cnt = 0
-    let mut cd_val = if n < 0 { -n } else { n }
+    let mut cd_val = if n == -2147483647 - 1 { 2147483647 } else if n < 0 { -n } else { n }
     while cd_val > 0 { cd_cnt += 1; cd_val = cd_val / 10 }
     cd_cnt
 }
 
 // digit_at: Returns the digit at position pos (0 = units) in n.
 pub func digit_at(n: i32, pos: i32) -> i32 {
-    let mut da_val = if n < 0 { -n } else { n }
+    let mut da_val = if n == -2147483647 - 1 { 2147483647 } else if n < 0 { -n } else { n }
     let mut da_p = 0
     while da_p < pos { da_val = da_val / 10; da_p += 1 }
     da_val % 10
@@ -359,17 +386,22 @@ pub func digit_at(n: i32, pos: i32) -> i32 {
 // sum_digits: Returns the sum of decimal digits of n.
 pub func sum_digits(n: i32) -> i32 {
     let mut sd_acc = 0
-    let mut sd_val = if n < 0 { -n } else { n }
+    let mut sd_val = if n == -2147483647 - 1 { 2147483647 } else if n < 0 { -n } else { n }
     while sd_val > 0 { sd_acc += sd_val % 10; sd_val = sd_val / 10 }
     sd_acc
 }
 
 // reverse_number: Returns n with decimal digits reversed.
+// Uses i64 arithmetic to avoid overflow; returns -1 if the reversed value
+// cannot be represented as i32.
 pub func reverse_number(n: i32) -> i32 {
-    let mut rn_acc = 0
-    let mut rn_val = if n < 0 { -n } else { n }
-    while rn_val > 0 { rn_acc = rn_acc * 10 + rn_val % 10; rn_val = rn_val / 10 }
-    rn_acc
+    let mut rn_acc: i64 = 0
+    let mut rn_val = if n == -2147483647 - 1 { 2147483647 } else if n < 0 { -n } else { n }
+    while rn_val > 0 {
+        rn_acc = rn_acc * 10 + (rn_val % 10) as i64
+        rn_val = rn_val / 10
+    }
+    if rn_acc > 2147483647 { -1 } else { rn_acc as i32 }
 }
 
 // is_palindrome_number: Returns true if n is a palindrome (e.g. 121).
@@ -384,7 +416,13 @@ pub func collatz_steps(n: i32) -> i32 {
     let mut cs_cnt = 0
     let mut cs_val = n
     while cs_val != 1 {
-        if cs_val % 2 == 0 { cs_val = cs_val / 2 } else { cs_val = 3 * cs_val + 1 }
+        if cs_val % 2 == 0 {
+            cs_val = cs_val / 2
+        } else {
+            if cs_val > 715827882 { return -1 }
+            let cs_next = 3 * cs_val + 1
+            cs_val = cs_next
+        }
         cs_cnt += 1
     }
     cs_cnt
@@ -419,24 +457,38 @@ pub func round_val(x: f64) -> f64 {
 
 // gcd: Greatest common divisor of a and b (Euclidean algorithm); always non-negative.
 pub func gcd(a: i32, b: i32) -> i32 {
-    // Abs-normalize so gcd(4, -2) == 2 (not -2): gcd is defined up to sign,
-    // the stdlib convention is the non-negative representative.
-    let mut g_x = abs(a); let mut g_y = abs(b)
-    while g_y != 0 { let g_tmp = g_y; g_y = g_x % g_y; g_x = g_tmp }
-    g_x
+    // Abs-normalize in i64 so gcd(4, -2) == 2 (not -2), and i32::MIN can be
+    // represented (2147483648). If the non-negative gcd cannot be represented
+    // as i32, return -1 as the documented sentinel.
+    let mut g_x: i64 = a as i64
+    let mut g_y: i64 = b as i64
+    if g_x < 0 { g_x = -g_x }
+    if g_y < 0 { g_y = -g_y }
+    while g_y != 0 {
+        let g_tmp = g_y
+        g_y = g_x % g_y
+        g_x = g_tmp
+    }
+    if g_x > 2147483647 { -1 } else { g_x as i32 }
 }
 
 // lcm: Least common multiple of a and b; always non-negative (0 if either is 0).
 pub func lcm(a: i32, b: i32) -> i32 {
-    // Overflow-safe identity lcm(a,b) = |a| / gcd(|a|,|b|) * |b|: dividing
-    // before multiplying keeps the intermediate in range (lcm(65536, 65536)
-    // fits in i32 while 65536 * 65536 does not).
+    // Overflow-safe identity using i64 intermediates so even the final
+    // multiplication cannot trap before the result is narrowed to i32.
+    // Abs-normalize in i64 so i32::MIN is representable. Unrepresentable
+    // results return -1 instead of silently wrapping.
     if a == 0 || b == 0 {
         0
     } else {
-        let lcm_a = abs(a)
-        let lcm_b = abs(b)
-        lcm_a / gcd(lcm_a, lcm_b) * lcm_b
+        let mut lcm_a: i64 = a as i64
+        let mut lcm_b: i64 = b as i64
+        if lcm_a < 0 { lcm_a = -lcm_a }
+        if lcm_b < 0 { lcm_b = -lcm_b }
+        let g: i64 = gcd(a, b) as i64
+        if g <= 0 { return -1 }
+        let lcm_val: i64 = lcm_a / g * lcm_b
+        if lcm_val > 2147483647 { -1 } else { lcm_val as i32 }
     }
 }
 

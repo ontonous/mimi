@@ -33,6 +33,20 @@ const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024; // 16MB
 /// in sync; anything above this limit closes the connection cleanly.
 const HARD_MAX_CONTENT_LENGTH: usize = 64 * 1024 * 1024; // 64MB
 const MAX_DOCUMENTS: usize = 256;
+/// Hard cap on the number of per-line vectors built by LSP text utilities.
+/// A 16MB document cannot safely produce millions of line entries.
+pub(crate) const MAX_LSP_DOCUMENT_LINES: usize = 200_000;
+/// Hard cap on total cached open-document bytes. Prevents unbounded cache
+/// growth even when all LRU entries are still open.
+pub(crate) const MAX_DOCUMENT_BYTES_TOTAL: usize = 256 * 1024 * 1024;
+/// Hard cap on session-global SourceRegistry records. Each parsed File keeps
+/// its own registry snapshot, so clearing the session pool when it exceeds
+/// this cap is safe and prevents long-running didOpen/didClose churn from
+/// leaking records indefinitely (batch4 P2-8).
+pub(crate) const MAX_SOURCE_RECORDS: usize = 4096;
+/// Hard cap for a single LSP header line. Applied before body-size limits so
+/// an adversarial client cannot grow a header String without bound.
+const MAX_HEADER_LINE: usize = 4096;
 /// Maximum number of verification cache entries before LRU eviction.
 /// Prevents unbounded memory growth in long-running LSP sessions.
 pub(crate) const MAX_VERIFICATION_CACHE: usize = 4096;
@@ -64,6 +78,44 @@ fn consume_body_separator<R: Read>(reader: &mut R) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read a single line with a hard length cap.
+///
+/// Returns `Ok(Some(line))` when a line (including its trailing `\n`) was
+/// read, `Ok(None)` at EOF, and `Err` when the line exceeds `limit` before a
+/// newline is encountered.
+fn read_limited_line<R: BufRead>(
+    reader: &mut R,
+    limit: usize,
+    out: &mut String,
+) -> io::Result<Option<()>> {
+    let mut bytes = Vec::new();
+    loop {
+        if bytes.len() > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LSP header line exceeds hard limit",
+            ));
+        }
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        if let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+            bytes.extend_from_slice(&buf[..=pos]);
+            reader.consume(pos + 1);
+            break;
+        }
+        bytes.extend_from_slice(buf);
+        let len = buf.len();
+        reader.consume(len);
+    }
+    *out = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(Some(()))
 }
 
 /// Discard exactly `len` bytes from `reader`, reading in bounded chunks so
@@ -286,6 +338,9 @@ pub(crate) enum LifecycleState {
 /// LSP server for Mimi language
 pub struct LspServer {
     pub(crate) documents: HashMap<String, String>,
+    /// Total bytes currently stored in `documents`; used to enforce a hard
+    /// memory cap even when all cached documents are still open.
+    pub(crate) total_doc_bytes: usize,
     /// L-H3: last seen textDocument version per URI (None = unknown).
     pub(crate) document_versions: HashMap<String, i64>,
     access_order: VecDeque<String>,
@@ -333,6 +388,7 @@ impl LspServer {
     pub fn new() -> Self {
         LspServer {
             documents: HashMap::new(),
+            total_doc_bytes: 0,
             document_versions: HashMap::new(),
             access_order: VecDeque::new(),
             workspace_root: None,
@@ -564,8 +620,14 @@ impl LspServer {
             let mut header = String::new();
             loop {
                 header.clear();
-                if reader.read_line(&mut header).is_err() || header.is_empty() {
+                if read_limited_line(&mut reader, MAX_HEADER_LINE, &mut header)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
                     return Ok(());
+                }
+                if header.is_empty() {
+                    continue;
                 }
                 // CL-H9 (deep audit): LSP headers are case-insensitive.
                 // Also handle optional whitespace after colon.
@@ -700,7 +762,14 @@ impl LspServer {
                 }
                 for response in outbound {
                     let resp_str = serde_json::to_string(&response).unwrap_or_default();
-                    print!("Content-Length: {}\r\n\r\n{}", resp_str.len(), resp_str);
+                    // P3: use write! and handle errors instead of print!, which
+                    // can panic when the client disconnects (EPIPE).
+                    if let Err(e) = io::stdout().write_all(
+                        format!("Content-Length: {}\r\n\r\n{}", resp_str.len(), resp_str)
+                            .as_bytes(),
+                    ) {
+                        eprintln!("[mimi lsp] failed to write response: {}", e);
+                    }
                 }
                 if let Err(e) = io::stdout().flush() {
                     eprintln!("[mimi lsp] failed to flush stdout: {}", e);
@@ -732,5 +801,30 @@ impl LspServer {
     #[cfg(test)]
     pub(crate) fn set_workspace_root_for_test(&mut self, root: PathBuf) {
         self.workspace_root = Some(root);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn lsp_header_line_cap_rejects_oversize_line() {
+        let mut cur = Cursor::new(vec![b'x'; 8192]);
+        let mut line = String::new();
+        let err = read_limited_line(&mut cur, 4096, &mut line)
+            .expect_err("oversize header line must fail closed");
+        assert!(err.kind() == io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn lsp_header_line_cap_keeps_normal_line() {
+        let mut cur = Cursor::new(b"Content-Length: 42\r\n\r\n{}".to_vec());
+        let mut line = String::new();
+        assert!(read_limited_line(&mut cur, 4096, &mut line)
+            .unwrap()
+            .is_some());
+        assert_eq!(line, "Content-Length: 42\r\n");
     }
 }

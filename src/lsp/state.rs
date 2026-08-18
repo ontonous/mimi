@@ -125,7 +125,11 @@ impl LspServer {
         let source_id = registry
             .register(record)
             .map_err(|error| error.to_string())?;
-        Ok((source_id, registry.clone()))
+        let snapshot = registry.clone();
+        if registry.records().len() > super::MAX_SOURCE_RECORDS {
+            *registry = crate::span::SourceRegistry::default();
+        }
+        Ok((source_id, snapshot))
     }
 
     fn register_memory_source(&self, text: &str) -> Result<(SourceId, SourceRegistry), String> {
@@ -140,23 +144,43 @@ impl LspServer {
         let source_id = registry
             .register(record)
             .map_err(|error| error.to_string())?;
-        Ok((source_id, registry.clone()))
+        let snapshot = registry.clone();
+        if registry.records().len() > super::MAX_SOURCE_RECORDS {
+            *registry = crate::span::SourceRegistry::default();
+        }
+        Ok((source_id, snapshot))
     }
 
     pub(crate) fn cache_put(&mut self, uri: String, text: String) {
+        let old_len = self.documents.get(&uri).map_or(0, |old| old.len());
         if self.documents.contains_key(&uri) {
+            self.total_doc_bytes = self
+                .total_doc_bytes
+                .saturating_sub(old_len)
+                .saturating_add(text.len());
             self.access_order.retain(|k| *k != uri);
-        } else if self.documents.len() >= super::MAX_DOCUMENTS {
-            // L-H7: never silently drop still-open documents (those with a
-            // tracked version from didOpen/didChange). Evict the oldest closed
-            // entry; if every cached doc is still open, grow past the soft limit.
-            if let Some(pos) = self
-                .access_order
-                .iter()
-                .position(|k| !self.document_versions.contains_key(k))
+        } else {
+            self.total_doc_bytes = self.total_doc_bytes.saturating_add(text.len());
+            // L-H7: prefer evicting closed documents first, but also enforce
+            // a hard total-byte cap so a client cannot keep 256+ huge open
+            // documents and grow memory without bound.
+            while self.documents.len() >= super::MAX_DOCUMENTS
+                || self.total_doc_bytes > super::MAX_DOCUMENT_BYTES_TOTAL
             {
-                let lru = self.access_order.remove(pos).expect("index valid");
-                self.documents.remove(&lru);
+                let lru = if let Some(pos) = self
+                    .access_order
+                    .iter()
+                    .position(|k| !self.document_versions.contains_key(k))
+                {
+                    self.access_order.remove(pos).expect("index valid")
+                } else if let Some(pos) = self.access_order.iter().position(|_| true) {
+                    self.access_order.remove(pos).expect("index valid")
+                } else {
+                    break;
+                };
+                if let Some(removed) = self.documents.remove(&lru) {
+                    self.total_doc_bytes = self.total_doc_bytes.saturating_sub(removed.len());
+                }
                 self.document_versions.remove(&lru);
             }
         }
@@ -741,5 +765,22 @@ mod m10_tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P2-8: the session-global SourceRegistry must not grow without bound.
+    /// Each parse keeps its own snapshot, so the shared pool can be reset once
+    /// it exceeds the cap without invalidating already-parsed files.
+    #[test]
+    fn source_registry_cap_bounds_session_records() {
+        let server = LspServer::new();
+        let cap = crate::lsp::MAX_SOURCE_RECORDS;
+        for i in 0..(cap + 128) {
+            let _ = server.register_memory_source(&format!("text-{i}"));
+        }
+        let len = server.source_registry.borrow().records().len();
+        assert!(
+            len <= cap,
+            "source registry must stay bounded, got {len} records (cap {cap})"
+        );
     }
 }

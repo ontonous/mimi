@@ -987,7 +987,6 @@ fn collect_items(
             | Item::Trait(_)
             | Item::ExternBlock(_)
             | Item::Const { .. }
-            | Item::Protocol(_)
             | Item::Session(_) => {}
         }
     }

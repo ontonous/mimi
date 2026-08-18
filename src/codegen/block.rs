@@ -735,6 +735,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 | "read_file_bytes"
                                                 | "getenv"
                                                 | "base64_decode"
+                                                | "try_input_line"
                                                 | "mimi_lexer_tokenize"
                                                 | "mimi_parse_source"
                                         ) {
@@ -971,7 +972,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 self.var_type_names
                                                     .insert(name.clone(), "bool".to_string());
                                             }
-                                            "getenv" | "base64_decode" => {
+                                            "getenv" | "base64_decode" | "try_input_line" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "Result<string,string>".to_string(),
@@ -2173,6 +2174,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     | "read_file_bytes"
                                     | "getenv"
                                     | "base64_decode"
+                                    | "try_input_line"
                                     | "mimi_lexer_tokenize"
                                     | "mimi_parse_source" => {
                                         self.var_type_names.insert(

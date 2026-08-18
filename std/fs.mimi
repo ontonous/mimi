@@ -30,7 +30,7 @@ trait FsOps {
     func read() -> Result<string, string>
     func write(content: string) -> Result<(), string>
     func read_lines() -> Result<List<string>, string>
-    func file_size() -> Result<i32, string>
+    func file_size() -> Result<i64, string>
     func write_lines(xs: List<string>) -> Result<(), string>
 }
 
@@ -45,14 +45,14 @@ impl FsOps for string {
             Err(e) => Err("read_lines(" + self + "): " + e)
         }
     }
-    func file_size() -> Result<i32, string> {
+    func file_size() -> Result<i64, string> {
         // Byte size via stat (len() counts characters, not bytes).
         let fs_st = file_stat(self)
         if fs_st.size < 0 {
             Err("file_size(" + self + "): cannot stat file")
         } else {
             let fs_sz = fs_st.size
-            Ok(fs_sz as i32)
+            Ok(fs_sz)
         }
     }
     func write_lines(xs: List<string>) -> Result<(), string> {
@@ -92,13 +92,14 @@ pub func read_lines(path: string) -> Result<List<string>, string> {
 // on-disk byte size — len(content) would count characters, not bytes.
 
 // file_size: Returns the size of the file at path in bytes, or Err if it cannot be stat'ed.
-pub func file_size(path: string) -> Result<i32, string> {
+// The size is an i64 so files larger than 2 GiB are not truncated.
+pub func file_size(path: string) -> Result<i64, string> {
     let fs_st = file_stat(path)
     if fs_st.size < 0 {
         Err("file_size(" + path + "): cannot stat file")
     } else {
         let fs_sz = fs_st.size
-        Ok(fs_sz as i32)
+        Ok(fs_sz)
     }
 }
 
@@ -122,24 +123,36 @@ pub func append(path: string, content: string) -> bool {
 
 // read_partial: Reads up to max_bytes from a file into a string.
 // Useful for large files to avoid loading everything into memory.
+// NOTE (batch5-04 P2-6): the underlying builtin currently returns "" on
+// read/stat failure; this API intentionally keeps that behavior for
+// compatibility. New code should prefer `read_file`/`read` when error
+// visibility is required.
 pub func read_partial(path: string, max_bytes: i32) -> string {
     read_file_partial(path, max_bytes)
 }
 
 // read_bytes: Reads an entire file as raw bytes (lossy UTF-8 conversion).
 // For binary data, prefer read_partial for large files.
+// NOTE (batch5-04 P2-6): the underlying builtin currently returns "" on
+// read/stat failure; this API intentionally keeps that behavior for
+// compatibility. New code should prefer `read_file`/`read` when error
+// visibility is required.
 pub func read_bytes(path: string) -> string {
     read_file_bytes(path)
 }
 
 // write_bytes: Writes raw byte data to a file.
 // Returns true on success, false on failure.
+// NOTE (batch5-04 P2-6): false currently gives no diagnostic string; use
+// `write_file` when you need the underlying error message.
 pub func write_bytes(path: string, data: string) -> bool {
     write_file_bytes(path, data)
 }
 
 // read_lines_json: Reads file line-by-line and returns a JSON array of lines.
 // More memory-efficient than read_file + split for very large files.
+// NOTE (batch5-04 P2-6): the underlying builtin currently returns "[]" on
+// read failure; this API intentionally keeps that behavior for compatibility.
 pub func read_lines_json(path: string) -> string {
     read_lines_json_builtin(path)
 }

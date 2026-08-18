@@ -17,216 +17,39 @@ func main() -> i32 {
 }
 
 #[test]
-fn quote_basic_literal() {
-    let src = r#"
-func main() {
-    let ast = quote! { 42 };
-    println(ast);
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Unit);
-}
-
-#[test]
-fn quote_interpolation() {
-    let src = r#"
-func main() {
-    let x = 10;
-    let ast = quote! { $(x + 1) };
-    println(ast);
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Unit);
-}
-
-#[test]
-fn quote_let_statement() {
-    let src = r#"
-func main() {
-    let ast = quote! { let y = 5; };
-    println(ast);
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Unit);
-}
-
-#[test]
-fn quote_dump() {
-    let src = r#"
-func main() {
-    let ast = quote! { 42 };
-    let dumped = ast_dump(ast);
-    println(dumped);
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Unit);
-}
-
-#[test]
-fn quote_eval_literal() {
-    let src = r#"
-func main() -> i32 {
-    let ast = quote! { 42 };
-    ast_eval(ast)
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Int(42));
-}
-
-#[test]
-fn quote_eval_binary() {
-    let src = r#"
-func main() -> i32 {
-    let ast = quote! { 10 + 20 };
-    ast_eval(ast)
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Int(30));
-}
-
-#[test]
-fn quote_eval_interpolation() {
-    let src = r#"
-func main() -> i32 {
-    let x = 5;
-    let ast = quote! { $(x * 3) };
-    ast_eval(ast)
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Int(15));
-}
-
-#[test]
-fn quote_eval_block() {
-    let src = r#"
-func main() -> i32 {
-    let ast = quote! {
-        let a = 10;
-        let b = 20;
-        a + b
-    };
-    ast_eval(ast)
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Int(30));
-}
-
-#[test]
-fn quote_eval_string_concat() {
-    let src = r#"
-func main() {
-    let ast = quote! { "hello" + " " + "world" };
-    let result = ast_eval(ast);
-    println(result);
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Unit);
-}
-
-#[test]
-fn quote_nested_interpolation() {
-    let src = r#"
-func main() -> i32 {
-    let a = 3;
-    let b = 4;
-    let ast = quote! { $(a + b) };
-    ast_eval(ast)
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Int(7));
-}
-
-#[test]
-fn quote_eval_lambda_captures_and_invokes() {
-    let src = r#"
-func main() -> i32 {
-    let base = 40
-    let quoted = quote! { fn(x: i32) -> i32 { base + x } }
-    let add = ast_eval(quoted)
-    add(2)
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(42));
-}
-
-#[test]
-fn quote_eval_preserves_cast() {
-    let src = r#"
-func main() -> i32 {
-    ast_eval(quote! { 41.9 as i32 }) + 1
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(42));
-}
-
-#[test]
-fn quote_eval_while_let_binds_pattern() {
-    let src = r#"
-type MaybeInt {
-    Some(i32)
-    None
-}
-
-func main() -> i32 {
-    let item = Some(42)
-    ast_eval(quote! {
-        while let Some(value) = item {
-            break value
-        }
-    })
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(42));
-}
-
-#[test]
-fn quote_match_is_rejected_at_quote_boundary() {
-    let src = r#"
-func main() -> i32 {
-    ast_eval(quote! { match 1 { 1 => 42 _ => 0 } })
-}
-"#;
-    let err = run_source_bytecode_result(src).expect_err("quoted Match must be rejected");
+fn quote_syntax_removed_at_parser() {
+    let src = r#"func main() { let ast = quote! { 42 } }"#;
+    let tokens = lexer::Lexer::new(src)
+        .tokenize()
+        .expect("lex quote! source");
+    let err = parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("quote! syntax must be rejected after Phase E removal");
     assert!(
-        err.contains("quoted AST node 'Match' is unsupported"),
-        "unexpected error: {err}"
+        err.to_string().contains("removed"),
+        "unexpected quote! error: {err}"
     );
 }
 
 #[test]
-fn quote_if_let_is_rejected_not_silently_skipped() {
-    // C1 (audit-syntax 2026-08-03): an `if let` inside quote! used to fall
-    // into the catch-all and be silently dropped, desyncing the quote-block
-    // accounting and crashing at runtime with an E0800 stack underflow. It
-    // must now be rejected cleanly at bytecode-compile time.
-    let src = r#"
-func main() -> i32 {
-    let q = quote! {
-        let x: Option<i32> = Some(1)
-        if let Some(v) = x {
-            print_line(v)
-        }
-    }
-    println(q)
-    0
-}
-"#;
-    let err =
-        run_source_bytecode_result(src).expect_err("quote! containing `if let` must be rejected");
+fn quote_interpolation_removed_at_parser() {
+    let src = r#"func main() -> i32 { 1 + $(2) }"#;
+    let tokens = lexer::Lexer::new(src)
+        .tokenize()
+        .expect("lex quote interpolation source");
+    let err = parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("quote interpolation must be rejected after Phase E removal");
     assert!(
-        err.contains("does not support `if let`"),
-        "unexpected error: {err}"
+        err.to_string().contains("removed"),
+        "unexpected quote interpolation error: {err}"
     );
+}
+
+#[test]
+fn quote_is_ordinary_identifier_now() {
+    let src = r#"func main() -> i32 { let quote = 7; quote }"#;
+    assert_eq!(run_source(src), interp::Value::Int(7));
 }
 
 #[test]
@@ -469,45 +292,6 @@ func main() -> i32 {
 "#;
     let result = run_source_bytecode_result(src);
     assert!(result.is_err());
-}
-
-#[test]
-fn comptime_quote_with_contract_interaction() {
-    let src = r#"
-func main() -> i32 {
-    let ast = quote! { 42 };
-    ast_eval(ast)
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(42));
-}
-
-#[test]
-fn comptime_quote_eval_with_nested_interp() {
-    let src = r#"
-func main() -> i32 {
-    let x = 5;
-    let ast = quote! { $(x + 10) };
-    ast_eval(ast)
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(15));
-}
-
-#[test]
-fn comptime_quote_eval_block_with_contract() {
-    let src = r#"
-func compute(x: i32) -> i32 {
-    requires: x > 0
-    x * 2
-}
-
-func main() -> i32 {
-    let ast = quote! { compute(5) };
-    ast_eval(ast)
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(10));
 }
 
 #[test]

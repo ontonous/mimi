@@ -96,52 +96,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             session_displays.insert(session.qualified_name.clone(), session.body_display.clone());
         }
         self.resolved_session_displays = Some(session_displays);
-        self.resolved_protocols = Some(
-            program
-                .protocols()
-                .values()
-                .map(|protocol| protocol.qualified_name.clone())
-                .collect(),
-        );
-        let mut protocol_transitions = std::collections::HashMap::new();
-        let mut protocol_payloads = std::collections::HashMap::new();
-        let mut protocol_states = std::collections::HashMap::new();
-        let mut protocol_state_payloads = std::collections::HashMap::new();
-        for protocol in program.protocols().values() {
-            protocol_transitions.insert(
-                protocol.qualified_name.clone(),
-                protocol
-                    .transition_records
-                    .iter()
-                    .map(|tr| {
-                        (
-                            tr.event.clone(),
-                            tr.from_state.clone(),
-                            tr.to_states.first().cloned().unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-            let mut state_names = protocol.states.clone();
-            state_names.sort();
-            protocol_states.insert(protocol.qualified_name.clone(), state_names);
-            for state in &protocol.state_payloads {
-                if let Some(ty) = &state.payload_type {
-                    protocol_payloads.insert(
-                        format!("{}.{}", protocol.qualified_name, state.name),
-                        ty.clone(),
-                    );
-                    protocol_state_payloads.insert(
-                        format!("{}.{}", protocol.qualified_name, state.name),
-                        (state.payload_name.clone().unwrap_or_default(), ty.clone()),
-                    );
-                }
-            }
-        }
-        self.resolved_protocol_transitions = Some(protocol_transitions);
-        self.resolved_protocol_payloads = Some(protocol_payloads);
-        self.resolved_protocol_states = Some(protocol_states);
-        self.resolved_protocol_state_payloads = Some(protocol_state_payloads);
         let mut actors = std::collections::HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
@@ -457,7 +411,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 crate::core::ResolvedItemKind::Module => "module",
                 crate::core::ResolvedItemKind::Actor => "actor",
                 crate::core::ResolvedItemKind::Flow => "flow",
-                crate::core::ResolvedItemKind::Protocol => "protocol",
                 crate::core::ResolvedItemKind::Session => "session",
             };
             item_kinds.insert(item.qualified_name.clone(), kind.to_string());
@@ -470,13 +423,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_persistent_fields = Some(persistent_fields);
-        let mut flow_protocols = std::collections::HashMap::new();
-        for flow in program.flows().values() {
-            if !flow.impl_protocols.is_empty() {
-                flow_protocols.insert(flow.id.0.clone(), flow.impl_protocols.clone());
-            }
-        }
-        self.resolved_flow_protocols = Some(flow_protocols);
         // 0.31.30: build Component IR for runtime function validation.
         {
             let mut gen = crate::component::AbiGenerator::new();

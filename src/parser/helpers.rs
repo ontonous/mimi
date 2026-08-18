@@ -186,11 +186,15 @@ impl Parser {
     }
 
     pub(crate) fn advance(&mut self) -> &Token {
-        let tok = &self.tokens[self.pos];
+        // Mirror peek()'s EOF fallback: if the parser is already past the
+        // final token, return a synthetic EOF instead of panicking on a
+        // direct index (batch1 P2-1).
+        let idx = self.pos.min(self.tokens.len().saturating_sub(1));
+        let tok = &self.tokens[idx];
         if !matches!(tok.kind, TokenKind::Eof) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
         }
-        &self.tokens[self.pos.saturating_sub(1)]
+        tok
     }
 
     pub(crate) fn at(&self, kind: &TokenKind) -> bool {

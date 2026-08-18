@@ -281,8 +281,13 @@ fn mimi_tokens_to_json(tokens: &[MimiToken]) -> String {
     json
 }
 
+///
+/// # Safety
+/// `source` must be null or a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_lexer_tokenize(source: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_lexer_tokenize(
+    source: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     if source.is_null() {
         return alloc_c_string("[]");
     }
@@ -315,8 +320,13 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+///
+/// # Safety
+/// `source` must be null or a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_parse_source(source: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_parse_source(
+    source: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     if source.is_null() {
         return alloc_c_string(r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#);
     }
@@ -572,6 +582,8 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
     }
     if !modules_json.is_empty() {
         out.push_str(&format!(r#","modules":[{}]"#, modules_json.join(",")));
+    } else {
+        out.push_str(",\"modules\":[]");
     }
     if !imports_json.is_empty() {
         out.push_str(&format!(r#","imports":[{}]"#, imports_json.join(",")));

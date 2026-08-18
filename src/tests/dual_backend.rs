@@ -2825,16 +2825,17 @@ fn dual_comptime_with_requires() {
 }
 
 #[test]
-fn dual_quote_eval_literal() {
+fn dual_comptime_literal_fold() {
     if !can_link() {
         return;
     }
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
+    // v0.34.10a: comptime fully resolved (golden §7.6); after 0.1.7 Phase E
+    // removed quote!, the constant-folding surface is `comptime { ... }`.
     dual_assert!(
         r#"
         func main() -> i32 {
-            let ast = quote! { 42 };
-            println(ast_eval(ast));
+            let v = comptime { 42 }
+            println(v)
             0
         }
     "#,
@@ -2842,26 +2843,26 @@ fn dual_quote_eval_literal() {
     );
 }
 
-// ── quote! constant-fold correctness (SD-7 audit follow-up 2026-08-04) ──
+// ── comptime constant-fold correctness (SD-7 audit follow-up 2026-08-04) ──
 //
 // codegen's fold_const_binary used to fold bitwise ops through boolean
 // truthiness (`6 & 3` → 1) and compare constants UNSIGNED (`-1 < 1` →
 // false), while the bytecode VM evaluates both correctly — a silent
-// miscompilation on the codegen quote fast path. These dual tests pin the
+// miscompilation on the codegen comptime fast path. These dual tests pin the
 // value-correct behavior (int results, which display identically on both
-// backends; the bool-display divergence of ast_eval is tracked separately).
+// backends; the bool-display divergence is tracked separately).
 
 #[test]
-fn dual_quote_fold_bitwise_and_or() {
+fn dual_comptime_fold_bitwise_and_or() {
     if !can_link() {
         return;
     }
     dual_assert!(
         r#"
         func main() -> i32 {
-            println(ast_eval(quote! { 6 & 3 }));
-            println(ast_eval(quote! { 7 | 2 }));
-            println(ast_eval(quote! { 12 & 10 }));
+            println(comptime { 6 & 3 });
+            println(comptime { 7 | 2 });
+            println(comptime { 12 & 10 });
             0
         }
     "#,
@@ -2870,16 +2871,16 @@ fn dual_quote_fold_bitwise_and_or() {
 }
 
 #[test]
-fn dual_quote_fold_negative_arithmetic() {
+fn dual_comptime_fold_negative_arithmetic() {
     if !can_link() {
         return;
     }
     dual_assert!(
         r#"
         func main() -> i32 {
-            println(ast_eval(quote! { -100 - 23 }));
-            println(ast_eval(quote! { -1000 * 3 }));
-            println(ast_eval(quote! { -9 / 2 }));
+            println(comptime { -100 - 23 });
+            println(comptime { -1000 * 3 });
+            println(comptime { -9 / 2 });
             0
         }
     "#,
@@ -6948,12 +6949,13 @@ fn dual_match_result_err_string_binding() {
 }
 
 #[test]
-fn dual_ast_eval_bool_display() {
+fn dual_comptime_bool_display() {
     // Q4 (rc-quality-gate-0.34.25a): value_to_llvm_const folded Value::Bool
-    // to i64 0/1, so `ast_eval(quote! { true })` / `comptime { true }`
-    // printed "1"/"0" in codegen while the VM printed "true"/"false".
-    // Bool now folds to i1, which the i1-aware display path renders as
-    // true/false. int/float/tuple/bool-arg forms must stay consistent.
+    // to i64 0/1, so `comptime { true }` printed "1"/"0" in codegen while the
+    // VM printed "true"/"false". Bool now folds to i1, which the i1-aware
+    // display path renders as true/false. int/float/tuple/bool-arg forms must
+    // stay consistent. 0.1.7 Phase E removed `quote!`; comptime remains the
+    // constant-folding surface.
     if !can_link() {
         return;
     }
@@ -6961,19 +6963,17 @@ fn dual_ast_eval_bool_display() {
         r#"
         func takes_bool(b: bool) -> i32 { if b { 1 } else { 0 } }
         func main() -> i32 {
-            println(ast_eval(quote! { true }))
-            println(ast_eval(quote! { false }))
             println(comptime { true })
-            let x = ast_eval(quote! { true })
+            let x = comptime { true }
             println(x)
             let t = (42, comptime { false })
             println(t)
             println(takes_bool(comptime { true }))
-            println(ast_eval(quote! { 7 }))
+            println(comptime { 7 })
             0
         }
         "#,
-        "true\nfalse\ntrue\ntrue\n(42, false)\n1\n7"
+        "true\ntrue\n(42, false)\n1\n7"
     );
 }
 
@@ -10415,38 +10415,6 @@ fn dual_mimi_opt_cache_varied() {
     );
 }
 
-// P2-11: eval_quoted_ast Interpolate must not double-clone Box<Value>.
-// If the bug were present (double clone on Interpolate), the second ast_eval
-// would double-free the captured variable `n` and abort the process.
-// Note: quote! is comptime-only, tested via interpreter only.
-#[test]
-fn dual_quote_interpolate_snapshot() {
-    let src = r#"
-    func main() -> i32 {
-        let n = 7
-        let q = quote! { n * 2 }
-        let r1 = ast_eval(q)
-        let r2 = ast_eval(q)
-        println(r1)
-        println(r2)
-        0
-    }
-    "#;
-    // quote!/comptime resolve cleanly in the checker since 0.34.19; the
-    // load-bearing assertion is the interp double-eval below (a double-free
-    // would abort), so the check gate is hard now.
-    check_source(src).expect("quote snapshot must check");
-    // Both evaluations must succeed without panic (double-free would abort).
-    let v1 = run_source(src);
-    let v2 = run_source(src);
-    assert_eq!(v1, interp::Value::Int(0), "first eval must succeed");
-    assert_eq!(
-        v2,
-        interp::Value::Int(0),
-        "second eval must succeed (no double-free)"
-    );
-}
-
 // P0-2: parasteps with spawn in nested scope (inner block).
 #[test]
 fn dual_parasteps_spawn_nested_scope() {
@@ -11151,7 +11119,7 @@ fn dual_parse_builtin_codegen() {
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(
         out.trim(),
-        r#"{"functions":[{"name":"add","line":1,"col":1,"is_pub":false,"is_comptime":false,"is_async":false,"params":[{"name":"a","type":"i32","mut":false,"line":1,"col":10},{"name":"b","type":"i32","mut":false,"line":1,"col":18}],"return_type":"i32","has_body":true,"body_end_line":1,"stmts":[]}],"types":[],"imports":[],"has_main":false}"#
+        r#"{"functions":[{"name":"add","line":1,"col":1,"is_pub":false,"is_comptime":false,"is_async":false,"params":[{"name":"a","type":"i32","mut":false,"line":1,"col":10},{"name":"b","type":"i32","mut":false,"line":1,"col":18}],"return_type":"i32","has_body":true,"body_end_line":1,"stmts":[]}],"types":[],"modules":[],"imports":[],"has_main":false}"#
     );
 }
 
@@ -14413,6 +14381,109 @@ func main() -> i32 {{
 }
 
 #[test]
+fn dual_maps_stdlib_wrappers_preserve_original() {
+    // batch5-03 P1-3: std::maps functional wrappers must not mutate the
+    // original map on either backend. Earlier codegen map_set/map_remove
+    // mutated in place, so merge/update/omit (and set/remove) changed the
+    // caller's old map.
+    if !can_link() {
+        return;
+    }
+    let stdlib = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/maps.mimi"),
+    )
+    .expect("read std/maps.mimi");
+    let src = format!(
+        r#"{stdlib}
+func main() -> i32 {{
+    let a = new()
+    let a2 = set(a, "x", 1)
+    println(size(a))
+    println(size(a2))
+    let removed = remove(a2, "x")
+    println(size(a2))
+    println(size(removed))
+    let b = from_list([("j", 2)])
+    let merged = merge(a2, b)
+    println(size(a2))
+    println(size(merged))
+    let omitted = omit(a2, ["x"])
+    println(size(a2))
+    println(size(omitted))
+    0
+}}
+"#
+    );
+    dual_assert_soft!(src.as_str(), "0\n1\n1\n0\n1\n2\n1\n0");
+}
+
+#[test]
+fn dual_maps_from_list_tuple_roundtrip() {
+    // usability-probe P2: pin the real-world `List<(string, Any)>` +
+    // `map_from_list` tuple representation on both backends. The native
+    // lowering regressed when a tuple element was read as a flat string slot.
+    // Interpreter always runs; native is required when a C linker is present.
+    let stdlib = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/maps.mimi"),
+    )
+    .expect("read std/maps.mimi");
+    let src = format!(
+        r#"{stdlib}
+func main() -> i32 {{
+    let m = from_list([("a", 1), ("b", 2)])
+    if size(m) != 2 {{ return 1 }}
+    let (found_a, va) = get(m, "a")
+    if !found_a || va != 1 {{ return 2 }}
+    let (found_b, vb) = get(m, "b")
+    if !found_b || vb != 2 {{ return 3 }}
+    let m2 = from_list(to_list(m))
+    if size(m2) != 2 {{ return 4 }}
+    let (found_b2, vb2) = get(m2, "b")
+    if !found_b2 || vb2 != 2 {{ return 5 }}
+    let m3 = set(m2, "c", 3)
+    if size(m3) != 3 {{ return 6 }}
+    println(size(m3))
+    0
+}}
+"#
+    );
+    // CHECKER-GAP: concatenating std/maps.mimi lacks the loader's
+    // "stdlib:" SourceKey, so C3 Any exemptions do not fire. The real
+    // `use std::maps` path is covered by loader_std_maps_import_typechecks
+    // and tests/fixtures/maps_from_list_roundtrip.mimi via `mimi run`.
+    let _ = check_source(src.as_str());
+    let interp_run = std::panic::catch_unwind(|| run_source_with_stdout(src.as_str()));
+    assert!(
+        interp_run.is_ok(),
+        "interpreter panicked for dual_maps_from_list_tuple_roundtrip"
+    );
+    let (_interp_val, interp_stdout) = interp_run.unwrap();
+    assert_eq!(
+        interp_stdout.trim(),
+        "3",
+        "interpreter stdout mismatch\ninterp: {}\nexpected: 3",
+        interp_stdout.trim()
+    );
+    if !can_link() {
+        return;
+    }
+    let codegen = compile_and_run(src.as_str()).expect("codegen failed");
+    assert_eq!(
+        codegen.trim(),
+        "3",
+        "codegen mismatch\ncodegen: {}\nexpected: 3",
+        codegen.trim()
+    );
+    assert_eq!(
+        interp_stdout.trim(),
+        codegen.trim(),
+        "dual-backend stdout diverge\ninterp: {}\ncodegen: {}",
+        interp_stdout.trim(),
+        codegen.trim()
+    );
+}
+
+#[test]
 fn dual_set_size() {
     if !can_link() {
         return;
@@ -15258,13 +15329,12 @@ fn dual_channel_cross_thread_send_recv_no_deadlock() {
     );
 }
 
-// ─── v0.28.21 — Comptime / Quote codegen ───────────────────────────────
+// ─── v0.28.21 — Comptime codegen ────────────────────────────────────────
 //
 // These dual-backend tests verify that the codegen path resolves
 // `comptime { ... }` blocks via the interpreter (single-shot evaluation)
-// and folds the resulting value into the LLVM IR as a constant. The
-// `quote!` macro is folded similarly when the quoted block contains only
-// literal data; runtime-dependent quote! blocks are out of scope for v0.28.21.
+// and folds the resulting value into the LLVM IR as a constant.
+// 0.1.7 Phase E removed `quote!`; `comptime` remains the constant-fold path.
 
 #[test]
 fn dual_comptime_block_int() {
@@ -15360,205 +15430,6 @@ fn dual_comptime_func_arithmetic() {
         }
         "#,
         "7"
-    );
-}
-
-#[test]
-fn dual_quote_literal_fold() {
-    if !can_link() {
-        return;
-    }
-    // quote! { 42 } folds to Value::Int(42) at codegen time.
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        func main() -> i32 {
-            let v = ast_eval(quote! { 42 })
-            println(v)
-            0
-        }
-        "#,
-        "42"
-    );
-}
-
-#[test]
-fn dual_quote_arith_fold() {
-    if !can_link() {
-        return;
-    }
-    // quote! { 10 + 20 } folds to Value::Int(30).
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        func main() -> i32 {
-            let v = ast_eval(quote! { 10 + 20 })
-            println(v)
-            0
-        }
-        "#,
-        "30"
-    );
-}
-
-// ─── v0.28.21 — Quote AST codegen (comptime variable folding) ──────────
-//
-// These tests exercise the `fold_quote_block` path added in v0.28.21:
-// when a quote! block contains identifiers bound to comptime-known
-// values, the block is folded through the interpreter and emitted as
-// a constant. Anything that depends on a runtime-only binding still
-// errors — that's expected and matches the spirit of the v0.28.21 goal
-// "在 codegen 中构造 QuotedAst 值".
-
-#[test]
-fn dual_quote_comptime_ident_fold() {
-    if !can_link() {
-        return;
-    }
-    // Comptime call result is interpolated into a quote! block; the
-    // fold path runs the call through the interpreter and emits the
-    // sum as a constant.
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        comptime func seven() -> i32 { 7 }
-        func main() -> i32 {
-            let v = ast_eval(quote! { $(seven() + 1) })
-            println(v)
-            0
-        }
-        "#,
-        "8"
-    );
-}
-
-#[test]
-fn dual_quote_nested_comptime() {
-    if !can_link() {
-        return;
-    }
-    // Two comptime funcs combined inside a quote! block.
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        comptime func base() -> i32 { 100 }
-        comptime func step() -> i32 { 23 }
-        func main() -> i32 {
-            let v = ast_eval(quote! { $(base() + step()) })
-            println(v)
-            0
-        }
-        "#,
-        "123"
-    );
-}
-
-#[test]
-fn dual_quote_comptime_let_fold() {
-    if !can_link() {
-        return;
-    }
-    // A let-binding inside a quote! block, with the rhs supplied by a
-    // comptime call (folded into a constant).
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        comptime func make_sum() -> i32 { 30 + 12 }
-        func main() -> i32 {
-            let v = ast_eval(quote! { let s = $(make_sum()); s })
-            println(v)
-            0
-        }
-        "#,
-        "42"
-    );
-}
-
-#[test]
-fn dual_quote_runtime_var_is_rejected() {
-    // ABI v1 deliberately has no compiled evaluator. Codegen must reject a
-    // runtime-dependent quote instead of passing a tree through identity ast_eval.
-    let src = r#"
-        func main() -> i32 {
-            let n = 7
-            let ast = quote! { n + 1 }
-            0
-        }
-    "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let err = codegen
-        .compile_file(&file)
-        .expect_err("runtime-dependent quote must be rejected");
-    assert!(
-        err.to_string()
-            .contains("runtime-dependent quote is unsupported by QuotedAst ABI v1"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn dual_quote_cast() {
-    if !can_link() {
-        return;
-    }
-    // CHECKER-GAP (0.34.10a, golden §7.6 R8): ast_eval result participates
-    // in arithmetic (ast_eval(quote!{...}) + 1) — static return type AST
-    // cannot satisfy numeric unification. Retained as soft; adjudicated:
-    // quote returns a runtime AST value, arithmetic on it stays interp-only.
-    dual_assert_soft!(
-        r#"
-        func main() -> i32 {
-            println(ast_eval(quote! { 41.9 as i32 }) + 1)
-            0
-        }
-        "#,
-        "42"
-    );
-}
-
-#[test]
-fn dual_quote_interpolate_in_comptime() {
-    if !can_link() {
-        return;
-    }
-    // Top-level $(expr) interpolation inside a quote! block that is
-    // wrapped in a comptime block — exercises Expr::QuoteInterpolate
-    // resolution through both quote and comptime fold paths.
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        comptime func k() -> i32 { 5 }
-        func main() -> i32 {
-            let v = comptime { ast_eval(quote! { $(k() * 2) }) }
-            println(v)
-            0
-        }
-        "#,
-        "10"
-    );
-}
-
-#[test]
-fn dual_quote_with_comptime_conditional() {
-    if !can_link() {
-        return;
-    }
-    // An `if` inside a quote! block whose branch values are both
-    // comptime-foldable, ensuring the If arm of QuotedAst::eval
-    // participates in the codegen fold.
-    // v0.34.10a: quote!/comptime fully resolved (golden §7.6)
-    dual_assert!(
-        r#"
-        comptime func flag() -> bool { true }
-        func main() -> i32 {
-            let v = ast_eval(quote! { if $(flag()) { 100 } else { 200 } })
-            println(v)
-            0
-        }
-        "#,
-        "100"
     );
 }
 

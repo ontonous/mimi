@@ -1,3 +1,8 @@
+// ⚠ EXPERIMENTAL: this subpackage is not part of the stable stdlib ABI.
+// It is a Rust-side parser reimplementation experiment and may fail to
+// compile with current language syntax. Do not `use std::mimispec::*` in
+// production code; keep it excluded from default stdlib loading.
+//
 // MimiSpec AST type definitions
 // Defines the abstract syntax tree types for the MimiSpec language.
 // This is the foundational types for the Mimi-implemented mimispec parser.
@@ -9,66 +14,10 @@ pub type Token {
     Token { kind: string, value: string, line: i32, col: i32 }
 }
 
-// ── Top-level file ─────────────────────────────────────────────────────────
-
-pub type MmsFile {
-    MmsFile(List<string>, List<RuleDef>, List<Fragment>)
-}
-
-// ── Fragment ───────────────────────────────────────────────────────────────
-
-pub type Fragment {
-    ModuleFrag(Module)
-    TypeDefFrag(TypeDef)
-    FuncDefFrag(FuncDef)
-    FlowFrag(FlowDef)
-    UiFrag(UiDef)
-    StepsFrag(List<Step>)
-    ExprFrag(Expr)
-    UiNodeFrag(UiNode)
-    PlaceholderFrag(bool)
-}
-
-// ── Module ─────────────────────────────────────────────────────────────────
-
-pub type Module {
-    Module(string, string, List<RuleDef>, List<Fragment>)
-}
-
 // ── Rule Definition ────────────────────────────────────────────────────────
 
 pub type RuleDef {
     RuleDef(string, i32)
-}
-
-// ── Type Definition ────────────────────────────────────────────────────────
-
-pub type TypeBody {
-    EnumType(List<string>)
-    RecordType(List<Field>)
-}
-
-pub type Field {
-    Field(string, List<string>)
-}
-
-pub type TypeDef {
-    TypeDef(string, string, List<RuleDef>, TypeBody)
-}
-
-// ── Function Definition ────────────────────────────────────────────────────
-
-pub type Param {
-    Param(string, List<string>)
-}
-
-pub type Condition {
-    StructuredCond(Expr)
-    NaturalCond(string)
-}
-
-pub type FuncDef {
-    FuncDef(string, string, List<RuleDef>, List<Param>, Condition, bool, Condition, bool, List<Step>)
 }
 
 // ── Expression ─────────────────────────────────────────────────────────────
@@ -102,6 +51,48 @@ pub type Expr {
     PlaceholderExpr(bool)
 }
 
+// ── Simple Value ───────────────────────────────────────────────────────────
+
+pub type SimpleValue {
+    IdentValue(string)
+    StringValue(string)
+    NumberValue(string)
+    BoolValue(bool)
+    ListValue(List<List<string>>)
+}
+
+// ── Parse Error ────────────────────────────────────────────────────────────
+
+pub type ParseError {
+    ParseError(string, i32, i32)
+}
+
+// ── Type Definition ────────────────────────────────────────────────────────
+
+pub type Field {
+    Field(string, List<string>)
+}
+
+pub type TypeBody {
+    EnumType(List<string>)
+    RecordType(List<Field>)
+}
+
+pub type TypeDef {
+    TypeDef(string, string, List<RuleDef>, TypeBody)
+}
+
+// ── Function Definition ────────────────────────────────────────────────────
+
+pub type Param {
+    Param(string, List<string>)
+}
+
+pub type Condition {
+    StructuredCond(Expr)
+    NaturalCond(string)
+}
+
 // ── Step ───────────────────────────────────────────────────────────────────
 
 pub type ToTarget {
@@ -109,7 +100,7 @@ pub type ToTarget {
 }
 
 pub type OnBlock {
-    OnBlock(List<string>, List<Step>)
+    OnBlock(List<string>, List<Any>)
 }
 
 pub type Step {
@@ -124,14 +115,8 @@ pub type Step {
     PlaceholderStep(bool)
 }
 
-// ── Simple Value ───────────────────────────────────────────────────────────
-
-pub type SimpleValue {
-    IdentValue(string)
-    StringValue(string)
-    NumberValue(string)
-    BoolValue(bool)
-    ListValue(List<List<string>>)
+pub type FuncDef {
+    FuncDef(string, string, List<RuleDef>, List<Param>, Condition, bool, Condition, bool, List<Step>)
 }
 
 // ── Flow ───────────────────────────────────────────────────────────────────
@@ -165,12 +150,6 @@ pub type UiDef {
     UiDef(string, string, bool, UiNode)
 }
 
-// ── Parse Error ────────────────────────────────────────────────────────────
-
-pub type ParseError {
-    ParseError(string, i32, i32)
-}
-
 // ── Math Block ─────────────────────────────────────────────────────────────
 
 pub type MathStatement {
@@ -181,3 +160,29 @@ pub type MathStatement {
 pub type MathBlock {
     MathBlock(List<MathStatement>)
 }
+// ── Fragment ───────────────────────────────────────────────────────────────
+
+pub type Fragment {
+    ModuleFrag(Any)
+    TypeDefFrag(TypeDef)
+    FuncDefFrag(FuncDef)
+    FlowFrag(FlowDef)
+    UiFrag(UiDef)
+    StepsFrag(List<Step>)
+    ExprFrag(Expr)
+    UiNodeFrag(UiNode)
+    PlaceholderFrag(bool)
+}
+
+// ── Module ─────────────────────────────────────────────────────────────────
+
+pub type Module {
+    Module(string, string, List<RuleDef>, List<Fragment>)
+}
+
+// ── Top-level file ─────────────────────────────────────────────────────────
+
+pub type MmsFile {
+    MmsFile(List<string>, List<RuleDef>, List<Fragment>)
+}
+

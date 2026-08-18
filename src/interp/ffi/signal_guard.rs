@@ -29,6 +29,7 @@
 
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use std::sync::Mutex;
 
 /// Global mutex serializing signal guard usage. Signal handlers are
@@ -38,8 +39,14 @@ use std::sync::Mutex;
 static GUARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// sigjmp_buf is 200 bytes on x86_64 Linux (glibc).
-/// Use 256 for alignment headroom across platforms.
-const JMP_BUF_SIZE: usize = 256;
+/// Use a generous 1024-byte buffer for alignment/headroom across the
+/// supported Linux/glibc targets. This is still a hardcoded fallback; a
+/// future port should replace it with `size_of::<libc::sigjmp_buf>()` when
+/// the libc crate exposes that type (batch5 P1-5).
+const JMP_BUF_SIZE: usize = 1024;
+// Keep the scratch buffer comfortably above the largest known sigjmp_buf
+// size (200 bytes on x86_64 glibc) so accidental regressions fail at build.
+const _: () = assert!(JMP_BUF_SIZE >= 512);
 
 extern "C" {
     /// glibc internal entry point for sigsetjmp (the macro expands to this).
@@ -50,15 +57,39 @@ extern "C" {
     fn siglongjmp(env: *mut c_void, val: i32) -> !;
 }
 
+// Re-entrancy guard: true while inside call_guarded on this thread.
+// Prevents deadlock when a C function calls back into Mimi → FFI.
 thread_local! {
-    /// Thread-local recovery point. NULL means no guarded call is active.
-    static RECOVERY_BUF: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
-    /// Thread-local buffer for the sigjmp_buf (avoids stack allocation
-    /// across the signal handler boundary).
-    static JMP_BUF: Cell<[u8; JMP_BUF_SIZE]> = const { Cell::new([0u8; JMP_BUF_SIZE]) };
-    /// Re-entrancy guard: true while inside call_guarded on this thread.
-    /// Prevents deadlock when a C function calls back into Mimi → FFI.
     static IN_GUARDED_CALL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Recovery buffer for sigjmp_buf. Only one guarded FFI call can be active
+/// process-wide because GUARD_LOCK serializes entry; the buffer is therefore
+/// global rather than thread-local. The signal handler reads the matching
+/// RECOVERY_PTR/GUARDED_TID atomics instead of touching TLS, avoiding the
+/// previous async-signal-unsafe TLS access.
+static mut JMP_BUF: [u8; JMP_BUF_SIZE] = [0u8; JMP_BUF_SIZE];
+
+/// Process-wide recovery pointer and owning thread id. These are written
+/// only by the single thread that holds GUARD_LOCK and read by the signal
+/// handler. A crashed thread only longjmps if it is the thread that armed
+/// the guard; other threads (e.g. threads spawned by the C callee) re-raise
+/// the signal with the default disposition.
+static RECOVERY_PTR: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static GUARDED_TID: AtomicI64 = AtomicI64::new(0);
+
+#[cfg(target_os = "linux")]
+unsafe fn current_tid() -> i64 {
+    // SAFETY: syscall(SYS_gettid) is async-signal-safe and does not allocate.
+    unsafe { libc::syscall(libc::SYS_gettid) as i64 }
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn current_tid() -> i64 {
+    // Non-Linux fallback: treat the whole process as one guarded "thread".
+    // This is conservative; the signal guard is primarily a Linux/glibc
+    // feature and this keeps the handler safe to compile elsewhere.
+    0
 }
 
 /// Signal handler: restores SIG_DFL for all guarded signals, then
@@ -79,15 +110,17 @@ extern "C" fn crash_handler(sig: libc::c_int) {
         libc::signal(libc::SIGILL, libc::SIG_DFL);
         libc::signal(libc::SIGFPE, libc::SIG_DFL);
     }
-    RECOVERY_BUF.with(|buf| {
-        let ptr = buf.get();
-        if !ptr.is_null() {
-            // SAFETY: ptr points to a valid sigjmp_buf set by sigsetjmp
-            // in call_ffi_guarded. siglongjmp is async-signal-safe.
-            unsafe { siglongjmp(ptr, sig) };
-        }
-    });
-    // No recovery point: re-raise with default handler (terminates process).
+    let ptr = RECOVERY_PTR.load(Ordering::Relaxed);
+    // SAFETY: current_tid() is an async-signal-safe syscall wrapper.
+    let tid = unsafe { current_tid() };
+    if !ptr.is_null() && GUARDED_TID.load(Ordering::Relaxed) == tid {
+        // SAFETY: ptr points to a valid sigjmp_buf set by sigsetjmp
+        // in call_ffi_guarded, and only the arming thread is allowed to
+        // longjmp. siglongjmp is async-signal-safe.
+        unsafe { siglongjmp(ptr, sig) };
+    }
+    // No matching recovery point (or crash came from another thread):
+    // re-raise with default handler (terminates process).
     // SAFETY: raise() is async-signal-safe.
     unsafe {
         libc::raise(sig);
@@ -136,6 +169,23 @@ fn restore_handlers(saved: &SavedHandlers) {
 /// If the closure triggers a fatal signal, returns `Err` with the signal name.
 /// If the closure completes normally, returns `Ok(result)`.
 ///
+/// # Safety
+///
+/// This function is `unsafe` because `siglongjmp` from a signal handler
+/// crosses ordinary Rust stack frames, and the signal handler reads a
+/// thread-local recovery pointer. That recovery mechanism is inherently
+/// not guaranteed by Rust's memory model; it is provided only as the
+/// low-level FFI crash guard. Callers must ensure:
+///
+/// - the closure only contains FFI calls and does not rely on Rust-scoped
+///   destructors running when a catchable signal is delivered;
+/// - resources acquired by the closure that outlive a caught crash are
+///   treated as leaked;
+/// - only one guarded FFI call is active per thread at a time (the same
+///   thread re-entrant path is supported);
+/// - the host platform supports this POSIX signal/longjmp recovery approach
+///   (primary target: Linux/glibc).
+///
 /// # Limitations
 /// - Process-wide signal handlers: concurrent guarded calls from multiple
 ///   threads are serialized by GUARD_LOCK.
@@ -160,7 +210,7 @@ fn restore_handlers(saved: &SavedHandlers) {
 /// guarded call must re-establish it), clear `IN_GUARDED_CALL`, restore the
 /// saved signal handlers, and then resume the unwind via
 /// `std::panic::resume_unwind` (the caller observes the original panic).
-pub(crate) fn call_guarded<F, R>(f: F) -> Result<R, String>
+pub(crate) unsafe fn call_guarded<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce() -> R,
 {
@@ -180,63 +230,65 @@ where
 
     let saved = install_handlers();
 
-    // Set up thread-local jmp_buf and recovery point.
-    let result = JMP_BUF.with(|jmp_cell| {
-        let mut buf = jmp_cell.get();
-        let buf_ptr = buf.as_mut_ptr() as *mut c_void;
+    // Set up the global jmp_buf and recovery point. GUARD_LOCK guarantees
+    // only one thread is inside a guarded call at a time; the buffer is
+    // global, and the owning thread id is recorded for the signal handler.
+    // SAFETY: JMP_BUF is only accessed under GUARD_LOCK.
+    let buf_ptr = std::ptr::addr_of_mut!(JMP_BUF).cast::<c_void>();
+    // SAFETY: current_tid() is an async-signal-safe syscall wrapper.
+    let tid = unsafe { current_tid() };
+    RECOVERY_PTR.store(buf_ptr, Ordering::Relaxed);
+    GUARDED_TID.store(tid, Ordering::Relaxed);
 
-        RECOVERY_BUF.with(|rec| {
-            rec.set(buf_ptr);
+    // SAFETY: buf_ptr points to a valid 1024-byte buffer (sigjmp_buf
+    // is 200 bytes on x86_64). savesigs=1 saves the signal mask.
+    let sig = unsafe { __sigsetjmp(buf_ptr, 1) };
 
-            // SAFETY: buf_ptr points to a valid 256-byte buffer (sigjmp_buf
-            // is 200 bytes on x86_64). savesigs=1 saves the signal mask.
-            let sig = unsafe { __sigsetjmp(buf_ptr, 1) };
-
-            if sig == 0 {
-                // Initial call: execute the protected closure.
-                //
-                // Audit fix (signal_guard.rs:149-208): intercept Rust
-                // panics. A bare unwind would skip the cleanup after
-                // JMP_BUF.with(..) and leave crash_handler installed with
-                // RECOVERY_BUF pointing at this dying frame and
-                // IN_GUARDED_CALL stuck true — the next SIGSEGV would
-                // siglongjmp into dead stack. AssertUnwindSafe: the closure
-                // borrows nothing whose invariants we must re-check here;
-                // any state it touched is leaked per the documented
-                // "resources acquired before the crash are leaked"
-                // limitation, same as the signal (longjmp) path.
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-                    Ok(v) => Ok(v),
-                    Err(payload) => {
-                        // Neutralize the guard state BEFORE resuming the
-                        // unwind so the signal handler can never longjmp
-                        // into this frame once it unwinds.
-                        RECOVERY_BUF.with(|r| r.set(std::ptr::null_mut()));
-                        IN_GUARDED_CALL.with(|flag| flag.set(false));
-                        restore_handlers(&saved);
-                        std::panic::resume_unwind(payload)
-                    }
-                }
-            } else {
-                // Signal caught: siglongjmp returned here with the signal number.
-                let sig_name = match sig {
-                    6 => "SIGABRT",
-                    7 => "SIGBUS",
-                    8 => "SIGFPE",
-                    11 => "SIGSEGV",
-                    4 => "SIGILL",
-                    _ => "UNKNOWN",
-                };
-                Err(format!(
-                    "FFI safety: C function crashed with {} (signal {})",
-                    sig_name, sig
-                ))
+    let result = if sig == 0 {
+        // Initial call: execute the protected closure.
+        //
+        // Audit fix (signal_guard.rs:149-208): intercept Rust
+        // panics. A bare unwind would skip the cleanup after
+        // JMP_BUF.with(..) and leave crash_handler installed with
+        // RECOVERY_BUF pointing at this dying frame and
+        // IN_GUARDED_CALL stuck true — the next SIGSEGV would
+        // siglongjmp into dead stack. AssertUnwindSafe: the closure
+        // borrows nothing whose invariants we must re-check here;
+        // any state it touched is leaked per the documented
+        // "resources acquired before the crash are leaked"
+        // limitation, same as the signal (longjmp) path.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(v) => Ok(v),
+            Err(payload) => {
+                // Neutralize the guard state BEFORE resuming the
+                // unwind so the signal handler can never longjmp
+                // into this frame once it unwinds.
+                RECOVERY_PTR.store(std::ptr::null_mut(), Ordering::Relaxed);
+                GUARDED_TID.store(0, Ordering::Relaxed);
+                IN_GUARDED_CALL.with(|flag| flag.set(false));
+                restore_handlers(&saved);
+                std::panic::resume_unwind(payload)
             }
-        })
-    });
+        }
+    } else {
+        // Signal caught: siglongjmp returned here with the signal number.
+        let sig_name = match sig {
+            6 => "SIGABRT",
+            7 => "SIGBUS",
+            8 => "SIGFPE",
+            11 => "SIGSEGV",
+            4 => "SIGILL",
+            _ => "UNKNOWN",
+        };
+        Err(format!(
+            "FFI safety: C function crashed with {} (signal {})",
+            sig_name, sig
+        ))
+    };
 
     // Clear recovery point, re-entrancy flag, and restore handlers.
-    RECOVERY_BUF.with(|rec| rec.set(std::ptr::null_mut()));
+    RECOVERY_PTR.store(std::ptr::null_mut(), Ordering::Relaxed);
+    GUARDED_TID.store(0, Ordering::Relaxed);
     IN_GUARDED_CALL.with(|flag| flag.set(false));
     restore_handlers(&saved);
 
@@ -247,15 +299,25 @@ where
 mod tests {
     use super::*;
 
+    /// Safe test-only wrapper around the intentionally unsafe crash guard.
+    fn guarded<F, R>(f: F) -> Result<R, String>
+    where
+        F: FnOnce() -> R,
+    {
+        // SAFETY: test-only call sites only run the signal-guard scenarios
+        // described in each test, satisfying the FFI crash-recovery contract.
+        unsafe { call_guarded(f) }
+    }
+
     #[test]
     fn signal_guard_normal_call_succeeds() {
-        let result = call_guarded(|| 42);
+        let result = guarded(|| 42);
         assert_eq!(result, Ok(42));
     }
 
     #[test]
     fn signal_guard_catches_sigsegv() {
-        let result = call_guarded(|| -> i32 {
+        let result = guarded(|| -> i32 {
             // SAFETY: intentionally dereference null to trigger SIGSEGV.
             unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
         });
@@ -270,7 +332,7 @@ mod tests {
 
     #[test]
     fn signal_guard_catches_sigabrt() {
-        let result = call_guarded(|| -> i32 {
+        let result = guarded(|| -> i32 {
             // SAFETY: intentionally abort to trigger SIGABRT.
             unsafe { libc::abort() }
         });
@@ -289,28 +351,28 @@ mod tests {
         let _ =
             // SAFETY: this deliberately reads from a null pointer to produce a
             // SIGSEGV that tests the signal guard recovery mechanism.
-            call_guarded(|| -> i32 { unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) } });
+            guarded(|| -> i32 { unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) } });
         // If handlers weren't restored, this second call would also be caught.
         // But since crash_handler restores SIG_DFL, a second crash would
-        // terminate the process. We verify by checking that call_guarded
+        // terminate the process. We verify by checking that guarded
         // still works for normal calls.
-        let result = call_guarded(|| 99);
+        let result = guarded(|| 99);
         assert_eq!(result, Ok(99));
     }
 
     #[test]
     fn signal_guard_string_result() {
-        let result = call_guarded(|| "hello".to_string());
+        let result = guarded(|| "hello".to_string());
         assert_eq!(result, Ok("hello".to_string()));
     }
 
     #[test]
     fn signal_guard_reentrant_call_does_not_deadlock() {
         // Simulates C callback → Mimi → FFI re-entrancy.
-        // The inner call_guarded should NOT deadlock on GUARD_LOCK.
-        let result = call_guarded(|| {
+        // The inner guarded should NOT deadlock on GUARD_LOCK.
+        let result = guarded(|| {
             // Inner call: re-entrant, should skip lock and run directly.
-            let inner = call_guarded(|| 42);
+            let inner = guarded(|| 42);
             inner.unwrap() + 1
         });
         assert_eq!(result, Ok(43));
@@ -320,8 +382,8 @@ mod tests {
     fn signal_guard_reentrant_crash_caught_by_outer() {
         // If the inner (re-entrant) call crashes, the outer recovery
         // point catches it (inner has no separate recovery point).
-        let result = call_guarded(|| -> i32 {
-            let inner = call_guarded(|| -> i32 {
+        let result = guarded(|| -> i32 {
+            let inner = guarded(|| -> i32 {
                 // SAFETY: deliberately crashes to test signal guard reentrancy
                 unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
             });
@@ -335,24 +397,25 @@ mod tests {
 
     #[test]
     fn signal_guard_panic_leaves_clean_state() {
-        // 2026-08-05 audit fix: a panic inside call_guarded must not poison
+        // 2026-08-05 audit fix: a panic inside guarded must not poison
         // the process-wide signal state. Before the fix the unwind skipped
         // cleanup, leaving IN_GUARDED_CALL stuck true and RECOVERY_BUF
         // dangling at a dead frame — the next SIGSEGV would siglongjmp into
         // dead stack.
         let r = std::panic::catch_unwind(|| {
-            let _ = call_guarded(|| -> i32 { panic!("deliberate audit test panic") });
+            let _ = guarded(|| -> i32 { panic!("deliberate audit test panic") });
         });
         assert!(r.is_err(), "the panic must propagate to the caller");
 
         // Guard state must be clean on this thread after the unwind.
         IN_GUARDED_CALL.with(|flag| assert!(!flag.get()));
-        RECOVERY_BUF.with(|rec| assert!(rec.get().is_null()));
+        assert!(RECOVERY_PTR.load(Ordering::Relaxed).is_null());
+        assert_eq!(GUARDED_TID.load(Ordering::Relaxed), 0);
 
         // And a subsequent guarded call must still catch real crashes.
         // (With IN_GUARDED_CALL stuck true this would run unprotected and
         // kill the test process instead of returning Err.)
-        let result = call_guarded(|| -> i32 {
+        let result = guarded(|| -> i32 {
             // SAFETY: deliberate null dereference to verify the signal
             // guard still recovers after a panicked guarded call.
             unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
@@ -366,15 +429,16 @@ mod tests {
         // A panic in a re-entrant (inner) closure unwinds into the outer
         // call's catch_unwind, which performs the cleanup.
         let r = std::panic::catch_unwind(|| {
-            let _ = call_guarded(|| -> i32 {
-                let _inner = call_guarded(|| -> i32 { panic!("inner panic") });
+            let _ = guarded(|| -> i32 {
+                let _inner = guarded(|| -> i32 { panic!("inner panic") });
                 0
             });
         });
         assert!(r.is_err());
         IN_GUARDED_CALL.with(|flag| assert!(!flag.get()));
-        RECOVERY_BUF.with(|rec| assert!(rec.get().is_null()));
+        assert!(RECOVERY_PTR.load(Ordering::Relaxed).is_null());
+        assert_eq!(GUARDED_TID.load(Ordering::Relaxed), 0);
         // Sanity: guard still usable afterwards.
-        assert_eq!(call_guarded(|| 7), Ok(7));
+        assert_eq!(guarded(|| 7), Ok(7));
     }
 }

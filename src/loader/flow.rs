@@ -413,20 +413,6 @@ fn remap_item_spans(item: &mut Item, remap: &SourceIdRemap) -> Result<(), String
             }
             Ok(())
         }
-        Item::Protocol(protocol) => {
-            remap_meta(&mut protocol.meta, remap)?;
-            remap_generic_params_spans(&mut protocol.generics, remap)?;
-            for state in &mut protocol.states {
-                remap_meta(&mut state.meta, remap)?;
-                if let Some(payload_type) = &mut state.payload_type {
-                    remap_type_spans(payload_type, remap)?;
-                }
-            }
-            for transition in &mut protocol.transitions {
-                remap_meta(&mut transition.meta, remap)?;
-            }
-            Ok(())
-        }
     }
 }
 
@@ -1352,13 +1338,10 @@ fn item_is_pub(item: &Item) -> bool {
         Item::Const { pub_, .. } => *pub_,
         Item::Flow(f) => f.pub_,
         Item::Session(s) => s.pub_,
-        // Traits/impls/modules/extern/protocol/cap: treat as public API surface.
-        Item::Module(_)
-        | Item::Trait(_)
-        | Item::Impl(_)
-        | Item::ExternBlock(_)
-        | Item::Protocol(_)
-        | Item::Cap(_) => true,
+        // Traits/impls/modules/extern/cap: treat as public API surface.
+        Item::Module(_) | Item::Trait(_) | Item::Impl(_) | Item::ExternBlock(_) | Item::Cap(_) => {
+            true
+        }
     }
 }
 
@@ -1390,7 +1373,6 @@ fn item_name(item: &Item) -> Option<String> {
         Item::ExternBlock(_) => None,
         Item::Const { name, .. } => Some(name.clone()),
         Item::Flow(f) => Some(f.name.clone()),
-        Item::Protocol(p) => Some(p.name.clone()),
         Item::Session(s) => Some(s.name.clone()),
     }
 }

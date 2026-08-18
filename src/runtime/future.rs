@@ -38,6 +38,7 @@
 
 #[cfg(standalone)]
 use super::libc;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 
@@ -69,6 +70,65 @@ fn future_layout(data_capacity: u64) -> Option<std::alloc::Layout> {
     }
     let total = FUTURE_HEADER_SIZE.checked_add(data_capacity as usize)?;
     std::alloc::Layout::from_size_align(total, FUTURE_ALIGN).ok()
+}
+
+/// Process-wide set of addresses returned by `mimi_future_alloc` and not yet
+/// fully deallocated. Combined with the atomic refcount, this lets public FFI
+/// entry points reject a fully-deallocated pointer without touching freed
+/// memory (P0-11): the registry is checked under lock before the header is
+/// read, and the last release unregisters before deallocating.
+static LIVE_FUTURES: std::sync::OnceLock<Mutex<HashSet<usize>>> = std::sync::OnceLock::new();
+
+fn live_futures() -> &'static Mutex<HashSet<usize>> {
+    LIVE_FUTURES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn future_register(fut: *mut std::ffi::c_void) {
+    if fut.is_null() {
+        return;
+    }
+    if let Ok(mut guard) = live_futures().lock() {
+        guard.insert(fut as usize);
+    }
+}
+
+fn future_unregister(fut: *mut std::ffi::c_void) {
+    if fut.is_null() {
+        return;
+    }
+    if let Ok(mut guard) = live_futures().lock() {
+        let removed = guard.remove(&(fut as usize));
+        // If the registry is empty again, release its backing allocation so
+        // Valgrind does not report the global set's table as possibly lost at
+        // process exit.
+        if removed && guard.is_empty() {
+            guard.shrink_to_fit();
+        }
+    }
+}
+
+/// Retain a future only if it is still registered (not fully deallocated).
+///
+/// SAFETY: `fut` must be null or a pointer that was previously returned by
+/// `mimi_future_alloc`; if it is no longer registered, the function returns
+/// false without dereferencing the pointer.
+fn future_retain_registered(fut: *mut std::ffi::c_void) -> bool {
+    if fut.is_null() {
+        return false;
+    }
+    let addr = fut as usize;
+    let guard = match live_futures().lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if !guard.contains(&addr) {
+        return false;
+    }
+    // SAFETY: registration is removed only by the last release before
+    // deallocation; while the address is still in the registry, the
+    // allocation has not been freed yet. The caller guarantees `fut` came
+    // from mimi_future_alloc.
+    unsafe { future_try_retain(fut as *mut MimiFutureHeader) }
 }
 
 /// Try to retain a live future. Returns false if already fully freed (refs==0).
@@ -103,6 +163,9 @@ unsafe fn future_release(fut: *mut MimiFutureHeader) {
         // We hold the last reference, so reading `data_capacity` (written
         // once by mimi_future_alloc, immutable afterwards) cannot race.
         let data_capacity = rep.data_capacity;
+        // Remove from the live registry BEFORE deallocating so concurrent
+        // entry points reject the address without touching freed memory.
+        future_unregister(fut as *mut std::ffi::c_void);
         let layout = match future_layout(data_capacity) {
             Some(l) => l,
             // Corrupt header: fail loud instead of freeing with a wrong layout.
@@ -162,7 +225,9 @@ pub extern "C" fn mimi_future_alloc(result_size: u64) -> *mut std::ffi::c_void {
             data_capacity as u64,
         );
     }
-    ptr as *mut std::ffi::c_void
+    let ret = ptr as *mut std::ffi::c_void;
+    future_register(ret);
+    ret
 }
 
 /// Global wait channel used by `mimi_await_future` so waiting threads block
@@ -186,8 +251,14 @@ static AWAIT_CONDVAR: Condvar = Condvar::new();
 /// boundary remains — a double-free of a FULLY deallocated pointer still
 /// touches freed memory to read the refcount (no live registry exists for
 /// bare pointers), but it is now a rejected read, never a write.
+///
+/// # Safety
+/// The future pointer must be null or a pointer returned by `mimi_future_alloc` that
+/// has not been fully deallocated; callers must retain a live reference (for
+/// free/spawn/await/set/is-completed, the runtime performs its own retain check
+/// but a fully deallocated pointer cannot be safely probed).
 #[no_mangle]
-pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
@@ -195,7 +266,7 @@ pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     // the retain below rejects already-freed futures before any write.
     unsafe {
         let fut = fut as *mut MimiFutureHeader;
-        if !future_try_retain(fut) {
+        if !future_retain_registered(fut as *mut std::ffi::c_void) {
             return; // already fully freed — reject before touching the header
         }
         // SAFETY: successfully retained → the allocation is live for the
@@ -206,8 +277,14 @@ pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     }
 }
 
+///
+/// # Safety
+/// The future pointer must be null or a pointer returned by `mimi_future_alloc` that
+/// has not been fully deallocated; callers must retain a live reference (for
+/// free/spawn/await/set/is-completed, the runtime performs its own retain check
+/// but a fully deallocated pointer cannot be safely probed).
 #[no_mangle]
-pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
@@ -216,7 +293,7 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
     // already-freed futures before the header is touched for the CAS.
     unsafe {
         let fut = fut as *mut MimiFutureHeader;
-        if !future_try_retain(fut) {
+        if !future_retain_registered(fut as *mut std::ffi::c_void) {
             return;
         }
         // SAFETY: successfully retained → allocation is live.
@@ -236,8 +313,14 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
     }
 }
 
+///
+/// # Safety
+/// The future pointer must be null or a pointer returned by `mimi_future_alloc` that
+/// has not been fully deallocated; callers must retain a live reference (for
+/// free/spawn/await/set/is-completed, the runtime performs its own retain check
+/// but a fully deallocated pointer cannot be safely probed).
 #[no_mangle]
-pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
+pub unsafe extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
     if fut.is_null() {
         return 1;
     }
@@ -246,7 +329,7 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
     // already-freed futures before the header is read.
     unsafe {
         let fut = fut as *mut MimiFutureHeader;
-        if !future_try_retain(fut) {
+        if !future_retain_registered(fut as *mut std::ffi::c_void) {
             return 1; // already freed — treat as completed/dead
         }
         // SAFETY: successfully retained → allocation is live.
@@ -383,8 +466,14 @@ extern "C" fn mimi_join_spawn_pool_atexit() {
 /// Spawn a future on a real worker thread (used by codegen `spawn expr`).
 /// The poll function is submitted to a bounded global worker pool, which calls
 /// it and sets completed=1 when done. Returns the future pointer (same input).
+///
+/// # Safety
+/// The future pointer must be null or a pointer returned by `mimi_future_alloc` that
+/// has not been fully deallocated; callers must retain a live reference (for
+/// free/spawn/await/set/is-completed, the runtime performs its own retain check
+/// but a fully deallocated pointer cannot be safely probed).
 #[no_mangle]
-pub extern "C" fn mimi_spawn_future(
+pub unsafe extern "C" fn mimi_spawn_future(
     future: *mut std::ffi::c_void,
     // SAFETY: unsafe extern "C" function pointer used for C poll callbacks; see # Safety docs.
     poll_fn: unsafe extern "C" fn(*mut std::ffi::c_void),
@@ -393,12 +482,8 @@ pub extern "C" fn mimi_spawn_future(
         return std::ptr::null_mut();
     }
     // R-C5: retain one ref for the worker thread; release when poll_fn returns.
-    // SAFETY: non-null pointer from mimi_future_alloc.
-    unsafe {
-        let fut = future as *mut MimiFutureHeader;
-        if !future_try_retain(fut) {
-            return std::ptr::null_mut();
-        }
+    if !future_retain_registered(future) {
+        return std::ptr::null_mut();
     }
     // Nested spawns from inside a pool worker use a dedicated thread.  This
     // keeps bounded workers safe when an async body itself awaits another
@@ -479,8 +564,14 @@ pub extern "C" fn mimi_spawn_future(
 /// Wait for a future to become completed. Used by codegen `await` for
 /// thread-spawned futures.  Uses a per-future condvar so long-running tasks do
 /// not trip an artificial spin cap and abort the process.
+///
+/// # Safety
+/// The future pointer must be null or a pointer returned by `mimi_future_alloc` that
+/// has not been fully deallocated; callers must retain a live reference (for
+/// free/spawn/await/set/is-completed, the runtime performs its own retain check
+/// but a fully deallocated pointer cannot be safely probed).
 #[no_mangle]
-pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     if future.is_null() {
         return;
     }
@@ -488,7 +579,7 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     // SAFETY: non-null pointer from mimi_future_alloc.
     unsafe {
         let fut = future as *mut MimiFutureHeader;
-        if !future_try_retain(fut) {
+        if !future_retain_registered(future) {
             return;
         }
         // Fast path: already completed before we block on the condvar.
@@ -529,8 +620,14 @@ static EXECUTOR_QUEUE: std::sync::Mutex<Vec<ExecutorEntry>> = std::sync::Mutex::
 
 /// Submit a future + its poll function to the global executor.
 /// The future is not polled immediately; call mimi_executor_run() to poll.
+///
+/// # Safety
+/// The future pointer must be null or a pointer returned by `mimi_future_alloc` that
+/// has not been fully deallocated; callers must retain a live reference (for
+/// free/spawn/await/set/is-completed, the runtime performs its own retain check
+/// but a fully deallocated pointer cannot be safely probed).
 #[no_mangle]
-pub extern "C" fn mimi_executor_spawn(
+pub unsafe extern "C" fn mimi_executor_spawn(
     future: *mut std::ffi::c_void,
     // SAFETY: unsafe extern "C" function pointer used for C poll callbacks; see # Safety docs.
     poll_fn: unsafe extern "C" fn(*mut std::ffi::c_void),
@@ -538,10 +635,20 @@ pub extern "C" fn mimi_executor_spawn(
     if future.is_null() {
         return;
     }
+    // P0-11: retain one ref for the executor queue. Without this, a caller
+    // could free the future before mimi_executor_run polls it and the queue
+    // would hold a dangling pointer.
+    if !future_retain_registered(future) {
+        return;
+    }
     let mut queue = EXECUTOR_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    // Don't add duplicates
+    // Don't add duplicates; drop the newly acquired ref if it is already queued.
     if !queue.iter().any(|(_, f)| f.0 == future) {
         queue.push((poll_fn, SendPtr(future)));
+    } else {
+        unsafe {
+            future_release(future as *mut MimiFutureHeader);
+        }
     }
 }
 
@@ -563,7 +670,7 @@ pub extern "C" fn mimi_executor_run() {
                 // R-C5: retain while reading completed so free cannot UAF.
                 let completed = unsafe {
                     let fut = future.0 as *mut MimiFutureHeader;
-                    if !future_try_retain(fut) {
+                    if !future_retain_registered(future.0) {
                         1 // freed — treat as done
                     } else {
                         // SAFETY: successfully retained → allocation is live.
@@ -587,20 +694,25 @@ pub extern "C" fn mimi_executor_run() {
                     Some((poll_fn, future.0))
                 }
                 None => {
-                    queue.clear();
+                    // All queued futures are already completed/freed. Release
+                    // the executor's retained refs before dropping the queue.
+                    for (_, f) in queue.drain(..) {
+                        unsafe {
+                            future_release(f.0 as *mut MimiFutureHeader);
+                        }
+                    }
                     return;
                 }
             }
         };
         if let Some((poll_fn, future)) = entry {
-            // SAFETY: future came from the executor queue; retain for the
-            // poll duration (R-C5) so concurrent free cannot drop under us.
+            // The executor queue already holds a retained ref from
+            // mimi_executor_spawn, so the pointer is live for this poll.
+            // Release that queue ref after polling.
             unsafe {
                 let fut = future as *mut MimiFutureHeader;
-                if future_try_retain(fut) {
-                    poll_fn(future);
-                    future_release(fut);
-                }
+                poll_fn(future);
+                future_release(fut);
             }
         }
     }
@@ -635,9 +747,11 @@ mod tests {
             assert_eq!(std::ptr::read_volatile(data), 0xAB);
             assert_eq!(std::ptr::read_volatile(data.add(1023)), 0xCD);
         }
-        mimi_future_set_completed(f);
-        assert_eq!(mimi_future_is_completed(f), 1);
-        mimi_future_free(f);
+        unsafe {
+            mimi_future_set_completed(f);
+            assert_eq!(mimi_future_is_completed(f), 1);
+            mimi_future_free(f);
+        }
     }
 
     #[test]
@@ -649,7 +763,22 @@ mod tests {
             let hdr = f as *mut MimiFutureHeader;
             assert_eq!((*hdr).data_capacity, FUTURE_MIN_DATA_CAPACITY as u64);
         }
-        mimi_future_free(f);
+        unsafe {
+            mimi_future_free(f);
+        }
+    }
+
+    #[test]
+    fn future_double_free_after_full_deallocation_is_rejected() {
+        let f = mimi_future_alloc(64);
+        assert!(!f.is_null());
+        unsafe {
+            mimi_future_free(f);
+            // P0-11: a second free of a fully deallocated bare pointer used to
+            // read the freed refcount. The live-future registry now rejects it
+            // without touching the old allocation.
+            mimi_future_free(f);
+        }
     }
 
     #[test]
@@ -659,7 +788,9 @@ mod tests {
         // never panic across the FFI boundary.
         let f = mimi_future_alloc(u64::MAX);
         if !f.is_null() {
-            mimi_future_free(f);
+            unsafe {
+                mimi_future_free(f);
+            }
         }
     }
 
@@ -672,13 +803,17 @@ mod tests {
         let other = f as usize;
         let completer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
-            mimi_future_set_completed(other as *mut std::ffi::c_void);
+            unsafe {
+                mimi_future_set_completed(other as *mut std::ffi::c_void);
+            }
         });
         // This is the call that used to abort after 1M yield iterations if a
         // spawned task took slightly longer than the fixed spin budget.
-        mimi_await_future(f);
-        assert_eq!(mimi_future_is_completed(f), 1);
-        mimi_future_free(f);
+        unsafe {
+            mimi_await_future(f);
+            assert_eq!(mimi_future_is_completed(f), 1);
+            mimi_future_free(f);
+        }
         completer.join().expect("completer thread panicked");
     }
     #[test]
@@ -696,8 +831,10 @@ mod tests {
         }
         let parent = mimi_future_alloc(0);
         assert!(!parent.is_null());
-        mimi_spawn_future(parent, nested_poll);
-        mimi_await_future(parent);
-        mimi_future_free(parent);
+        unsafe {
+            mimi_spawn_future(parent, nested_poll);
+            mimi_await_future(parent);
+            mimi_future_free(parent);
+        }
     }
 }

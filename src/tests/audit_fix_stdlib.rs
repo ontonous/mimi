@@ -109,7 +109,43 @@ func main() -> i32 {
     assert_eq!(out.trim(), "65585", "codegen must match safe lcm");
 }
 
-// ===== mymath.mimi — fix 2: free factorial gains the n>12 overflow guard ====
+// ===== mymath.mimi — batch5-04 P2-3: trait gcd/lcm methods abs-normalize ====
+
+#[test]
+fn audit_stdlib_gcd_lcm_trait_abs_normalized() {
+    // The IntMath trait implementations used to disagree with the free
+    // functions for negative inputs (4.gcd(-2) -> -2, etc.). They must now
+    // go through the same abs-normalized free-function convention.
+    let src = r#"
+func main() -> i32 {
+    let a: i32 = 4
+    let b: i32 = -12
+    let c: i32 = -17
+    let d: i32 = 0
+    let e: i32 = 2
+    let f: i32 = -6
+    println(a.gcd(-2))
+    println(b.gcd(8))
+    println(c.gcd(-5))
+    println(d.gcd(-9))
+    println(e.lcm(-4))
+    println(f.lcm(8))
+    0
+}
+"#;
+    let combined = format!("{}\n{}", audit2_stdlib_src("mymath.mimi"), src);
+    let stdout = run_source_with_stdout(&combined).1;
+    assert_eq!(
+        stdout.trim(),
+        "2\n4\n1\n9\n4\n24",
+        "trait gcd/lcm must match free-function abs semantics"
+    );
+    if can_link() {
+        let out = audit2_compile_and_run_with_stdlib("mymath.mimi", src)
+            .unwrap_or_else(|e| panic!("codegen trait gcd/lcm failed: {}", e));
+        assert_eq!(out.trim(), "2\n4\n1\n9\n4\n24");
+    }
+}
 
 #[test]
 fn audit_stdlib_factorial_free_overflow_guard() {
@@ -286,6 +322,36 @@ func main() -> string {
 // ===== strings.mimi — fix 6: words() drops empty tokens =====================
 
 #[test]
+fn audit_stdlib_reverse_number_overflow_safe() {
+    // reverse_number(2147483647) must not overflow i32; it returns -1 as
+    // the documented sentinel for unrepresentable reversed values.
+    let src = r#"
+func main() -> i32 {
+    let mut ok = 0
+    if reverse_number(1234) == 4321 { ok = ok + 1 }
+    if reverse_number(2147483647) == -1 { ok = ok + 1 }
+    if reverse_number(-2147483647) == -1 { ok = ok + 1 }
+    ok
+}
+"#;
+    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Int(3));
+
+    let cg_src = r#"
+func main() -> i32 {
+    let mut ok = 0
+    if reverse_number(1234) == 4321 { ok = ok + 1 }
+    if reverse_number(2147483647) == -1 { ok = ok + 1 }
+    if reverse_number(-2147483647) == -1 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen reverse_number overflow guard failed: {}", e));
+    assert_eq!(out.trim(), "3", "codegen must match reverse_number guard");
+}
+
+#[test]
 fn audit_stdlib_words_filters_empty_tokens() {
     // "a  b" split by " " yields ["a", "", "b"]; the empty token made
     // words()/count_words() report 3 words.
@@ -327,6 +393,38 @@ func main() -> i32 {
         "5",
         "codegen must match words empty-token filtering"
     );
+}
+
+// ===== strings.mimi/text.mimi — negative repeat/indent guards =============
+
+#[test]
+fn audit_stdlib_repeat_indent_non_positive_guards() {
+    let src = r#"
+func main() -> i32 {
+    let mut ok = 0
+    if repeat("ab", 0) == "" { ok = ok + 1 }
+    if repeat("ab", -2) == "" { ok = ok + 1 }
+    if indent("a", 0) == "a" { ok = ok + 1 }
+    if indent("a", -1) == "a" { ok = ok + 1 }
+    ok
+}
+"#;
+    assert_eq!(run_with_stdlib("strings.mimi", src), interp::Value::Int(4));
+
+    let cg_src = r#"
+func main() -> i32 {
+    let mut ok = 0
+    if repeat("ab", 0) == "" { ok = ok + 1 }
+    if repeat("ab", -2) == "" { ok = ok + 1 }
+    if indent("a", 0) == "a" { ok = ok + 1 }
+    if indent("a", -1) == "a" { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("strings.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen repeat/indent guard failed: {}", e));
+    assert_eq!(out.trim(), "4", "codegen must match repeat/indent guard");
 }
 
 // ===== collections.mimi — fix 7: take/drop_n negative-n guard ===============
@@ -404,7 +502,7 @@ fn audit_stdlib_file_size_counts_bytes_not_chars() {
         r#"
 func main() -> i32 {{
     match file_size("{}") {{
-        Ok(n) => n
+        Ok(n) => n as i32
         Err(_) => -1
     }}
 }}
@@ -988,5 +1086,107 @@ func main() -> i32 {
         cg.trim(),
         "hello \t|\t hello|a b |a b|||end",
         "codegen trim must match the VM"
+    );
+}
+
+// ===== mymath.mimi — batch5 P1-39: overflow guards for large valid inputs =====
+
+#[test]
+fn audit_stdlib_mymath_large_input_overflow_guards() {
+    let src = r#"
+func main() -> i32 {
+    let mut ok = 0
+    if is_prime(2147483647) { ok = ok + 1 }
+    if fibonacci(47) == -1 { ok = ok + 1 }
+    if next_power_of_two(1073741825) == -1 { ok = ok + 1 }
+    if mod_pow(2, 1000000, 1000000007) >= 0 { ok = ok + 1 }
+    ok
+}
+"#;
+    assert_eq!(
+        run_with_stdlib("mymath.mimi", src),
+        interp::Value::Int(4),
+        "VM: large-input mymath helpers must not trap and must return sentinels"
+    );
+
+    let cg_src = r#"
+func main() -> i32 {
+    let mut ok = 0
+    if is_prime(2147483647) { ok = ok + 1 }
+    if fibonacci(47) == -1 { ok = ok + 1 }
+    if next_power_of_two(1073741825) == -1 { ok = ok + 1 }
+    if mod_pow(2, 1000000, 1000000007) >= 0 { ok = ok + 1 }
+    println(ok)
+    0
+}
+"#;
+    let out = audit2_compile_and_run_with_stdlib("mymath.mimi", cg_src)
+        .unwrap_or_else(|e| panic!("codegen mymath overflow guards failed: {e}"));
+    assert_eq!(
+        out.trim(),
+        "4",
+        "codegen must match VM large-input mymath guards"
+    );
+}
+
+// ===== strings.mimi — batch5 P2-4: truncate negative max_len =====
+
+#[test]
+fn audit_stdlib_truncate_negative_max_len_dual() {
+    let src = r#"
+func main() -> i32 {
+    println("[" + truncate("hello", -1) + "]")
+    println("[" + truncate("hello", 0) + "]")
+    println("[" + truncate("hello", 3) + "]")
+    println("[" + truncate("hello", 5) + "]")
+    0
+}
+"#;
+    let combined = format!("{}\n{}", audit2_stdlib_src("strings.mimi"), src);
+    let (v, out) = run_source_with_stdout(&combined);
+    assert_eq!(v, interp::Value::Int(0));
+    assert_eq!(
+        out.trim(),
+        "[]\n[]\n[hel...]\n[hello]",
+        "VM truncate must define non-positive max_len as empty"
+    );
+
+    if !can_link() {
+        return;
+    }
+    let cg = compile_and_run(&combined)
+        .unwrap_or_else(|e| panic!("codegen truncate negative max_len failed: {}", e));
+    assert_eq!(
+        cg.trim(),
+        "[]\n[]\n[hel...]\n[hello]",
+        "codegen truncate must match the VM"
+    );
+}
+
+// ===== mimispec/lexer.mimi — batch5 P2-5: remove dummy first token =====
+
+#[test]
+fn audit_stdlib_mimispec_lexer_no_dummy_first_token() {
+    let src = r#"
+func main() -> i32 {
+    let toks = tokenize("foo bar")
+    println(len(toks))
+    println(toks[0].0)
+    println(toks[1].0)
+    let empty_toks = tokenize("")
+    println(len(empty_toks))
+    let (toks2, errs2) = tokenize_with_errors("foo !")
+    println(len(errs2))
+    println(errs2[0].0)
+    0
+}
+"#;
+    let combined = format!("{}\n{}", audit2_stdlib_src("mimispec/lexer.mimi"), src);
+    let (v, out) = run_source_with_stdout(&combined);
+    assert_eq!(v, interp::Value::Int(0));
+    assert_eq!(
+        out.trim(),
+        "4\nnewline\nident\n1\n1\nunexpected `!`, expected `!=`",
+        "tokenize must not prepend a dummy empty token or duplicate eof, and errors must be exposed"
     );
 }

@@ -108,7 +108,7 @@ fn audit_jni_borrowed_string_return_is_not_freed() {
         vec![],
         Some(Type::Name("string".to_string(), vec![])),
     )]);
-    assert!(c.contains("JNIEXPORT jstring JNICALL Java_Auditmod_peek_label"));
+    assert!(c.contains("JNIEXPORT jstring JNICALL Java_Auditmod_peek_1label"));
     assert!(c.contains("mimi_ret = (*env)->NewStringUTF(env, raw_ret);"));
     assert!(
         c.contains("/* borrowed from C — do NOT free */"),
@@ -131,7 +131,7 @@ fn audit_jni_json_return_still_freed() {
         vec![],
         Some(Type::Name("List".to_string(), vec![])),
     )]);
-    assert!(json.contains("JNIEXPORT jstring JNICALL Java_Auditmod_fetch_list"));
+    assert!(json.contains("JNIEXPORT jstring JNICALL Java_Auditmod_fetch_1list"));
     assert!(
         json.contains("mimi_string_free(raw_ret);"),
         "Json return must be freed:\n{}",

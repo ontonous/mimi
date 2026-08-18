@@ -48,6 +48,12 @@ pub fn register(reg: &mut BuiltinRegistry) {
         func: builtin_input_line,
     });
     reg.register(BuiltinDesc {
+        name: "try_input_line",
+        arity: 0,
+        category: BuiltinCategory::Io,
+        func: builtin_try_input_line,
+    });
+    reg.register(BuiltinDesc {
         name: "input_int",
         arity: 0,
         category: BuiltinCategory::Io,
@@ -104,6 +110,26 @@ fn builtin_input_line(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, In
         .read_line(&mut input)
         .map_err(|e| InterpError::new(format!("input_line error: {}", e)))?;
     Ok(Value::String(Arc::new(input.trim_end().to_string())))
+}
+
+fn builtin_try_input_line(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
+    let mut input = String::new();
+    match std::io::stdin().read_line(&mut input) {
+        Ok(0) => Ok(Value::Variant(
+            "Err".into(),
+            vec![Value::String(Arc::new(
+                "input: EOF or read error".to_string(),
+            ))],
+        )),
+        Ok(_) => Ok(Value::Variant(
+            "Ok".into(),
+            vec![Value::String(Arc::new(input.trim_end().to_string()))],
+        )),
+        Err(e) => Ok(Value::Variant(
+            "Err".into(),
+            vec![Value::String(Arc::new(format!("input: {}", e)))],
+        )),
+    }
 }
 
 fn builtin_input_int(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {

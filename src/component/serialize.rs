@@ -103,6 +103,13 @@ impl MimiAbi {
         for ty in &self.types {
             validate_type(ty)?;
         }
+        // Also run the Component IR structural validator (duplicate symbols,
+        // unresolved Named/Opaque references) so deserialization cannot hand
+        // back an internally inconsistent ABI (batch4-09 P2-3).
+        let ir = self.to_component_ir();
+        if let Some(err) = ir.validate().into_iter().next() {
+            return Err(MimiAbiError::InvalidComponentIr(format!("{err:?}")));
+        }
         Ok(())
     }
 
@@ -151,6 +158,8 @@ pub enum MimiAbiError {
     UnknownCallConv(String),
     /// Unknown callback category.
     UnknownCallbackCategory(String),
+    /// Component IR structural validation failed.
+    InvalidComponentIr(String),
 }
 
 impl std::fmt::Display for MimiAbiError {
@@ -175,6 +184,9 @@ impl std::fmt::Display for MimiAbiError {
             }
             MimiAbiError::UnknownCallbackCategory(name) => {
                 write!(f, "unknown callback category: {:?}", name)
+            }
+            MimiAbiError::InvalidComponentIr(msg) => {
+                write!(f, "invalid component IR: {}", msg)
             }
         }
     }
@@ -864,6 +876,30 @@ mod tests {
         }"#;
         let err = MimiAbi::from_json_validated(json).unwrap_err();
         assert!(matches!(err, MimiAbiError::UnknownPrimitive(n) if n == "NotAPrimitive"));
+    }
+
+    #[test]
+    fn validated_rejects_unresolved_type_ref() {
+        // from_json_validated must also catch structurally invalid IR such as
+        // a Named return type that has no matching type definition.
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [{
+                "name": "f",
+                "kind": "Function",
+                "params": [],
+                "ret": { "kind": "Named", "value": "MissingType" },
+                "effects": [],
+                "is_unsafe": false,
+                "call_conv": "C",
+                "callback_category": null
+            }],
+            "imports": [],
+            "types": []
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(err, MimiAbiError::InvalidComponentIr(_)));
     }
 
     #[test]

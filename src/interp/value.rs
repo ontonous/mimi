@@ -703,13 +703,26 @@ pub struct CBufferInner {
 impl CBufferInner {
     /// Create a buffer wrapper taking ownership of `ptr` (from
     /// libc::malloc/calloc) of `size` bytes. Freed exactly once in Drop.
-    pub fn new(ptr: *mut u8, size: usize) -> Self {
+    ///
+    /// # Safety
+    /// `ptr` must be non-null unless `size` is zero, must be the sole owner
+    /// of a libc allocation (malloc/calloc), and must not be wrapped by
+    /// another `CBufferInner` or otherwise freed before this value drops.
+    pub unsafe fn new(ptr: *mut u8, size: usize) -> Self {
         CBufferInner { ptr, size }
     }
 
     /// Read-only view of the buffer pointer. Safe to call on `&self`:
-    /// reading the pointer does not dereference it.
-    pub fn as_ptr(&self) -> *mut u8 {
+    /// reading the pointer does not dereference it. Shared references must
+    /// not obtain a mutable pointer (batch2 P3-1); use `as_mut_ptr` on a
+    /// `&mut` value when mutation is required.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Mutable view of the buffer pointer. Requires `&mut self` so shared
+    /// references cannot race on the buffer contents.
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.ptr
     }
 
@@ -2177,7 +2190,8 @@ mod tests {
     #[test]
     fn c_buffer_inner_read_only_accessors() {
         // SAFETY: fresh null buffer, never dereferenced.
-        let buf = CBufferInner::new(std::ptr::null_mut(), 0);
+        // SAFETY: null pointer is a valid libc free no-op and size is zero.
+        let buf = unsafe { CBufferInner::new(std::ptr::null_mut(), 0) };
         assert!(buf.is_empty());
         assert_eq!(buf.len(), 0);
         assert!(buf.as_ptr().is_null());

@@ -228,7 +228,7 @@ impl LspServer {
                 // For each argument that is non-trivial, add a param hint
                 let mut depth = 0i32;
                 let mut arg_start_byte = paren_pos + 1;
-                let mut arg_start_char = line_content[..paren_pos + 1].chars().count();
+                let mut arg_start_char = utf16_count(&line_content[..paren_pos + 1]);
                 let mut arg_idx = 0;
                 let mut byte_pos = paren_pos + 1;
                 for (_, ch) in line_content[byte_pos..].char_indices() {
@@ -254,7 +254,7 @@ impl LspServer {
                                 }
                             }
                             arg_start_byte = byte_pos + ch_byte_len;
-                            arg_start_char = line_content[..byte_pos + ch_byte_len].chars().count();
+                            arg_start_char = utf16_count(&line_content[..byte_pos + ch_byte_len]);
                             arg_idx += 1;
                         }
                         _ => {}
@@ -292,4 +292,10 @@ impl LspServer {
             _ => {}
         }
     }
+}
+
+/// LSP inlay hint positions must use UTF-16 code units, not scalar values
+/// (batch4 P2-6). This mirrors PositionMap's column semantics.
+fn utf16_count(s: &str) -> usize {
+    s.chars().map(|c| c.len_utf16() as usize).sum()
 }

@@ -5984,6 +5984,55 @@ impl BodyLowerer<'_> {
                 to: to.clone(),
             });
         }
+        // Tuple-level transparent conversion: std/mimispec/parser.mimi
+        // returns `(Record, i32)` where a `(Any, i32)` is declared. The
+        // checker already unifies Any↔concrete; the resolved layer must
+        // recurse into tuple elements. For now only identity and
+        // non-primitive DynamicAnyPack elements are admitted because those
+        // require no runtime repacking at the tuple level.
+        if let (Some(ResolvedType::Tuple(from_elems)), Some(ResolvedType::Tuple(to_elems))) =
+            (self.types.get(from), self.types.get(to))
+        {
+            if from_elems.len() == to_elems.len() {
+                for (from_elem, to_elem) in from_elems.iter().zip(to_elems.iter()) {
+                    let elem_conversion = self.implicit_conversion(node_id, from_elem, to_elem)?;
+                    match elem_conversion.kind {
+                        CheckedConversionKind::Identity => {}
+                        CheckedConversionKind::DynamicAnyPack => {
+                            // Allow pointer/handle-like values (Record/string
+                            // etc.) into Any; disallow primitive numeric
+                            // widening because TupleErase is runtime-identity.
+                            if matches!(self.types.get(from_elem), Some(ResolvedType::Primitive(_)))
+                            {
+                                return Err(vec![ResolvedBodyError::new(
+                                    node_id.clone(),
+                                    format!(
+                                        "tuple Any element conversion requires repacking from '{}' to '{}'",
+                                        self.type_display(from_elem),
+                                        self.type_display(to_elem)
+                                    ),
+                                )]);
+                            }
+                        }
+                        _ => {
+                            return Err(vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!(
+                                    "tuple conversion from '{}' to '{}' is not runtime-transparent",
+                                    self.type_display(from_elem),
+                                    self.type_display(to_elem)
+                                ),
+                            )]);
+                        }
+                    }
+                }
+                return Ok(CheckedConversion {
+                    kind: CheckedConversionKind::TupleErase,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
         let primitives = match (self.types.get(from), self.types.get(to)) {
             (Some(ResolvedType::Primitive(from)), Some(ResolvedType::Primitive(to))) => {
                 (*from, *to)

@@ -17,6 +17,245 @@ use z3::ast::String as Z3String;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
 
+/// Conservative AST-side detector for checked arithmetic that is not part of
+/// the extracted tail return expression.
+///
+/// The AST fallback (batch4-08 P0-1) previously only generated definedness
+/// obligations for `body_return`; a non-tail `x / y` or `x + 1` in a branch or
+/// statement could trap at runtime while the verifier returned Proven.  These
+/// helpers make such bodies fail closed (NotInTrustedSubset) instead.
+fn expr_has_checked_arith(expr: &Expr) -> bool {
+    match expr.unlocated() {
+        Expr::Located { expr, .. } => expr_has_checked_arith(expr),
+        Expr::Binary(op, l, r) => {
+            matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+            ) || expr_has_checked_arith(l)
+                || expr_has_checked_arith(r)
+        }
+        Expr::Unary(UnOp::Neg, inner) => true || expr_has_checked_arith(inner),
+        Expr::Unary(_, inner) => expr_has_checked_arith(inner),
+        Expr::Call(callee, args) => {
+            expr_has_checked_arith(callee) || args.iter().any(expr_has_checked_arith)
+        }
+        Expr::Field(obj, _) => expr_has_checked_arith(obj),
+        Expr::Index(obj, idx) => expr_has_checked_arith(obj) || expr_has_checked_arith(idx),
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            items.iter().any(expr_has_checked_arith)
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            expr_has_checked_arith(expr)
+                || expr_has_checked_arith(iter)
+                || guard.as_ref().is_some_and(|g| expr_has_checked_arith(g))
+        }
+        Expr::Match(scrutinee, arms) => {
+            expr_has_checked_arith(scrutinee)
+                || arms.iter().any(|arm| {
+                    expr_has_checked_arith(&arm.body)
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|g| expr_has_checked_arith(g))
+                })
+        }
+        Expr::Record { fields, .. } => fields.iter().any(|f| expr_has_checked_arith(&f.value)),
+        Expr::Block(block) | Expr::Comptime(block) | Expr::Quote(block) | Expr::Arena(block) => {
+            block_has_any_checked_arith(block)
+        }
+        Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner)
+        | Expr::SliceExpr { target: inner, .. }
+        | Expr::Cast(inner, _) => expr_has_checked_arith(inner),
+        Expr::If { cond, then_, else_ } => {
+            expr_has_checked_arith(cond)
+                || block_has_any_checked_arith(then_)
+                || else_
+                    .as_ref()
+                    .is_some_and(|b| block_has_any_checked_arith(b))
+        }
+        Expr::Lambda { body, .. } => block_has_any_checked_arith(body),
+        Expr::TupleIndex(inner, _) => expr_has_checked_arith(inner),
+        Expr::MapLiteral { entries } => entries
+            .iter()
+            .any(|(k, v)| expr_has_checked_arith(k) || expr_has_checked_arith(v)),
+        Expr::NamedArg(_, inner) => expr_has_checked_arith(inner),
+        Expr::Turbofish(_, _, args) => args.iter().any(expr_has_checked_arith),
+        Expr::Literal(_) | Expr::Ident(_) | Expr::TypeInfo(_) => false,
+    }
+}
+
+fn stmt_contains_any_checked_arith(stmt: &Stmt) -> bool {
+    match stmt.unlocated() {
+        Stmt::Located { stmt, .. } => stmt_contains_any_checked_arith(stmt),
+        Stmt::Let { init: Some(e), .. } | Stmt::Drop(e) | Stmt::Break(Some(e)) => {
+            expr_has_checked_arith(e)
+        }
+        Stmt::Return(Some(e)) => expr_has_checked_arith(e),
+        Stmt::Expr(e) => expr_has_checked_arith(e),
+        Stmt::Assign { target, value } => {
+            expr_has_checked_arith(target) || expr_has_checked_arith(value)
+        }
+        Stmt::SharedLet { init, .. } => expr_has_checked_arith(init),
+        Stmt::If { cond, then_, else_ } => {
+            expr_has_checked_arith(cond)
+                || block_has_any_checked_arith(then_)
+                || else_
+                    .as_ref()
+                    .is_some_and(|b| block_has_any_checked_arith(b))
+        }
+        Stmt::IfLet {
+            init, then_, else_, ..
+        } => {
+            expr_has_checked_arith(init)
+                || block_has_any_checked_arith(then_)
+                || else_
+                    .as_ref()
+                    .is_some_and(|b| block_has_any_checked_arith(b))
+        }
+        Stmt::While { cond, body }
+        | Stmt::For {
+            iterable: cond,
+            body,
+            ..
+        } => expr_has_checked_arith(cond) || block_has_any_checked_arith(body),
+        Stmt::WhileLet { init, body, .. } => {
+            expr_has_checked_arith(init) || block_has_any_checked_arith(body)
+        }
+        Stmt::Loop(body)
+        | Stmt::Block(body)
+        | Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
+        | Stmt::Defer(body)
+        | Stmt::OnFailure(body) => block_has_any_checked_arith(body),
+        _ => false,
+    }
+}
+
+fn block_has_any_checked_arith(block: &[Stmt]) -> bool {
+    block.iter().any(stmt_contains_any_checked_arith)
+}
+
+fn block_has_unverified_non_tail_arith(block: &[Stmt]) -> bool {
+    let tail_pos = block.iter().rposition(|s| {
+        matches!(
+            s.unlocated(),
+            Stmt::Expr(_) | Stmt::Return(_) | Stmt::If { .. } | Stmt::IfLet { .. }
+        )
+    });
+    for (i, stmt) in block.iter().enumerate() {
+        match stmt.unlocated() {
+            Stmt::Located { stmt, .. } => {
+                if block_has_unverified_non_tail_arith(std::slice::from_ref(stmt)) {
+                    return true;
+                }
+            }
+            Stmt::Expr(e) => {
+                if Some(i) != tail_pos && expr_has_checked_arith(e) {
+                    return true;
+                }
+            }
+            Stmt::Let {
+                pat, init: Some(e), ..
+            } => {
+                if !expr_has_checked_arith(e) {
+                    continue;
+                }
+                if let Some(name) = pat.single_var_name() {
+                    let mut later = Vec::new();
+                    for s in &block[i + 1..] {
+                        collect_idents_in_stmt(s, &mut later);
+                    }
+                    if !later.contains(&name.to_string()) {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+            Stmt::Return(Some(e)) => {
+                if Some(i) != tail_pos && expr_has_checked_arith(e) {
+                    return true;
+                }
+            }
+            Stmt::Assign { value, .. } | Stmt::SharedLet { init: value, .. } => {
+                if expr_has_checked_arith(value) {
+                    return true;
+                }
+            }
+            Stmt::If { cond, then_, else_ } => {
+                if expr_has_checked_arith(cond) {
+                    return true;
+                }
+                if block_has_unverified_non_tail_arith(then_) {
+                    return true;
+                }
+                if let Some(else_) = else_ {
+                    if block_has_unverified_non_tail_arith(else_) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                if expr_has_checked_arith(init) {
+                    return true;
+                }
+                if block_has_unverified_non_tail_arith(then_) {
+                    return true;
+                }
+                if let Some(else_) = else_ {
+                    if block_has_unverified_non_tail_arith(else_) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::While { cond, body }
+            | Stmt::For {
+                iterable: cond,
+                body,
+                ..
+            } => {
+                if expr_has_checked_arith(cond) || block_has_any_checked_arith(body) {
+                    return true;
+                }
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                if expr_has_checked_arith(init) || block_has_any_checked_arith(body) {
+                    return true;
+                }
+            }
+            Stmt::Loop(body)
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
+            | Stmt::Defer(body)
+            | Stmt::OnFailure(body) => {
+                if block_has_any_checked_arith(body) {
+                    return true;
+                }
+            }
+            Stmt::Drop(e) | Stmt::Break(Some(e)) => {
+                if expr_has_checked_arith(e) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 impl VerifierCtx {
     pub(crate) fn verify_items(
         &mut self,
@@ -220,11 +459,23 @@ impl VerifierCtx {
                                     artifact: None,
                                     trusted_subset_domain: None,
                                 },
-                                SatResult::Sat | SatResult::Unknown => VerificationResult {
+                                SatResult::Sat => VerificationResult {
+                                    func_name: format!("extern {}", func.name),
+                                    status: VerifStatus::Disproven,
+                                    message:
+                                        "extern contracts are inconsistent (preconditions admit a counterexample to the postconditions)"
+                                            .into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: None,
+                                    trusted_subset_domain: None,
+                                },
+                                SatResult::Unknown => VerificationResult {
                                     func_name: format!("extern {}", func.name),
                                     status: VerifStatus::SolverUnknown,
                                     message:
-                                        "extern contracts are consistent (preconditions do not statically guarantee postconditions; runtime verification required)"
+                                        "extern contract consistency is unknown (solver could not decide)"
                                             .into(),
                                     diagnostic: None,
                                     duration_us: start.elapsed().as_micros() as u64,
@@ -553,6 +804,26 @@ impl VerifierCtx {
         }
 
         let body_return = extract_body_return(&func.body);
+
+        // batch4-08 P0-1: the AST fallback only proves definedness for the
+        // extracted tail expression. Non-tail checked arithmetic (branch
+        // statements, unused let initializers, loop bodies, assignments) can
+        // still trap at runtime, so refuse to return Proven for such bodies.
+        if block_has_unverified_non_tail_arith(&func.body) {
+            return VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::NotInTrustedSubset,
+                message: format!(
+                    "function '{}' contains non-tail checked arithmetic that the AST fallback cannot verify; refusing Proven",
+                    func.name
+                ),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count: requires_exprs.len() + ensures_exprs.len(),
+                artifact: None,
+                trusted_subset_domain: None,
+            };
+        }
 
         // Build let-substitution map so that `let y = double(x); y` resolves
         // `y` to `double(x)` for encoding purposes.

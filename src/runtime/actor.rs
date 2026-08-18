@@ -161,8 +161,13 @@ type ActorDispatchFn = unsafe extern "C" fn(
 ///
 /// # Returns
 /// Opaque `*mut MimiActorRepr` handle, or null on failure.
+///
+/// # Safety
+/// `fields_ptr` must be non-null and point to a valid field blob of
+/// `fields_size` bytes; oversized sizes are rejected before slicing.
+/// `dispatch_fn` must be a valid codegen dispatch function.
 #[no_mangle]
-pub extern "C" fn mimi_actor_spawn(
+pub unsafe extern "C" fn mimi_actor_spawn(
     fields_ptr: *const std::ffi::c_void,
     fields_size: i64,
     dispatch_fn: Option<ActorDispatchFn>,
@@ -171,8 +176,11 @@ pub extern "C" fn mimi_actor_spawn(
 }
 
 /// Spawn an actor that is not owned by the current actor's lifecycle.
+///
+/// # Safety
+/// Same requirements as `mimi_actor_spawn`.
 #[no_mangle]
-pub extern "C" fn mimi_actor_spawn_detached(
+pub unsafe extern "C" fn mimi_actor_spawn_detached(
     fields_ptr: *const std::ffi::c_void,
     fields_size: i64,
     dispatch_fn: Option<ActorDispatchFn>,
@@ -208,6 +216,12 @@ fn mimi_actor_spawn_with_mode(
             id => Some(id),
         })
     };
+    if fields_size < 0 || fields_size > (1 << 30) {
+        // Reject negative/huge sizes: casting to usize would turn -1 into a
+        // near-isize::MAX slice length and cause an unsafe precondition panic
+        // (or a massive out-of-bounds read in release).
+        return std::ptr::null_mut();
+    }
     let fields_size = fields_size as usize;
 
     // SAFETY: `fields_ptr` is checked non-null; caller guarantees it points to
@@ -371,8 +385,14 @@ pub(crate) fn actor_test_pin_reached() -> bool {
 }
 
 /// Get the actor ID from a handle. Used by codegen for self-call detection.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_id(handle: *mut std::ffi::c_void) -> u64 {
+pub unsafe extern "C" fn mimi_actor_id(handle: *mut std::ffi::c_void) -> u64 {
     actor_pin_handle(handle).map_or(0, |actor| actor.id)
 }
 
@@ -399,8 +419,14 @@ pub extern "C" fn mimi_actor_current_id() -> u64 {
 ///
 /// # Returns
 /// Number of bytes written to `result_ptr`, or 0 on error.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle. `args_ptr` must be null or
+/// valid for `args_size` bytes (negative or huge sizes are rejected before
+/// slicing). `result_ptr` must be null or point to a writable buffer of at
+/// least 8 bytes.
 #[no_mangle]
-pub extern "C" fn mimi_actor_call(
+pub unsafe extern "C" fn mimi_actor_call(
     handle: *mut std::ffi::c_void,
     method_id: i32,
     args_ptr: *const std::ffi::c_void,
@@ -447,7 +473,13 @@ pub extern "C" fn mimi_actor_call(
     }
 
     // Pack args.
-    let args: Vec<u8> = if args_ptr.is_null() || args_size <= 0 {
+    // Reject negative or absurdly large argument sizes before converting to
+    // usize; an FFI caller can otherwise ask us to allocate/copy huge amounts
+    // of memory (batch4-06 P2).
+    if args_size < 0 || args_size > (64 * 1024 * 1024) {
+        return 0;
+    }
+    let args: Vec<u8> = if args_ptr.is_null() || args_size == 0 {
         Vec::new()
     } else {
         // SAFETY: caller guarantees `args_ptr` points to `args_size` valid bytes.
@@ -525,8 +557,14 @@ pub extern "C" fn mimi_actor_call(
 
 /// Drop an actor handle. Signals the worker thread to exit (by dropping the
 /// mailbox sender) and joins it.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
     // Detach under the registry lock. Existing operations own Arc pins; new
     // operations cannot obtain one, and final destruction is delayed safely.
     let Some(actor) = actor_take_live(handle as usize) else {
@@ -543,8 +581,14 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
 
 /// Terminate an actor and every transitively owned, non-detached child.
 /// Topology is removed under one lock; actor shutdown happens after unlock.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_system_kill(handle: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_actor_system_kill(handle: *mut std::ffi::c_void) {
     if handle.is_null() {
         return;
     }
@@ -594,15 +638,27 @@ pub extern "C" fn mimi_actor_system_kill(handle: *mut std::ffi::c_void) {
 /// v0.29.11: Mark an actor as Faulted and short-circuit its mailbox (O(1)).
 /// Subsequent `mimi_actor_call` returns 0 without enqueueing; the worker drains
 /// any already-queued messages without dispatch.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
     mimi_actor_system_kill(handle);
 }
 
 /// v0.29.11: Query whether an actor's mailbox is short-circuited.
 /// Returns 1 if faulted, 0 otherwise (or if handle is null).
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
+pub unsafe extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
     let Some(repr) = actor_pin_handle(handle) else {
         return 0;
     };
@@ -614,8 +670,14 @@ pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
 }
 
 /// v0.29.21: set mailbox high-water depth limit for backpressure.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, depth: i64) {
+pub unsafe extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, depth: i64) {
     if depth <= 0 {
         return;
     }
@@ -627,8 +689,14 @@ pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, de
 }
 
 /// v0.29.21: current approximate mailbox depth.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64 {
+pub unsafe extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64 {
     let Some(repr) = actor_pin_handle(handle) else {
         return 0;
     };
@@ -637,8 +705,14 @@ pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64
 }
 
 /// v0.29.21: 1 if actor is muted under backpressure, else 0.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_is_muted(handle: *mut std::ffi::c_void) -> i32 {
+pub unsafe extern "C" fn mimi_actor_is_muted(handle: *mut std::ffi::c_void) -> i32 {
     let Some(repr) = actor_pin_handle(handle) else {
         return 0;
     };
@@ -670,13 +744,18 @@ pub extern "C" fn mimi_actor_max_children() -> i64 {
 
 /// v0.29.25: register method names for an actor handle (for broadcast by name).
 /// `names` is an array of `count` C strings (method name in definition order).
+///
+/// # Safety
+/// `handle` must be null or a live actor handle. If `count` is positive,
+/// `names` must point to an array of at least `count` valid C string
+/// pointers. Oversized counts are rejected before slicing.
 #[no_mangle]
-pub extern "C" fn mimi_actor_set_method_names(
+pub unsafe extern "C" fn mimi_actor_set_method_names(
     handle: *mut std::ffi::c_void,
     names: *const *const std::os::raw::c_char,
     count: i64,
 ) {
-    if names.is_null() || count <= 0 {
+    if names.is_null() || count <= 0 || count > (1 << 30) {
         return;
     }
     let Some(repr) = actor_pin_handle(handle) else {
@@ -700,8 +779,14 @@ pub extern "C" fn mimi_actor_set_method_names(
 }
 
 /// Resolve method name to method_id for a handle; returns -1 if not found.
+///
+/// # Safety
+/// `handle` must be null or a live actor handle returned by
+/// `mimi_actor_spawn`/`mimi_actor_spawn_detached` that has not been
+/// fully dropped. For `mimi_actor_method_id`, `name` must also be a
+/// valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn mimi_actor_method_id(
+pub unsafe extern "C" fn mimi_actor_method_id(
     handle: *mut std::ffi::c_void,
     name: *const std::os::raw::c_char,
 ) -> i32 {
@@ -728,14 +813,19 @@ pub extern "C" fn mimi_actor_method_id(
 /// with empty args. Results: heap-allocated i64 array of length `count`.
 /// v0.29.35: PeerFault slots use sentinel -1 (distinguishable from 0 result).
 /// Caller owns the returned pointer.
+///
+/// # Safety
+/// If `count` is positive, `handles` must point to an array of at least
+/// `count` live-or-null actor handles. `method_name` must be a valid C
+/// string. `out_len`, if non-null, must point to a writable i64.
 #[no_mangle]
-pub extern "C" fn mimi_broadcast(
+pub unsafe extern "C" fn mimi_broadcast(
     handles: *const *mut std::ffi::c_void,
     count: i64,
     method_name: *const std::os::raw::c_char,
     out_len: *mut i64,
 ) -> *mut i64 {
-    if handles.is_null() || count <= 0 || method_name.is_null() {
+    if handles.is_null() || count <= 0 || count > (1 << 30) || method_name.is_null() {
         if !out_len.is_null() {
             unsafe { *out_len = 0 };
         }
@@ -781,8 +871,13 @@ pub extern "C" fn mimi_broadcast(
 }
 
 /// Free a buffer returned by mimi_broadcast.
+///
+/// # Safety
+/// `ptr` must be null or exactly the pointer returned by `mimi_broadcast`,
+/// and `len` must equal the length written through `out_len`. Passing an
+/// unrelated pointer/length pair is undefined behavior.
 #[no_mangle]
-pub extern "C" fn mimi_broadcast_free(ptr: *mut i64, len: i64) {
+pub unsafe extern "C" fn mimi_broadcast_free(ptr: *mut i64, len: i64) {
     if ptr.is_null() || len <= 0 {
         return;
     }

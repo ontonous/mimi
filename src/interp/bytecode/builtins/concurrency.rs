@@ -313,7 +313,9 @@ fn builtin_atomic_i32_new(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
 
 fn builtin_atomic_i32_load(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_atomic_i32_load(h) as i64))
+    Ok(Value::Int(
+        unsafe { crate::runtime::mimi_atomic_i32_load(h) } as i64,
+    ))
 }
 
 fn builtin_atomic_i32_store(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -322,7 +324,7 @@ fn builtin_atomic_i32_store(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Valu
         Value::Int(x) => *x as i32,
         _ => return Err(InterpError::new("expects i32")),
     };
-    crate::runtime::mimi_atomic_i32_store(h, v);
+    unsafe { crate::runtime::mimi_atomic_i32_store(h, v) };
     Ok(Value::Unit)
 }
 
@@ -336,7 +338,7 @@ fn builtin_atomic_i32_fetch_add(
         _ => return Err(InterpError::new("expects i32")),
     };
     Ok(Value::Int(
-        crate::runtime::mimi_atomic_i32_fetch_add(h, d) as i64
+        unsafe { crate::runtime::mimi_atomic_i32_fetch_add(h, d) } as i64,
     ))
 }
 
@@ -354,13 +356,13 @@ fn builtin_atomic_i32_compare_exchange(
         _ => return Err(InterpError::new("expects i32")),
     };
     Ok(Value::Int(
-        crate::runtime::mimi_atomic_i32_compare_exchange(h, exp, nv) as i64,
+        unsafe { crate::runtime::mimi_atomic_i32_compare_exchange(h, exp, nv) } as i64,
     ))
 }
 
 fn builtin_atomic_i32_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_atomic_i32_drop(h);
+    unsafe { crate::runtime::mimi_atomic_i32_drop(h) };
     Ok(Value::Unit)
 }
 
@@ -373,13 +375,15 @@ fn builtin_atomic_i64_new(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
 
 fn builtin_atomic_i64_load(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_atomic_i64_load(h)))
+    Ok(Value::Int(unsafe {
+        crate::runtime::mimi_atomic_i64_load(h)
+    }))
 }
 
 fn builtin_atomic_i64_store(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let v = handle(args, 1)?;
-    crate::runtime::mimi_atomic_i64_store(h, v);
+    unsafe { crate::runtime::mimi_atomic_i64_store(h, v) };
     Ok(Value::Unit)
 }
 
@@ -389,7 +393,9 @@ fn builtin_atomic_i64_fetch_add(
 ) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let d = handle(args, 1)?;
-    Ok(Value::Int(crate::runtime::mimi_atomic_i64_fetch_add(h, d)))
+    Ok(Value::Int(unsafe {
+        crate::runtime::mimi_atomic_i64_fetch_add(h, d)
+    }))
 }
 
 fn builtin_atomic_i64_compare_exchange(
@@ -406,13 +412,13 @@ fn builtin_atomic_i64_compare_exchange(
         _ => return Err(InterpError::new("expects i64")),
     };
     Ok(Value::Int(
-        crate::runtime::mimi_atomic_i64_compare_exchange(h, exp, nv) as i64,
+        unsafe { crate::runtime::mimi_atomic_i64_compare_exchange(h, exp, nv) } as i64,
     ))
 }
 
 fn builtin_atomic_i64_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_atomic_i64_drop(h);
+    unsafe { crate::runtime::mimi_atomic_i64_drop(h) };
     Ok(Value::Unit)
 }
 
@@ -434,7 +440,9 @@ fn builtin_atomic_bool_new(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
 
 fn builtin_atomic_bool_load(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Bool(crate::runtime::mimi_atomic_bool_load(h) != 0))
+    Ok(Value::Bool(
+        unsafe { crate::runtime::mimi_atomic_bool_load(h) } != 0,
+    ))
 }
 
 fn builtin_atomic_bool_store(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -449,7 +457,7 @@ fn builtin_atomic_bool_store(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Val
         }
         _ => return Err(InterpError::new("expects bool")),
     };
-    crate::runtime::mimi_atomic_bool_store(h, v);
+    unsafe { crate::runtime::mimi_atomic_bool_store(h, v) };
     Ok(Value::Unit)
 }
 
@@ -469,13 +477,13 @@ fn builtin_atomic_bool_compare_exchange(
         _ => return Err(InterpError::new("expects bool or i32")),
     };
     Ok(Value::Int(
-        crate::runtime::mimi_atomic_bool_compare_exchange(h, exp, nv) as i64,
+        unsafe { crate::runtime::mimi_atomic_bool_compare_exchange(h, exp, nv) } as i64,
     ))
 }
 
 fn builtin_atomic_bool_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_atomic_bool_drop(h);
+    unsafe { crate::runtime::mimi_atomic_bool_drop(h) };
     Ok(Value::Unit)
 }
 
@@ -488,30 +496,45 @@ fn builtin_mutex_new(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
 
 fn builtin_mutex_lock(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_mutex_lock(h)))
+    Ok(Value::Int(unsafe { crate::runtime::mimi_mutex_lock(h) }))
 }
 
 fn builtin_mutex_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_mutex_get(h)))
+    if unsafe { crate::runtime::mimi_mutex_guard_valid(h) } == 0 {
+        return Err(InterpError::lock_error(
+            "mutex guard used across threads or after unlock",
+        ));
+    }
+    Ok(Value::Int(unsafe { crate::runtime::mimi_mutex_get(h) }))
 }
 
 fn builtin_mutex_set(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let v = handle(args, 1)?;
-    crate::runtime::mimi_mutex_set(h, v);
+    if unsafe { crate::runtime::mimi_mutex_guard_valid(h) } == 0 {
+        return Err(InterpError::lock_error(
+            "mutex guard used across threads or after unlock",
+        ));
+    }
+    unsafe { crate::runtime::mimi_mutex_set(h, v) };
     Ok(Value::Unit)
 }
 
 fn builtin_mutex_unlock(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_mutex_unlock(h);
+    if unsafe { crate::runtime::mimi_mutex_guard_valid(h) } == 0 {
+        return Err(InterpError::lock_error(
+            "mutex guard used across threads or after unlock",
+        ));
+    }
+    unsafe { crate::runtime::mimi_mutex_unlock(h) };
     Ok(Value::Unit)
 }
 
 fn builtin_mutex_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_mutex_drop(h);
+    unsafe { crate::runtime::mimi_mutex_drop(h) };
     Ok(Value::Unit)
 }
 
@@ -524,23 +547,25 @@ fn builtin_channel_new(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, I
 fn builtin_channel_send(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let v = handle(args, 1)?;
-    crate::runtime::mimi_channel_send(h, v);
+    unsafe { crate::runtime::mimi_channel_send(h, v) };
     Ok(Value::Unit)
 }
 
 fn builtin_channel_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_channel_recv(h)))
+    Ok(Value::Int(unsafe { crate::runtime::mimi_channel_recv(h) }))
 }
 
 fn builtin_channel_try_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_channel_try_recv(h)))
+    Ok(Value::Int(unsafe {
+        crate::runtime::mimi_channel_try_recv(h)
+    }))
 }
 
 fn builtin_channel_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_channel_drop(h);
+    unsafe { crate::runtime::mimi_channel_drop(h) };
     Ok(Value::Unit)
 }
 
@@ -548,8 +573,8 @@ fn builtin_channel_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
 
 fn builtin_session_pair(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let packed = crate::runtime::mimi_session_pair();
-    let lo = crate::runtime::mimi_session_lo(packed);
-    let hi = crate::runtime::mimi_session_hi(packed);
+    let lo = unsafe { crate::runtime::mimi_session_lo(packed) };
+    let hi = unsafe { crate::runtime::mimi_session_hi(packed) };
     // 0.36.38: the pair is a TUPLE (lo, hi) — matches the (i64, i64) /
     // (SessionChan<S>, SessionChan<dual S>) typing and the codegen's
     // {lo, hi} tuple struct value.
@@ -558,25 +583,25 @@ fn builtin_session_pair(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, 
 
 fn builtin_session_open(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
     let packed = crate::runtime::mimi_session_pair();
-    let lo = crate::runtime::mimi_session_lo(packed);
+    let lo = unsafe { crate::runtime::mimi_session_lo(packed) };
     Ok(Value::Int(lo))
 }
 
 fn builtin_session_send(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let v = handle(args, 1)?;
-    crate::runtime::mimi_channel_send(h, v);
+    unsafe { crate::runtime::mimi_channel_send(h, v) };
     Ok(Value::Unit)
 }
 
 fn builtin_session_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    Ok(Value::Int(crate::runtime::mimi_channel_recv(h)))
+    Ok(Value::Int(unsafe { crate::runtime::mimi_channel_recv(h) }))
 }
 
 fn builtin_session_close(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    crate::runtime::mimi_channel_drop(h);
+    unsafe { crate::runtime::mimi_channel_drop(h) };
     Ok(Value::Unit)
 }
 

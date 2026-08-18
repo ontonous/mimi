@@ -142,6 +142,7 @@ pub(crate) mod audit_fix_lowering;
 pub(crate) mod audit_fix_lsp;
 pub(crate) mod audit_fix_parser;
 pub(crate) mod audit_fix_paths;
+pub(crate) mod audit_fix_review_reports;
 pub(crate) mod audit_fix_runtime_core;
 pub(crate) mod audit_fix_runtime_sub;
 pub(crate) mod audit_fix_scripts;

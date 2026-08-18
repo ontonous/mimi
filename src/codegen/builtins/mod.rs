@@ -253,6 +253,11 @@ fn register_map_record_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_map_clone",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_map_from_json_i64",
         i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
@@ -1906,6 +1911,20 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // str_join_ll(list*, sep, sep_len, out_len*) → i8*
+    module.add_function(
+        "mimi_str_join_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // str_join(list*, sep) → i8* (heap-allocated string)
     module.add_function(
         "mimi_str_join",
@@ -1930,12 +1949,39 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_str_concat_ll(a, a_len, b, b_len) → i8* (length-aware concat)
+    module.add_function(
+        "mimi_str_concat_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_str_char_at(s, index) → i8* (Unicode scalar index; aborts on OOB)
     module.add_function(
         "mimi_str_char_at",
         i8_ptr.fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_char_at_ll(s, s_len, index) → i8* (length-aware variant)
+    module.add_function(
+        "mimi_str_char_at_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::IntType(i64),
             ],
             false,
@@ -1962,6 +2008,23 @@ fn register_string_fns<'ctx>(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_replace_ll(s, s_len, from, from_len, to, to_len, out_len) → i8*
+    module.add_function(
+        "mimi_str_replace_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
             ],
             false,
@@ -2022,6 +2085,48 @@ fn register_string_fns<'ctx>(
     module.add_function(
         "mimi_string_free",
         _void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_index_of(hay, hay_len, needle, needle_len) → i64 byte offset or -1
+    module.add_function(
+        "mimi_str_index_of",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_starts_with(hay, hay_len, prefix, prefix_len) → i64 0/1
+    module.add_function(
+        "mimi_str_starts_with",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_ends_with(hay, hay_len, suffix, suffix_len) → i64 0/1
+    module.add_function(
+        "mimi_str_ends_with",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
         Some(inkwell::module::Linkage::External),
     );
     // mimi_str_count_substring(s, sub) → i32 (count of non-overlapping occurrences)
@@ -2375,12 +2480,21 @@ fn register_environment_cli_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-    // mimi_args_init(argc: i64, argv: i8**) -> void
+    // mimi_read_stdin_line() -> i8*
+    module.add_function(
+        "mimi_read_stdin_line",
+        i8_ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // mimi_args_init(argc: i32, argv: i8**) -> void
+    // The runtime export is `extern "C" fn mimi_args_init(argc: i32, ...)`;
+    // declaring it as i64 was a C ABI mismatch (batch4-03 P2-6).
     module.add_function(
         "mimi_args_init",
         void.fn_type(
             &[
-                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(_i32),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
             ],
             false,
@@ -3108,6 +3222,19 @@ fn register_process_advanced_file_operations<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_append_file_ll(path: i8*, content: i8*, len: i64) -> i64
+    module.add_function(
+        "mimi_append_file_ll",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_append_file(path: i8*, content: i8*) -> i64
     module.add_function(
         "mimi_append_file",
@@ -3161,16 +3288,54 @@ fn register_binary_i_o_streaming_line_reading<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_read_file_partial_ll(path: i8*, max_bytes: i64, out_len: i64*) -> i8*
+    module.add_function(
+        "mimi_read_file_partial_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_read_file_bytes(path: i8*) -> i8*
     module.add_function(
         "mimi_read_file_bytes",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-    // mimi_write_file_bytes(path: i8*, data: i8*) -> i64
+    // mimi_read_file_bytes_ll(path: i8*, out_len: i64*) -> i8*
+    module.add_function(
+        "mimi_read_file_bytes_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_write_file_bytes_ll(path: i8*, data: i8*, len: i64) -> i32
+    module.add_function(
+        "mimi_write_file_bytes_ll",
+        _i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_write_file_bytes(path: i8*, data: i8*) -> i32
     module.add_function(
         "mimi_write_file_bytes",
-        i64.fn_type(
+        _i32.fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
@@ -3338,6 +3503,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "assert_ne" => self.compile_assert_ne(args),
             "assert_approx_eq" => self.compile_assert_approx_eq(args),
             "input" => self.compile_input(args),
+            "try_input_line" => self.compile_try_input_line(args),
             "file_exists" => self.compile_file_exists(args),
             "read_file" => self.compile_read_file(args),
             "write_file" => self.compile_write_file(args),

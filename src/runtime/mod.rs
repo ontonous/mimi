@@ -18,6 +18,16 @@ pub mod profiler;
 //
 // ## Standalone compilation
 //
+// ## Handle thread-safety
+//
+// Map/set handles are raw allocation addresses registered in LIVE_MAPS and
+// LIVE_SETS. The registry detects stale/double-destroyed handles but does not
+// provide a lease or reference count. Callers must not concurrently destroy a
+// map/set while another thread may be using the same handle (P1-03). The
+// interpreter/codegen callers already serialize handle access; external FFI
+// callers sharing a handle across threads are responsible for the same
+// synchronization.
+//
 // For linking with Mimi-compiled object files, compile `standalone.rs` with:
 // ```sh
 // rustc --edition 2021 --crate-type staticlib --cfg standalone --crate-name mimi_runtime \
@@ -280,8 +290,14 @@ impl MimiList {
     }
 }
 
-pub type ValueHandle = usize;
-pub type MapHandle = usize;
+pub type ValueHandle = i64;
+pub type MapHandle = i64;
+
+// P0-10 (batch4/05): these runtime handles cross the LLVM `i64` ABI. Keeping
+// them as explicit 64-bit integers (rather than `usize`) prevents silent
+// truncation on 32-bit targets.
+const _: () = assert!(std::mem::size_of::<ValueHandle>() == std::mem::size_of::<i64>());
+const _: () = assert!(std::mem::size_of::<MapHandle>() == std::mem::size_of::<i64>());
 
 // ---------------------------------------------------------------------------
 // R-C11: live handle registries (Map / Set; Actor → actor.rs, Quote → quote.rs)
@@ -734,13 +750,23 @@ fn grow_list_data(lst: &mut MimiList, new_cap: i64) -> *mut *mut std::ffi::c_cha
 /// headered buffer materialized on first growth (audit 2026-08-05, H-27).
 /// Modifies list in place (data and len are updated).
 /// 0.31.23: Sets element_kind to I64 for typed storage.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
+pub unsafe extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     if list.is_null() {
         return;
     }
     // SAFETY: `list` points to a valid, properly aligned value
     let lst = unsafe { &mut *list };
+    // batch4 P2-3: a corrupt/negative len must not be interpreted as a huge
+    // unsigned offset in the growth/write path.
+    if lst.len < 0 {
+        return;
+    }
     // 0.31.23: Mark this list as containing i64 elements.
     lst.element_kind = ListElementKind::I64;
     let len = lst.len;
@@ -783,13 +809,23 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
 /// 0.31.23: Push an f64 element into a MimiList with exponential capacity growth.
 /// Header-less lists get a headered buffer materialized on first growth
 /// (audit 2026-08-05, H-27). Sets element_kind to F64 for typed storage.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
+pub unsafe extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
     if list.is_null() {
         return;
     }
     // SAFETY: `list` points to a valid, properly aligned value
     let lst = unsafe { &mut *list };
+    // batch4 P2-3: negative list lengths are invalid and would be treated as
+    // huge unsigned offsets below.
+    if lst.len < 0 {
+        return;
+    }
     // 0.31.23: Mark this list as containing f64 elements.
     lst.element_kind = ListElementKind::F64;
     let len = lst.len;
@@ -829,13 +865,25 @@ pub extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
 /// The string is copied into a new allocation (caller retains ownership of the input).
 /// Header-less lists get a headered buffer materialized on first growth
 /// (audit 2026-08-05, H-27). Sets element_kind to String for typed storage.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_push_string(list: *mut MimiList, element: *const std::ffi::c_char) {
+pub unsafe extern "C" fn mimi_list_push_string(
+    list: *mut MimiList,
+    element: *const std::ffi::c_char,
+) {
     if list.is_null() {
         return;
     }
     // SAFETY: `list` points to a valid, properly aligned value
     let lst = unsafe { &mut *list };
+    // batch4 P2-3: reject negative lengths before using them as offsets.
+    if lst.len < 0 {
+        return;
+    }
     // 0.31.23: Mark this list as containing string elements.
     lst.element_kind = ListElementKind::String;
     let len = lst.len;
@@ -890,8 +938,13 @@ pub extern "C" fn mimi_list_push_string(list: *mut MimiList, element: *const std
 /// Returns the (possibly new) data pointer. The caller is responsible for
 /// storing the element at `data[len]` and incrementing `list.len`.
 /// This variant works for any element type (not just i64).
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_push_grow(
+pub unsafe extern "C" fn mimi_list_push_grow(
     list: *mut MimiList,
     additional: i64,
 ) -> *mut *mut std::ffi::c_char {
@@ -900,6 +953,9 @@ pub extern "C" fn mimi_list_push_grow(
     }
     // SAFETY: `list` was checked non-null; mutable reference is held only within this function.
     let lst = unsafe { &mut *list };
+    if lst.len < 0 {
+        return std::ptr::null_mut();
+    }
     let len = lst.len;
     let old_data = lst.data;
     let cap = list_cap(lst);
@@ -1005,8 +1061,13 @@ pub extern "C" fn mimi_list_push_grow(
 
 /// 0.31.23: Get an i64 element from a list at the given index.
 /// Returns 0 if the list is null, index is out of bounds, or element_kind is not I64.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_get_i64(list: *const MimiList, index: i64) -> i64 {
+pub unsafe extern "C" fn mimi_list_get_i64(list: *const MimiList, index: i64) -> i64 {
     if list.is_null() {
         return 0;
     }
@@ -1031,8 +1092,13 @@ pub extern "C" fn mimi_list_get_i64(list: *const MimiList, index: i64) -> i64 {
 
 /// 0.31.23: Get an f64 element from a list at the given index.
 /// Returns 0.0 if the list is null, index is out of bounds, or element_kind is not F64.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_get_f64(list: *const MimiList, index: i64) -> f64 {
+pub unsafe extern "C" fn mimi_list_get_f64(list: *const MimiList, index: i64) -> f64 {
     if list.is_null() {
         return 0.0;
     }
@@ -1057,8 +1123,16 @@ pub extern "C" fn mimi_list_get_f64(list: *const MimiList, index: i64) -> f64 {
 
 /// 0.31.23: Get a string element from a list at the given index.
 /// Returns null if the list is null, index is out of bounds, or element_kind is not String.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_get_string(list: *const MimiList, index: i64) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_get_string(
+    list: *const MimiList,
+    index: i64,
+) -> *mut std::ffi::c_char {
     if list.is_null() {
         return std::ptr::null_mut();
     }
@@ -1083,8 +1157,13 @@ pub extern "C" fn mimi_list_get_string(list: *const MimiList, index: i64) -> *mu
 
 /// 0.31.23: Get the element kind of a list.
 /// Returns the element kind as an i8 (see ListElementKind enum).
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_element_kind(list: *const MimiList) -> i8 {
+pub unsafe extern "C" fn mimi_list_element_kind(list: *const MimiList) -> i8 {
     if list.is_null() {
         return ListElementKind::Unknown as i8;
     }
@@ -1112,8 +1191,13 @@ pub fn mimi_list_has_header_probe(list: *const MimiList) -> bool {
 /// the Rust allocator + an 8-byte size header; a raw `libc::free` was both
 /// the wrong allocator and the wrong base (Miri-detectable UB). In normal
 /// builds `mimi_free` IS `libc::free` — behavior is unchanged.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
+pub unsafe extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
     if !ptr.is_null() {
         // SAFETY: `ptr` is non-null (checked above) and was allocated by
         // `mimi_alloc` via `alloc_c_string`; mimi_free is the matching
@@ -1138,8 +1222,13 @@ pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
 /// 0.31.23: Uses element_kind to determine whether elements need freeing.
 /// Only String/List/Record elements are heap-allocated pointers; I64/F64/Bool/Map/Set
 /// are stored directly in the data array and don't need individual freeing.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
+pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     if list.is_null() {
         return;
     }
@@ -1216,8 +1305,13 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
 /// struct stored as ptrtoint i64 in the data array).
 /// The data buffer is freed separately by the existing `register_heap_slot` mechanism;
 /// the list struct itself is a stack alloca and must NOT be freed.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
+pub unsafe extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
     if list.is_null() {
         return;
     }
@@ -1303,6 +1397,23 @@ fn alloc_c_string_from_bytes(bytes: &[u8]) -> *mut std::ffi::c_char {
     ptr as *mut std::ffi::c_char
 }
 
+/// Read one line from standard input and return it as a heap-allocated
+/// NUL-terminated C string with trailing whitespace removed (matching the
+/// bytecode VM's `input()` trim_end behavior). Returns null on EOF or a
+/// read error.
+///
+/// The caller owns the returned allocation and must free it with
+/// `mimi_free` / `mimi_string_free` (both ultimately `libc::free`).
+#[no_mangle]
+pub extern "C" fn mimi_read_stdin_line() -> *mut std::ffi::c_char {
+    let mut input = String::new();
+    match std::io::stdin().read_line(&mut input) {
+        Ok(0) => std::ptr::null_mut(),
+        Ok(_) => alloc_c_string(input.trim_end()),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Integer math
 // ---------------------------------------------------------------------------
@@ -1312,9 +1423,10 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
     // CG-H3: match interpreter — negative exponents and overflow are errors,
     // not silent zero (which collides with legitimate 0**n results).
     if exp < 0 {
-        mimi_runtime_abort(
-            b"negative exponent not supported for integers\0".as_ptr() as *const std::ffi::c_char
-        );
+        unsafe {
+            mimi_runtime_abort(b"negative exponent not supported for integers\0".as_ptr()
+                as *const std::ffi::c_char);
+        }
     }
     // wave1-review §5.17 (audit 2026-08-05): mirror the VM's exact bound.
     // Bytecode `Op::PowInt` (interp/bytecode/vm.rs) and `builtin_pow`
@@ -1324,9 +1436,10 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
     // the VM traps — an L1 backend divergence (pow(1, 4294967326): VM error,
     // old runtime returned 1).
     if exp > u32::MAX as i64 {
-        mimi_runtime_abort(
-            b"pow: exponent exceeds u32::MAX (integer power)\0".as_ptr() as *const std::ffi::c_char
-        );
+        unsafe {
+            mimi_runtime_abort(b"pow: exponent exceeds u32::MAX (integer power)\0".as_ptr()
+                as *const std::ffi::c_char);
+        }
     }
     if exp == 0 {
         return 1;
@@ -1338,22 +1451,22 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
         if (e & 1) != 0 {
             match result.checked_mul(b) {
                 Some(v) => result = v,
-                None => {
+                None => unsafe {
                     mimi_runtime_abort(
                         b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char
                     );
-                }
+                },
             }
         }
         e >>= 1;
         if e > 0 {
             match b.checked_mul(b) {
                 Some(v) => b = v,
-                None => {
+                None => unsafe {
                     mimi_runtime_abort(
                         b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char
                     );
-                }
+                },
             }
         }
     }
@@ -1385,8 +1498,13 @@ unsafe fn rc_header_ref(ptr: *mut std::ffi::c_void) -> &'static RcHeader {
     &*(ptr as *mut RcHeader).sub(1)
 }
 
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_rc_alloc(size: i64) -> *mut std::ffi::c_void {
+pub unsafe extern "C" fn mimi_rc_alloc(size: i64) -> *mut std::ffi::c_void {
     // FFI-1: Reject negative/huge sizes that would cause Layout::array to panic.
     // abort() is async-signal-safe and the only safe option across FFI boundary.
     if size <= 0 || size > 0x7fff_ffff {
@@ -1417,8 +1535,13 @@ pub extern "C" fn mimi_rc_alloc(size: i64) -> *mut std::ffi::c_void {
     unsafe { (hdr.add(1)) as *mut std::ffi::c_void }
 }
 
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_rc_retain(ptr: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_rc_retain(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
@@ -1448,8 +1571,13 @@ unsafe fn rc_dealloc_layout(hdr: *mut RcHeader) -> std::alloc::Layout {
         .pad_to_align()
 }
 
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
@@ -1500,8 +1628,13 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
 /// strong or weak reference for the duration of this call. There is no
 /// cheaper hardening: RC pointers are bare addresses with no handle registry
 /// (adding one would put a lock on the hot retain/release path).
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
@@ -1538,8 +1671,13 @@ pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
 /// the caller must actually hold the weak reference being released. A call
 /// with no live reference RMWs a freed header (UAF); the guard here is the
 /// count arithmetic, which is only meaningful for a live allocation.
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
+pub unsafe extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
@@ -1573,8 +1711,13 @@ pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
 /// memory before any count check can reject it. §10-#26 (closed 0.36.109 by
 /// design): standard Arc-class boundary; no cheaper hardening exists without
 /// a handle registry on the hot path.
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+pub unsafe extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -1745,7 +1888,9 @@ fn free_map_owned_value(vh: ValueHandle, kind: MapOwnedValueKind) {
             // list struct (Box::from_raw), its owned data array, and Record
             // element pack bases. Map/Set element handles are deliberately
             // not freed (caller may hold them via map_get — bounded leak).
-            mimi_list_free(vh as *mut MimiList, true);
+            unsafe {
+                mimi_list_free(vh as *mut MimiList, true);
+            }
         }
     }
     MAP_OWNED_VALUE_BALANCE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -1761,6 +1906,11 @@ struct MimiMap {
 /// Callers must dereference within a single scope (no two &mut to same handle).
 /// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
 /// R-C11: also aborts on stale (destroyed / never-registered) handles.
+/// batch4-05 P1-2: the live-set check and the returned raw pointer are not
+/// atomic with respect to `mimi_map_destroy`. Callers MUST NOT share a map
+/// handle across threads while one thread can destroy it. The runtime treats
+/// cross-thread destroy/use as outside the supported C ABI contract until a
+/// per-handle lease/reference-count mechanism lands.
 // SAFETY: aborts on invalid/stale handle; caller must ensure exclusive access while live.
 unsafe fn map_from_handle(handle: MapHandle) -> *mut MimiMap {
     if handle == 0 || !map_is_live(handle) {
@@ -1781,7 +1931,7 @@ pub extern "C" fn mimi_map_new() -> MapHandle {
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_map_destroy(handle: MapHandle) {
+pub unsafe extern "C" fn mimi_map_destroy(handle: MapHandle) {
     // R-C11: double free is a no-op; only free if still live.
     if !map_take_live(handle) {
         return;
@@ -1800,7 +1950,7 @@ pub extern "C" fn mimi_map_destroy(handle: MapHandle) {
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
+pub unsafe extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
@@ -1808,8 +1958,12 @@ pub extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     unsafe { (*map_from_handle(handle)).inner.len() as i64 }
 }
 
+///
+/// # Safety
+/// `handle` must be a live map handle and `key` must be a valid
+/// NUL-terminated C string (or null, which is a no-op).
 #[no_mangle]
-pub extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
     if handle == 0 || key.is_null() {
         return 0;
     }
@@ -1819,8 +1973,15 @@ pub extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ffi::c_ch
     unsafe { (*map_from_handle(handle)).inner.contains_key(&s) as i32 }
 }
 
+///
+/// # Safety
+/// `handle` must be a live map handle and `key` must be a valid
+/// NUL-terminated C string (or null, which is a no-op).
 #[no_mangle]
-pub extern "C" fn mimi_map_get(handle: MapHandle, key: *const std::ffi::c_char) -> ValueHandle {
+pub unsafe extern "C" fn mimi_map_get(
+    handle: MapHandle,
+    key: *const std::ffi::c_char,
+) -> ValueHandle {
     if handle == 0 || key.is_null() {
         return 0;
     }
@@ -1837,7 +1998,31 @@ pub extern "C" fn mimi_map_get(handle: MapHandle, key: *const std::ffi::c_char) 
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_map_set(
+pub unsafe extern "C" fn mimi_map_clone(handle: MapHandle) -> MapHandle {
+    if handle == 0 {
+        return 0;
+    }
+    // SAFETY: handle validated by map_from_handle; deref is in a single scope.
+    let src = unsafe { &*map_from_handle(handle) };
+    let clone = Box::new(MimiMap {
+        inner: src.inner.clone(),
+        // The clone does not own any value buffers; those remain owned by
+        // the source map (or by the value producer). Keeping this empty
+        // prevents double frees when both maps are destroyed.
+        owned: HashMap::new(),
+    });
+    let h = Box::into_raw(clone) as MapHandle;
+    map_register_live(h);
+    h
+}
+
+/// Insert `value` under `key` in an existing map.
+///
+/// # Safety
+/// `handle` must be a live map handle. `key` must be a valid
+/// NUL-terminated C string (or null, which is a no-op).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_map_set(
     handle: MapHandle,
     key: *const std::ffi::c_char,
     value: ValueHandle,
@@ -1866,15 +2051,23 @@ pub extern "C" fn mimi_map_set(
 /// distinguishes them from integers by size and alignment.
 ///
 /// The caller must `free` the returned pointer with `mimi_string_free`.
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
     const MIN_HEAP: usize = 1_048_576; // 1MB — below this is definitely not a heap ptr
     const MAX_ADDR: usize = usize::MAX - 4096;
-    const MAX_BOUNDED_SCAN: usize = 256; // C12: limit scan to 256 bytes to avoid 1MB arbitrary read
+    // C12: bounded scan. 1 MiB covers long Mimi strings (up to 64 MiB is
+    // possible) while still bounding per-call work for untyped Any values.
+    const MAX_BOUNDED_SCAN: usize = 1_048_576;
 
     // Bit-0 = 0: could be an aligned heap pointer (string), or an even integer.
     // Validate before treating as pointer.
-    if value & 1 == 0 && (MIN_HEAP..MAX_ADDR).contains(&value) && value % 8 == 0 {
+    let value_addr = value as usize;
+    if value & 1 == 0 && (MIN_HEAP..MAX_ADDR).contains(&value_addr) && value % 8 == 0 {
         let ptr = value as *const u8;
         // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
         // C12 (deep audit): a large *untagged* integer (e.g. `0x7FFF_FFFF_F000`)
@@ -1885,39 +2078,48 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         // SAFETY: `libc::sysconf` is async-signal-safe and has no preconditions beyond a valid POSIX constant
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         let page_size = if page_size == 0 { 4096 } else { page_size };
-        let page_start = (value / page_size) * page_size;
-        let mut mvec: u8 = 0;
-        let mapped =
-// SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
-            unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
-        if mapped == 0 {
-            let page_offset = value - page_start;
-            let max_in_page = page_size.saturating_sub(page_offset);
-            let max_scan = max_in_page.min(MAX_BOUNDED_SCAN);
-            let mut len: usize = 0;
-            // SAFETY: mincore confirmed the first page is mapped; the scan is
-            // bounded to that page so it cannot cross into an unmapped page.
+        let mut len: usize = 0;
+        while len < MAX_BOUNDED_SCAN {
+            let cur = value_addr + len;
+            let page_start = (cur / page_size) * page_size;
+            let page_offset = cur - page_start;
+            let chunk = page_size
+                .saturating_sub(page_offset)
+                .min(MAX_BOUNDED_SCAN - len);
+            if chunk == 0 {
+                break;
+            }
+            let mut mvec: u8 = 0;
+            // SAFETY: `libc::mincore` is async-signal-safe; `page_start` is page-aligned.
+            let mapped =
+                unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
+            if mapped != 0 {
+                break;
+            }
+            // SAFETY: mincore confirmed this page is mapped; scan/copy is
+            // bounded to the page and to MAX_BOUNDED_SCAN, and stops at NUL.
             unsafe {
-                while len < max_scan {
-                    let byte = *ptr.add(len);
+                for i in 0..chunk {
+                    let byte = *ptr.add(len + i);
                     if byte == 0 {
-                        // Found null terminator within the mapped page — likely a real C string.
+                        let found_len = len + i;
+                        // Found a NUL terminator — likely a real C string.
                         // N-1: mimi_alloc pairs with mimi_string_free (see fn docs).
-                        let buf = mimi_alloc(len + 1) as *mut u8;
+                        let buf = mimi_alloc(found_len + 1) as *mut u8;
                         if buf.is_null() {
                             return std::ptr::null_mut();
                         }
-                        if len > 0 {
-                            std::ptr::copy_nonoverlapping(ptr, buf, len);
+                        if found_len > 0 {
+                            std::ptr::copy_nonoverlapping(ptr, buf, found_len);
                         }
-                        *buf.add(len) = 0;
+                        *buf.add(found_len) = 0;
                         return buf as *mut std::ffi::c_char;
                     }
-                    len += 1;
                 }
             }
+            len += chunk;
         }
-        // C12: no null within 256 bytes — treat as large integer (≥1MB) and
+        // C12: no null within the bounded scan — treat as large integer (≥1MB) and
         // format as hex to avoid reading arbitrary memory for 1MB.
         // N-1: mimi_alloc pairs with mimi_string_free (see fn docs); the
         // buffer is 24 bytes and the format string "0x%lx\0" writes at most
@@ -2011,8 +2213,12 @@ pub extern "C" fn mimi_any_to_float(value: ValueHandle) -> f64 {
     }
 }
 
+///
+/// # Safety
+/// `handle` must be a live map handle and `key` must be a valid
+/// NUL-terminated C string (or null, which is a no-op).
 #[no_mangle]
-pub extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
+pub unsafe extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
     if handle == 0 || key.is_null() {
         return 0;
     }
@@ -2028,9 +2234,21 @@ pub extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_cha
 /// stores a bare NUL-terminated data pointer (mincore(field0) fails, field0
 /// is payload bytes) from one that stores a `{ptr,len}` struct pointer
 /// (mincore(field0) succeeds, field0 is the data pointer).
+///
+/// # Safety
+/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
+/// runtime-owned C string for `mimi_any_to_string`) and must not
+/// be used after the matching release/free.
 #[no_mangle]
-pub extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> i64 {
+pub unsafe extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> i64 {
     if ptr.is_null() || len <= 0 {
+        return 0;
+    }
+    // batch4 P2-5: a huge untrusted len used to make the page loop scan the
+    // whole address space. Bound the probe to a sane span; callers that need
+    // a larger span should use a checked helper instead.
+    const MAX_READABLE_SPAN: i64 = 1 << 20;
+    if len > MAX_READABLE_SPAN {
         return 0;
     }
     // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX
@@ -2063,49 +2281,75 @@ pub extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> i64 {
 }
 
 #[no_mangle]
-/// RT-H4 helper: treat a ValueHandle as a C string only if mincore says the
-/// page is mapped and a NUL terminator appears within a bounded scan.
+/// RT-H4 helper: treat an aligned `ValueHandle` as a C string only if mincore
+/// says the page is mapped and a NUL terminator appears within a bounded scan.
+/// Alignment remains part of the untyped `Any` pointer-vs-integer heuristic.
 fn safe_c_string_from_handle(handle: ValueHandle) -> Option<String> {
+    safe_c_string_from_handle_impl(handle, true)
+}
+
+/// Decode a pointer that is already known by its ABI position to be a C
+/// string. C string literals and byte buffers have byte alignment, so this
+/// path intentionally skips the aligned-handle heuristic used for `Any`.
+fn safe_c_string_from_ptr(ptr: *const std::ffi::c_char) -> Option<String> {
+    safe_c_string_from_handle_impl(ptr as ValueHandle, false)
+}
+
+fn safe_c_string_from_handle_impl(handle: ValueHandle, require_alignment: bool) -> Option<String> {
     const MIN_HEAP: usize = 1_048_576;
-    const MAX_BOUNDED_SCAN: usize = 256;
-    if handle < MIN_HEAP || handle % 8 != 0 {
+    // 1 MiB bounded scan for untyped map/any string values; see P1-1.
+    const MAX_BOUNDED_SCAN: usize = 1_048_576;
+    let addr = handle as usize;
+    if addr < MIN_HEAP || (require_alignment && handle % 8 != 0) {
         return None;
     }
     // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
     let page_size = if page_size == 0 { 4096 } else { page_size };
-    let page_start = (handle / page_size) * page_size;
-    let mut mvec: u8 = 0;
-    let mapped =
-// SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
-        unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
-    if mapped != 0 {
-        return None;
-    }
-    let page_offset = handle - page_start;
-    let max_scan = page_size.saturating_sub(page_offset).min(MAX_BOUNDED_SCAN);
+    let end = addr.checked_add(MAX_BOUNDED_SCAN)?;
     let ptr = handle as *const u8;
     // RT-H2 soft harden: copy bytes into a local buffer while scanning so a
     // concurrent munmap after mincore cannot corrupt the String we build from
     // a live slice. Residual race remains on the individual byte loads
     // themselves (cannot close fully without process_vm_readv / userfaultfd).
-    let mut local = [0u8; MAX_BOUNDED_SCAN];
-    let mut len = 0usize;
-    // SAFETY: mincore confirmed mapped page; scan/copy bounded to that page.
-    unsafe {
-        while len < max_scan {
-            let b = *ptr.add(len);
-            if b == 0 {
-                // Re-check mapping before trusting the snapshot.
-                let mut mvec2: u8 = 0;
-                if libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec2) != 0 {
-                    return None;
-                }
-                return Some(String::from_utf8_lossy(&local[..len]).into_owned());
-            }
-            local[len] = b;
-            len += 1;
+    let mut local: Vec<u8> = Vec::with_capacity(MAX_BOUNDED_SCAN);
+    let mut offset = 0usize;
+    while offset < MAX_BOUNDED_SCAN {
+        let cur = addr + offset;
+        let page_start = (cur / page_size) * page_size;
+        let page_end = page_start.saturating_add(page_size).min(end);
+        let chunk_limit = page_end.saturating_sub(cur);
+        if chunk_limit == 0 {
+            break;
         }
+        let mut mvec: u8 = 0;
+        // SAFETY: `libc::mincore` is async-signal-safe; `page_start` is page-aligned.
+        let mapped =
+            unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
+        if mapped != 0 {
+            return None;
+        }
+        let mut scanned = 0usize;
+        // SAFETY: mincore confirmed this page is mapped; scan/copy is bounded
+        // to this page, MAX_BOUNDED_SCAN, and stops at the first NUL.
+        unsafe {
+            while scanned < chunk_limit {
+                let b = *ptr.add(offset + scanned);
+                if b == 0 {
+                    // Re-check mapping before trusting the snapshot.
+                    let mut mvec2: u8 = 0;
+                    if libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec2)
+                        != 0
+                    {
+                        return None;
+                    }
+                    return Some(String::from_utf8_lossy(&local).into_owned());
+                }
+                local.push(b);
+                scanned += 1;
+            }
+        }
+        offset += scanned;
     }
     None
 }
@@ -2148,7 +2392,8 @@ static PRODUCT_HANDLE_WARNED: std::sync::atomic::AtomicBool =
 /// not a plausible mapped heap pointer (warns once per process, fail-loud).
 fn safe_read_product_fields(handle: ValueHandle, n: usize) -> Option<Vec<i64>> {
     const MIN_HEAP: usize = 1_048_576;
-    if n == 0 || handle < MIN_HEAP || handle % 8 != 0 {
+    let addr = handle as usize;
+    if n == 0 || addr < MIN_HEAP || handle % 8 != 0 {
         if !PRODUCT_HANDLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             eprintln!(
                 "[mimi runtime] product value handle {:#x} is not a plausible heap pointer — serialized as zeros",
@@ -2158,7 +2403,7 @@ fn safe_read_product_fields(handle: ValueHandle, n: usize) -> Option<Vec<i64>> {
         return None;
     }
     let byte_len = n * std::mem::size_of::<i64>();
-    if !pages_mapped(handle, byte_len) {
+    if !pages_mapped(addr, byte_len) {
         if !PRODUCT_HANDLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             eprintln!(
                 "[mimi runtime] product value handle {:#x} points at unmapped memory — serialized as zeros",
@@ -2172,8 +2417,13 @@ fn safe_read_product_fields(handle: ValueHandle, n: usize) -> Option<Vec<i64>> {
     Some(unsafe { std::slice::from_raw_parts(handle as *const i64, n).to_vec() })
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_map_from_list(
+pub unsafe extern "C" fn mimi_map_from_list(
     keys: *mut ValueHandle,
     values: *mut ValueHandle,
     n: i64,
@@ -2204,19 +2454,32 @@ pub extern "C" fn mimi_map_from_list(
     for i in 0..n {
         // C6: We only have the caller's word that arrays have >= n elements.
         // We mitigate by capping n at 1M, but the real fix requires a
-        // different API that takes slices. For now, validate each key
-        // handle looks like a plausible heap pointer before dereference.
-        // SAFETY: keys and values are non-null (caller-checked) and n
-        // is capped at 1M, so index `i` is in bounds for the caller's
-        // arrays (we trust the caller's array length, the cap is just
-        // a defensive upper bound).
-        let key_handle = unsafe { *keys.add(i as usize) };
-        let val_handle = unsafe { *values.add(i as usize) };
-        // RT-H1/H4: only decode keys via safe_c_string_from_handle (mincore+NUL).
+        // different API that takes slices. For now, validate each array slot
+        // is mapped before reading the handle, and validate each key handle
+        // looks like a plausible heap pointer before dereference.
+        let idx = i as usize;
+        let key_slot_addr = keys as usize + idx * std::mem::size_of::<ValueHandle>();
+        let val_slot_addr = values as usize + idx * std::mem::size_of::<ValueHandle>();
+        if !pages_mapped(key_slot_addr, std::mem::size_of::<ValueHandle>())
+            || !pages_mapped(val_slot_addr, std::mem::size_of::<ValueHandle>())
+        {
+            eprintln!(
+                "[mimi runtime] mimi_map_from_list: array slot {} is not mapped;                  refusing to read beyond the caller-provided arrays",
+                i
+            );
+            break;
+        }
+        // SAFETY: pages_mapped confirmed the slot is resident; keys/values are
+        // non-null and n is capped at 1M.
+        let key_handle = unsafe { *keys.add(idx) };
+        let val_handle = unsafe { *values.add(idx) };
+        // RT-H1/H4: map keys are ABI-declared C strings, so their pointers may
+        // be byte-aligned (unlike untyped Any handles). Still require the same
+        // mapped-page and bounded-NUL validation before dereferencing.
         // M7: a failed key check is diagnosed once (not silent) — it means
         // the caller's array contains a wild/foreign handle, and the pair is
         // skipped rather than inserted under a garbage key.
-        if let Some(s) = safe_c_string_from_handle(key_handle) {
+        if let Some(s) = safe_c_string_from_ptr(key_handle as *const std::ffi::c_char) {
             // SAFETY: map_ptr is the just-allocated map (handle != 0).
             unsafe {
                 (*map_ptr).inner.insert(s, val_handle);
@@ -2287,12 +2550,12 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_map_keys(handle: MapHandle) -> *mut MimiList {
+pub unsafe extern "C" fn mimi_map_keys(handle: MapHandle) -> *mut MimiList {
     mimi_map_collect(handle, false)
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_map_values(handle: MapHandle) -> *mut MimiList {
+pub unsafe extern "C" fn mimi_map_values(handle: MapHandle) -> *mut MimiList {
     mimi_map_collect(handle, true)
 }
 
@@ -2319,8 +2582,13 @@ unsafe fn cstr_to_string(ptr: *const std::ffi::c_char) -> String {
 /// Returns a ValueHandle (pointer) suitable for storage in a map and
 /// later detection by `mimi_any_to_string` (aligned heap pointer >= 1MB).
 /// The caller (codegen side) is responsible for freeing via `mimi_string_free`.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> ValueHandle {
+pub unsafe extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> ValueHandle {
     if ptr.is_null() || len <= 0 {
         return 0;
     }
@@ -2353,8 +2621,15 @@ pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> Valu
 /// Escape a C string for safe JSON string embedding.
 /// Returns a new heap-allocated string (caller must free with mimi_string_free).
 /// Handles: \ " \n \r \t \b \f and control chars as \uXXXX.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_json_escape_string(ptr: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_json_escape_string(
+    ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -2381,8 +2656,107 @@ pub extern "C" fn mimi_json_escape_string(ptr: *const std::ffi::c_char) -> *mut 
     alloc_c_string(&escaped)
 }
 
+/// Byte offset of the first occurrence of `needle` in `haystack`, or -1.
+/// Unlike C `strstr`, this uses explicit lengths so embedded NUL bytes are
+/// searched correctly (P1-13).
+///
+/// # Safety
+/// Both pointers must be valid for their corresponding lengths; negative
+/// lengths are rejected by this function but the pointers themselves must
+/// originate from live Mimi string values.
 #[no_mangle]
-pub extern "C" fn mimi_str_concat(
+pub unsafe extern "C" fn mimi_str_index_of(
+    haystack: *const std::ffi::c_char,
+    hay_len: i64,
+    needle: *const std::ffi::c_char,
+    needle_len: i64,
+) -> i64 {
+    if haystack.is_null() || needle.is_null() || hay_len < 0 || needle_len < 0 {
+        return -1;
+    }
+    if needle_len == 0 {
+        return 0;
+    }
+    if hay_len < needle_len {
+        return -1;
+    }
+    // SAFETY: codegen passes pointers with matching explicit lengths from
+    // Mimi string values; negative lengths are rejected above. Slices live
+    // only for the duration of the search.
+    let hay = unsafe { std::slice::from_raw_parts(haystack as *const u8, hay_len as usize) };
+    let needle = unsafe { std::slice::from_raw_parts(needle as *const u8, needle_len as usize) };
+    let n = needle_len as usize;
+    hay.windows(n)
+        .position(|w| w == needle)
+        .map(|i| i as i64)
+        .unwrap_or(-1)
+}
+
+/// Returns 1 when `prefix` is a prefix of `haystack`, using explicit byte
+/// lengths so embedded NUL bytes are not treated as terminators.
+///
+/// # Safety
+/// Both pointers must be valid for their corresponding lengths; prefix_len
+/// is checked against hay_len before slicing.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_starts_with(
+    haystack: *const std::ffi::c_char,
+    hay_len: i64,
+    prefix: *const std::ffi::c_char,
+    prefix_len: i64,
+) -> i64 {
+    if haystack.is_null() || prefix.is_null() || hay_len < 0 || prefix_len < 0 {
+        return 0;
+    }
+    if prefix_len > hay_len {
+        return 0;
+    }
+    if prefix_len == 0 {
+        return 1;
+    }
+    // SAFETY: lengths are validated non-negative and prefix_len <= hay_len;
+    // pointers come from Mimi string values passed by codegen.
+    let hay = unsafe { std::slice::from_raw_parts(haystack as *const u8, hay_len as usize) };
+    let prefix = unsafe { std::slice::from_raw_parts(prefix as *const u8, prefix_len as usize) };
+    i64::from(hay[..prefix_len as usize] == *prefix)
+}
+
+/// Returns 1 when `suffix` is a suffix of `haystack`, using explicit byte
+/// lengths so embedded NUL bytes are not treated as terminators.
+///
+/// # Safety
+/// Both pointers must be valid for their corresponding lengths; suffix_len
+/// is checked against hay_len before slicing.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_ends_with(
+    haystack: *const std::ffi::c_char,
+    hay_len: i64,
+    suffix: *const std::ffi::c_char,
+    suffix_len: i64,
+) -> i64 {
+    if haystack.is_null() || suffix.is_null() || hay_len < 0 || suffix_len < 0 {
+        return 0;
+    }
+    if suffix_len > hay_len {
+        return 0;
+    }
+    if suffix_len == 0 {
+        return 1;
+    }
+    // SAFETY: lengths are validated non-negative and suffix_len <= hay_len;
+    // pointers come from Mimi string values passed by codegen.
+    let hay = unsafe { std::slice::from_raw_parts(haystack as *const u8, hay_len as usize) };
+    let suffix = unsafe { std::slice::from_raw_parts(suffix as *const u8, suffix_len as usize) };
+    i64::from(hay[hay_len as usize - suffix_len as usize..] == *suffix)
+}
+
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_concat(
     a: *const std::ffi::c_char,
     b: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -2394,21 +2768,69 @@ pub extern "C" fn mimi_str_concat(
     alloc_c_string(&result)
 }
 
+/// Length-aware string concatenation. Unlike `mimi_str_concat`, this uses the
+/// explicit byte lengths so embedded NUL bytes are preserved (batch4/02
+/// P1-1). The returned buffer is NUL-terminated for C-string consumers, but
+/// codegen wraps it with the computed total length.
+///
+/// # Safety
+/// Pointers must be valid for the corresponding byte lengths; negative
+/// lengths are rejected.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_concat_ll(
+    a: *const std::ffi::c_char,
+    a_len: i64,
+    b: *const std::ffi::c_char,
+    b_len: i64,
+) -> *mut std::ffi::c_char {
+    if a_len < 0 || b_len < 0 {
+        return alloc_c_string("");
+    }
+    let a_len = a_len as usize;
+    let b_len = b_len as usize;
+    let a_bytes = if a.is_null() || a_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: caller guarantees `a` is valid for `a_len` bytes.
+        unsafe { std::slice::from_raw_parts(a as *const u8, a_len) }
+    };
+    let b_bytes = if b.is_null() || b_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: caller guarantees `b` is valid for `b_len` bytes.
+        unsafe { std::slice::from_raw_parts(b as *const u8, b_len) }
+    };
+    let mut result = Vec::with_capacity(a_len + b_len);
+    result.extend_from_slice(a_bytes);
+    result.extend_from_slice(b_bytes);
+    alloc_c_string_from_bytes(&result)
+}
+
 /// Deep-eval 2026-08-09 (test_result_match parity): the current OS error as
 /// a heap C string, formatted like Rust's `io::Error` Display
 /// ("No such file or directory (os error 2)"). Used by the native
 /// read_file/write_file Err paths so their messages match the interpreter's
 /// `e.to_string()` instead of a hard-coded string.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_os_error_message() -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_os_error_message() -> *mut std::ffi::c_char {
     let msg = std::io::Error::last_os_error().to_string();
     alloc_c_string(&msg)
 }
 
 /// Character-index (Unicode scalar) `char_at`.
 /// Returns a new heap-allocated 1-char string; aborts on OOB / invalid UTF-8.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_char_at(
+pub unsafe extern "C" fn mimi_str_char_at(
     s: *const std::ffi::c_char,
     index: i64,
 ) -> *mut std::ffi::c_char {
@@ -2431,10 +2853,57 @@ pub extern "C" fn mimi_str_char_at(
     }
 }
 
+/// Length-aware character-index (Unicode scalar) `char_at`.
+/// Uses the explicit byte length so embedded NUL bytes are preserved
+/// (batch4/02 P1-1). Aborts on OOB / invalid UTF-8.
+///
+/// # Safety
+/// Pointers must be valid for the corresponding byte length; negative
+/// lengths are rejected.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_char_at_ll(
+    s: *const std::ffi::c_char,
+    s_len: i64,
+    index: i64,
+) -> *mut std::ffi::c_char {
+    if s_len < 0 || index < 0 {
+        mimi_runtime_abort(
+            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
+        );
+    }
+    let bytes = if s.is_null() || s_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: caller guarantees `s` is valid for `s_len` bytes.
+        unsafe { std::slice::from_raw_parts(s as *const u8, s_len as usize) }
+    };
+    let text = match std::str::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => {
+            mimi_runtime_abort(b"str_char_at: invalid UTF-8\0".as_ptr() as *const std::ffi::c_char);
+        }
+    };
+    match text.chars().nth(index as usize) {
+        Some(c) => {
+            let mut buf = [0u8; 8];
+            let encoded = c.encode_utf8(&mut buf);
+            alloc_c_string(encoded)
+        }
+        None => mimi_runtime_abort(
+            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
+        ),
+    }
+}
+
 /// Character-index (Unicode scalar) substring `[start, end)`.
 /// Returns a new heap-allocated string; aborts on `start > end` or end OOB.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_substring(
+pub unsafe extern "C" fn mimi_str_substring(
     s: *const std::ffi::c_char,
     start: i64,
     end: i64,
@@ -2472,9 +2941,11 @@ fn str_from_ptr_len(ptr: *const std::ffi::c_char, len: i64) -> String {
     // RT-H9 parity with mimi_str_clone: cap absurd allocation/read requests.
     const MAX_STR_LEN: i64 = 64 * 1024 * 1024; // 64 MiB
     if len > MAX_STR_LEN {
-        mimi_runtime_abort(
-            b"string builtin: length out of bounds\0".as_ptr() as *const std::ffi::c_char
-        );
+        unsafe {
+            mimi_runtime_abort(
+                b"string builtin: length out of bounds\0".as_ptr() as *const std::ffi::c_char
+            );
+        }
     }
     // SAFETY: caller guarantees `ptr` points to at least `len` readable bytes
     // (ptr+len string ABI used by codegen, same contract as mimi_str_clone);
@@ -2487,8 +2958,13 @@ fn str_from_ptr_len(ptr: *const std::ffi::c_char, len: i64) -> String {
 /// builtin_str_substring): substring `[start, end)` with indices CLAMPED to
 /// the char count. Aborts only if `start > end` AFTER clamping. The method
 /// form `mimi_str_substring` above stays strict — do not conflate them.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_substring_clamp(
+pub unsafe extern "C" fn mimi_str_substring_clamp(
     ptr: *const std::ffi::c_char,
     len: i64,
     start: i64,
@@ -2510,8 +2986,13 @@ pub extern "C" fn mimi_str_substring_clamp(
 /// audit-wave1: Unicode-correct full-string case conversion (VM parity:
 /// `s.to_uppercase()`), replacing codegen's byte-wise emulation. Returns a
 /// freshly heap-allocated string (caller frees via mimi_string_free).
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_to_upper(
+pub unsafe extern "C" fn mimi_str_to_upper(
     ptr: *const std::ffi::c_char,
     len: i64,
 ) -> *mut std::ffi::c_char {
@@ -2521,8 +3002,13 @@ pub extern "C" fn mimi_str_to_upper(
 
 /// audit-wave1: Unicode-correct full-string case conversion (VM parity:
 /// `s.to_lowercase()`). Returns a freshly heap-allocated string.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_to_lower(
+pub unsafe extern "C" fn mimi_str_to_lower(
     ptr: *const std::ffi::c_char,
     len: i64,
 ) -> *mut std::ffi::c_char {
@@ -2533,14 +3019,27 @@ pub extern "C" fn mimi_str_to_lower(
 /// audit-wave1: Unicode-aware trim (VM parity: Rust `str::trim`, which strips
 /// all chars with the White_Space property). Returns a freshly heap-allocated
 /// string.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_trim(ptr: *const std::ffi::c_char, len: i64) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_str_trim(
+    ptr: *const std::ffi::c_char,
+    len: i64,
+) -> *mut std::ffi::c_char {
     let ss = str_from_ptr_len(ptr, len);
     alloc_c_string(ss.trim())
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_split(
+pub unsafe extern "C" fn mimi_str_split(
     s: *const std::ffi::c_char,
     delim: *const std::ffi::c_char,
 ) -> *mut MimiList {
@@ -2610,8 +3109,58 @@ pub extern "C" fn mimi_str_split(
     Box::into_raw(list)
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_join(
+pub unsafe extern "C" fn mimi_str_join_ll(
+    list: *const MimiList,
+    sep: *const std::ffi::c_char,
+    sep_len: i64,
+    out_len: *mut i64,
+) -> *mut std::ffi::c_char {
+    if !out_len.is_null() {
+        // SAFETY: out_len was checked non-null above.
+        unsafe { *out_len = 0 };
+    }
+    if list.is_null() {
+        return alloc_c_string("");
+    }
+    // SAFETY: `list` was checked non-null; shared reference is in a single scope.
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("");
+    }
+    if sep.is_null() || sep_len < 0 {
+        return alloc_c_string("");
+    }
+    // SAFETY: `sep` is non-null and the caller guarantees it is valid for
+    // `sep_len` bytes; the length is checked non-negative above.
+    let sep_bytes = unsafe { std::slice::from_raw_parts(sep as *const u8, sep_len as usize) };
+    let separator = String::from_utf8_lossy(sep_bytes).into_owned();
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize);
+    for i in 0..lst.len as isize {
+        // SAFETY: `i` is within `[0, len)` and data pointer is non-null for valid entries.
+        unsafe {
+            let ptr = *lst.data.offset(i);
+            parts.push(cstr_to_string(ptr));
+        }
+    }
+    let result = parts.join(&separator);
+    if !out_len.is_null() {
+        // SAFETY: out_len was checked non-null above.
+        unsafe { *out_len = result.len() as i64 };
+    }
+    alloc_c_string_from_bytes(result.as_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_join(
     list: *const MimiList,
     sep: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -2619,7 +3168,7 @@ pub extern "C" fn mimi_str_join(
         return alloc_c_string("");
     }
     // SAFETY: `list` was checked non-null; shared reference is in a single scope.
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("");
     }
@@ -2649,8 +3198,12 @@ pub extern "C" fn mimi_str_join(
 /// This ABI entry point is string-list-specific. Native codegen passes the
 /// stable two-field `{len, data}` list layout, which has no `element_kind`
 /// tail field. Numeric and structured lists use their dedicated formatters.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
@@ -2685,15 +3238,25 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
 
 /// Render `List<Result<i32,i32>>` (ptrtoint of Result structs) as JSON array of
 /// `{"Ok":[n]}` / `{"Err":[n]}` tags matching interp to_json.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_result_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_result_i64_to_json(
+    list: *const MimiList,
+) -> *mut std::ffi::c_char {
     list_result_to_json_impl(list, 0)
 }
 
 /// Render `List<Result<Map<string, V>, i32>>` as JSON array.
 /// `mode`: 0=i64 map, 1=string map, 2=bool map, 3=f64 map (same as other map JSON helpers).
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_result_map_to_json(
+pub unsafe extern "C" fn mimi_list_result_map_to_json(
     list: *const MimiList,
     mode: i64,
 ) -> *mut std::ffi::c_char {
@@ -2773,7 +3336,7 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -2793,7 +3356,13 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
             continue;
         }
         // Layout {i1 disc, i64 ok, i64 err} — disc at 0, ok at 8, err at 16 on x86_64.
-        // SAFETY: base is heap Result from list element storage.
+        if !pages_mapped(base as usize, 24) {
+            // Malformed/stale result pack: fail closed instead of reading
+            // unmapped memory (P1-21).
+            parts.push(String::from("null"));
+            continue;
+        }
+        // SAFETY: pages_mapped confirmed the 24-byte result pack is resident.
         let disc = unsafe { *base };
         let ok = unsafe { *(base.add(8) as *const i64) };
         let err = unsafe { *(base.add(16) as *const i64) };
@@ -2801,7 +3370,7 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
             if mode >= 20 {
                 // Product Map: mode = 20 + arity.
                 let arity = mode - 20;
-                let json_ptr = mimi_map_to_json_product_i64(ok as MapHandle, arity, 0);
+                let json_ptr = unsafe { mimi_map_to_json_product_i64(ok as MapHandle, arity, 0) };
                 // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
@@ -2812,10 +3381,10 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
             } else if mode >= 10 {
                 let map_mode = mode - 10;
                 let json_ptr = match map_mode {
-                    1 => mimi_map_to_json_string(ok as MapHandle),
-                    2 => mimi_map_to_json_bool(ok as MapHandle),
-                    3 => mimi_map_to_json_f64_serde(ok as MapHandle),
-                    _ => mimi_map_to_json_i64(ok as MapHandle),
+                    1 => unsafe { mimi_map_to_json_string(ok as MapHandle) },
+                    2 => unsafe { mimi_map_to_json_bool(ok as MapHandle) },
+                    3 => unsafe { mimi_map_to_json_f64_serde(ok as MapHandle) },
+                    _ => unsafe { mimi_map_to_json_i64(ok as MapHandle) },
                 };
                 // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
                 let s = unsafe { cstr_to_string(json_ptr) };
@@ -2840,8 +3409,12 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
 
 /// Render `List<Option<Map>>` as JSON array of `{"Some":[{…}]}` / `"None"`.
 /// `mode`: 0=i64 map, 1=string map, 2=bool map, 3=f64 map.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_option_map_to_json(
+pub unsafe extern "C" fn mimi_list_option_map_to_json(
     list: *const MimiList,
     mode: i64,
 ) -> *mut std::ffi::c_char {
@@ -2849,7 +3422,7 @@ pub extern "C" fn mimi_list_option_map_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -2869,6 +3442,12 @@ pub extern "C" fn mimi_list_option_map_to_json(
             continue;
         }
         // SAFETY: heap Option {i1, i64 map handle}.
+        if !pages_mapped(base as usize, 16) {
+            // Malformed/stale option pack: fail closed instead of reading
+            // unmapped memory (P1-21).
+            parts.push(String::from("\"None\""));
+            continue;
+        }
         let disc = unsafe { *base };
         let handle = unsafe { *(base.add(8) as *const i64) } as MapHandle;
         if disc != 0 {
@@ -2883,10 +3462,10 @@ pub extern "C" fn mimi_list_option_map_to_json(
                 mimi_map_to_json_product_i64(handle, mode - 10, 0)
             } else {
                 match mode {
-                    1 => mimi_map_to_json_string(handle),
-                    2 => mimi_map_to_json_bool(handle),
-                    3 => mimi_map_to_json_f64_serde(handle),
-                    _ => mimi_map_to_json_i64(handle),
+                    1 => unsafe { mimi_map_to_json_string(handle) },
+                    2 => unsafe { mimi_map_to_json_bool(handle) },
+                    3 => unsafe { mimi_map_to_json_f64_serde(handle) },
+                    _ => unsafe { mimi_map_to_json_i64(handle) },
                 }
             };
             // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -2906,13 +3485,19 @@ pub extern "C" fn mimi_list_option_map_to_json(
 
 /// Render `List<Option<i32>>` (ptrtoint of Option structs) as JSON array of
 /// `{"Some":[n]}` / `"None"` tags matching interp to_json.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_option_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_option_i64_to_json(
+    list: *const MimiList,
+) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -2947,14 +3532,24 @@ pub extern "C" fn mimi_list_option_i64_to_json(list: *const MimiList) -> *mut st
 }
 
 /// Render `List<Map>` (i64 map handles in data slots) as `[{"a":1}, ...]`.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     list_map_to_string_impl(list, MapJsonMode::Int, ", ")
 }
 
 /// List of Map for to_json with string values (no space after comma).
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_map_to_json_string(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_map_to_json_string(
+    list: *const MimiList,
+) -> *mut std::ffi::c_char {
     list_map_to_string_impl(list, MapJsonMode::String, ",")
 }
 
@@ -2967,7 +3562,7 @@ fn list_map_to_string_impl(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -2983,10 +3578,12 @@ fn list_map_to_string_impl(
         // SAFETY: `lst.data` points to a valid, properly aligned value
         let handle = unsafe { *(lst.data as *const i64).offset(i) } as MapHandle;
         let json_ptr = match mode {
-            MapJsonMode::String => mimi_map_to_json_string(handle),
-            MapJsonMode::Bool => mimi_map_to_json_bool(handle),
-            MapJsonMode::Float | MapJsonMode::FloatJson => mimi_map_to_json_f64_serde(handle),
-            MapJsonMode::Int => mimi_map_to_json_i64(handle),
+            MapJsonMode::String => unsafe { mimi_map_to_json_string(handle) },
+            MapJsonMode::Bool => unsafe { mimi_map_to_json_bool(handle) },
+            MapJsonMode::Float | MapJsonMode::FloatJson => unsafe {
+                mimi_map_to_json_f64_serde(handle)
+            },
+            MapJsonMode::Int => unsafe { mimi_map_to_json_i64(handle) },
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(json_ptr) };
@@ -3014,19 +3611,19 @@ pub extern "C" fn mimi_option_map_to_json(
     // 0-3 scalar maps; 10+arity flat product; 20+arity Map of List product;
     // 30+arity Map of Set product; 40+arity Map of Map product.
     let json_ptr = if mode >= 40 {
-        mimi_map_to_json_map_product_i64(handle, mode - 40, 0)
+        unsafe { mimi_map_to_json_map_product_i64(handle, mode - 40, 0) }
     } else if mode >= 30 {
-        mimi_map_to_json_set_product_i64(handle, mode - 30, 0)
+        unsafe { mimi_map_to_json_set_product_i64(handle, mode - 30, 0) }
     } else if mode >= 20 {
-        mimi_map_to_json_list_product_i64(handle, mode - 20, 0)
+        unsafe { mimi_map_to_json_list_product_i64(handle, mode - 20, 0) }
     } else if mode >= 10 {
-        mimi_map_to_json_product_i64(handle, mode - 10, 0)
+        unsafe { mimi_map_to_json_product_i64(handle, mode - 10, 0) }
     } else {
         match mode {
-            1 => mimi_map_to_json_string(handle),
-            2 => mimi_map_to_json_bool(handle),
-            3 => mimi_map_to_json_f64_serde(handle),
-            _ => mimi_map_to_json_i64(handle),
+            1 => unsafe { mimi_map_to_json_string(handle) },
+            2 => unsafe { mimi_map_to_json_bool(handle) },
+            3 => unsafe { mimi_map_to_json_f64_serde(handle) },
+            _ => unsafe { mimi_map_to_json_i64(handle) },
         }
     };
     // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -3050,15 +3647,15 @@ pub extern "C" fn mimi_option_set_to_json(
     }
     // mode: 0-3 scalar; 10+ product; 70+ Map product.
     let json_ptr = if mode >= 70 {
-        mimi_set_to_json_map_product_i64(handle, mode - 70, 0)
+        unsafe { mimi_set_to_json_map_product_i64(handle, mode - 70, 0) }
     } else if mode >= 10 {
-        mimi_set_to_json_product_i64(handle, mode - 10, 0)
+        unsafe { mimi_set_to_json_product_i64(handle, mode - 10, 0) }
     } else {
         match mode {
-            1 => mimi_set_to_json_string(handle),
-            2 => mimi_set_to_json_bool(handle),
-            3 => mimi_set_to_json_f64(handle),
-            _ => mimi_set_to_json_i64(handle),
+            1 => unsafe { mimi_set_to_json_string(handle) },
+            2 => unsafe { mimi_set_to_json_bool(handle) },
+            3 => unsafe { mimi_set_to_json_f64(handle) },
+            _ => unsafe { mimi_set_to_json_i64(handle) },
         }
     };
     // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -3082,23 +3679,23 @@ pub extern "C" fn mimi_result_map_to_json(
         // mode: 0-3 scalar; 10+ product; 20+ List; 30+ Set; 40+ Map;
         // 50+ Option product; 60+ Result product.
         let json_ptr = if mode >= 60 {
-            mimi_map_to_json_result_product_i64(ok_handle, mode - 60, 0)
+            unsafe { mimi_map_to_json_result_product_i64(ok_handle, mode - 60, 0) }
         } else if mode >= 50 {
-            mimi_map_to_json_option_product_i64(ok_handle, mode - 50, 0)
+            unsafe { mimi_map_to_json_option_product_i64(ok_handle, mode - 50, 0) }
         } else if mode >= 40 {
-            mimi_map_to_json_map_product_i64(ok_handle, mode - 40, 0)
+            unsafe { mimi_map_to_json_map_product_i64(ok_handle, mode - 40, 0) }
         } else if mode >= 30 {
-            mimi_map_to_json_set_product_i64(ok_handle, mode - 30, 0)
+            unsafe { mimi_map_to_json_set_product_i64(ok_handle, mode - 30, 0) }
         } else if mode >= 20 {
-            mimi_map_to_json_list_product_i64(ok_handle, mode - 20, 0)
+            unsafe { mimi_map_to_json_list_product_i64(ok_handle, mode - 20, 0) }
         } else if mode >= 10 {
-            mimi_map_to_json_product_i64(ok_handle, mode - 10, 0)
+            unsafe { mimi_map_to_json_product_i64(ok_handle, mode - 10, 0) }
         } else {
             match mode {
-                1 => mimi_map_to_json_string(ok_handle),
-                2 => mimi_map_to_json_bool(ok_handle),
-                3 => mimi_map_to_json_f64_serde(ok_handle),
-                _ => mimi_map_to_json_i64(ok_handle),
+                1 => unsafe { mimi_map_to_json_string(ok_handle) },
+                2 => unsafe { mimi_map_to_json_bool(ok_handle) },
+                3 => unsafe { mimi_map_to_json_f64_serde(ok_handle) },
+                _ => unsafe { mimi_map_to_json_i64(ok_handle) },
             }
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -3125,17 +3722,17 @@ pub extern "C" fn mimi_result_set_to_json(
     if disc != 0 {
         // mode: 0-3 scalar; 10+ product; 50+ Option product; 70+ Map product.
         let json_ptr = if mode >= 70 {
-            mimi_set_to_json_map_product_i64(ok_handle, mode - 70, 0)
+            unsafe { mimi_set_to_json_map_product_i64(ok_handle, mode - 70, 0) }
         } else if mode >= 50 {
-            mimi_set_to_json_option_product_i64(ok_handle, mode - 50, 0)
+            unsafe { mimi_set_to_json_option_product_i64(ok_handle, mode - 50, 0) }
         } else if mode >= 10 {
-            mimi_set_to_json_product_i64(ok_handle, mode - 10, 0)
+            unsafe { mimi_set_to_json_product_i64(ok_handle, mode - 10, 0) }
         } else {
             match mode {
-                1 => mimi_set_to_json_string(ok_handle),
-                2 => mimi_set_to_json_bool(ok_handle),
-                3 => mimi_set_to_json_f64(ok_handle),
-                _ => mimi_set_to_json_i64(ok_handle),
+                1 => unsafe { mimi_set_to_json_string(ok_handle) },
+                2 => unsafe { mimi_set_to_json_bool(ok_handle) },
+                3 => unsafe { mimi_set_to_json_f64(ok_handle) },
+                _ => unsafe { mimi_set_to_json_i64(ok_handle) },
             }
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -3152,13 +3749,17 @@ pub extern "C" fn mimi_result_set_to_json(
 }
 
 /// Render `List<Set>` as a JSON array of JSON arrays `[[1,2],[3]]`.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3187,8 +3788,12 @@ pub extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi:
 }
 
 /// Render `List<Set<product>>` as JSON array of product-set JSON arrays.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_product_to_json(
+pub unsafe extern "C" fn mimi_list_set_product_to_json(
     list: *const MimiList,
     arity: i64,
 ) -> *mut std::ffi::c_char {
@@ -3196,7 +3801,7 @@ pub extern "C" fn mimi_list_set_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3225,8 +3830,12 @@ pub extern "C" fn mimi_list_set_product_to_json(
 }
 
 /// Render `List<Set<product>>` Display as `[Set{(1, 2)}, ...]`.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_product_to_string(
+pub unsafe extern "C" fn mimi_list_set_product_to_string(
     list: *const MimiList,
     arity: i64,
 ) -> *mut std::ffi::c_char {
@@ -3234,7 +3843,7 @@ pub extern "C" fn mimi_list_set_product_to_string(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3263,13 +3872,17 @@ pub extern "C" fn mimi_list_set_product_to_string(
 }
 
 /// Render `List<Set>` (i64 set handles) as `[Set{1, 2}, ...]`.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3284,7 +3897,7 @@ pub extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut std::ff
         }
         // SAFETY: `lst.data` points to a valid, properly aligned value
         let handle = unsafe { *(lst.data as *const i64).offset(i) } as SetHandle;
-        let disp = mimi_set_to_display(handle);
+        let disp = unsafe { mimi_set_to_display(handle) };
         // SAFETY: `disp` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(disp) };
         if !disp.is_null() {
@@ -3299,13 +3912,17 @@ pub extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut std::ff
 
 /// Render a codegen `List<i32>` (layout `{i64 len, i8* data}` where data points
 /// to pointer-sized slots) to a printable heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3332,13 +3949,17 @@ pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ff
 /// Render a codegen `List<bool>` (layout `{i64 len, i8* data}` where data points
 /// to i64 slots containing 0 or 1) to a JSON array string. Each element is
 /// formatted as `true` or `false`. Returns a heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_bool_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_bool_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3366,13 +3987,17 @@ pub extern "C" fn mimi_list_bool_to_json(list: *const MimiList) -> *mut std::ffi
 /// Render a codegen `List<i32/i64>` (layout `{i64 len, i8* data}` where data
 /// points to i64 slots) to a JSON array string. Each i64 element is formatted
 /// as a JSON number. Returns a heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3396,13 +4021,17 @@ pub extern "C" fn mimi_list_i64_to_json(list: *const MimiList) -> *mut std::ffi:
 /// Render a codegen `List<f64>` (layout `{i64 len, i8* data}` where data points
 /// to i64 slots containing bitcast f64 values) to a JSON array string.
 /// Returns a heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_f64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_f64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3427,13 +4056,17 @@ pub extern "C" fn mimi_list_f64_to_json(list: *const MimiList) -> *mut std::ffi:
 /// Render a codegen `List<string>` (layout `{i64 len, i8* data}` where data
 /// points to i64 slots containing C-string pointers) to a JSON array string.
 /// Each element is quoted and JSON-escaped. Returns a heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_str_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_list_str_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3466,8 +4099,12 @@ pub extern "C" fn mimi_list_str_to_json(list: *const MimiList) -> *mut std::ffi:
 /// The caller provides the appropriate inner-list formatter
 /// (`mimi_list_to_string` for `List<string>`, `mimi_list_i32_to_string` for
 /// `List<i32>`, etc.). Returns a heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_list_to_string(
+pub unsafe extern "C" fn mimi_list_list_to_string(
     list: *const MimiList,
     elem_to_string: extern "C" fn(*const MimiList) -> *mut std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -3475,8 +4112,12 @@ pub extern "C" fn mimi_list_list_to_string(
 }
 
 /// Compact JSON form of `List<List<T>>` (no spaces after commas).
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_list_to_json(
+pub unsafe extern "C" fn mimi_list_list_to_json(
     list: *const MimiList,
     elem_to_string: extern "C" fn(*const MimiList) -> *mut std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -3492,7 +4133,7 @@ fn list_list_to_string_impl(
         return alloc_c_string("[]");
     }
     // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3532,8 +4173,12 @@ fn list_list_to_string_impl(
 /// to a JSON array string. Each element is serialized by calling `elem_to_json(ptr)` which
 /// returns a heap-allocated C string of the JSON representation of that record.
 /// Returns a heap-allocated C string.
+///
+/// # Safety
+/// `list` must be null or a live `MimiList` pointer created by the
+/// runtime (or a legal codegen list prefix where documented).
 #[no_mangle]
-pub extern "C" fn mimi_list_record_to_json(
+pub unsafe extern "C" fn mimi_list_record_to_json(
     list: *const MimiList,
     elem_to_json: extern "C" fn(*const std::ffi::c_void) -> *mut std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -3541,7 +4186,7 @@ pub extern "C" fn mimi_list_record_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -3573,8 +4218,13 @@ pub extern "C" fn mimi_list_record_to_json(
     alloc_c_string(&parts.join(""))
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_replace(
+pub unsafe extern "C" fn mimi_str_replace(
     s: *const std::ffi::c_char,
     from: *const std::ffi::c_char,
     to: *const std::ffi::c_char,
@@ -3593,6 +4243,71 @@ pub extern "C" fn mimi_str_replace(
     alloc_c_string(&result)
 }
 
+/// Length-aware string replacement. Uses explicit byte lengths so embedded
+/// NUL bytes are preserved (batch4/02 P1-1). Writes the result byte length
+/// to `out_len` when non-null.
+///
+/// # Safety
+/// Pointers must be valid for the corresponding byte lengths; negative
+/// lengths are rejected.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_replace_ll(
+    s: *const std::ffi::c_char,
+    s_len: i64,
+    from: *const std::ffi::c_char,
+    from_len: i64,
+    to: *const std::ffi::c_char,
+    to_len: i64,
+    out_len: *mut i64,
+) -> *mut std::ffi::c_char {
+    if !out_len.is_null() {
+        // SAFETY: `out_len` was checked non-null above.
+        unsafe { *out_len = 0 };
+    }
+    if s_len < 0 || from_len < 0 || to_len < 0 {
+        return alloc_c_string("");
+    }
+    let hay = if s.is_null() || s_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: caller guarantees `s` is valid for `s_len` bytes.
+        unsafe { std::slice::from_raw_parts(s as *const u8, s_len as usize) }
+    };
+    let needle = if from.is_null() || from_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: caller guarantees `from` is valid for `from_len` bytes.
+        unsafe { std::slice::from_raw_parts(from as *const u8, from_len as usize) }
+    };
+    let repl = if to.is_null() || to_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: caller guarantees `to` is valid for `to_len` bytes.
+        unsafe { std::slice::from_raw_parts(to as *const u8, to_len as usize) }
+    };
+    let result = if needle.is_empty() {
+        hay.to_vec()
+    } else {
+        let mut out = Vec::with_capacity(hay.len());
+        let mut i = 0usize;
+        while i < hay.len() {
+            if hay[i..].starts_with(needle) {
+                out.extend_from_slice(repl);
+                i += needle.len();
+            } else {
+                out.push(hay[i]);
+                i += 1;
+            }
+        }
+        out
+    };
+    if !out_len.is_null() {
+        // SAFETY: `out_len` was checked non-null above.
+        unsafe { *out_len = result.len() as i64 };
+    }
+    alloc_c_string_from_bytes(&result)
+}
+
 // ---------------------------------------------------------------------------
 // Try/exit (? operator)
 // ---------------------------------------------------------------------------
@@ -3609,8 +4324,11 @@ pub extern "C" fn mimi_try_exit(payload: i64) -> ! {
 }
 
 /// S18: String variant of try_exit for string error messages.
+///
+/// # Safety
+/// When `len` is positive, `str` must point to at least `len` readable bytes.
 #[no_mangle]
-pub extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i64) -> ! {
+pub unsafe extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i64) -> ! {
     let msg = if str.is_null() || len <= 0 {
         String::new()
     } else {
@@ -3626,8 +4344,13 @@ pub extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i64) -> !
 
 /// Count non-overlapping occurrences of `sub` in `s` (O(n) single scan).
 /// Returns i32 count. Zero heap allocations during scan.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings (unless
+/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
+/// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
-pub extern "C" fn mimi_str_count_substring(
+pub unsafe extern "C" fn mimi_str_count_substring(
     s: *const std::ffi::c_char,
     sub: *const std::ffi::c_char,
 ) -> i32 {
@@ -3690,6 +4413,23 @@ pub extern "C" fn mimi_sleep(ms: i64) {
         let ms_u = (ms as u64).min(MAX_SLEEP_MS);
         std::thread::sleep(std::time::Duration::from_millis(ms_u));
     }
+}
+
+#[no_mangle]
+pub extern "C" fn mimi_random() -> f64 {
+    // Same simple LCG as the bytecode VM (interp/bytecode/builtins/math.rs):
+    // time-derived seed -> 53-bit value -> [0, 1). Keeping the algorithm in
+    // one shared runtime export prevents the two backends from drifting
+    // (batch4-03 P2-8).
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let val = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407)
+        >> 11;
+    (val as f64) / ((1u64 << 53) as f64)
 }
 
 // ---------------------------------------------------------------------------
@@ -4267,8 +5007,14 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_from_json(json_str: *const std::ffi::c_char) -> *mut std::ffi::c_void {
+pub unsafe extern "C" fn mimi_from_json(
+    json_str: *const std::ffi::c_char,
+) -> *mut std::ffi::c_void {
     if json_str.is_null() {
         return std::ptr::null_mut();
     }
@@ -4281,8 +5027,12 @@ pub extern "C" fn mimi_from_json(json_str: *const std::ffi::c_char) -> *mut std:
     }
 }
 
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_is_valid_json(json_str: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_is_valid_json(json_str: *const std::ffi::c_char) -> i64 {
     if json_str.is_null() {
         return 0;
     }
@@ -4446,7 +5196,7 @@ fn json_accessor_abort(prefix: &str, detail: &str, suffix: &str) -> ! {
     msg.push_str(detail);
     msg.push_str(suffix);
     msg.push('\0');
-    mimi_runtime_abort(msg.as_ptr() as *const std::ffi::c_char)
+    unsafe { mimi_runtime_abort(msg.as_ptr() as *const std::ffi::c_char) }
 }
 
 /// True if the document parses as SOME JSON value (used by accessors to tell
@@ -4470,8 +5220,12 @@ fn json_key_label(key: *const std::ffi::c_char) -> String {
 /// audit-wave1 (fail-loud, audit §10): aborts instead of returning NULL.
 /// VM-matching messages (src/interp/bytecode/builtins/misc.rs):
 /// malformed JSON, missing key. Codegen keeps its NULL guards as defense.
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn json_get_string(
+pub unsafe extern "C" fn json_get_string(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -4492,8 +5246,12 @@ pub extern "C" fn json_get_string(
 /// audit-wave1: a MISSING key still returns 0 (that is the function's
 /// purpose, VM parity); malformed JSON now aborts instead of masquerading
 /// as "key absent".
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn json_has_key(
+pub unsafe extern "C" fn json_has_key(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
 ) -> i64 {
@@ -4509,8 +5267,12 @@ pub extern "C" fn json_has_key(
 
 /// audit-wave1 (fail-loud, audit §10): aborts with VM-matching messages on
 /// malformed JSON / missing key / wrong type instead of returning 0.
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn json_get_int(
+pub unsafe extern "C" fn json_get_int(
     json_str: *const std::ffi::c_char,
     key: *const std::ffi::c_char,
 ) -> i64 {
@@ -4600,8 +5362,12 @@ fn json_array_length_try(json_str: *const std::ffi::c_char) -> i64 {
 
 /// audit-wave1 (fail-loud, audit §10): aborts with VM-matching messages on
 /// malformed JSON / non-array input instead of silently returning 0.
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
     if json_str.is_null() {
         json_accessor_abort("json_array_length parse error: ", "invalid JSON", "");
     }
@@ -4688,8 +5454,12 @@ fn json_get_element_try(
 
 /// audit-wave1 (fail-loud, audit §10): aborts with VM-matching messages on
 /// malformed JSON / out-of-bounds index instead of returning NULL.
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn json_get_element(
+pub unsafe extern "C" fn json_get_element(
     json_str: *const std::ffi::c_char,
     index: i64,
 ) -> *mut std::ffi::c_char {
@@ -4731,25 +5501,25 @@ pub extern "C" fn json_get_element(
 /// Serialize a MapHandle of integer ValueHandles to a JSON object string.
 /// Keys are JSON-escaped; values are printed as decimal integers.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
     map_to_json_values(handle, MapJsonMode::Int)
 }
 
 /// Serialize a MapHandle of 0/1 bool ValueHandles as JSON true/false.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_char {
     map_to_json_values(handle, MapJsonMode::Bool)
 }
 
 /// Serialize a MapHandle of f64-bit ValueHandles for println Display (compact).
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ffi::c_char {
     map_to_json_values(handle, MapJsonMode::Float)
 }
 
 /// Serialize Map f64 for `to_json` (serde-compatible, whole floats as `2.0`).
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_f64_serde(handle: MapHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_map_to_json_f64_serde(handle: MapHandle) -> *mut std::ffi::c_char {
     map_to_json_values(handle, MapJsonMode::FloatJson)
 }
 
@@ -4761,7 +5531,7 @@ enum MapJsonMode {
     String,
 }
 
-fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
+unsafe fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("{}");
     }
@@ -4819,8 +5589,12 @@ fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_
 
 /// Build a MapHandle from a JSON object with string keys and f64 values.
 /// Values are stored as f64 bit patterns in i64 ValueHandles.
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_f64(json: *const std::ffi::c_char) -> MapHandle {
+pub unsafe extern "C" fn mimi_map_from_json_f64(json: *const std::ffi::c_char) -> MapHandle {
     if json.is_null() {
         return mimi_map_new();
     }
@@ -4911,8 +5685,12 @@ pub extern "C" fn mimi_map_from_json_f64(json: *const std::ffi::c_char) -> MapHa
 
 /// Build a MapHandle from a JSON object with string keys and string values.
 /// Values are heap-cloned C strings (ValueHandles via mimi_str_clone).
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char) -> MapHandle {
+pub unsafe extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char) -> MapHandle {
     if json.is_null() {
         return mimi_map_new();
     }
@@ -5012,7 +5790,8 @@ pub extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char) -> Ma
             val.push(c as char);
             pos += 1;
         }
-        let v_handle = mimi_str_clone(val.as_ptr() as *const std::ffi::c_char, val.len() as i64);
+        let v_handle =
+            unsafe { mimi_str_clone(val.as_ptr() as *const std::ffi::c_char, val.len() as i64) };
         // SAFETY: handle is a valid map from mimi_map_new.
         unsafe {
             (*map_from_handle(handle)).inner.insert(key, v_handle);
@@ -5024,7 +5803,7 @@ pub extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char) -> Ma
 
 /// Serialize a MapHandle whose values are C-string ValueHandles to JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("{}");
     }
@@ -5056,7 +5835,7 @@ pub extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c
 /// `arity` is the number of i64 fields (e.g. 2 for `(i32,i32)` after widen).
 /// `display_style`: 0 = JSON arrays `[1,2]`, 1 = Display `(1, 2)`.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -5107,7 +5886,7 @@ pub extern "C" fn mimi_map_to_json_product_i64(
 /// List layout: `{i64 len, ptr data}` where data is `i64` product handles.
 /// `display_style`: 0 = JSON `[[1,2]]`, 1 = Display `[(1, 2)]`.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -5139,7 +5918,7 @@ pub extern "C" fn mimi_map_to_json_list_product_i64(
         // SAFETY: map_set packs List as heap {i64 len, ptr data}.
         // §10-#31: probe the 16-byte list header before dereferencing it.
         let list_base = vh as *const u8;
-        if !pages_mapped(vh, 16) {
+        if !pages_mapped(vh as usize, 16) {
             if !PRODUCT_HANDLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "[mimi runtime] list-product value handle {:#x} points at unmapped memory — serialized as []",
@@ -5208,8 +5987,13 @@ pub extern "C" fn mimi_map_to_json_list_product_i64(
 
 /// Build Map from JSON object whose values are arrays of product arrays:
 /// `"a":[[1,2],[3,4]]`. Each list is heap-packed as List of product handles.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -5357,7 +6141,7 @@ pub extern "C" fn mimi_map_from_json_list_product_i64(
 /// Serialize Map values that are SetHandles of product-tuples.
 /// `display_style`: 0 = JSON set arrays, 1 = Display `Set{(…)}`.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -5396,8 +6180,13 @@ pub extern "C" fn mimi_map_to_json_set_product_i64(
 
 /// Build Map from JSON object whose values are product-set arrays:
 /// `"a":[[1,2],[3,4]]` → Map string → Set of product.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -5481,7 +6270,7 @@ pub extern "C" fn mimi_map_from_json_set_product_i64(
 /// Serialize Map values that are MapHandles of product-tuples.
 /// `display_style`: 0 = JSON, 1 = Display with `(a, b)` products.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -5520,8 +6309,13 @@ pub extern "C" fn mimi_map_to_json_map_product_i64(
 
 /// Build Map from JSON object whose values are nested Map product objects:
 /// `"outer":{"a":[1,2]}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -5605,8 +6399,13 @@ pub extern "C" fn mimi_map_from_json_map_product_i64(
 /// Build a MapHandle from a JSON object whose values are product-tuple arrays
 /// of integers (e.g. `"a":[1,2]`). Each value is heap-packed as i64[arity]
 /// matching `map_set` of product tuples / `mimi_map_to_json_product_i64`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -5710,8 +6509,13 @@ pub extern "C" fn mimi_map_from_json_product_i64(
 
 /// Map of Result of Map of product from JSON.
 /// Pack: `{i64 disc, i64 map_handle_or_err}` disc 1=Ok map handle, 0=Err string ptr.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -5903,7 +6707,7 @@ pub extern "C" fn mimi_map_from_json_result_map_product_i64(
 
 /// Map of Result of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -5937,6 +6741,10 @@ pub extern "C" fn mimi_map_to_json_result_map_product_i64(
         }
         let base = vh as *const i64;
         // SAFETY: `base` points to a valid, properly aligned value
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -5975,8 +6783,13 @@ pub extern "C" fn mimi_map_to_json_result_map_product_i64(
 /// Map of Option of Result of product from JSON.
 /// Pack: `{i64 disc, i64 res_handle}` disc 0=None; res_handle is Result product pack
 /// `{i64 res_disc, i64[n] fields or err}` (same as map result product).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_result_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -6035,6 +6848,8 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
         if pack.is_null() {
             continue;
         }
+        let mut res_h: i64 = 0;
+        let mut transferred_owned_kind: Option<MapOwnedValueKind> = None;
         let is_none = if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
             i += 4;
             true
@@ -6116,13 +6931,23 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
                 // SAFETY: `c_one` was returned by `alloc_c_string` and is non-null (checked by the enclosing `if`); freed to prevent memory leak
                 mimi_free(c_one as *mut _);
             }
-            // Extract the single value handle from tmp_map
-            let mut res_h: i64 = 0;
+            // Extract the single value handle from tmp_map, transferring its
+            // ownership record to the outer map before destroying the temporary.
             if tmp_map != 0 {
-                // SAFETY: `map_from_handle` is non-null and points to a valid map instance
-                let m = unsafe { &*map_from_handle(tmp_map) };
-                if let Some(v) = m.inner.values().next() {
-                    res_h = *v as i64;
+                // SAFETY: `map_from_handle` is non-null and points to a valid map instance.
+                let m = unsafe { &mut *map_from_handle(tmp_map) };
+                if let Some(&v) = m.inner.values().next() {
+                    res_h = v as i64;
+                    transferred_owned_kind = m.owned.remove(&v);
+                }
+                // Drop the entries from the temporary without freeing the
+                // transferred value; mimi_map_destroy below is then a no-op
+                // for that value.
+                m.inner.clear();
+            }
+            if tmp_map != 0 {
+                unsafe {
+                    mimi_map_destroy(tmp_map);
                 }
             }
             // SAFETY: `pack` is non-null with 16 bytes; writing the Some discriminant and result handle at offsets 0 and 8 is within bounds
@@ -6142,6 +6967,14 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
             // destroy() can reclaim its base (inner object handles are
             // intentional bounded leaks, see mimi_map_destroy comment).
             (*map_ptr).owned.insert(vh, MapOwnedValueKind::Pack);
+            // If the temporary JSON map owned the inner result product,
+            // transfer that ownership record to the outer map so the value
+            // stays alive and the temporary map is destroyed without leaks.
+            if let Some(kind) = transferred_owned_kind {
+                if res_h != 0 {
+                    (*map_ptr).owned.insert(res_h as ValueHandle, kind);
+                }
+            }
         }
         MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -6150,7 +6983,7 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
 
 /// Map of Option of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_result_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_result_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -6185,6 +7018,10 @@ pub extern "C" fn mimi_map_to_json_option_result_product_i64(
         }
         let base = vh as *const i64;
         // SAFETY: `base` points to a valid, properly aligned value
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("\"None\""));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -6205,6 +7042,9 @@ pub extern "C" fn mimi_map_to_json_option_result_product_i64(
                 let json_ptr = mimi_map_to_json_result_product_i64(tmp, arity, display_style);
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
+                unsafe {
+                    mimi_map_destroy(tmp);
+                }
                 if !json_ptr.is_null() {
                     mimi_free(json_ptr as *mut _);
                 }
@@ -6233,8 +7073,13 @@ pub extern "C" fn mimi_map_to_json_option_result_product_i64(
 
 /// List of Option of product from JSON.
 /// Element pack: `{i64 disc, i64[n] fields}` disc 1=Some, 0=None.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_option_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -6422,8 +7267,13 @@ pub extern "C" fn mimi_list_from_json_option_product_i64(
 }
 
 /// List of Option of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_option_product_to_json(
+pub unsafe extern "C" fn mimi_list_option_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -6432,7 +7282,7 @@ pub extern "C" fn mimi_list_option_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
         return alloc_c_string("[]");
     }
@@ -6458,7 +7308,11 @@ pub extern "C" fn mimi_list_option_product_to_json(
             continue;
         }
         let base = h as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 8 * (n + 1)) {
+            parts.push(String::from("\"None\""));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -6484,8 +7338,13 @@ pub extern "C" fn mimi_list_option_product_to_json(
 
 /// List of Option of Set of product from JSON.
 /// Element pack: `{i64 opt_disc, i64 set_handle}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_option_set_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_option_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -6636,8 +7495,13 @@ pub extern "C" fn mimi_list_from_json_option_set_product_i64(
 }
 
 /// List of Option of Set of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_option_set_product_to_json(
+pub unsafe extern "C" fn mimi_list_option_set_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -6646,7 +7510,7 @@ pub extern "C" fn mimi_list_option_set_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
         return alloc_c_string("[]");
     }
@@ -6671,7 +7535,11 @@ pub extern "C" fn mimi_list_option_set_product_to_json(
             continue;
         }
         let base = h as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("\"None\""));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -6700,8 +7568,13 @@ pub extern "C" fn mimi_list_option_set_product_to_json(
 }
 
 /// Map of List of Option of Set of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_option_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_option_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -6802,7 +7675,7 @@ pub extern "C" fn mimi_map_from_json_list_option_set_product_i64(
 
 /// Map of List of Option of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_option_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_option_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -6831,7 +7704,8 @@ pub extern "C" fn mimi_map_to_json_list_option_set_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_option_set_product_to_json(list_ptr, arity, display_style);
+        let json_ptr =
+            unsafe { mimi_list_option_set_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -6844,8 +7718,13 @@ pub extern "C" fn mimi_map_to_json_list_option_set_product_i64(
 }
 
 /// Map of List of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -6946,7 +7825,7 @@ pub extern "C" fn mimi_map_from_json_list_option_product_i64(
 
 /// Map of List of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -6975,7 +7854,7 @@ pub extern "C" fn mimi_map_to_json_list_option_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_option_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = unsafe { mimi_list_option_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -6988,8 +7867,13 @@ pub extern "C" fn mimi_map_to_json_list_option_product_i64(
 }
 
 /// Set of Option of Result of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_option_result_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_option_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -7082,7 +7966,7 @@ pub extern "C" fn mimi_set_from_json_option_result_product_i64(
 
 /// Set of Option of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_option_result_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_option_result_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -7200,8 +8084,13 @@ pub extern "C" fn mimi_set_to_json_option_result_product_i64(
 }
 
 /// Set of Result of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_result_option_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_result_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -7218,7 +8107,7 @@ pub extern "C" fn mimi_set_from_json_result_option_product_i64(
         return 0;
     }
     // SAFETY: `list_ptr` is non-null, properly aligned, and points to a valid value of the expected type
-    let lst = unsafe { &*list_ptr };
+    let lst = unsafe { &*list_ptr.cast::<MimiListAbiPrefix>() };
     if !lst.data.is_null() && lst.len > 0 {
         for i in 0..lst.len as isize {
             // SAFETY: `lst.data` points to a valid, properly aligned value
@@ -7232,7 +8121,7 @@ pub extern "C" fn mimi_set_from_json_result_option_product_i64(
 
 /// Set of Result of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_result_option_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_result_option_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -7346,8 +8235,13 @@ pub extern "C" fn mimi_set_to_json_result_option_product_i64(
 }
 
 /// Set of List of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_list_map_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_list_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -7418,7 +8312,7 @@ pub extern "C" fn mimi_set_from_json_list_map_product_i64(
 
 /// Set of List of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_list_map_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_list_map_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -7444,7 +8338,7 @@ pub extern "C" fn mimi_set_to_json_list_map_product_i64(
         .iter()
         .map(|vh| {
             let list_ptr = *vh as *const MimiList;
-            let jp = mimi_list_map_product_to_json(list_ptr, arity, display_style);
+            let jp = unsafe { mimi_list_map_product_to_json(list_ptr, arity, display_style) };
             // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(jp) };
             if !jp.is_null() {
@@ -7482,8 +8376,13 @@ pub extern "C" fn mimi_set_to_json_list_map_product_i64(
 /// Set of Result of Map of product from JSON.
 
 /// Set of Result of List of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_result_list_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_result_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -7627,7 +8526,7 @@ pub extern "C" fn mimi_set_from_json_result_list_product_i64(
 
 /// Set of Result of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_result_list_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_result_list_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -7695,6 +8594,9 @@ pub extern "C" fn mimi_set_to_json_result_list_product_i64(
                 let jp = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
                 // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
                 let map_s = unsafe { cstr_to_string(jp) };
+                unsafe {
+                    mimi_map_destroy(tmp);
+                }
                 if !jp.is_null() {
                     mimi_free(jp as *mut _);
                 }
@@ -7745,8 +8647,13 @@ pub extern "C" fn mimi_set_to_json_result_list_product_i64(
 }
 
 /// Map of List of Map of List of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -7848,8 +8755,13 @@ pub extern "C" fn mimi_map_from_json_list_map_list_product_i64(
 }
 
 /// List of Map of List of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_map_list_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -7942,8 +8854,13 @@ pub extern "C" fn mimi_list_from_json_map_list_product_i64(
 }
 
 /// List of Map of List of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_map_list_product_to_json(
+pub unsafe extern "C" fn mimi_list_map_list_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -7952,7 +8869,7 @@ pub extern "C" fn mimi_list_map_list_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
         return alloc_c_string("[]");
     }
@@ -7982,7 +8899,7 @@ pub extern "C" fn mimi_list_map_list_product_to_json(
 
 /// Map of List of Map of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_map_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -8011,7 +8928,8 @@ pub extern "C" fn mimi_map_to_json_list_map_list_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_map_list_product_to_json(list_ptr, arity, display_style);
+        let json_ptr =
+            unsafe { mimi_list_map_list_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -8024,8 +8942,13 @@ pub extern "C" fn mimi_map_to_json_list_map_list_product_i64(
 }
 
 /// Map of Option of Map of List of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -8151,7 +9074,7 @@ pub extern "C" fn mimi_map_from_json_option_map_list_product_i64(
 
 /// Map of Option of Map of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_map_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -8184,7 +9107,11 @@ pub extern "C" fn mimi_map_to_json_option_map_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -8212,8 +9139,13 @@ pub extern "C" fn mimi_map_to_json_option_map_list_product_i64(
     alloc_c_string(&parts.join(""))
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_result_map_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_result_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -8347,7 +9279,7 @@ pub extern "C" fn mimi_set_from_json_result_map_product_i64(
 
 /// Set of Result of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_result_map_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_result_map_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -8448,8 +9380,13 @@ pub extern "C" fn mimi_set_to_json_result_map_product_i64(
 /// Map of Map of List of product from JSON.
 
 /// Map of Map of Result of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_map_result_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_map_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -8544,7 +9481,7 @@ pub extern "C" fn mimi_map_from_json_map_result_product_i64(
 
 /// Map of Map of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_map_result_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_map_result_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -8583,8 +9520,13 @@ pub extern "C" fn mimi_map_to_json_map_result_product_i64(
 /// Set of Map of List of product from JSON.
 
 /// Set of Map of Set of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_map_set_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_map_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -8655,7 +9597,7 @@ pub extern "C" fn mimi_set_from_json_map_set_product_i64(
 
 /// Set of Map of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_map_set_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_map_set_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -8717,8 +9659,13 @@ pub extern "C" fn mimi_set_to_json_map_set_product_i64(
 }
 
 /// Map of Set of Map of List of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -8813,7 +9760,7 @@ pub extern "C" fn mimi_map_from_json_set_map_list_product_i64(
 
 /// Map of Set of Map of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_map_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -8849,8 +9796,13 @@ pub extern "C" fn mimi_map_to_json_set_map_list_product_i64(
     alloc_c_string(&parts.join(""))
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_map_list_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -8921,7 +9873,7 @@ pub extern "C" fn mimi_set_from_json_map_list_product_i64(
 
 /// Set of Map of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_map_list_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_map_list_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -8982,8 +9934,13 @@ pub extern "C" fn mimi_set_to_json_map_list_product_i64(
     }
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_map_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -9078,7 +10035,7 @@ pub extern "C" fn mimi_map_from_json_map_list_product_i64(
 
 /// Map of Map of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_map_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_map_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -9115,8 +10072,13 @@ pub extern "C" fn mimi_map_to_json_map_list_product_i64(
 }
 
 /// Map of Map of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_map_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_map_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -9211,7 +10173,7 @@ pub extern "C" fn mimi_map_from_json_map_option_product_i64(
 
 /// Map of Map of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_map_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_map_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -9248,8 +10210,13 @@ pub extern "C" fn mimi_map_to_json_map_option_product_i64(
 }
 
 /// Set of Option of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_option_map_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_option_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -9342,7 +10309,7 @@ pub extern "C" fn mimi_set_from_json_option_map_product_i64(
 
 /// Set of Option of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_option_map_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_option_map_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -9446,8 +10413,13 @@ pub extern "C" fn mimi_set_to_json_option_map_product_i64(
 }
 
 /// Map of Map of Set of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_map_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_map_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -9542,7 +10514,7 @@ pub extern "C" fn mimi_map_from_json_map_set_product_i64(
 
 /// Map of Map of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_map_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_map_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -9579,8 +10551,13 @@ pub extern "C" fn mimi_map_to_json_map_set_product_i64(
 }
 
 /// Set of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_map_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -9651,7 +10628,7 @@ pub extern "C" fn mimi_set_from_json_map_product_i64(
 
 /// Set of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_map_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_map_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -9713,8 +10690,13 @@ pub extern "C" fn mimi_set_to_json_map_product_i64(
 }
 
 /// List of Set of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_set_map_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_set_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -9807,8 +10789,13 @@ pub extern "C" fn mimi_list_from_json_set_map_product_i64(
 }
 
 /// List of Set of Map of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_map_product_to_json(
+pub unsafe extern "C" fn mimi_list_set_map_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -9817,7 +10804,7 @@ pub extern "C" fn mimi_list_set_map_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
         return alloc_c_string("[]");
     }
@@ -9846,8 +10833,13 @@ pub extern "C" fn mimi_list_set_map_product_to_json(
 }
 
 /// List of Set of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_set_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -9940,8 +10932,13 @@ pub extern "C" fn mimi_list_from_json_set_product_i64(
 }
 
 /// Set of List of product from JSON array of list-of-product arrays.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_list_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -10023,7 +11020,7 @@ pub extern "C" fn mimi_set_from_json_list_product_i64(
 
 /// Set of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_list_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_list_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -10060,6 +11057,9 @@ pub extern "C" fn mimi_set_to_json_list_product_i64(
                 let jp = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
                 // SAFETY: `jp` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(jp) };
+                unsafe {
+                    mimi_map_destroy(tmp);
+                }
                 if !jp.is_null() {
                     mimi_free(jp as *mut _);
                 }
@@ -10105,8 +11105,13 @@ pub extern "C" fn mimi_set_to_json_list_product_i64(
 }
 
 /// List of Map of product from JSON array of map objects.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_map_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -10199,8 +11204,13 @@ pub extern "C" fn mimi_list_from_json_map_product_i64(
 }
 
 /// List of Map of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_map_product_to_json(
+pub unsafe extern "C" fn mimi_list_map_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -10209,7 +11219,7 @@ pub extern "C" fn mimi_list_map_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
         return alloc_c_string("[]");
     }
@@ -10238,8 +11248,13 @@ pub extern "C" fn mimi_list_map_product_to_json(
 }
 
 /// Map of Set of List of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_list_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -10334,7 +11349,7 @@ pub extern "C" fn mimi_map_from_json_set_list_map_product_i64(
 
 /// Map of Set of List of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_list_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -10371,8 +11386,13 @@ pub extern "C" fn mimi_map_to_json_set_list_map_product_i64(
 }
 
 /// Map of List of Set of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_set_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -10473,7 +11493,7 @@ pub extern "C" fn mimi_map_from_json_list_set_map_product_i64(
 
 /// Map of List of Set of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_set_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -10502,7 +11522,7 @@ pub extern "C" fn mimi_map_to_json_list_set_map_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_set_map_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = unsafe { mimi_list_set_map_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -10515,8 +11535,13 @@ pub extern "C" fn mimi_map_to_json_list_set_map_product_i64(
 }
 
 /// Map of Set of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -10611,7 +11636,7 @@ pub extern "C" fn mimi_map_from_json_set_map_product_i64(
 
 /// Map of Set of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -10648,8 +11673,13 @@ pub extern "C" fn mimi_map_to_json_set_map_product_i64(
 }
 
 /// Map of List of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -10750,7 +11780,7 @@ pub extern "C" fn mimi_map_from_json_list_map_product_i64(
 
 /// Map of List of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -10779,7 +11809,7 @@ pub extern "C" fn mimi_map_to_json_list_map_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_map_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = unsafe { mimi_list_map_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -10792,8 +11822,13 @@ pub extern "C" fn mimi_map_to_json_list_map_product_i64(
 }
 
 /// Map of Set of List of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -10888,7 +11923,7 @@ pub extern "C" fn mimi_map_from_json_set_list_product_i64(
 
 /// Map of Set of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -10934,8 +11969,13 @@ pub extern "C" fn mimi_map_to_json_set_list_product_i64(
 }
 
 /// Map of List of Set of Result of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_set_result_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_set_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -11036,7 +12076,7 @@ pub extern "C" fn mimi_map_from_json_list_set_result_product_i64(
 
 /// Map of List of Set of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_set_result_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_set_result_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -11065,7 +12105,8 @@ pub extern "C" fn mimi_map_to_json_list_set_result_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_set_result_product_to_json(list_ptr, arity, display_style);
+        let json_ptr =
+            unsafe { mimi_list_set_result_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -11078,8 +12119,13 @@ pub extern "C" fn mimi_map_to_json_list_set_result_product_i64(
 }
 
 /// Map of List of Set of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_set_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_set_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -11180,7 +12226,7 @@ pub extern "C" fn mimi_map_from_json_list_set_option_product_i64(
 
 /// Map of List of Set of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_set_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_set_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -11209,7 +12255,8 @@ pub extern "C" fn mimi_map_to_json_list_set_option_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_set_option_product_to_json(list_ptr, arity, display_style);
+        let json_ptr =
+            unsafe { mimi_list_set_option_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -11222,8 +12269,13 @@ pub extern "C" fn mimi_map_to_json_list_set_option_product_i64(
 }
 
 /// Map of List of Set of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -11324,7 +12376,7 @@ pub extern "C" fn mimi_map_from_json_list_set_product_i64(
 
 /// Map of List of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -11354,9 +12406,9 @@ pub extern "C" fn mimi_map_to_json_list_set_product_i64(
         }
         let list_ptr = vh as *const MimiList;
         let json_ptr = if display_style != 0 {
-            mimi_list_set_product_to_string(list_ptr, arity)
+            unsafe { mimi_list_set_product_to_string(list_ptr, arity) }
         } else {
-            mimi_list_set_product_to_json(list_ptr, arity)
+            unsafe { mimi_list_set_product_to_json(list_ptr, arity) }
         };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
@@ -11370,8 +12422,13 @@ pub extern "C" fn mimi_map_to_json_list_set_product_i64(
 }
 
 /// List of Set of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_set_option_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_set_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -11464,8 +12521,13 @@ pub extern "C" fn mimi_list_from_json_set_option_product_i64(
 }
 
 /// List of Set of Option of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_option_product_to_json(
+pub unsafe extern "C" fn mimi_list_set_option_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -11474,8 +12536,12 @@ pub extern "C" fn mimi_list_set_option_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
+        return alloc_c_string("[]");
+    }
+    // batch4/05 P2-4: cap list length like sibling serializers.
+    if lst.len < 0 || lst.len > 1_000_000 {
         return alloc_c_string("[]");
     }
     let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize * 2 + 2);
@@ -11503,8 +12569,13 @@ pub extern "C" fn mimi_list_set_option_product_to_json(
 }
 
 /// List of Set of Result of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_set_result_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_set_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -11597,8 +12668,13 @@ pub extern "C" fn mimi_list_from_json_set_result_product_i64(
 }
 
 /// List of Set of Result of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_set_result_product_to_json(
+pub unsafe extern "C" fn mimi_list_set_result_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -11607,8 +12683,12 @@ pub extern "C" fn mimi_list_set_result_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
+        return alloc_c_string("[]");
+    }
+    // batch4/05 P2-4: cap list length like sibling serializers.
+    if lst.len < 0 || lst.len > 1_000_000 {
         return alloc_c_string("[]");
     }
     let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize * 2 + 2);
@@ -11637,8 +12717,13 @@ pub extern "C" fn mimi_list_set_result_product_to_json(
 
 /// List of Result of Option of product from JSON.
 /// Element pack: `{i64 res_disc, i64 opt_pack_or_err}` where opt_pack is option product heap.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_result_option_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_result_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -11710,10 +12795,20 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
         }
         let mut h: i64 = 0;
         if tmp != 0 {
-            // SAFETY: `map_from_handle` is non-null and points to a valid map instance
-            let m = unsafe { &*map_from_handle(tmp) };
-            if let Some(v) = m.inner.values().next() {
-                h = *v as i64;
+            // SAFETY: `map_from_handle` is non-null and points to a valid map instance.
+            let m = unsafe { &mut *map_from_handle(tmp) };
+            if let Some(&v) = m.inner.values().next() {
+                h = v as i64;
+                // The list owns this record pointer and frees it via
+                // mimi_list_free. Remove it from the temporary map's owned
+                // registry so destroying the map does not double-free it.
+                m.owned.remove(&v);
+            }
+            m.inner.clear();
+        }
+        if tmp != 0 {
+            unsafe {
+                mimi_map_destroy(tmp);
             }
         }
         handles.push(h);
@@ -11745,8 +12840,13 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
 }
 
 /// List of Result of Option of product Display/JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_result_option_product_to_json(
+pub unsafe extern "C" fn mimi_list_result_option_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -11755,8 +12855,12 @@ pub extern "C" fn mimi_list_result_option_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len <= 0 {
+        return alloc_c_string("[]");
+    }
+    // batch4/05 P2-4: cap list length like sibling serializers.
+    if lst.len < 0 || lst.len > 1_000_000 {
         return alloc_c_string("[]");
     }
     let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize * 2 + 2);
@@ -11791,6 +12895,9 @@ pub extern "C" fn mimi_list_result_option_product_to_json(
             let json_ptr = mimi_map_to_json_result_option_product_i64(tmp, arity, display_style);
             // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(json_ptr) };
+            unsafe {
+                mimi_map_destroy(tmp);
+            }
             if !json_ptr.is_null() {
                 mimi_free(json_ptr as *mut _);
             }
@@ -11811,8 +12918,13 @@ pub extern "C" fn mimi_list_result_option_product_to_json(
 }
 
 /// Map of List of Result of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_result_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_result_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -11913,7 +13025,7 @@ pub extern "C" fn mimi_map_from_json_list_result_option_product_i64(
 
 /// Map of List of Result of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_result_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_result_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -11942,7 +13054,8 @@ pub extern "C" fn mimi_map_to_json_list_result_option_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_result_option_product_to_json(list_ptr, arity, display_style);
+        let json_ptr =
+            unsafe { mimi_list_result_option_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -11956,8 +13069,13 @@ pub extern "C" fn mimi_map_to_json_list_result_option_product_i64(
 
 /// Map of Result of Option of List of product from JSON.
 /// Pack: `{i64 disc, i64 opt_or_err}` where Ok opt pack is `{i64 opt_disc, i64 list_handle}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_option_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_option_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -12169,7 +13287,7 @@ pub extern "C" fn mimi_map_from_json_result_option_list_product_i64(
 
 /// Map of Result of Option of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_option_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -12202,7 +13320,11 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -12249,6 +13371,9 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
                         let json_ptr = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
                         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                         let s = unsafe { cstr_to_string(json_ptr) };
+                        unsafe {
+                            mimi_map_destroy(tmp);
+                        }
                         if !json_ptr.is_null() {
                             mimi_free(json_ptr as *mut _);
                         }
@@ -12277,8 +13402,13 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
 
 /// Map of Option of Set of List of product from JSON.
 /// Pack: `{i64 disc, i64 set_handle}` disc 1=Some set of list product, 0=None.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_set_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_set_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -12441,7 +13571,7 @@ pub extern "C" fn mimi_map_from_json_option_set_list_product_i64(
 
 /// Map of Option of Set of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_set_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_set_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -12474,7 +13604,11 @@ pub extern "C" fn mimi_map_to_json_option_set_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -12504,8 +13638,13 @@ pub extern "C" fn mimi_map_to_json_option_set_list_product_i64(
 
 /// Map of Option of Result of List of product from JSON.
 /// Pack: `{i64 disc, i64 res_handle}` where res is Result list product pack.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_result_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_result_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -12643,7 +13782,7 @@ pub extern "C" fn mimi_map_from_json_option_result_list_product_i64(
 
 /// Map of Option of Result of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_result_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -12676,7 +13815,11 @@ pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -12697,6 +13840,9 @@ pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
                 let json_ptr = mimi_map_to_json_result_list_product_i64(tmp, arity, display_style);
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
+                unsafe {
+                    mimi_map_destroy(tmp);
+                }
                 if !json_ptr.is_null() {
                     mimi_free(json_ptr as *mut _);
                 }
@@ -12723,8 +13869,13 @@ pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
 
 /// Map of Result of List of Set of product from JSON.
 /// Pack: `{i64 disc, i64 list_or_err}` Ok list is List of Set product handles.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_list_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_list_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -12897,7 +14048,7 @@ pub extern "C" fn mimi_map_from_json_result_list_set_product_i64(
 
 /// Map of Result of List of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_list_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_list_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -12930,7 +14081,11 @@ pub extern "C" fn mimi_map_to_json_result_list_set_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -12950,9 +14105,9 @@ pub extern "C" fn mimi_map_to_json_result_list_set_product_i64(
             // SAFETY: the offset is within bounds of `base`'s allocation; the handle value is valid for the target type
             let list_ptr = unsafe { *base.add(1) } as *const MimiList;
             let list_json = if display_style != 0 {
-                mimi_list_set_product_to_string(list_ptr, arity)
+                unsafe { mimi_list_set_product_to_string(list_ptr, arity) }
             } else {
-                mimi_list_set_product_to_json(list_ptr, arity)
+                unsafe { mimi_list_set_product_to_json(list_ptr, arity) }
             };
             // SAFETY: `list_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(list_json) };
@@ -12972,8 +14127,13 @@ pub extern "C" fn mimi_map_to_json_result_list_set_product_i64(
 
 /// Map of Result of List of Option of product from JSON.
 /// Pack: `{i64 disc, i64 list_or_err}` disc 1=Ok list option product, 0=Err string.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_list_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_list_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -13146,7 +14306,7 @@ pub extern "C" fn mimi_map_from_json_result_list_option_product_i64(
 
 /// Map of Result of List of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_list_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_list_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -13179,7 +14339,11 @@ pub extern "C" fn mimi_map_to_json_result_list_option_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -13198,7 +14362,8 @@ pub extern "C" fn mimi_map_to_json_result_list_option_product_i64(
         } else {
             // SAFETY: the offset is within bounds of `base`'s allocation; the handle value is valid for the target type
             let list_ptr = unsafe { *base.add(1) } as *const MimiList;
-            let list_json = mimi_list_option_product_to_json(list_ptr, arity, display_style);
+            let list_json =
+                unsafe { mimi_list_option_product_to_json(list_ptr, arity, display_style) };
             // SAFETY: `list_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(list_json) };
             if !list_json.is_null() {
@@ -13216,8 +14381,13 @@ pub extern "C" fn mimi_map_to_json_result_list_option_product_i64(
 }
 
 /// Map of Set of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -13312,7 +14482,7 @@ pub extern "C" fn mimi_map_from_json_set_option_product_i64(
 
 /// Map of Set of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -13358,8 +14528,13 @@ pub extern "C" fn mimi_map_to_json_set_option_product_i64(
 }
 
 /// Map of Set of Result of Option of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_result_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_result_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -13454,7 +14629,7 @@ pub extern "C" fn mimi_map_from_json_set_result_option_product_i64(
 
 /// Map of Set of Result of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_result_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_result_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -13500,8 +14675,13 @@ pub extern "C" fn mimi_map_to_json_set_result_option_product_i64(
 }
 
 /// Map of Set of Result of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_set_result_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_set_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -13596,7 +14776,7 @@ pub extern "C" fn mimi_map_from_json_set_result_product_i64(
 
 /// Map of Set of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_set_result_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_set_result_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -13643,8 +14823,13 @@ pub extern "C" fn mimi_map_to_json_set_result_product_i64(
 
 /// Map of List of Result of product from JSON.
 /// Each map value is a list handle whose elements are Result product packs.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_list_result_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_list_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -13745,7 +14930,7 @@ pub extern "C" fn mimi_map_from_json_list_result_product_i64(
 
 /// Map of List of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_list_result_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_list_result_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -13774,7 +14959,7 @@ pub extern "C" fn mimi_map_to_json_list_result_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr = mimi_list_result_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = unsafe { mimi_list_result_product_to_json(list_ptr, arity, display_style) };
         // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -13788,8 +14973,13 @@ pub extern "C" fn mimi_map_to_json_list_result_product_i64(
 
 /// Map of Option of List of product from JSON.
 /// Pack: `{i64 disc, i64 list_handle}` disc 1=Some list, 0=None.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -14030,7 +15220,7 @@ pub extern "C" fn mimi_map_from_json_option_list_product_i64(
 
 /// Map of Option of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -14064,7 +15254,11 @@ pub extern "C" fn mimi_map_to_json_option_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -14085,6 +15279,9 @@ pub extern "C" fn mimi_map_to_json_option_list_product_i64(
                 let json_ptr = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
+                unsafe {
+                    mimi_map_destroy(tmp);
+                }
                 if !json_ptr.is_null() {
                     mimi_free(json_ptr as *mut _);
                 }
@@ -14112,8 +15309,13 @@ pub extern "C" fn mimi_map_to_json_option_list_product_i64(
 
 /// Map of Result of List of product from JSON.
 /// Pack: `{i64 disc, i64 list_handle}` disc 1=Ok list of product packs, 0=Err string.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -14365,7 +15567,7 @@ pub extern "C" fn mimi_map_from_json_result_list_product_i64(
 
 /// Map of Result of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -14399,7 +15601,11 @@ pub extern "C" fn mimi_map_to_json_result_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -14429,6 +15635,9 @@ pub extern "C" fn mimi_map_to_json_result_list_product_i64(
                 let json_ptr = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
                 // SAFETY: `json_ptr` is a valid null-terminated C string returned by a Mimi allocation function
                 let s = unsafe { cstr_to_string(json_ptr) };
+                unsafe {
+                    mimi_map_destroy(tmp);
+                }
                 if !json_ptr.is_null() {
                     mimi_free(json_ptr as *mut _);
                 }
@@ -14457,8 +15666,13 @@ pub extern "C" fn mimi_map_to_json_result_list_product_i64(
 /// Map of Result of Option of product from JSON.
 /// Pack: `{i64 disc, i64[n+1]}` where disc 1=Ok Option-product pack, 0=Err string.
 /// Ok pack reuses option product layout: `{i64 opt_disc, i64[n] fields}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -14798,7 +16012,7 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
 
 /// Map of Result of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -14832,7 +16046,11 @@ pub extern "C" fn mimi_map_to_json_result_option_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -14886,8 +16104,13 @@ pub extern "C" fn mimi_map_to_json_result_option_product_i64(
 }
 
 /// Map of Result of Set of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_set_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -15090,7 +16313,7 @@ pub extern "C" fn mimi_map_from_json_result_set_map_product_i64(
 
 /// Map of Result of Set of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_set_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -15123,7 +16346,11 @@ pub extern "C" fn mimi_map_to_json_result_set_map_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -15160,8 +16387,13 @@ pub extern "C" fn mimi_map_to_json_result_set_map_product_i64(
 }
 
 /// Map of Option of Set of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_set_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -15288,7 +16520,7 @@ pub extern "C" fn mimi_map_from_json_option_set_map_product_i64(
 
 /// Map of Option of Set of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_set_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_set_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -15321,7 +16553,11 @@ pub extern "C" fn mimi_map_to_json_option_set_map_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -15350,8 +16586,13 @@ pub extern "C" fn mimi_map_to_json_option_set_map_product_i64(
 }
 
 /// Map of Result of List of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_list_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -15554,7 +16795,7 @@ pub extern "C" fn mimi_map_from_json_result_list_map_product_i64(
 
 /// Map of Result of List of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_list_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -15587,7 +16828,11 @@ pub extern "C" fn mimi_map_to_json_result_list_map_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -15606,7 +16851,7 @@ pub extern "C" fn mimi_map_to_json_result_list_map_product_i64(
         } else {
             // SAFETY: the offset is within bounds of `base`'s allocation; the handle value is valid for the target type
             let ok_h = unsafe { *base.add(1) };
-            let ok_json = mimi_list_map_product_to_json(ok_h as _, arity, display_style);
+            let ok_json = unsafe { mimi_list_map_product_to_json(ok_h as _, arity, display_style) };
             // SAFETY: `ok_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(ok_json) };
             if !ok_json.is_null() {
@@ -15624,8 +16869,13 @@ pub extern "C" fn mimi_map_to_json_result_list_map_product_i64(
 }
 
 /// Map of Option of List of Map of product from JSON.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_list_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -15752,7 +17002,7 @@ pub extern "C" fn mimi_map_from_json_option_list_map_product_i64(
 
 /// Map of Option of List of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_list_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_list_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -15785,7 +17035,11 @@ pub extern "C" fn mimi_map_to_json_option_list_map_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -15796,7 +17050,8 @@ pub extern "C" fn mimi_map_to_json_option_list_map_product_i64(
         } else {
             // SAFETY: the offset is within bounds of `base`'s allocation; the handle value is valid for the target type
             let some_h = unsafe { *base.add(1) };
-            let some_json = mimi_list_map_product_to_json(some_h as _, arity, display_style);
+            let some_json =
+                unsafe { mimi_list_map_product_to_json(some_h as _, arity, display_style) };
             // SAFETY: `some_json` is a valid null-terminated C string returned by a Mimi allocation function
             let s = unsafe { cstr_to_string(some_json) };
             if !some_json.is_null() {
@@ -15814,8 +17069,13 @@ pub extern "C" fn mimi_map_to_json_option_list_map_product_i64(
 }
 /// Map of Result of Set of List of product from JSON.
 /// Pack: `{i64 disc, i64 set_or_err}` Ok set is Set of List product handles.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_set_list_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_set_list_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -15988,7 +17248,7 @@ pub extern "C" fn mimi_map_from_json_result_set_list_product_i64(
 
 /// Map of Result of Set of List of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_set_list_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_set_list_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -16021,7 +17281,11 @@ pub extern "C" fn mimi_map_to_json_result_set_list_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -16059,8 +17323,13 @@ pub extern "C" fn mimi_map_to_json_result_set_list_product_i64(
 
 /// Map of Result of Set of product from JSON.
 /// Pack: `{i64 disc, i64 set_or_err}` disc 1=Ok set handle, 0=Err string ptr.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -16234,7 +17503,7 @@ pub extern "C" fn mimi_map_from_json_result_set_product_i64(
 
 /// Map of Result of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -16267,7 +17536,11 @@ pub extern "C" fn mimi_map_to_json_result_set_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -16305,8 +17578,13 @@ pub extern "C" fn mimi_map_to_json_result_set_product_i64(
 
 /// Map of Option of Set of product from JSON.
 /// Pack: `{i64 disc, i64 set_handle}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_set_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -16444,7 +17722,7 @@ pub extern "C" fn mimi_map_from_json_option_set_product_i64(
 
 /// Map of Option of Set of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_set_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_set_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -16477,7 +17755,11 @@ pub extern "C" fn mimi_map_to_json_option_set_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -16507,8 +17789,13 @@ pub extern "C" fn mimi_map_to_json_option_set_product_i64(
 
 /// Map of Option of Map of product from JSON.
 /// Pack: `{i64 disc, i64 map_handle}` (disc 0=None, 1=Some).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_map_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -16644,7 +17931,7 @@ pub extern "C" fn mimi_map_from_json_option_map_product_i64(
 
 /// Map of Option of Map of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_map_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_map_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -16677,7 +17964,11 @@ pub extern "C" fn mimi_map_to_json_option_map_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -16708,8 +17999,13 @@ pub extern "C" fn mimi_map_to_json_option_map_product_i64(
 /// Map of Option of product-tuple from JSON.
 /// Values: `null`/`"None"` → None; array `[1,2]` or `{"Some":[1,2]}` → Some product.
 /// Stores heap `{i8 disc, pad, i64[n] fields}` as ValueHandle (disc 0=None, 1=Some).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_option_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -16870,7 +18166,7 @@ pub extern "C" fn mimi_map_from_json_option_product_i64(
 /// Map of Option of product Display/JSON.
 /// `display_style` 0 = JSON, 1 = Display.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_option_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_option_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -16904,7 +18200,11 @@ pub extern "C" fn mimi_map_to_json_option_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             if display_style != 0 {
@@ -16930,8 +18230,13 @@ pub extern "C" fn mimi_map_to_json_option_product_i64(
 
 /// Map of Result of product from JSON.
 /// Values: bare product array → Ok; `{"Ok":[…]}` / `{"Err":…}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_result_product_i64(
+pub unsafe extern "C" fn mimi_map_from_json_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> MapHandle {
@@ -17127,7 +18432,7 @@ pub extern "C" fn mimi_map_from_json_result_product_i64(
 
 /// Map of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_map_to_json_result_product_i64(
+pub unsafe extern "C" fn mimi_map_to_json_result_product_i64(
     handle: MapHandle,
     arity: i64,
     display_style: i64,
@@ -17161,7 +18466,11 @@ pub extern "C" fn mimi_map_to_json_result_product_i64(
             continue;
         }
         let base = vh as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 16) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc = unsafe { *base };
         if disc == 0 {
             // SAFETY: `err_ptr` is a valid null-terminated C string from a prior allocation
@@ -17195,8 +18504,12 @@ pub extern "C" fn mimi_map_to_json_result_product_i64(
 
 /// Build a MapHandle from a JSON object with string keys and integer values.
 /// Values are stored as raw i64 ValueHandles (same as map_set of integers).
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_map_from_json_i64(json: *const std::ffi::c_char) -> MapHandle {
+pub unsafe extern "C" fn mimi_map_from_json_i64(json: *const std::ffi::c_char) -> MapHandle {
     if json.is_null() {
         return mimi_map_new();
     }
@@ -17293,8 +18606,12 @@ pub extern "C" fn mimi_map_from_json_i64(json: *const std::ffi::c_char) -> MapHa
     handle
 }
 
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
     if json.is_null() {
         return 0;
     }
@@ -17318,8 +18635,12 @@ pub extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
     }
 }
 
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_json_as_f64(json: *const std::ffi::c_char) -> f64 {
+pub unsafe extern "C" fn mimi_json_as_f64(json: *const std::ffi::c_char) -> f64 {
     if json.is_null() {
         return 0.0;
     }
@@ -17332,8 +18653,12 @@ pub extern "C" fn mimi_json_as_f64(json: *const std::ffi::c_char) -> f64 {
     }
 }
 
+///
+/// # Safety
+/// JSON string pointers must be valid NUL-terminated C strings
+/// (or null where documented).
 #[no_mangle]
-pub extern "C" fn mimi_json_as_bool(json: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_json_as_bool(json: *const std::ffi::c_char) -> i64 {
     if json.is_null() {
         return 0;
     }
@@ -17375,6 +18700,8 @@ struct MimiSet {
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
 /// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
 /// R-C11: also aborts on stale (destroyed / never-registered) handles.
+/// batch4-05 P1-2: like map handles, set handles must not be destroyed by
+/// another thread while an operation is using them; no lease mechanism yet.
 // SAFETY: aborts on invalid/stale handle; caller must ensure exclusive access while live.
 unsafe fn set_from_handle(handle: SetHandle) -> *mut MimiSet {
     if handle == 0 || !set_is_live(handle) {
@@ -17416,13 +18743,13 @@ pub extern "C" fn mimi_result_i64_to_json(disc: i64, ok: i64, err: i64) -> *mut 
 
 /// Display form `Set{1, 2, 3}` (sorted ints) for println dual.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_display(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_display(handle: SetHandle) -> *mut std::ffi::c_char {
     set_to_display_impl(handle, false)
 }
 
 /// Display form `Set{true, false}` for bool-valued sets.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_display_bool(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_display_bool(handle: SetHandle) -> *mut std::ffi::c_char {
     set_to_display_impl(handle, true)
 }
 
@@ -17454,7 +18781,7 @@ fn set_to_display_impl(handle: SetHandle, as_bool: bool) -> *mut std::ffi::c_cha
 
 /// Serialize a SetHandle of integer values to a JSON array string.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("[]");
     }
@@ -17480,7 +18807,7 @@ pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_ch
 /// Serialize Set of heap-packed product-tuple i64[n] handles.
 /// `display_style`: 0 = JSON `[[1,2]]`, 1 = Display `Set{(1, 2), (3, 4)}`.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -17546,8 +18873,13 @@ pub extern "C" fn mimi_set_to_json_product_i64(
 
 /// List of Result of product from JSON array of tagged objects / bare products.
 /// Elements stored as heap `{i64 disc, i64[n] fields or err string ptr}` ValueHandles in list data.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_result_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -17747,8 +19079,13 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
 
 /// List of Result of Set of product from JSON.
 /// Elements: heap `{i64 disc, i64 set_or_err}`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_result_set_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_result_set_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -17925,8 +19262,13 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
 }
 
 /// Display/JSON for List of Result of Set of product.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_result_set_product_to_json(
+pub unsafe extern "C" fn mimi_list_result_set_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -17935,7 +19277,7 @@ pub extern "C" fn mimi_list_result_set_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -17964,7 +19306,11 @@ pub extern "C" fn mimi_list_result_set_product_to_json(
         }
         // Layout: disc (word0, low bit) + Ok SetHandle (word1) + Err (word2).
         let base = h as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 24) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc_word = unsafe { *base };
         let is_ok = (disc_word & 1) != 0;
         if !is_ok {
@@ -18004,8 +19350,13 @@ pub extern "C" fn mimi_list_result_set_product_to_json(
 
 /// List of Result of Map of product from JSON.
 /// Elements: heap `{i64 disc, i64 map_or_err}` (disc 1=Ok map handle).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_from_json_result_map_product_i64(
+pub unsafe extern "C" fn mimi_list_from_json_result_map_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> *mut MimiList {
@@ -18182,8 +19533,13 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
 }
 
 /// Display/JSON for List of Result of Map of product.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_result_map_product_to_json(
+pub unsafe extern "C" fn mimi_list_result_map_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -18192,7 +19548,7 @@ pub extern "C" fn mimi_list_result_map_product_to_json(
         return alloc_c_string("[]");
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -18221,7 +19577,11 @@ pub extern "C" fn mimi_list_result_map_product_to_json(
         }
         // Layout: disc (word0, low bit) + Ok MapHandle (word1) + Err (word2).
         let base = h as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 24) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc_word = unsafe { *base };
         let is_ok = (disc_word & 1) != 0;
         if !is_ok {
@@ -18261,8 +19621,13 @@ pub extern "C" fn mimi_list_result_map_product_to_json(
 
 /// Display/JSON for List of Result of product (heap packs from list_from_json_result_product).
 /// Pack: `{i64 disc, i64[n] fields, i64 err_ptr}` where disc!=0 is Ok.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_result_product_to_json(
+pub unsafe extern "C" fn mimi_list_result_product_to_json(
     list: *const MimiList,
     arity: i64,
     display_style: i64,
@@ -18275,7 +19640,7 @@ pub extern "C" fn mimi_list_result_product_to_json(
         };
     }
     // SAFETY: `list` is non-null and points to a valid `MimiList`
-    let lst = unsafe { &*list };
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -18308,7 +19673,11 @@ pub extern "C" fn mimi_list_result_product_to_json(
         //   word1..n = Ok product fields (zeroed on Err)
         //   word(n+1) = Err payload (i64 handle / int)
         let base = h as *const i64;
-        // SAFETY: `base` points to a valid, properly aligned value
+        // SAFETY: `base` points to a valid, properly aligned value.
+        if !pages_mapped(base as usize, 8 * (n + 2)) {
+            parts.push(String::from("null"));
+            continue;
+        }
         let disc_word = unsafe { *base };
         let is_ok = (disc_word & 1) != 0;
         if !is_ok {
@@ -18345,8 +19714,13 @@ pub extern "C" fn mimi_list_result_product_to_json(
 }
 
 /// Set of Result of product from JSON array of tagged objects.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_result_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_result_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -18504,7 +19878,7 @@ pub extern "C" fn mimi_set_from_json_result_product_i64(
 
 /// Set of Result of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_result_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_result_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -18598,8 +19972,13 @@ pub extern "C" fn mimi_set_to_json_result_product_i64(
 }
 
 /// Set of Option of product from JSON array: `[[1,2],null,"None"]`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_option_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_option_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -18725,7 +20104,7 @@ pub extern "C" fn mimi_set_from_json_option_product_i64(
 
 /// Set of Option of product Display/JSON.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_option_product_i64(
+pub unsafe extern "C" fn mimi_set_to_json_option_product_i64(
     handle: SetHandle,
     arity: i64,
     display_style: i64,
@@ -18803,8 +20182,13 @@ pub extern "C" fn mimi_set_to_json_option_product_i64(
 }
 
 /// Build Set from JSON array of product arrays: `[[1,2],[3,4]]`.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_product_i64(
+pub unsafe extern "C" fn mimi_set_from_json_product_i64(
     json: *const std::ffi::c_char,
     arity: i64,
 ) -> SetHandle {
@@ -18881,7 +20265,7 @@ pub extern "C" fn mimi_set_from_json_product_i64(
 
 /// Serialize a SetHandle of 0/1 bool values to a JSON array of true/false.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("[]");
     }
@@ -18910,7 +20294,7 @@ pub extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_c
 
 /// Serialize a SetHandle of f64-bit values to a JSON number array (serde-style).
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("[]");
     }
@@ -18943,7 +20327,7 @@ pub extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ffi::c_ch
 
 /// Serialize a SetHandle of C-string ValueHandles to a JSON string array.
 #[no_mangle]
-pub extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("[]");
     }
@@ -18972,8 +20356,13 @@ pub extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c
 }
 
 /// Build a SetHandle from a JSON array of f64 values (stored as bit patterns).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -> SetHandle {
+pub unsafe extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -> SetHandle {
     let handle = mimi_set_new();
     if handle == 0 || json.is_null() {
         return handle;
@@ -19004,7 +20393,7 @@ pub extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -> SetHa
 
 /// Display form `Set{1.5, 2}` for f64-bit sets (sorted by bit pattern / float value).
 #[no_mangle]
-pub extern "C" fn mimi_set_to_display_f64(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_display_f64(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("Set{}");
     }
@@ -19036,8 +20425,13 @@ pub extern "C" fn mimi_set_to_display_f64(handle: SetHandle) -> *mut std::ffi::c
 
 /// Build a SetHandle from a JSON array of strings.
 /// Elements are stored as heap-cloned C-string ValueHandles.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> SetHandle {
+pub unsafe extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> SetHandle {
     let handle = mimi_set_new();
     if handle == 0 || json.is_null() {
         return handle;
@@ -19060,7 +20454,8 @@ pub extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> Se
         let es = unsafe { cstr_to_string(elem) };
         // Strip surrounding quotes if present (json_get_element may return quoted).
         let body = es.trim().trim_matches('"');
-        let v = mimi_str_clone(body.as_ptr() as *const std::ffi::c_char, body.len() as i64);
+        let v =
+            unsafe { mimi_str_clone(body.as_ptr() as *const std::ffi::c_char, body.len() as i64) };
         mimi_free(elem as *mut std::ffi::c_void);
         mimi_set_insert(handle, v as SetValueHandle);
     }
@@ -19070,7 +20465,7 @@ pub extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> Se
 
 /// Display form `Set{a, b}` for string-valued sets (sorted by string content).
 #[no_mangle]
-pub extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("Set{}");
     }
@@ -19098,8 +20493,13 @@ pub extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi
 }
 
 /// Build a SetHandle from a JSON array of integers.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHandle {
+pub unsafe extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHandle {
     let handle = mimi_set_new();
     if handle == 0 || json.is_null() {
         return handle;
@@ -19118,7 +20518,7 @@ pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHa
         if elem.is_null() {
             continue;
         }
-        let v = mimi_json_as_i64(elem);
+        let v = unsafe { mimi_json_as_i64(elem) };
         // SAFETY: `elem` is non-null (null-checked above) and was allocated by `json_get_element_try` which uses `libc::malloc`
         // Free the element string allocated by json_get_element_try.
         mimi_free(elem as *mut std::ffi::c_void);
@@ -19129,7 +20529,7 @@ pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHa
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_set_destroy(handle: SetHandle) {
+pub unsafe extern "C" fn mimi_set_destroy(handle: SetHandle) {
     // R-C11: double free is a no-op; only free if still live.
     if !set_take_live(handle) {
         return;
@@ -19141,7 +20541,7 @@ pub extern "C" fn mimi_set_destroy(handle: SetHandle) {
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> SetHandle {
+pub unsafe extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> SetHandle {
     if handle == 0 {
         return handle;
     }
@@ -19153,7 +20553,7 @@ pub extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> S
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) -> i64 {
+pub unsafe extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
@@ -19162,7 +20562,7 @@ pub extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) ->
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> SetHandle {
+pub unsafe extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> SetHandle {
     if handle == 0 {
         return handle;
     }
@@ -19174,7 +20574,7 @@ pub extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> S
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
+pub unsafe extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
@@ -19182,8 +20582,16 @@ pub extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
     unsafe { (*set_from_handle(handle)).inner.len() as i64 }
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut SetValueHandle {
+pub unsafe extern "C" fn mimi_set_to_list(
+    handle: SetHandle,
+    out_len: *mut i64,
+) -> *mut SetValueHandle {
     // P2-14 fix: handle == 0 (invalid) returns distinct sentinel from empty set.
     // Invalid handle: returns null, *out_len = -1.
     // Empty set: returns null, *out_len = 0.
@@ -19220,9 +20628,13 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
 
 /// C9 fix: Free a SetValueHandle array returned by `mimi_set_to_list`.
 /// Must be called with the pointer and length as returned by `mimi_set_to_list`.
-/// Safe to call with null pointer (no-op).
+/// Null pointer is a no-op.
+///
+/// # Safety
+/// `ptr` must be null or the exact pointer/length pair returned by
+/// `mimi_set_to_list`, and must not be freed more than once.
 #[no_mangle]
-pub extern "C" fn mimi_set_list_free(ptr: *mut SetValueHandle, len: i64) {
+pub unsafe extern "C" fn mimi_set_list_free(ptr: *mut SetValueHandle, len: i64) {
     if ptr.is_null() || len <= 0 {
         return;
     }
@@ -19247,8 +20659,12 @@ mod regex;
 
 /// Sorts an f64 list in place (ascending). Uses Rust's `sort_unstable_by`
 /// for O(n log n) performance instead of the original O(n²) bubble sort.
+///
+/// # Safety
+/// When `count > 1`, `data` must point to at least `count * 8` writable,
+/// well-aligned bytes.
 #[no_mangle]
-pub extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
+pub unsafe extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
     if data.is_null() || count <= 1 {
         return;
     }
@@ -19261,8 +20677,12 @@ pub extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
 /// `data` points to an array of `count` `*mut c_char` pointers.
 /// Each pointer is preserved across the sort (the underlying C strings are
 /// not freed or duplicated — only the pointer slots are reordered).
+///
+/// # Safety
+/// When `count > 1`, `data` must point to at least `count` valid `*mut c_char`
+/// slots, and every non-null slot must point to a readable NUL-terminated string.
 #[no_mangle]
-pub extern "C" fn mimi_sort_str_inplace(data: *mut *mut std::ffi::c_char, count: i64) {
+pub unsafe extern "C" fn mimi_sort_str_inplace(data: *mut *mut std::ffi::c_char, count: i64) {
     if data.is_null() || count <= 1 {
         return;
     }
@@ -19292,8 +20712,14 @@ mod net;
 // JSON FFI serialization
 // ---------------------------------------------------------------------------
 
+/// Serialize an array of i64/f64/string handles to JSON.
+///
+/// # Safety
+/// `data` must be null or a readable, `align_of::<i64>()`-aligned pointer to
+/// at least `len` `ValueHandle`-sized elements. `elem_type` selects how each
+/// element is decoded and must match the actual element kind.
 #[no_mangle]
-pub extern "C" fn mimi_json_serialize(
+pub unsafe extern "C" fn mimi_json_serialize(
     data: *mut std::ffi::c_void,
     len: i64,
     elem_type: i64,
@@ -19358,16 +20784,28 @@ pub extern "C" fn mimi_json_serialize(
     alloc_c_string(&result)
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_serialize(
+pub unsafe extern "C" fn mimi_list_serialize(
     data: *mut std::ffi::c_void,
     len: i64,
 ) -> *mut std::ffi::c_char {
-    mimi_json_serialize(data, len, 0)
+    // SAFETY: `data`/`len` are forwarded as-is from the caller; this ABI
+    // entry point itself is `unsafe` because it dereferences raw slice data.
+    unsafe { mimi_json_serialize(data, len, 0) }
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_json_deserialize(
+pub unsafe extern "C" fn mimi_json_deserialize(
     json: *const std::ffi::c_char,
     out_len: *mut i64,
     elem_type: i64,
@@ -19505,6 +20943,7 @@ pub extern "C" fn mimi_json_deserialize(
                 // M10: limit per-string length to prevent oversized allocation.
                 const MAX_JSON_STR_LEN: usize = 10 * 1024 * 1024; // 10MB
                 let mut str_len: usize = 0;
+                let mut oversized = false;
                 // RT-C1: trailing `\` must not advance past EOF (`pos += 2` OOB).
                 while pos < bytes.len() && bytes[pos] != b'"' {
                     if bytes[pos] == b'\\' {
@@ -19518,16 +20957,34 @@ pub extern "C" fn mimi_json_deserialize(
                         str_len += 1;
                     }
                     if str_len > MAX_JSON_STR_LEN {
-                        // Oversized string: skip past closing quote
+                        // Oversized string: skip past closing quote and treat
+                        // the whole parse as failed instead of silently storing
+                        // a truncated value (batch4-05 P2-1).
+                        oversized = true;
                         while pos < bytes.len() && bytes[pos] != b'"' {
                             pos += 1;
                         }
                         break;
                     }
                 }
+                if oversized {
+                    for j in 0..idx {
+                        let p = data[j as usize] as *mut std::ffi::c_char;
+                        if !p.is_null() {
+                            // SAFETY: slot holds a C string allocated by
+                            // alloc_c_string_from_bytes earlier in this loop.
+                            mimi_free(p as *mut std::ffi::c_void);
+                        }
+                    }
+                    if !out_len.is_null() {
+                        // SAFETY: `out_len` was checked non-null above.
+                        unsafe { *out_len = 0 };
+                    }
+                    return std::ptr::null_mut();
+                }
                 // M19 fix: unescape JSON escape sequences (\n, \", \\, \uXXXX, etc.)
                 let end = usize::min(pos, bytes.len());
-                let raw_bytes = bytes[start..usize::min(end, start + MAX_JSON_STR_LEN)].to_vec();
+                let raw_bytes = bytes[start..end].to_vec();
                 // audit-wave1: json_unescape now fails (serde parity) on bad
                 // \uXXXX / lone surrogates. Treat as a JSON parse failure:
                 // free the already-allocated element strings, out_len=0, null.
@@ -19628,8 +21085,17 @@ pub extern "C" fn mimi_json_deserialize(
 /// RT-H3 (audit-wave1): the producer hands out a boxed slice (exact-size
 /// allocation), so reconstruction reads `len` elements and makes no capacity
 /// assumption.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i64, elem_type: i64) {
+pub unsafe extern "C" fn mimi_json_deserialize_free(
+    buf: *mut std::ffi::c_void,
+    len: i64,
+    elem_type: i64,
+) {
     if buf.is_null() || len <= 0 {
         return;
     }
@@ -19656,16 +21122,26 @@ pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i6
     }
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_list_deserialize(
+pub unsafe extern "C" fn mimi_list_deserialize(
     json: *const std::ffi::c_char,
     out_len: *mut i64,
 ) -> *mut std::ffi::c_void {
     mimi_json_deserialize(json, out_len, 0)
 }
 
+/// Serialize a tuple-like flat array to JSON.
+///
+/// # Safety
+/// `values` must be null or a valid pointer to at least `count` i64 values.
+/// If `elem_types` is non-null it must point to at least `count` i64 tags.
 #[no_mangle]
-pub extern "C" fn mimi_tuple_serialize(
+pub unsafe extern "C" fn mimi_tuple_serialize(
     values: *mut i64,
     count: i64,
     elem_types: *mut i64,
@@ -19728,8 +21204,13 @@ pub extern "C" fn mimi_tuple_serialize(
     alloc_c_string(&result)
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_tuple_deserialize(
+pub unsafe extern "C" fn mimi_tuple_deserialize(
     json: *const std::ffi::c_char,
     count: i64,
     elem_types: *mut i64,
@@ -19965,8 +21446,13 @@ pub extern "C" fn mimi_runtime_set_error_handler(handler: Option<ErrorHandler>) 
     ERROR_HANDLER.store(ptr, Ordering::Release);
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
+pub unsafe extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     // P3-19 fix: write to stderr fd using raw syscall (async-signal-safe),
     // instead of eprintln!() which acquires locks that may deadlock in signal context.
     extern "C" {
@@ -20070,8 +21556,13 @@ fn trap_write_code(code: &'static str) {
 
 /// SD-7: Integer overflow trap. Called when checked arithmetic detects
 /// overflow in add/sub/mul. Prints diagnostic and aborts.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
+pub unsafe extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
     // M1 (audit-codegen 2026-08-03): integer overflow is E0802 per
     // docs/error-codes.md (E0801 is reserved for division by zero); the
     // bytecode VM's IntegerOverflow also maps to E0802.
@@ -20127,8 +21618,13 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
 /// Fault — the value is a live state, and neither backend can recover/reset
 /// it. Mirrors the bytecode VM's flow-transition miss text exactly
 /// ("no transition {flow}::{verb} from state {state}", generic E0800).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_trap_no_flow_transition(
+pub unsafe extern "C" fn mimi_trap_no_flow_transition(
     flow: *const std::ffi::c_char,
     verb: *const std::ffi::c_char,
     from_state: *const std::ffi::c_char,
@@ -20166,8 +21662,13 @@ fn trap_write_cstr_bounded(ptr: *const std::ffi::c_char) {
 
 /// SD-9 (0.31.51b): Float finiteness trap. Called when a float operation
 /// produces NaN or Infinity. Prints diagnostic and aborts.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
+pub unsafe extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
     const PREFIX: &[u8] = trap::FLOAT_NOT_FINITE_PREFIX.as_bytes();
     // 0.34.34 (docs/diagnostics.md §2): hints ride the single dense line as
     // the `| hint:` field — no separate "Hint:" line.
@@ -20199,8 +21700,13 @@ pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
 /// no definition, so any program with such a pattern failed to link.
 /// Pattern-match failures are a language-level trap (E0801 family), so on
 /// failure we print the message and abort — never silently fall through.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_runtime_assert(cond: bool, msg: *const std::ffi::c_char) {
+pub unsafe extern "C" fn mimi_runtime_assert(cond: bool, msg: *const std::ffi::c_char) {
     if cond {
         return;
     }
@@ -20237,8 +21743,13 @@ pub extern "C" fn mimi_runtime_assert(cond: bool, msg: *const std::ffi::c_char) 
 /// (`builtins/mod.rs`: "cannot construct a Fault/SystemTrace value"), so no
 /// generated code depends on the old -1 return; the interp path constructs the
 /// Fault record itself and never calls this symbol.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) -> i64 {
+pub unsafe extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) -> i64 {
     let state = if state_name.is_null() {
         "unknown".to_string()
     } else {
@@ -20259,8 +21770,13 @@ pub extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) -> i64 
 /// Compares two C strings; if they differ, prints an error and aborts.
 /// If `actual_state` is null, the check is skipped (codegen cannot extract
 /// the state name at runtime — the interp path does the full check).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI
+/// (live runtime objects, NUL-terminated strings, or sized arrays
+/// with matching length arguments).
 #[no_mangle]
-pub extern "C" fn mimi_assert_state(
+pub unsafe extern "C" fn mimi_assert_state(
     actual_state: *const std::ffi::c_char,
     expected_state: *const std::ffi::c_char,
 ) -> i64 {
@@ -20347,21 +21863,25 @@ mod handle_registry_tests {
             data2: 0,
         };
         let ptr = &mut forged as *mut MimiQuotedAst;
-        assert_eq!(mimi_quote_tag(ptr), -1);
-        assert_eq!(mimi_quote_data0(ptr), 0);
-        assert_eq!(mimi_quote_argc(ptr), 0);
-        assert!(mimi_quote_list_child(ptr, 0).is_null());
+        unsafe {
+            assert_eq!(mimi_quote_tag(ptr), -1);
+            assert_eq!(mimi_quote_data0(ptr), 0);
+            assert_eq!(mimi_quote_argc(ptr), 0);
+            assert!(mimi_quote_list_child(ptr, 0).is_null());
+        }
     }
 
     #[test]
     fn quote_snapshot_accessors_reject_dropped_handle() {
         let node = mimi_quote_new_leaf(QuotedAstTag::QastInt as i32, 42);
-        assert_eq!(mimi_quote_tag(node), QuotedAstTag::QastInt as i32);
-        mimi_quote_drop(node);
-        assert_eq!(mimi_quote_tag(node), -1);
-        assert_eq!(mimi_quote_data0(node), 0);
-        assert_eq!(mimi_quote_argc(node), 0);
-        assert!(mimi_quote_list_child(node, 0).is_null());
+        unsafe {
+            assert_eq!(mimi_quote_tag(node), QuotedAstTag::QastInt as i32);
+            mimi_quote_drop(node);
+            assert_eq!(mimi_quote_tag(node), -1);
+            assert_eq!(mimi_quote_data0(node), 0);
+            assert_eq!(mimi_quote_argc(node), 0);
+            assert!(mimi_quote_list_child(node, 0).is_null());
+        }
     }
 
     #[test]
@@ -20374,39 +21894,43 @@ mod handle_registry_tests {
     fn map_double_destroy_is_noop() {
         let h = mimi_map_new();
         assert_ne!(h, 0);
-        assert_eq!(mimi_map_size(h), 0);
-        mimi_map_destroy(h);
+        assert_eq!(unsafe { mimi_map_size(h) }, 0);
+        unsafe { mimi_map_destroy(h) };
         // Second destroy must not free again (would be double-free).
-        mimi_map_destroy(h);
-        mimi_map_destroy(0);
+        unsafe { mimi_map_destroy(h) };
+        unsafe { mimi_map_destroy(0) };
     }
 
     #[test]
     fn set_double_destroy_is_noop() {
         let h = mimi_set_new();
         assert_ne!(h, 0);
-        mimi_set_destroy(h);
-        mimi_set_destroy(h);
-        mimi_set_destroy(0);
+        unsafe { mimi_set_destroy(h) };
+        unsafe { mimi_set_destroy(h) };
+        unsafe { mimi_set_destroy(0) };
     }
 
     #[test]
     fn map_ops_on_live_handle_work() {
         let h = mimi_map_new();
         let key = b"k\0".as_ptr() as *const std::ffi::c_char;
-        mimi_map_set(h, key, 42);
-        assert_eq!(mimi_map_has_key(h, key), 1);
-        assert_eq!(mimi_map_get(h, key), 42);
-        assert_eq!(mimi_map_size(h), 1);
-        mimi_map_destroy(h);
+        unsafe {
+            mimi_map_set(h, key, 42);
+        }
+        unsafe {
+            assert_eq!(mimi_map_has_key(h, key), 1);
+            assert_eq!(mimi_map_get(h, key), 42);
+        }
+        assert_eq!(unsafe { mimi_map_size(h) }, 1);
+        unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
     fn set_insert_on_live_handle_works() {
         let h = mimi_set_new();
-        let h2 = mimi_set_insert(h, 7);
+        let h2 = unsafe { mimi_set_insert(h, 7) };
         assert_eq!(h, h2);
-        mimi_set_destroy(h);
+        unsafe { mimi_set_destroy(h) };
     }
 }
 
@@ -20465,6 +21989,57 @@ mod audit_wave1_tests {
     #[test]
     fn json_unescape_rejects_dangling_backslash() {
         assert!(json_unescape(b"abc\\").is_none());
+    }
+
+    #[test]
+    fn safe_c_string_from_handle_reads_long_strings_beyond_256() {
+        let text = "x".repeat(600);
+        let c = alloc_c_string(&text);
+        let decoded =
+            safe_c_string_from_handle(c as i64).expect("long C string should be readable");
+        assert_eq!(decoded, text);
+        // SAFETY: c was returned by alloc_c_string (mimi_alloc) and is freed once.
+        mimi_free(c as *mut _);
+    }
+
+    #[test]
+    fn safe_c_string_from_handle_reads_multipage_strings() {
+        // Regression for batch4-04 P1-1: strings spanning several pages were
+        // previously truncated by a 4 KiB bounded scan.
+        let text = "z".repeat(5000);
+        let c = alloc_c_string(&text);
+        let decoded =
+            safe_c_string_from_handle(c as i64).expect("multipage C string should be readable");
+        assert_eq!(decoded, text);
+        // SAFETY: c was returned by alloc_c_string (mimi_alloc) and is freed once.
+        mimi_free(c as *mut _);
+    }
+
+    #[test]
+    fn safe_c_string_from_ptr_accepts_byte_aligned_storage() {
+        // Native string literals are valid C strings but need not be 8-byte
+        // aligned. Map keys use this ABI-declared pointer path rather than the
+        // aligned Any pointer-vs-integer heuristic.
+        let mut bytes = Vec::from([0u8]);
+        bytes.extend_from_slice(b"key\0");
+        let ptr = unsafe { bytes.as_ptr().add(1) } as *const std::ffi::c_char;
+        assert_eq!(safe_c_string_from_ptr(ptr).as_deref(), Some("key"));
+    }
+
+    #[test]
+    fn mimi_any_to_string_reads_multipage_strings() {
+        // batch4-04 P1-1: the untyped Any renderer must also scan across pages.
+        let text = "y".repeat(5000);
+        let c = alloc_c_string(&text);
+        // SAFETY: c is a valid runtime-allocated C string.
+        let raw = unsafe { mimi_any_to_string(c as i64) };
+        assert!(!raw.is_null());
+        // SAFETY: raw is a valid runtime-allocated C string.
+        let decoded = unsafe { cstr_to_string(raw) };
+        assert_eq!(decoded, text);
+        // SAFETY: both pointers were returned by alloc_c_string/mimi_any_to_string.
+        mimi_free(c as *mut _);
+        mimi_free(raw as *mut _);
     }
 
     #[test]
@@ -20527,15 +22102,21 @@ mod audit_wave1_tests {
     #[test]
     fn list_from_json_builders_set_element_kind_and_free_cleanly() {
         // Option of product: elements are malloc'd packs → Record.
-        let l1 = mimi_list_from_json_option_product_i64(b"[null,[7,8]]\0".as_ptr() as _, 2);
+        let l1 =
+            unsafe { mimi_list_from_json_option_product_i64(b"[null,[7,8]]\0".as_ptr() as _, 2) };
         assert!(!l1.is_null());
-        assert_eq!(mimi_list_element_kind(l1), ListElementKind::Record as i8);
-        mimi_list_free(l1, true);
+        unsafe {
+            assert_eq!(mimi_list_element_kind(l1), ListElementKind::Record as i8);
+            mimi_list_free(l1, true);
+        }
 
         // Set of product: elements are SetHandles → Set.
-        let l2 = mimi_list_from_json_set_product_i64(b"[[1,2],[3,4]]\0".as_ptr() as _, 2);
+        let l2 =
+            unsafe { mimi_list_from_json_set_product_i64(b"[[1,2],[3,4]]\0".as_ptr() as _, 2) };
         assert!(!l2.is_null());
-        assert_eq!(mimi_list_element_kind(l2), ListElementKind::Set as i8);
+        unsafe {
+            assert_eq!(mimi_list_element_kind(l2), ListElementKind::Set as i8);
+        }
         // Destroy the set handles stored in the data array before freeing.
         // SAFETY: l2 is non-null with a valid {len, data} layout just built.
         unsafe {
@@ -20547,12 +22128,18 @@ mod audit_wave1_tests {
                 }
             }
         }
-        mimi_list_free(l2, false);
+        unsafe {
+            mimi_list_free(l2, false);
+        }
 
         // Map of product: elements are MapHandles → Map.
-        let l3 = mimi_list_from_json_map_product_i64(b"[{\"a\":1},{\"b\":2}]\0".as_ptr() as _, 1);
+        let l3 = unsafe {
+            mimi_list_from_json_map_product_i64(b"[{\"a\":1},{\"b\":2}]\0".as_ptr() as _, 1)
+        };
         assert!(!l3.is_null());
-        assert_eq!(mimi_list_element_kind(l3), ListElementKind::Map as i8);
+        unsafe {
+            assert_eq!(mimi_list_element_kind(l3), ListElementKind::Map as i8);
+        }
         // SAFETY: same layout contract as above.
         unsafe {
             let lst = &*l3;
@@ -20563,16 +22150,22 @@ mod audit_wave1_tests {
                 }
             }
         }
-        mimi_list_free(l3, false);
+        unsafe {
+            mimi_list_free(l3, false);
+        }
 
         // Result of product: elements are malloc'd packs → Record.
-        let l4 = mimi_list_from_json_result_product_i64(
-            b"[{\"Ok\":[1,2]},{\"Err\":\"e\"}]\0".as_ptr() as _,
-            2,
-        );
+        let l4 = unsafe {
+            mimi_list_from_json_result_product_i64(
+                b"[{\"Ok\":[1,2]},{\"Err\":\"e\"}]\0".as_ptr() as _,
+                2,
+            )
+        };
         if !l4.is_null() {
-            assert_eq!(mimi_list_element_kind(l4), ListElementKind::Record as i8);
-            mimi_list_free(l4, true);
+            unsafe {
+                assert_eq!(mimi_list_element_kind(l4), ListElementKind::Record as i8);
+                mimi_list_free(l4, true);
+            }
         }
     }
 
@@ -20580,10 +22173,12 @@ mod audit_wave1_tests {
     fn list_from_json_builders_invalid_input_empty_with_kind() {
         // Malformed JSON must still yield a Box-allocated list with a valid
         // element_kind (the empty() path used to leave it uninitialized).
-        let l = mimi_list_from_json_option_product_i64(b"not json\0".as_ptr() as _, 2);
+        let l = unsafe { mimi_list_from_json_option_product_i64(b"not json\0".as_ptr() as _, 2) };
         assert!(!l.is_null());
-        assert_eq!(mimi_list_element_kind(l), ListElementKind::Record as i8);
-        mimi_list_free(l, true);
+        unsafe {
+            assert_eq!(mimi_list_element_kind(l), ListElementKind::Record as i8);
+            mimi_list_free(l, true);
+        }
     }
 
     // ── Fix #4: ptr+len string externs ────────────────────────────────
@@ -20594,7 +22189,9 @@ mod audit_wave1_tests {
         let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
-        mimi_string_free(ptr);
+        unsafe {
+            mimi_string_free(ptr);
+        }
         s
     }
 
@@ -20603,18 +22200,30 @@ mod audit_wave1_tests {
         let s = b"hello";
         let p = s.as_ptr() as *const std::ffi::c_char;
         // In-range: identical to VM function form.
-        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 1, 4)), "ell");
+        assert_eq!(
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 1, 4) }),
+            "ell"
+        );
         // End beyond char count clamps to len (VM parity; method form aborts).
-        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 2, 99)), "llo");
+        assert_eq!(
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 2, 99) }),
+            "llo"
+        );
         // Start beyond char count clamps to len → empty slice.
-        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 99, 100)), "");
+        assert_eq!(
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 99, 100) }),
+            ""
+        );
         // Empty range.
-        assert_eq!(owned_str(mimi_str_substring_clamp(p, 5, 0, 0)), "");
+        assert_eq!(
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 0, 0) }),
+            ""
+        );
         // Unicode chars (byte len 6, char count 5): indices are char-based.
         let u = "héllo"; // é is 2 bytes
         let up = u.as_ptr() as *const std::ffi::c_char;
         assert_eq!(
-            owned_str(mimi_str_substring_clamp(up, u.len() as i64, 1, 3)),
+            owned_str(unsafe { mimi_str_substring_clamp(up, u.len() as i64, 1, 3) }),
             "él"
         );
     }
@@ -20623,13 +22232,13 @@ mod audit_wave1_tests {
     fn str_to_upper_lower_full_unicode() {
         let s = b"Hello";
         let p = s.as_ptr() as *const std::ffi::c_char;
-        assert_eq!(owned_str(mimi_str_to_upper(p, 5)), "HELLO");
-        assert_eq!(owned_str(mimi_str_to_lower(p, 5)), "hello");
+        assert_eq!(owned_str(unsafe { mimi_str_to_upper(p, 5) }), "HELLO");
+        assert_eq!(owned_str(unsafe { mimi_str_to_lower(p, 5) }), "hello");
         // ß uppercases to SS (multi-char mapping — impossible byte-wise).
         let sharp = "Straße";
         let sp = sharp.as_ptr() as *const std::ffi::c_char;
         assert_eq!(
-            owned_str(mimi_str_to_upper(sp, sharp.len() as i64)),
+            owned_str(unsafe { mimi_str_to_upper(sp, sharp.len() as i64) }),
             "STRASSE"
         );
     }
@@ -20638,7 +22247,7 @@ mod audit_wave1_tests {
     fn str_trim_is_unicode_aware() {
         let t = "\u{00A0}\t hi \n\u{00A0}"; // NBSP + ASCII whitespace
         let p = t.as_ptr() as *const std::ffi::c_char;
-        assert_eq!(owned_str(mimi_str_trim(p, t.len() as i64)), "hi");
+        assert_eq!(owned_str(unsafe { mimi_str_trim(p, t.len() as i64) }), "hi");
     }
 
     // ── Fix #6/#7: tuple deserialize empty string + surrogate pair ────
@@ -20649,7 +22258,9 @@ mod audit_wave1_tests {
         let json = b"[\"\",\"abc\"]\0";
         let mut types: [i64; 2] = [2, 2];
         let mut out: [i64; 2] = [-1, -1];
-        let n = mimi_tuple_deserialize(json.as_ptr() as _, 2, types.as_mut_ptr(), out.as_mut_ptr());
+        let n = unsafe {
+            mimi_tuple_deserialize(json.as_ptr() as _, 2, types.as_mut_ptr(), out.as_mut_ptr())
+        };
         assert_eq!(n, 2);
         for slot in out.iter() {
             assert_ne!(*slot, 0, "empty string must allocate, not write NULL");
@@ -20662,8 +22273,9 @@ mod audit_wave1_tests {
         // First slot is exactly "".
         // (Re-run to inspect content without use-after-free.)
         let mut out2: [i64; 2] = [-1, -1];
-        let _ =
-            mimi_tuple_deserialize(json.as_ptr() as _, 2, types.as_mut_ptr(), out2.as_mut_ptr());
+        let _ = unsafe {
+            mimi_tuple_deserialize(json.as_ptr() as _, 2, types.as_mut_ptr(), out2.as_mut_ptr())
+        };
         // SAFETY: out2[0] is a fresh "" allocation from the runtime.
         let first = unsafe { std::ffi::CStr::from_ptr(out2[0] as *const std::ffi::c_char) };
         assert_eq!(first.to_string_lossy(), "");
@@ -20679,7 +22291,9 @@ mod audit_wave1_tests {
         let mut out: [i64; 1] = [-1];
         // Valid pair →😀
         let ok = b"[\"\\ud83d\\ude00\"]\0";
-        let n = mimi_tuple_deserialize(ok.as_ptr() as _, 1, types.as_mut_ptr(), out.as_mut_ptr());
+        let n = unsafe {
+            mimi_tuple_deserialize(ok.as_ptr() as _, 1, types.as_mut_ptr(), out.as_mut_ptr())
+        };
         assert_eq!(n, 1);
         // SAFETY: out[0] holds the runtime-allocated unescaped string.
         let s = unsafe { std::ffi::CStr::from_ptr(out[0] as *const std::ffi::c_char) }
@@ -20692,8 +22306,9 @@ mod audit_wave1_tests {
         // Lone surrogate → parse failure (-1).
         let bad = b"[\"\\ud800\"]\0";
         let mut out2: [i64; 1] = [-1];
-        let n2 =
-            mimi_tuple_deserialize(bad.as_ptr() as _, 1, types.as_mut_ptr(), out2.as_mut_ptr());
+        let n2 = unsafe {
+            mimi_tuple_deserialize(bad.as_ptr() as _, 1, types.as_mut_ptr(), out2.as_mut_ptr())
+        };
         assert_eq!(n2, -1);
     }
 
@@ -20703,7 +22318,7 @@ mod audit_wave1_tests {
     fn json_deserialize_strings_and_free_via_boxed_slice() {
         let json = b"[\"a\",\"\\ud83d\\ude00\",\"c\"]\0";
         let mut len: i64 = -1;
-        let buf = mimi_json_deserialize(json.as_ptr() as _, &mut len as *mut i64, 2);
+        let buf = unsafe { mimi_json_deserialize(json.as_ptr() as _, &mut len as *mut i64, 2) };
         assert!(!buf.is_null());
         assert_eq!(len, 3);
         // Element 1 must be the combined surrogate pair.
@@ -20714,14 +22329,14 @@ mod audit_wave1_tests {
             let s = std::ffi::CStr::from_ptr(mid).to_string_lossy().into_owned();
             assert_eq!(s, "\u{1F600}");
         }
-        mimi_json_deserialize_free(buf, len, 2);
+        unsafe { mimi_json_deserialize_free(buf, len, 2) };
     }
 
     #[test]
     fn json_deserialize_lone_surrogate_fails_parse() {
         let json = b"[\"\\udc00\"]\0";
         let mut len: i64 = -1;
-        let buf = mimi_json_deserialize(json.as_ptr() as _, &mut len as *mut i64, 2);
+        let buf = unsafe { mimi_json_deserialize(json.as_ptr() as _, &mut len as *mut i64, 2) };
         assert!(buf.is_null(), "lone surrogate must fail the JSON parse");
         assert_eq!(len, 0);
     }
@@ -20730,11 +22345,11 @@ mod audit_wave1_tests {
     fn set_to_list_round_trips_through_boxed_slice_free() {
         let h = mimi_set_new();
         assert_ne!(h, 0);
-        mimi_set_insert(h, 11);
-        mimi_set_insert(h, 22);
-        mimi_set_insert(h, 33);
+        unsafe { mimi_set_insert(h, 11) };
+        unsafe { mimi_set_insert(h, 22) };
+        unsafe { mimi_set_insert(h, 33) };
         let mut len: i64 = -1;
-        let ptr = mimi_set_to_list(h, &mut len as *mut i64);
+        let ptr = unsafe { mimi_set_to_list(h, &mut len as *mut i64) };
         assert!(!ptr.is_null());
         assert_eq!(len, 3);
         // SAFETY: mimi_set_to_list hands out a boxed slice of `len` handles.
@@ -20744,8 +22359,8 @@ mod audit_wave1_tests {
             vals.sort_unstable();
             assert_eq!(vals, vec![11, 22, 33]);
         }
-        mimi_set_list_free(ptr, len);
-        mimi_set_destroy(h);
+        unsafe { mimi_set_list_free(ptr, len) };
+        unsafe { mimi_set_destroy(h) };
     }
 
     // ── Fix #9: fail-loud json accessors (non-aborting paths only) ────
@@ -20757,20 +22372,26 @@ mod audit_wave1_tests {
         let key_count = b"count\0";
         let key_missing = b"nope\0";
         // json_get_string returns the value for present keys.
-        let s = json_get_string(obj.as_ptr() as _, key_name.as_ptr() as _);
+        let s = unsafe { json_get_string(obj.as_ptr() as _, key_name.as_ptr() as _) };
         assert_eq!(owned_str(s), "mimi");
         // json_get_int parses integer values.
-        assert_eq!(json_get_int(obj.as_ptr() as _, key_count.as_ptr() as _), 3);
-        // json_has_key distinguishes present/missing without aborting.
-        assert_eq!(json_has_key(obj.as_ptr() as _, key_name.as_ptr() as _), 1);
         assert_eq!(
-            json_has_key(obj.as_ptr() as _, key_missing.as_ptr() as _),
+            unsafe { json_get_int(obj.as_ptr() as _, key_count.as_ptr() as _) },
+            3
+        );
+        // json_has_key distinguishes present/missing without aborting.
+        assert_eq!(
+            unsafe { json_has_key(obj.as_ptr() as _, key_name.as_ptr() as _) },
+            1
+        );
+        assert_eq!(
+            unsafe { json_has_key(obj.as_ptr() as _, key_missing.as_ptr() as _) },
             0
         );
         // json_is_valid_json must NEVER abort: 1 for valid...
-        assert_eq!(mimi_is_valid_json(obj.as_ptr() as _), 1);
+        assert_eq!(unsafe { mimi_is_valid_json(obj.as_ptr() as _) }, 1);
         // ...0 for malformed.
-        assert_eq!(mimi_is_valid_json(b"{oops\0".as_ptr() as _), 0);
+        assert_eq!(unsafe { mimi_is_valid_json(b"{oops\0".as_ptr() as _) }, 0);
     }
 
     #[test]
@@ -20793,8 +22414,8 @@ mod audit_wave1_tests {
     #[test]
     fn json_array_length_and_get_element_happy_paths() {
         let arr = b"[10,\"twenty\",[3]]\0";
-        assert_eq!(json_array_length(arr.as_ptr() as _), 3);
-        let e = json_get_element(arr.as_ptr() as _, 1);
+        assert_eq!(unsafe { json_array_length(arr.as_ptr() as _) }, 3);
+        let e = unsafe { json_get_element(arr.as_ptr() as _, 1) };
         assert_eq!(owned_str(e), "twenty");
     }
 
@@ -20828,7 +22449,9 @@ mod audit_pkgd_tests {
         let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
-        mimi_string_free(ptr);
+        unsafe {
+            mimi_string_free(ptr);
+        }
         s
     }
 
@@ -20840,11 +22463,13 @@ mod audit_pkgd_tests {
         let garbage: ValueHandle = 0x0000_7000_0000_0000;
         let h = mimi_map_new();
         let key = b"k\0".as_ptr() as *const std::ffi::c_char;
-        mimi_map_set(h, key, garbage);
+        unsafe {
+            mimi_map_set(h, key, garbage);
+        }
         // Pre-fix this dereferenced the handle blind (SIGSEGV).
-        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_product_i64(h, 2, 0) });
         assert_eq!(out, "{\"k\":[0,0]}");
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
@@ -20852,21 +22477,53 @@ mod audit_pkgd_tests {
         // Below MIN_HEAP: provably not a heap pointer.
         let h = mimi_map_new();
         let key = b"k\0".as_ptr() as *const std::ffi::c_char;
-        mimi_map_set(h, key, 8);
-        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 1));
+        unsafe {
+            mimi_map_set(h, key, 8);
+        }
+        let out = owned_str(unsafe { mimi_map_to_json_product_i64(h, 2, 1) });
         assert_eq!(out, "{\"k\":(0, 0)}");
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
     fn product_serializer_real_packs_still_round_trip() {
         // The probe must not perturb legitimate heap-packed values.
         let json = b"{\"a\":[1,2],\"b\":[3,4]}\0";
-        let h = mimi_map_from_json_product_i64(json.as_ptr() as _, 2);
+        let h = unsafe { mimi_map_from_json_product_i64(json.as_ptr() as _, 2) };
         assert_ne!(h, 0);
-        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_product_i64(h, 2, 0) });
         assert_eq!(out, "{\"a\":[1,2],\"b\":[3,4]}");
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
+    }
+
+    #[test]
+    fn composite_serializers_unmapped_handle_fail_closed() {
+        // P1-21: every map composite serializer must mincore-probe composite
+        // packs before dereferencing them. A wild unmapped handle used to
+        // SIGSEGV in result/option/map composite paths; it must now serialize
+        // as null without reading memory.
+        type JsonFn = unsafe extern "C" fn(MapHandle, i64, i64) -> *mut std::ffi::c_char;
+        let cases: &[JsonFn] = &[
+            mimi_map_to_json_result_product_i64,
+            mimi_map_to_json_result_map_product_i64,
+            mimi_map_to_json_option_map_list_product_i64,
+            mimi_map_to_json_result_option_list_product_i64,
+            mimi_map_to_json_result_set_product_i64,
+        ];
+        let garbage: ValueHandle = 0x0000_7000_0000_0000;
+        for &f in cases {
+            let h = mimi_map_new();
+            let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+            unsafe {
+                mimi_map_set(h, key, garbage);
+            }
+            let out = owned_str(unsafe { f(h, 2, 0) });
+            assert_eq!(
+                out, "{\"k\":null}",
+                "fail-closed output for composite serializer"
+            );
+            unsafe { mimi_map_destroy(h) };
+        }
     }
 
     // ── §10-#35: destroy() must reclaim map-owned value buffers ────────
@@ -20879,16 +22536,16 @@ mod audit_pkgd_tests {
     fn attempt_reclaim_check(json: &[u8], arity: i64, list: bool) -> bool {
         let baseline = mimi_runtime_map_owned_value_balance();
         let h = if list {
-            mimi_map_from_json_list_product_i64(json.as_ptr() as _, arity)
+            unsafe { mimi_map_from_json_list_product_i64(json.as_ptr() as _, arity) }
         } else {
-            mimi_map_from_json_product_i64(json.as_ptr() as _, arity)
+            unsafe { mimi_map_from_json_product_i64(json.as_ptr() as _, arity) }
         };
         if h == 0 {
             return false;
         }
         // Race-free exact registration proof.
         let registered = mimi_map_owned_value_count(h) == 2;
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
         registered && mimi_runtime_map_owned_value_balance() <= baseline
     }
 
@@ -20906,13 +22563,13 @@ mod audit_pkgd_tests {
     fn map_destroy_reclaims_owned_list_of_packs() {
         let json = b"{\"a\":[[1,2],[3,4]],\"b\":[[5,6]]}\0";
         // Serialization must still work while live (frees nothing).
-        let h = mimi_map_from_json_list_product_i64(json.as_ptr() as _, 2);
+        let h = unsafe { mimi_map_from_json_list_product_i64(json.as_ptr() as _, 2) };
         assert_ne!(h, 0);
         assert_eq!(mimi_map_owned_value_count(h), 2);
-        let out = owned_str(mimi_map_to_json_list_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_list_product_i64(h, 2, 0) });
         assert_eq!(out, "{\"a\":[[1,2],[3,4]],\"b\":[[5,6]]}");
         assert_eq!(mimi_map_owned_value_count(h), 2, "serialize must not free");
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
         let ok = (0..5).any(|_| attempt_reclaim_check(json, 2, true));
         assert!(
             ok,
@@ -20934,7 +22591,7 @@ mod audit_pkgd_tests {
         // Race-free exact registration proof: one registered shell per entry.
         let registered = mimi_map_owned_value_count(h) == entries;
         let after_build = mimi_runtime_map_owned_value_balance();
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
         let after_destroy = mimi_runtime_map_owned_value_balance();
         // destroy() must reclaim exactly the shells this map registered.
         // Inner map/set/list handles stay as bounded leaks by design (a
@@ -20949,20 +22606,20 @@ mod audit_pkgd_tests {
         let json = b"{\"a\":null,\"b\":{\"x\":[3,4]},\"c\":{\"y\":[5,6]}}\0";
         let ok = (0..5).any(|_| {
             nested_reclaim_check(
-                || mimi_map_from_json_option_map_product_i64(json.as_ptr() as _, 2),
+                || unsafe { mimi_map_from_json_option_map_product_i64(json.as_ptr() as _, 2) },
                 3,
             )
         });
         assert!(ok, "option pack shells must be registered + reclaimed");
         // Serialization round-trips while live.
-        let h = mimi_map_from_json_option_map_product_i64(json.as_ptr() as _, 2);
+        let h = unsafe { mimi_map_from_json_option_map_product_i64(json.as_ptr() as _, 2) };
         assert_ne!(h, 0);
-        let out = owned_str(mimi_map_to_json_option_map_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_option_map_product_i64(h, 2, 0) });
         assert_eq!(
             out,
             "{\"a\":\"None\",\"b\":{\"Some\":[{\"x\":[3,4]}]},\"c\":{\"Some\":[{\"y\":[5,6]}]}}"
         );
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
@@ -20972,19 +22629,19 @@ mod audit_pkgd_tests {
         let json = b"{\"a\":{\"Err\":\"boom\"},\"b\":{\"Ok\":{\"x\":[7,8]}}}\0";
         let ok = (0..5).any(|_| {
             nested_reclaim_check(
-                || mimi_map_from_json_result_map_product_i64(json.as_ptr() as _, 2),
+                || unsafe { mimi_map_from_json_result_map_product_i64(json.as_ptr() as _, 2) },
                 2,
             )
         });
         assert!(ok, "result pack shells must be registered + reclaimed");
-        let h = mimi_map_from_json_result_map_product_i64(json.as_ptr() as _, 2);
+        let h = unsafe { mimi_map_from_json_result_map_product_i64(json.as_ptr() as _, 2) };
         assert_ne!(h, 0);
-        let out = owned_str(mimi_map_to_json_result_map_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_result_map_product_i64(h, 2, 0) });
         assert_eq!(
             out,
             "{\"a\":{\"Err\":[\"boom\"]},\"b\":{\"Ok\":[{\"x\":[7,8]}]}}"
         );
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
@@ -20995,21 +22652,21 @@ mod audit_pkgd_tests {
         let json = b"{\"a\":[null,[1,2]],\"b\":[[3,4],null]}\0";
         let ok = (0..5).any(|_| {
             nested_reclaim_check(
-                || mimi_map_from_json_list_option_product_i64(json.as_ptr() as _, 2),
+                || unsafe { mimi_map_from_json_list_option_product_i64(json.as_ptr() as _, 2) },
                 2,
             )
         });
         assert!(ok, "Box MimiList shells must be registered + reclaimed");
-        let h = mimi_map_from_json_list_option_product_i64(json.as_ptr() as _, 2);
+        let h = unsafe { mimi_map_from_json_list_option_product_i64(json.as_ptr() as _, 2) };
         assert_ne!(h, 0);
         assert_eq!(mimi_map_owned_value_count(h), 2);
-        let out = owned_str(mimi_map_to_json_list_option_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_list_option_product_i64(h, 2, 0) });
         assert_eq!(
             out,
             "{\"a\":[\"None\",{\"Some\":[[1,2]]}],\"b\":[{\"Some\":[[3,4]]},\"None\"]}"
         );
         assert_eq!(mimi_map_owned_value_count(h), 2, "serialize must not free");
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
@@ -21019,19 +22676,21 @@ mod audit_pkgd_tests {
         let json = b"{\"a\":{\"Ok\":null},\"b\":{\"Err\":\"nope\"}}\0";
         let ok = (0..5).any(|_| {
             nested_reclaim_check(
-                || mimi_map_from_json_result_option_list_product_i64(json.as_ptr() as _, 2),
+                || unsafe {
+                    mimi_map_from_json_result_option_list_product_i64(json.as_ptr() as _, 2)
+                },
                 2,
             )
         });
         assert!(ok, "deeply nested result shells must be reclaimed");
-        let h = mimi_map_from_json_result_option_list_product_i64(json.as_ptr() as _, 2);
+        let h = unsafe { mimi_map_from_json_result_option_list_product_i64(json.as_ptr() as _, 2) };
         assert_ne!(h, 0);
-        let out = owned_str(mimi_map_to_json_result_option_list_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_result_option_list_product_i64(h, 2, 0) });
         assert_eq!(
             out,
             "{\"a\":{\"Ok\":[\"None\"]},\"b\":{\"Err\":[\"nope\"]}}"
         );
-        mimi_map_destroy(h);
+        unsafe { mimi_map_destroy(h) };
     }
 
     // ── M7 (0.35.37): mimi_map_from_list silent truncation / bad-key skip ──
@@ -21052,13 +22711,13 @@ mod audit_pkgd_tests {
             keys.push(c as ValueHandle);
             values.push(i as ValueHandle);
         }
-        let h = mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), n);
+        let h = unsafe { mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), n) };
         // Loud truncation: only the first 1M entries survive.
-        assert_eq!(mimi_map_size(h), 1_000_000);
-        mimi_map_destroy(h);
+        assert_eq!(unsafe { mimi_map_size(h) }, 1_000_000);
+        unsafe { mimi_map_destroy(h) };
         // Free the key strings (map copies them; we own the originals).
         for &k in &keys {
-            mimi_string_free(k as *mut std::ffi::c_char);
+            unsafe { mimi_string_free(k as *mut std::ffi::c_char) };
         }
     }
 
@@ -21070,20 +22729,22 @@ mod audit_pkgd_tests {
         let k2 = alloc_c_string("beta");
         let mut keys = vec![k1 as ValueHandle, 0x0000_7000_0000_0000, k2 as ValueHandle];
         let mut values = vec![1usize as ValueHandle, 2, 3];
-        let h = mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 3);
+        let h = unsafe { mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 3) };
         assert_eq!(
-            mimi_map_size(h),
+            unsafe { mimi_map_size(h) },
             2,
             "garbage key must be skipped, valid keys kept"
         );
         // "beta" -> 3 survived (third pair). "alpha" -> 1 survived (first).
-        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        let out = owned_str(unsafe { mimi_map_to_json_product_i64(h, 2, 0) });
         assert!(out.contains("\"alpha\""));
         assert!(out.contains("\"beta\""));
         assert!(!out.contains("garbage"));
-        mimi_map_destroy(h);
-        mimi_string_free(k1 as *mut std::ffi::c_char);
-        mimi_string_free(k2 as *mut std::ffi::c_char);
+        unsafe { mimi_map_destroy(h) };
+        unsafe {
+            mimi_string_free(k1 as *mut std::ffi::c_char);
+            mimi_string_free(k2 as *mut std::ffi::c_char);
+        }
     }
 
     /// Sanity: normal path with mixed integer/pointer values is unaffected —
@@ -21095,13 +22756,55 @@ mod audit_pkgd_tests {
         // Integer values 7 and 0 (0 is below MIN_HEAP — must still insert).
         let mut keys = vec![k1 as ValueHandle, k2 as ValueHandle];
         let mut values = vec![7usize as ValueHandle, 0usize as ValueHandle];
-        let h = mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 2);
-        assert_eq!(mimi_map_size(h), 2);
-        let out = owned_str(mimi_map_to_json_product_i64(h, 2, 0));
+        let h = unsafe { mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 2) };
+        assert_eq!(unsafe { mimi_map_size(h) }, 2);
+        let out = owned_str(unsafe { mimi_map_to_json_product_i64(h, 2, 0) });
         assert!(out.contains("\"int\":"));
         assert!(out.contains("\"zero\":"));
-        mimi_map_destroy(h);
-        mimi_string_free(k1 as *mut std::ffi::c_char);
-        mimi_string_free(k2 as *mut std::ffi::c_char);
+        unsafe { mimi_map_destroy(h) };
+        unsafe {
+            mimi_string_free(k1 as *mut std::ffi::c_char);
+            mimi_string_free(k2 as *mut std::ffi::c_char);
+        }
+    }
+}
+
+#[cfg(test)]
+mod runtime_ptr_readable_tests {
+    use super::*;
+
+    #[test]
+    fn ptr_readable_rejects_absurd_len_without_scanning() {
+        let arr = [0u8; 8];
+        unsafe {
+            // Normal small mapped stack span is readable.
+            assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), 8), 1);
+            // A >1MiB len is rejected up front even though the base pointer
+            // is mapped, preventing an unbounded page-mincore loop (P2-5).
+            assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), (1 << 20) + 1), 0);
+            assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), i64::MAX), 0);
+        }
+    }
+
+    #[test]
+    fn list_push_rejects_negative_len() {
+        unsafe {
+            let mut list = MimiList {
+                len: -1,
+                data: std::ptr::null_mut(),
+                owns_data: false,
+                element_kind: ListElementKind::I64,
+                has_header: false,
+            };
+            mimi_list_push_i64(&mut list, 42);
+            mimi_list_push_f64(&mut list, 1.5);
+            mimi_list_push_string(&mut list, b"x\0".as_ptr() as *const std::ffi::c_char);
+            assert_eq!(list.len, -1, "negative list length must be left untouched");
+            let grown = mimi_list_push_grow(&mut list, 4);
+            assert!(
+                grown.is_null(),
+                "push_grow must reject negative list length"
+            );
+        }
     }
 }

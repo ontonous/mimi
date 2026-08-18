@@ -19,8 +19,11 @@ use super::{alloc_c_string, cstr_to_string};
 ///
 /// RT-H8 note: CStr stops at the first NUL. For binary data with embedded NULs,
 /// use `mimi_sha256_n(data, len)` instead.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented lengths/ABI.
 #[no_mangle]
-pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     let input = if data.is_null() {
         b"".as_slice()
     } else {
@@ -34,8 +37,11 @@ pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c
 
 /// SHA-256 of an explicit byte buffer (handles embedded NULs).
 /// Returns a heap hex string (caller frees with mimi_string_free).
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented lengths/ABI.
 #[no_mangle]
-pub extern "C" fn mimi_sha256_n(data: *const u8, len: i64) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_sha256_n(data: *const u8, len: i64) -> *mut std::ffi::c_char {
     if data.is_null() || len <= 0 {
         let hash = sha256_bytes(b"");
         let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
@@ -142,8 +148,13 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
 }
 
 /// Base64 encode — returns allocated C string.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented lengths/ABI.
 #[no_mangle]
-pub extern "C" fn mimi_base64_encode(data: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_base64_encode(
+    data: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     let input = if data.is_null() {
         b"".as_slice()
     } else {
@@ -179,8 +190,13 @@ pub fn base64_encode_bytes(data: &[u8]) -> String {
 }
 
 /// Base64 decode — returns Result<string, string>.
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented lengths/ABI.
 #[no_mangle]
-pub extern "C" fn mimi_base64_decode(data: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn mimi_base64_decode(
+    data: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     let input = if data.is_null() {
         ""
     } else {
@@ -266,7 +282,11 @@ pub extern "C" fn mimi_to_string_f64(val: f64) -> *mut std::ffi::c_char {
 /// heap corruption; the primary defense is the checked add in the codegen
 /// emitter that computes `total`.
 #[no_mangle]
-pub extern "C" fn mimi_runtime_buf_nul_terminate(buf: *mut u8, offset: i64, alloc_size: i64) {
+pub unsafe extern "C" fn mimi_runtime_buf_nul_terminate(
+    buf: *mut u8,
+    offset: i64,
+    alloc_size: i64,
+) {
     if buf.is_null() || offset < 0 {
         return;
     }
@@ -288,10 +308,13 @@ pub extern "C" fn mimi_runtime_buf_nul_terminate(buf: *mut u8, offset: i64, allo
     }
 }
 
+///
+/// # Safety
+/// Pointer arguments must be valid for the documented lengths/ABI.
 #[no_mangle]
 /// M15: template string formatting with up to 8 arguments ({}-placeholders).
 /// If more than 8 args are needed, callers should concatenate intermediate results.
-pub extern "C" fn mimi_str_format(
+pub unsafe extern "C" fn mimi_str_format(
     num_args: i64,
     template: *const std::ffi::c_char,
     arg0: *const std::ffi::c_char,

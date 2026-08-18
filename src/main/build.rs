@@ -1,5 +1,8 @@
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
 use crate::resolve_path;
 use mimi::ast::Item;
 use mimi::codegen;
@@ -60,6 +63,77 @@ fn target_linker_flags(target: Option<&str>) -> Vec<&'static str> {
         flags.push("-lws2_32");
     }
     flags
+}
+
+#[cfg(unix)]
+fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
+    let runtime_dir = runtime_rs
+        .parent()
+        .ok_or_else(|| "runtime source has no parent directory".to_string())?;
+    let mut files = std::fs::read_dir(runtime_dir)
+        .map_err(|e| format!("read runtime directory: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect::<Vec<_>>();
+    files.push(runtime_rs.to_path_buf());
+    files.sort();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mimi-native-runtime-v1\0");
+    for path in files {
+        hasher.update(path.to_string_lossy().as_bytes());
+        let contents =
+            std::fs::read(&path).map_err(|e| format!("read runtime file {path:?}: {e}"))?;
+        hasher.update(&contents);
+    }
+    let key = hasher.finalize().to_hex();
+    let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
+    let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
+    let lock_path = cache_dir.join("build.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("open runtime cache lock: {e}"))?;
+    // SAFETY: lock_file is an open regular file and flock only changes its
+    // advisory lock state; no Rust references cross the FFI boundary.
+    unsafe {
+        if libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) != 0 {
+            return Err(format!(
+                "lock runtime cache: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    if cache_path.exists() {
+        return Ok(cache_path);
+    }
+
+    let tmp_path = cache_dir.join(format!("libmimi_runtime_{key}.tmp-{}", std::process::id()));
+    let status = std::process::Command::new("rustc")
+        .args([
+            "--edition",
+            "2021",
+            "--crate-type",
+            "staticlib",
+            "--cfg",
+            "standalone",
+        ])
+        .args(["--crate-name", "mimi_runtime", "-A", "dead_code"])
+        .arg("-o")
+        .arg(&tmp_path)
+        .arg(runtime_rs)
+        .status()
+        .map_err(|e| format!("runtime compile (rustc): {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err("Rust runtime compilation failed".into());
+    }
+    std::fs::rename(&tmp_path, &cache_path).map_err(|e| format!("publish runtime cache: {e}"))?;
+    Ok(cache_path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -267,35 +341,45 @@ pub(crate) fn build(
     // Compile and link Rust runtime
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runtime_rs = manifest_dir.join("src/runtime/standalone.rs");
-    // Use a per-build temp archive instead of a fixed sibling of the output.
-    // Concurrent `mimi build` invocations sharing an output directory used to
-    // race on the same `libmimi_runtime.a` (flaky "memory map must have a
-    // non-zero length" / "failed to open object file" during CI).
-    let runtime_lib = tmp_dir.join("libmimi_runtime.a");
-
-    // Compile the standalone runtime with rustc
-    let mut rt_cmd = std::process::Command::new("rustc");
-    rt_cmd.arg("--edition").arg("2021");
-    rt_cmd.arg("--crate-type").arg("staticlib");
-    rt_cmd.arg("--cfg").arg("standalone");
-    rt_cmd.arg("--crate-name").arg("mimi_runtime");
-    // Runtime symbols are called from LLVM IR (invisible to rustc reachability).
-    rt_cmd.arg("-A").arg("dead_code");
-    if let Some(triple) = target {
-        rt_cmd.arg("--target").arg(triple);
-    }
-    if shared {
-        rt_cmd.arg("-C").arg("relocation-model=pic");
-    }
-    rt_cmd.arg("-o").arg(&runtime_lib);
-    rt_cmd.arg(&runtime_rs);
-    let rt_status = rt_cmd
-        .status()
-        .map_err(|e| format!("runtime compile (rustc): {}", e))?;
-    if !rt_status.success() {
-        let _ = std::fs::remove_file(&obj_path);
-        return Err("Rust runtime compilation failed".into());
-    }
+    // Native executable builds share an immutable, content-addressed runtime
+    // archive. Cross/shared builds keep their per-build archive because target
+    // and relocation flags change the artifact ABI.
+    let use_native_cache = cfg!(unix) && target.is_none() && !shared && !no_std;
+    let runtime_lib = if use_native_cache {
+        #[cfg(unix)]
+        {
+            cached_native_runtime(&runtime_rs)?
+        }
+        #[cfg(not(unix))]
+        {
+            return Err("native runtime cache requires Unix".into());
+        }
+    } else {
+        let runtime_lib = tmp_dir.join("libmimi_runtime.a");
+        let mut rt_cmd = std::process::Command::new("rustc");
+        rt_cmd.arg("--edition").arg("2021");
+        rt_cmd.arg("--crate-type").arg("staticlib");
+        rt_cmd.arg("--cfg").arg("standalone");
+        rt_cmd.arg("--crate-name").arg("mimi_runtime");
+        // Runtime symbols are called from LLVM IR (invisible to rustc reachability).
+        rt_cmd.arg("-A").arg("dead_code");
+        if let Some(triple) = target {
+            rt_cmd.arg("--target").arg(triple);
+        }
+        if shared {
+            rt_cmd.arg("-C").arg("relocation-model=pic");
+        }
+        rt_cmd.arg("-o").arg(&runtime_lib);
+        rt_cmd.arg(&runtime_rs);
+        let rt_status = rt_cmd
+            .status()
+            .map_err(|e| format!("runtime compile (rustc): {}", e))?;
+        if !rt_status.success() {
+            let _ = std::fs::remove_file(&obj_path);
+            return Err("Rust runtime compilation failed".into());
+        }
+        runtime_lib
+    };
 
     // Link with cc to create executable or shared library
     let mut cmd = std::process::Command::new(&cc_cmd);
@@ -354,7 +438,9 @@ pub(crate) fn build(
 
     // Cleanup intermediate files
     let _ = std::fs::remove_file(&obj_path);
-    let _ = std::fs::remove_file(&runtime_lib);
+    if !use_native_cache {
+        let _ = std::fs::remove_file(&runtime_lib);
+    }
 
     if status.success() {
         let kind = if shared {

@@ -564,14 +564,21 @@ impl FfiRuntime {
                 let rvalue = ret_buf.as_mut_ptr() as *mut std::ffi::c_void;
                 // SD-4: signal guard for struct-by-value returns.
                 if self.signal_guard || extern_func.no_panic {
-                    super::ffi::signal_guard::call_guarded(|| {
-                        // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
-                        // with a caller-provided return buffer. rvalue points to a valid
-                        // ret_buf allocation.
-                        unsafe {
+                    // SAFETY: call_guarded uses sigsetjmp/siglongjmp across an
+                    // otherwise normal Rust frame and must only be used as the
+                    // FFI crash-recovery primitive. The closure's resources may
+                    // be leaked if a signal is caught.
+                    // SAFETY: call_guarded uses sigsetjmp/siglongjmp across an
+                    // otherwise normal Rust frame and must only be used as the
+                    // FFI crash-recovery primitive. The closure's resources may
+                    // be leaked if a signal is caught. The closure body calls
+                    // call_ffi_raw_struct, which is itself unsafe; the outer
+                    // unsafe block covers both the guard and the libffi call.
+                    unsafe {
+                        super::ffi::signal_guard::call_guarded(|| {
                             Self::call_ffi_raw_struct(&cif, code_ptr, &ffi_args, rvalue);
-                        }
-                    })?;
+                        })?;
+                    }
                 } else {
                     // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
                     // with a caller-provided return buffer. rvalue points to a valid
@@ -584,12 +591,21 @@ impl FfiRuntime {
                 Ok(0i64) // placeholder; actual result read from buffer below
             } else if self.signal_guard || extern_func.no_panic {
                 // SD-4: signal guard for scalar returns.
-                super::ffi::signal_guard::call_guarded(|| {
-                    // SAFETY: call_ffi_raw is an unsafe fn; its contract is satisfied
-
-                    // by the valid CIF, code pointer, and argument slice.
-                    unsafe { Self::call_ffi_raw(&cif, code_ptr, &ffi_args, &contract.ret) }
-                })
+                // SAFETY: call_guarded uses sigsetjmp/siglongjmp across an
+                // otherwise normal Rust frame and must only be used as the
+                // FFI crash-recovery primitive. The closure's resources may
+                // be leaked if a signal is caught.
+                // SAFETY: call_guarded uses sigsetjmp/siglongjmp across an
+                // otherwise normal Rust frame and must only be used as the
+                // FFI crash-recovery primitive. The closure's resources may
+                // be leaked if a signal is caught. The closure body calls
+                // call_ffi_raw, which is itself unsafe; the outer unsafe block
+                // covers both the guard and the libffi call.
+                unsafe {
+                    super::ffi::signal_guard::call_guarded(|| {
+                        Self::call_ffi_raw(&cif, code_ptr, &ffi_args, &contract.ret)
+                    })
+                }
             } else {
                 self.call_ffi_direct(&cif, code_ptr, &ffi_args, &contract.ret)
             };

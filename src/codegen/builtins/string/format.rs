@@ -16,6 +16,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let is_any = self.pending_to_string_is_any;
         self.pending_to_string_is_any = false;
+        let to_string_arg_type = self.pending_to_string_arg_type.take();
         match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
                 if is_any {
@@ -337,17 +338,158 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::StructValue(sv) => {
                 // String values are {i8*, i64} structs in codegen.
                 // Return as-is since to_string on a string is identity.
-                Ok(BasicValueEnum::StructValue(sv))
-            }
-            BasicMetadataValueEnum::PointerValue(_) => {
-                // Treat a stray pointer (e.g. typed reference) as a C string.
-                let pv = if let BasicMetadataValueEnum::PointerValue(p) = args[0] {
-                    p
-                } else {
-                    return Err(CompileError::Generic(
-                        "fstring format: expected pointer value".to_string(),
-                    ));
+                let fields = sv.get_type().get_field_types();
+                let is_string_struct = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    );
+                if is_string_struct {
+                    return Ok(BasicValueEnum::StructValue(sv));
+                }
+                // Other aggregates (List, record, Option, Result, Set, Map,
+                // Tuple, enum) must be rendered through the normal display
+                // path. Treating them as string structs produced type
+                // confusion (lists were returned as `{ptr,i64}` strings).
+                let i64_ty = self.context.i64_type();
+                let (print_arg, spec) = self.extract_print_arg(&args[0], i64_ty, "")?;
+                if spec != "%s" {
+                    return Err(CompileError::TypeMismatch(format!(
+                        "to_string: unsupported aggregate representation '{}'",
+                        spec
+                    )));
+                }
+                let raw = match print_arg {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => {
+                        return Err(CompileError::TypeMismatch(
+                            "to_string: aggregate display did not return a string".into(),
+                        ))
+                    }
                 };
+                // The display emitter registered `raw` for statement-end
+                // flushing; a returned string owns it now, so remove it from
+                // that temporary free list to avoid a double free.
+                self.display_frees.borrow_mut().retain(|p| *p != raw);
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let str_ty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let alloca = self.build_entry_alloca(str_ty, "aggregate_str")?;
+                let ptr_gep = self
+                    .gep()
+                    .build_struct_gep(str_ty, alloca, 0, "aggregate_str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.builder
+                    .build_store(ptr_gep, raw)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                self.register_heap_slot(alloca, str_ty, 0);
+                let strlen_fn = self
+                    .module
+                    .get_function("strlen")
+                    .ok_or_else(|| "strlen not declared".to_string())?;
+                let len = self
+                    .builder
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(raw)],
+                        "aggregate_strlen",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("strlen returned void".to_string()))?
+                    .into_int_value();
+                let len_gep = self
+                    .gep()
+                    .build_struct_gep(str_ty, alloca, 1, "aggregate_str_len")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.builder
+                    .build_store(len_gep, len)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                let result = self
+                    .builder
+                    .build_load(BasicTypeEnum::StructType(str_ty), alloca, "aggregate_str")
+                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                Ok(result)
+            }
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                // A list in the checked path may already be lowered to a
+                // pointer to the {len, data} struct. Use the inferred type to
+                // render it through the list display path instead of treating
+                // it as a raw C string (which produced a type-confused "?").
+                if let Some(list_ty) = to_string_arg_type
+                    .as_deref()
+                    .filter(|t| t.starts_with("List"))
+                {
+                    let list_struct_ty = self.list_struct_type();
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(list_struct_ty),
+                            pv,
+                            "to_string_list_load",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
+                    let sv = loaded.into_struct_value();
+                    let raw = self.emit_list_typed_to_string(sv, list_ty)?;
+                    // Same ownership transfer as the struct fallback: take the
+                    // display buffer out of the temporary free list.
+                    self.display_frees.borrow_mut().retain(|p| *p != raw);
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let i64_ty = self.context.i64_type();
+                    let str_ty = self.context.struct_type(
+                        &[
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    );
+                    let alloca = self.build_entry_alloca(str_ty, "to_string_list_str")?;
+                    let ptr_gep = self
+                        .gep()
+                        .build_struct_gep(str_ty, alloca, 0, "to_string_list_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                    self.builder
+                        .build_store(ptr_gep, raw)
+                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    self.register_heap_slot(alloca, str_ty, 0);
+                    let strlen_fn = self
+                        .module
+                        .get_function("strlen")
+                        .ok_or_else(|| "strlen not declared".to_string())?;
+                    let len = self
+                        .builder
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(raw)],
+                            "to_string_list_strlen",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .try_as_basic_value_opt()
+                        .ok_or("to_string list strlen void")?
+                        .into_int_value();
+                    let len_gep = self
+                        .gep()
+                        .build_struct_gep(str_ty, alloca, 1, "to_string_list_str_len")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                    self.builder
+                        .build_store(len_gep, len)
+                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    return self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(str_ty),
+                            alloca,
+                            "to_string_list_str",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("load: {}", e)));
+                }
+                // Unknown stray pointer: keep the old conservative fallback.
                 let alloc_size = self.context.i64_type().const_int(2, false);
                 let buf = self.malloc_or_abort(alloc_size, "malloc_call")?;
                 self.builder
@@ -365,7 +507,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(nul, self.context.i8_type().const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store nul: {}", e)))?;
-                let _ = pv; // suppress unused warning
                 let str_ty = self.context.struct_type(
                     &[
                         BasicTypeEnum::PointerType(

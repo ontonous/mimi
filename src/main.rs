@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 use mimi::diagnostic::format::format_simple_error;
 
+#[path = "main/abi.rs"]
+mod abi;
+#[path = "main/abi_bridge.rs"]
+mod abi_bridge;
 #[path = "main/add.rs"]
 mod add;
 #[path = "main/bindgen.rs"]
@@ -56,6 +60,8 @@ mod tree;
 mod update;
 #[path = "main/verify.rs"]
 mod verify;
+#[path = "main/wire.rs"]
+mod wire;
 
 #[derive(Parser, Debug)]
 #[command(name = "mimi", version = env!("CARGO_PKG_VERSION"), about = "Mimi language driver")]
@@ -356,6 +362,158 @@ enum Command {
         /// Search query
         query: String,
     },
+    /// Export, validate, hash, or diff Component .mimiabi files
+    Abi {
+        #[command(subcommand)]
+        action: AbiAction,
+    },
+    /// Encode or decode Component Wire envelopes
+    Wire {
+        #[command(subcommand)]
+        action: WireAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AbiAction {
+    /// Export the current core runtime Component ABI as .mimiabi JSON
+    Core {
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Validate a .mimiabi JSON file
+    Validate {
+        /// .mimiabi JSON file
+        input: PathBuf,
+    },
+    /// Print the BLAKE3 content hash of a .mimiabi JSON file
+    Hash {
+        /// .mimiabi JSON file
+        input: PathBuf,
+    },
+    /// Compare two .mimiabi JSON files and report breaking changes
+    Diff {
+        /// Baseline .mimiabi JSON file
+        left: PathBuf,
+        /// Candidate .mimiabi JSON file
+        right: PathBuf,
+    },
+    /// Generate a C header from a .mimiabi JSON file
+    EmitC {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate a Rust FFI module from a .mimiabi JSON file
+    EmitRust {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Check a .mimiabi file against the current core runtime ABI
+    Check {
+        /// .mimiabi JSON file to check against the current runtime
+        input: PathBuf,
+    },
+    /// Export a source file's extern/exported functions and core runtime ABI
+    Export {
+        /// .mimi source file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Go bindings from a .mimiabi JSON file
+    EmitGo {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Go package/module name (defaults to file stem)
+        #[arg(long)]
+        module_name: Option<String>,
+    },
+    /// Generate Node.js N-API bindings from a .mimiabi JSON file
+    EmitNode {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// TypeScript declaration output file
+        #[arg(long)]
+        ts_output: Option<PathBuf>,
+        /// Node module name (defaults to file stem)
+        #[arg(long)]
+        module_name: Option<String>,
+    },
+    /// Generate Python bindings from a .mimiabi JSON file
+    EmitPy {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Python module name (defaults to file stem)
+        #[arg(long)]
+        module_name: Option<String>,
+    },
+    /// Generate Java/JNI bindings from a .mimiabi JSON file
+    EmitJava {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Java class output file
+        #[arg(long)]
+        java_output: Option<PathBuf>,
+        /// Java module/package name (defaults to file stem)
+        #[arg(long)]
+        module_name: Option<String>,
+    },
+    /// Generate C++ bindings from a .mimiabi JSON file
+    EmitCpp {
+        /// .mimiabi JSON file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// C++ module name (defaults to file stem)
+        #[arg(long)]
+        module_name: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum WireAction {
+    /// Wrap a raw payload file in a binary Wire envelope
+    Encode {
+        /// Raw payload file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Unwrap a binary Wire envelope to its raw payload
+    Decode {
+        /// Wire envelope file
+        input: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Validate a WireSchema JSON file
+    ValidateSchema {
+        /// Wire schema JSON file
+        input: PathBuf,
+    },
 }
 
 fn main() {
@@ -513,6 +671,8 @@ fn main() {
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),
         Command::Search { query } => search::search(&query),
+        Command::Abi { action } => abi::run(action),
+        Command::Wire { action } => wire::run(action),
     };
     if let Err(e) = result {
         eprintln!("{}", format_simple_error(&e));

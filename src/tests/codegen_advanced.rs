@@ -508,35 +508,14 @@ fn adv_parasteps_basic() {
     );
 }
 
-// ===================== Quote/Comptime Tests =====================
+// ===================== Comptime Tests =====================
 //
-// v0.28.21 — `comptime { ... }` and literal-only `quote! { ... }` blocks
-// are folded to LLVM constants via the interpreter; previously these were
-// rejected at codegen time. The error-message tests below verify that
-// runtime-dependent content (e.g. `comptime { x + 1 }` referencing a
-// runtime `x`) still errors out with a helpful message.
-
-#[test]
-fn adv_quote_runtime_dep_produces_error() {
-    // ABI v1 rejects runtime-dependent quotes because compiled ast_eval only
-    // accepts already-folded evaluator results.
-    let src = r#"
-        func main() -> i64 {
-            let x = 10
-            let ast = quote! { x + 1 }
-            0
-        }
-    "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let err = codegen
-        .compile_file(&file)
-        .expect_err("runtime-dependent quote must be rejected");
-    assert!(err
-        .to_string()
-        .contains("runtime-dependent quote is unsupported by QuotedAst ABI v1"));
-}
+// v0.28.21 — `comptime { ... }` blocks are folded to LLVM constants via the
+// interpreter; previously these were rejected at codegen time. The error-
+// message tests below verify that runtime-dependent content (e.g.
+// `comptime { x + 1 }` referencing a runtime `x`) still errors out with a
+// helpful message. 0.1.7 Phase E removed `quote!` from the language surface;
+// constant folding remains on the `comptime` path.
 
 #[test]
 fn adv_comptime_folds_literally() {
@@ -643,23 +622,5 @@ fn adv_comptime_func_call_works() {
     assert!(
         codegen.compile_file(&file).is_ok(),
         "comptime function should be compilable."
-    );
-}
-
-#[test]
-fn adv_quote_literal_fold_succeeds() {
-    // quote! { 42 } folds to Value::Int(42); no error.
-    let src = r#"
-        func main() -> i64 {
-            let v = ast_eval(quote! { 42 })
-            v
-        }
-    "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    assert!(
-        codegen.compile_file(&file).is_ok(),
-        "literal-only quote should fold ok."
     );
 }

@@ -525,9 +525,11 @@ fn coerce_json_to_type(
                     }
                     _ => Err(InterpError::new(format!("expected list, got {}", val))),
                 }
-            } else if type_str.starts_with("Map<") {
+            } else if let Some(inner) = type_str
+                .strip_prefix("Map<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 // Map<K, V> — parse key and value types, coerce JSON object values.
-                let inner = &type_str[4..type_str.len() - 1]; // strip "Map<" and ">"
                 let parts = split_type_args(inner);
                 if parts.len() == 2 {
                     let val_type = &parts[1];
@@ -558,9 +560,11 @@ fn coerce_json_to_type(
                         Ok(Value::Variant("Some".into(), vec![inner_val]))
                     }
                 }
-            } else if type_str.starts_with("Result<") {
+            } else if let Some(inner) = type_str
+                .strip_prefix("Result<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 // Parse Result<T, E>
-                let inner = &type_str[7..type_str.len() - 1]; // strip "Result<" and ">"
                 let parts = split_type_args(inner);
                 if parts.len() == 2 {
                     let (ok_type, err_type) = (&parts[0], &parts[1]);
@@ -694,7 +698,7 @@ fn coerce_json_to_type(
 /// Split top-level type arguments by comma, respecting nested < > and ( ).
 fn split_type_args(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
-    let mut depth = 0;
+    let mut depth = 0usize;
     let mut current = String::new();
     for ch in s.chars() {
         match ch {
@@ -703,7 +707,8 @@ fn split_type_args(s: &str) -> Vec<String> {
                 current.push(ch);
             }
             '>' | ')' => {
-                depth -= 1;
+                // Avoid usize underflow on malformed input (batch2 P2-6).
+                depth = depth.saturating_sub(1);
                 current.push(ch);
             }
             ',' if depth == 0 => {
@@ -1254,13 +1259,26 @@ fn builtin_file_stat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
 
 fn builtin_read_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(path) => match std::fs::read(path.as_str()) {
-            Ok(bytes) => {
-                let s = String::from_utf8_lossy(&bytes).to_string();
-                Ok(Value::String(Arc::new(s)))
+        Value::String(path) => {
+            // Align with runtime MAX_FILE_READ_BYTES (256 MiB) so huge files
+            // fail loudly instead of being fully buffered (batch2 P2-9).
+            const MAX_FILE_READ_BYTES: u64 = 256 * 1024 * 1024;
+            if let Ok(meta) = std::fs::metadata(path.as_str()) {
+                if meta.len() > MAX_FILE_READ_BYTES {
+                    return Err(InterpError::new(format!(
+                        "read_file_bytes: file too large ({} bytes)",
+                        meta.len()
+                    )));
+                }
             }
-            Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
-        },
+            match std::fs::read(path.as_str()) {
+                Ok(bytes) => {
+                    let s = String::from_utf8_lossy(&bytes).to_string();
+                    Ok(Value::String(Arc::new(s)))
+                }
+                Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
+            }
+        }
         _ => Err(InterpError::new("read_file_bytes expects a string path")),
     }
 }
@@ -1268,10 +1286,12 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
 fn builtin_write_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(data)) => {
-            match std::fs::write(path.as_str(), data.as_bytes()) {
-                Ok(()) => Ok(Value::Bool(true)),
-                Err(e) => Err(InterpError::new(format!("write_file_bytes: {}", e))),
-            }
+            // Match the codegen contract: a failed write is a normal
+            // `false`, not a trap. Callers can handle the failure with an
+            // `if` instead of being aborted.
+            Ok(Value::Bool(
+                std::fs::write(path.as_str(), data.as_bytes()).is_ok(),
+            ))
         }
         _ => Err(InterpError::new(
             "write_file_bytes expects (string, string)",
@@ -1420,7 +1440,7 @@ fn builtin_shadow_alloc(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         _ => return Err(InterpError::new("shadow_alloc: label must be string")),
     };
     let c_label = std::ffi::CString::new(label.as_str()).unwrap_or_default();
-    let ptr = crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr());
+    let ptr = unsafe { crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr()) };
     Ok(Value::Int(ptr as i64))
 }
 
@@ -1433,7 +1453,9 @@ fn builtin_shadow_tag(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
         Value::Int(n) => *n as u8,
         _ => return Err(InterpError::new("shadow_tag: tag must be int")),
     };
-    Ok(Value::Int(crate::runtime::mimi_shadow_tag(ptr, tag) as i64))
+    Ok(Value::Int(
+        unsafe { crate::runtime::mimi_shadow_tag(ptr, tag) } as i64,
+    ))
 }
 
 fn builtin_shadow_check(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -1446,7 +1468,7 @@ fn builtin_shadow_check(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         _ => return Err(InterpError::new("shadow_check: tag must be int")),
     };
     Ok(Value::Bool(
-        crate::runtime::mimi_shadow_check(ptr, tag) == 1,
+        unsafe { crate::runtime::mimi_shadow_check(ptr, tag) } == 1,
     ))
 }
 
@@ -1455,7 +1477,7 @@ fn builtin_shadow_free(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
         Value::Int(n) => *n as *mut u8,
         _ => return Err(InterpError::new("shadow_free: ptr must be int")),
     };
-    crate::runtime::mimi_shadow_free(ptr);
+    unsafe { crate::runtime::mimi_shadow_free(ptr) };
     Ok(Value::Unit)
 }
 
@@ -1500,7 +1522,7 @@ fn builtin_lexer(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
         .ok_or_else(|| InterpError::new("lexer expects a string source"))?;
     let c_source = std::ffi::CString::new(source)
         .map_err(|_| InterpError::new("lexer: source contains null bytes"))?;
-    let result_ptr = crate::runtime::mimi_lexer_tokenize(c_source.as_ptr());
+    let result_ptr = unsafe { crate::runtime::mimi_lexer_tokenize(c_source.as_ptr()) };
     if result_ptr.is_null() {
         return Ok(Value::String(Arc::new("[]".to_string())));
     }
@@ -1517,7 +1539,7 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         .ok_or_else(|| InterpError::new("parse expects a string source"))?;
     let c_source = std::ffi::CString::new(source)
         .map_err(|_| InterpError::new("parse: source contains null bytes"))?;
-    let result_ptr = crate::runtime::mimi_parse_source(c_source.as_ptr());
+    let result_ptr = unsafe { crate::runtime::mimi_parse_source(c_source.as_ptr()) };
     if result_ptr.is_null() {
         return Ok(Value::String(Arc::new(
             r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string(),

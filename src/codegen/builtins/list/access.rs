@@ -99,6 +99,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
             BasicMetadataValueEnum::StructValue(sv) => sv.into(),
             BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+            BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "contains: unsupported element type".to_string(),
@@ -206,9 +207,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_int_compare(inkwell::IntPredicate::EQ, a, b_i64, "eq")
                         .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
                 }
+                (BasicValueEnum::IntValue(a), BasicMetadataValueEnum::FloatValue(b)) => {
+                    // List<f64> slots are stored as i64 bit patterns; decode
+                    // the loaded slot to f64 and compare numerically (VM uses
+                    // `==` semantics: -0.0 == 0.0, NaN != anything).
+                    let a_f64 = self
+                        .build_bit_cast(
+                            BasicValueEnum::IntValue(a),
+                            BasicTypeEnum::FloatType(self.context.f64_type()),
+                            "contains_elem_f64",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                        .into_float_value();
+                    self.builder
+                        .build_float_compare(inkwell::FloatPredicate::OEQ, a_f64, b, "f64_eq")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                }
                 _ => {
                     return Err(CompileError::TypeMismatch(
-                        "contains: element comparison only supports i64 for now".to_string(),
+                        "contains: element comparison only supports i64/f64 strings for now"
+                            .to_string(),
                     ))
                 }
             }

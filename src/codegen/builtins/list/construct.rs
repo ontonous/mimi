@@ -65,12 +65,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_select(is_neg, zero, raw_len, "range_len_clamped")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
-        // Allocate array: len * sizeof(i64)
-        let sizeof_i64 = self.list_elem_size();
-        let alloc_size = self
-            .builder
-            .build_int_mul(len_val, sizeof_i64, "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        // Allocate array
+        let alloc_size = self.checked_list_alloc_size(len_val, 8, "range")?;
         // B4: use malloc_or_abort for NULL check.
         let data_ptr = self.malloc_or_abort(alloc_size, "list_data")?;
         let data_ptr_i64 = self

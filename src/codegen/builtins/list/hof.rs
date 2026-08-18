@@ -273,7 +273,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let list_ptr = self.require_list_pointer(args[0], "flatten")?;
         let i64_ty = self.context.i64_type();
-        let list_struct_ty = self.list_struct_type();
         let outer_len = self.load_list_len(list_ptr)?;
         let data_i8 = self.load_list_data_raw(list_ptr)?;
         let data_ptr = self
@@ -329,11 +328,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(cmp, count_body_bb, count_done_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(count_body_bb);
-        let inner_list_ptr = {
-            self.gep()
-                .build_in_bounds_gep(list_struct_ty, data_ptr, &[idx], "inner_list")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        // List-of-list elements are stored as i64 pointers to heap-allocated
+        // `{i64 len, i8* data}` structs (see struct_to_i64/push deep-copy).
+        // Loading the slot as a struct would read pointer bits as len.
+        let inner_slot = self
+            .gep()
+            .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "inner_slot")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let inner_handle = self
+            .builder
+            .build_load(i64_ty, inner_slot, "inner_handle")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let inner_list_ptr = self.build_int_to_ptr(
+            inner_handle,
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            "inner_list_ptr",
+        )?;
         let inner_len = self.load_list_len(inner_list_ptr)?;
         let total = self
             .builder
@@ -364,11 +375,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         // Allocate new array
-        let sizeof_i64 = self.list_elem_size();
-        let alloc_size = self
-            .builder
-            .build_int_mul(total_len, sizeof_i64, "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(total_len, 8, "flatten")?;
         let new_data = self.malloc_or_abort(alloc_size, "malloc_call")?;
         let new_data_i64 = self
             .builder
@@ -392,6 +399,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_inner_body_bb = self
             .context
             .append_basic_block(function, "flatten_copy_inner_body");
+        let copy_outer_inc_bb = self
+            .context
+            .append_basic_block(function, "flatten_copy_outer_inc");
         let copy_done_bb = self
             .context
             .append_basic_block(function, "flatten_copy_done");
@@ -435,11 +445,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(outer_cmp, copy_outer_body_bb, copy_done_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(copy_outer_body_bb);
-        let inner_list_ptr = {
-            self.gep()
-                .build_in_bounds_gep(list_struct_ty, data_ptr, &[outer_idx], "inner_list")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let inner_slot = self
+            .gep()
+            .build_in_bounds_gep(i64_ty, data_ptr, &[outer_idx], "inner_copy_slot")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let inner_handle = self
+            .builder
+            .build_load(i64_ty, inner_slot, "inner_copy_handle")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let inner_list_ptr = self.build_int_to_ptr(
+            inner_handle,
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            "inner_copy_list_ptr",
+        )?;
         let inner_len = self.load_list_len(inner_list_ptr)?;
         let inner_data_ptr = self.load_list_data_i64(inner_list_ptr)?;
         self.builder
@@ -464,7 +483,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         self.builder
-            .build_conditional_branch(inner_cmp, copy_inner_body_bb, copy_outer_bb)
+            .build_conditional_branch(inner_cmp, copy_inner_body_bb, copy_outer_inc_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(copy_inner_body_bb);
         let src_ptr = {
@@ -507,8 +526,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_unconditional_branch(copy_inner_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // After inner loop: increment outer_idx and continue
-        self.builder.position_at_end(copy_outer_bb);
+        // After inner loop: increment outer_idx in a dedicated block, then
+        // loop back to the outer condition. Never append instructions to
+        // copy_outer_bb, which already ends with a conditional branch.
+        self.builder.position_at_end(copy_outer_inc_bb);
         let next_outer = self
             .builder
             .build_int_add(outer_idx, i64_ty.const_int(1, false), "next_outer")
@@ -516,6 +537,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(outer_idx_alloca, next_outer)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(copy_outer_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(copy_done_bb);
         // Build result list struct
         let result_alloca = self.alloc_list_result(total_len, new_data)?;
@@ -541,10 +565,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // pointers, see emit_list_product_tuple_to_string) and the push builtin's
         // struct-copy path — raw 16-byte inline pairs made enumerate display
         // segfault (formatter dereferenced the first slot as a pointer).
-        let alloc_size = self
-            .builder
-            .build_int_mul(list_len, i64_ty.const_int(8, false), "enum_alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(list_len, 8, "enumerate")?;
         let result_data = self.malloc_or_abort(alloc_size, "enum_malloc")?;
         let result_data_i64 = self
             .builder
@@ -672,10 +693,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // path. The previous raw 16-byte inline pairs made zip display print
         // empty (formatter read the pair's first slot as a pointer into the
         // second slot's integer bits).
-        let alloc_size = self
-            .builder
-            .build_int_mul(min_len, i64_ty.const_int(8, false), "zip_alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+        let alloc_size = self.checked_list_alloc_size(min_len, 8, "zip")?;
         let result_data = self.malloc_or_abort(alloc_size, "zip_malloc")?;
         let result_data_i64 = self
             .builder

@@ -161,8 +161,13 @@ pub extern "C" fn mimi_quote_new_leaf(tag: i32, value: i64) -> *mut MimiQuotedAs
 /// Allocate a binary / unary / index / field-style node with up to two
 /// children. The children pointers are themselves returned by
 /// `mimi_quote_new_*` and ownership transfers to the new parent.
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_new_node(
+pub unsafe extern "C" fn mimi_quote_new_node(
     tag: i32,
     child0: *mut MimiQuotedAst,
     child1: *mut MimiQuotedAst,
@@ -187,8 +192,13 @@ pub extern "C" fn mimi_quote_new_node(
 /// Tuple, List, Block, Record, etc.). The children are stored in a
 /// `Vec<*mut MimiQuotedAst>` allocated separately so we can store a
 /// thin pointer in `data0` (length tracked in `data2`).
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_new_list(
+pub unsafe extern "C" fn mimi_quote_new_list(
     tag: i32,
     children: *const *mut MimiQuotedAst,
     len: i64,
@@ -218,6 +228,12 @@ pub extern "C" fn mimi_quote_new_list(
             return std::ptr::null_mut();
         }
     };
+    if children.is_null() && len > 0 {
+        // A non-zero child count with no children array cannot be represented
+        // safely: mimi_quote_list_child would index an empty Vec while argc
+        // claims it has children. Reject instead of creating a corrupt node.
+        return std::ptr::null_mut();
+    }
     // SAFETY: caller guarantees `children` points to `len` valid
     // `*mut MimiQuotedAst` pointers, each owned by the new node.
     let vec: Vec<*mut MimiQuotedAst> = if children.is_null() || len == 0 {
@@ -246,8 +262,13 @@ pub extern "C" fn mimi_quote_new_list(
 /// Audit fix (quote.rs unbounded recursion): implemented iteratively with an
 /// explicit heap work stack instead of recursion — a deeply nested quote
 /// tree (one child per node) used to overflow the stack here.
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
+pub unsafe extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
     // Explicit work stack: nodes whose children still need processing.
     let mut work: Vec<*mut MimiQuotedAst> = Vec::new();
     if quote_take_live(node) {
@@ -298,40 +319,73 @@ pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
 
 /// Read the tag back. Useful for runtime dispatch (e.g. in `ast_eval`
 /// when written to interpret the runtime node).
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_tag(node: *mut MimiQuotedAst) -> i32 {
+pub unsafe extern "C" fn mimi_quote_tag(node: *mut MimiQuotedAst) -> i32 {
     quote_read(node, -1, |node| node.tag)
 }
 
 /// Read `data0` (literal value or first child pointer). Callers that
 /// want a child pointer can cast the result to `*mut MimiQuotedAst`.
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_data0(node: *mut MimiQuotedAst) -> i64 {
+pub unsafe extern "C" fn mimi_quote_data0(node: *mut MimiQuotedAst) -> i64 {
     quote_read(node, 0, |node| node.data0)
 }
 
 /// Read `data1`.
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_data1(node: *mut MimiQuotedAst) -> i64 {
+pub unsafe extern "C" fn mimi_quote_data1(node: *mut MimiQuotedAst) -> i64 {
     quote_read(node, 0, |node| node.data1)
 }
 
 /// Read `data2`.
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_data2(node: *mut MimiQuotedAst) -> i64 {
+pub unsafe extern "C" fn mimi_quote_data2(node: *mut MimiQuotedAst) -> i64 {
     quote_read(node, 0, |node| node.data2)
 }
 
 /// Read `argc` (number of children).
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_argc(node: *mut MimiQuotedAst) -> i32 {
+pub unsafe extern "C" fn mimi_quote_argc(node: *mut MimiQuotedAst) -> i32 {
     quote_read(node, 0, |node| node.argc)
 }
 
 /// Read child at index `i` from a list-style node. Returns null on
 /// out-of-range or if the node isn't list-style.
+///
+/// # Safety
+/// Node/children pointers must be null or come from `mimi_quote_new_*`
+/// and must not be used after `mimi_quote_drop` unless the registry
+/// contract says otherwise (dropped handles are rejected).
 #[no_mangle]
-pub extern "C" fn mimi_quote_list_child(node: *mut MimiQuotedAst, i: i64) -> *mut MimiQuotedAst {
+pub unsafe extern "C" fn mimi_quote_list_child(
+    node: *mut MimiQuotedAst,
+    i: i64,
+) -> *mut MimiQuotedAst {
     quote_read(node, std::ptr::null_mut(), |node| unsafe {
         if node.argc <= 2 {
             return std::ptr::null_mut();
@@ -347,6 +401,9 @@ pub extern "C" fn mimi_quote_list_child(node: *mut MimiQuotedAst, i: i64) -> *mu
         }
         // SAFETY: `arr_ptr` is a valid `Vec` created by `mimi_quote_new_list`.
         let vec = &*arr_ptr;
+        if idx >= vec.len() {
+            return std::ptr::null_mut();
+        }
         (*vec)[idx]
     })
 }

@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
@@ -253,23 +254,40 @@ fn builtin_listdir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
 /// backends agree.
 fn builtin_walk_dir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
-    fn walk_recursive(dir: &std::path::Path, out: &mut Vec<String>) {
-        let rd = match std::fs::read_dir(dir) {
+    // Iterative DFS with depth/result caps and symlink-cycle detection,
+    // mirroring the runtime walk_dir implementation (batch2 P2-3).
+    const MAX_DEPTH: usize = 64;
+    const MAX_RESULTS: usize = 1_000_000;
+    let mut result: Vec<String> = Vec::new();
+    let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut stack = vec![(std::path::PathBuf::from(&path), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !visited.insert(canonical) {
+            continue;
+        }
+        let rd = match std::fs::read_dir(&dir) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(_) => continue,
         };
         for entry in rd.flatten() {
-            let path = entry.path();
-            let path_str = path.to_string_lossy().to_string();
-            if path.is_dir() {
-                walk_recursive(&path, out);
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push((entry_path, depth + 1));
             } else {
-                out.push(path_str);
+                result.push(entry_path.to_string_lossy().to_string());
+                if result.len() >= MAX_RESULTS {
+                    break;
+                }
             }
         }
+        if result.len() >= MAX_RESULTS {
+            break;
+        }
     }
-    let mut result = Vec::new();
-    walk_recursive(std::path::Path::new(&path), &mut result);
     Ok(Value::List(Arc::new(
         result
             .into_iter()

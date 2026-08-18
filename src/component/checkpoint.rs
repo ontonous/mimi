@@ -198,8 +198,10 @@ pub fn probe_layout(abi: &MimiAbi) -> Vec<LayoutFault> {
                     } else if let Some(fsize) = field_size {
                         // Audit 2026-08-05: offset < size alone does not
                         // catch a field that starts inside the struct but
-                        // extends past its tail.
-                        if offset + fsize > *size {
+                        // extends past its tail. Use checked_add so an
+                        // adversarial huge offset/size cannot overflow and
+                        // bypass the check (batch4-09 P2-2).
+                        if offset.checked_add(fsize).map_or(true, |end| end > *size) {
                             faults.push(LayoutFault::FieldOverflowsStruct {
                                 struct_name: name.clone(),
                                 field: field.name.clone(),

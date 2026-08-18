@@ -527,29 +527,6 @@ fn callable_catalog_atomically_owns_body_cfg_and_resources() {
 }
 
 #[test]
-fn resolved_protocol_topology_is_indexed() {
-    let file = parse(
-        r#"
-protocol Sensor {
-    state Idle
-    state Active
-    transition start(Idle) -> Active
-    transition stop(Active) -> Idle
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    let protocol = program.protocol("Sensor").expect("Sensor");
-    assert!(protocol.states.iter().any(|s| s == "Idle"));
-    assert!(protocol.states.iter().any(|s| s == "Active"));
-    assert!(protocol
-        .transitions
-        .iter()
-        .any(|(name, from, to)| name == "start" && from == "Idle" && to.as_slice() == ["Active"]));
-}
-
-#[test]
 fn resolved_actor_fields_and_methods_are_indexed() {
     let file = parse(
         r#"
@@ -625,14 +602,9 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn interpreter_from_checked_installs_session_and_protocol_directories() {
+fn interpreter_from_checked_installs_session_directories() {
     let file = parse(
         r#"
-protocol Sensor {
-    state Idle
-    state Active
-    transition start(Idle) -> Active
-}
 session Ping = !i32 . end
 func main() -> i32 { 0 }
 "#,
@@ -640,8 +612,6 @@ func main() -> i32 { 0 }
     let program = crate::core::check_program(&file).expect("check");
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert!(interp.has_resolved_session("Ping"));
-    assert!(interp.has_resolved_protocol("Sensor"));
-    assert!(!interp.has_resolved_protocol("Missing"));
 }
 
 #[test]
@@ -1136,56 +1106,6 @@ func main() -> i32 { 0 }
     codegen.compile_checked(&simple_program).expect("compile");
     assert!(codegen.resolved_node_meta_count().is_some_and(|n| n > 0));
     assert!(!codegen.requires_resolved_capability("flow.multi_target"));
-}
-
-#[test]
-fn resolved_flow_records_impl_protocols() {
-    let file = parse(
-        r#"
-protocol Sensor {
-    state Idle
-    transition tick(Idle) -> Idle
-}
-flow Lidar {
-    impl Sensor
-    state Idle
-    transition tick(Idle) -> Idle { return Idle {} }
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    let flow = program.flow("Lidar").expect("Lidar");
-    assert!(flow.impl_protocols.iter().any(|p| p == "Sensor"));
-}
-
-#[test]
-fn consumers_install_flow_impl_protocol_directories() {
-    let file = parse(
-        r#"
-protocol Sensor {
-    state Idle
-    transition tick(Idle) -> Idle
-}
-flow Lidar {
-    impl Sensor
-    state Idle
-    transition tick(Idle) -> Idle { return Idle {} }
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    let interp = crate::interp::Interpreter::from_checked(&program);
-    let protocols = interp
-        .resolved_flow_protocols("Lidar")
-        .expect("Lidar protocols");
-    assert!(protocols.iter().any(|p| p == "Sensor"));
-    let mut verifier = crate::verifier::Verifier::new().expect("z3");
-    let _ = verifier.verify_checked(&program);
-    assert!(verifier
-        .checked_flow_protocols("Lidar")
-        .is_some_and(|p| p.iter().any(|n| n == "Sensor")));
 }
 
 #[test]
@@ -1692,86 +1612,6 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn protocol_payloads_and_transition_records_are_materialised() {
-    let file = parse(
-        r#"
-protocol Sensor {
-    state Idle
-    state Active { data: i32 }
-    transition start(Idle) -> Active
-    transition stop(Active) -> Idle
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    let active = program
-        .protocol_state_payload("Sensor", "Active")
-        .expect("Active");
-    assert_eq!(active.payload_type.as_deref(), Some("i32"));
-    let records = program
-        .protocol_transition_records("Sensor")
-        .expect("records");
-    assert!(records
-        .iter()
-        .any(|t| t.event == "start" && t.from_state == "Idle"));
-    assert!(records
-        .iter()
-        .any(|t| t.event == "stop" && t.from_state == "Active"));
-    let interp = crate::interp::Interpreter::from_checked(&program);
-    assert_eq!(
-        interp
-            .resolved_protocol_payload("Sensor", "Active")
-            .as_deref(),
-        Some("i32")
-    );
-    assert_eq!(
-        interp.resolved_protocol_state_payload("Sensor", "Active"),
-        Some(("data".into(), "i32".into()))
-    );
-    assert_eq!(
-        interp.resolved_protocol_states("Sensor"),
-        Some(vec!["Active".into(), "Idle".into()])
-    );
-    assert!(interp
-        .resolved_protocol_transitions("Sensor")
-        .is_some_and(|trs| trs.iter().any(|(e, f, _)| e == "start" && f == "Idle")));
-    let mut verifier = crate::verifier::Verifier::new().expect("z3");
-    let _ = verifier.verify_checked(&program);
-    assert_eq!(
-        verifier
-            .checked_protocol_payload("Sensor", "Active")
-            .as_deref(),
-        Some("i32")
-    );
-    assert_eq!(
-        verifier.checked_protocol_state_payload("Sensor", "Active"),
-        Some(("data".into(), "i32".into()))
-    );
-    assert_eq!(
-        verifier.checked_protocol_states("Sensor"),
-        Some(vec!["Active".into(), "Idle".into()])
-    );
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "proto");
-    codegen.compile_checked(&program).expect("compile");
-    assert_eq!(
-        codegen
-            .resolved_protocol_payload("Sensor", "Active")
-            .as_deref(),
-        Some("i32")
-    );
-    assert_eq!(
-        codegen.resolved_protocol_state_payload("Sensor", "Active"),
-        Some(("data".into(), "i32".into()))
-    );
-    assert_eq!(
-        codegen.resolved_protocol_states("Sensor"),
-        Some(vec!["Active".into(), "Idle".into()])
-    );
-}
-
-#[test]
 fn session_body_display_is_materialised() {
     let file = parse(
         r#"
@@ -2117,10 +1957,6 @@ fn codegen_compile_checked_installs_directories() {
     let file = parse(
         r#"
 cap Io
-protocol Sensor {
-    state Idle
-    transition start(Idle) -> Idle
-}
 session Ping = !i32 . end
 actor A { func f() -> i32 { 0 } }
 const N: i32 = 1
@@ -2133,7 +1969,6 @@ func main() -> i32 { N }
     codegen.compile_checked(&program).expect("compile_checked");
     // Public API is limited; compile success with populated CheckedProgram is the gate.
     assert!(program.capability("Io").is_some());
-    assert!(program.protocol("Sensor").is_some());
     assert!(program.session("Ping").is_some());
     assert!(program.actor("A").is_some());
     assert!(program.constant("N").is_some());
@@ -2147,10 +1982,6 @@ flow Door {
     state Closed
     state Open
     transition open(Closed) -> Open { return Open {} }
-}
-protocol Sensor {
-    state Idle
-    transition tick(Idle) -> Idle
 }
 trait Close { func close() -> i32 }
 actor Sink { func ping() -> i32 { 0 } }
@@ -2172,7 +2003,6 @@ func main() -> i32 { abs(1) }
     assert!(verifier.has_checked_transition("Door", "open", "Closed"));
     assert!(verifier.has_checked_session("Ping"));
     assert!(!verifier.has_checked_transition("Door", "close", "Closed"));
-    assert!(verifier.has_checked_protocol("Sensor"));
     assert!(verifier.has_checked_trait("Close"));
     assert!(verifier.has_checked_actor("Sink"));
 }
@@ -2234,9 +2064,6 @@ fn resolved_item_directory_records_declaration_spans() {
 actor Worker {
     func run() -> i32 { 0 }
 }
-protocol Service {
-    state Ready
-}
 session Request = !i32 . end
 func main() -> i32 { 0 }
 "#,
@@ -2244,9 +2071,8 @@ func main() -> i32 { 0 }
     let program = crate::core::check_program(&file).expect("check");
     for (node_id, line) in [
         ("actor:Worker", 2),
-        ("protocol:Service", 5),
-        ("session:Request", 8),
-        ("function:main", 9),
+        ("session:Request", 5),
+        ("function:main", 6),
     ] {
         let item = program
             .items()
@@ -2254,7 +2080,7 @@ func main() -> i32 { 0 }
             .unwrap_or_else(|| panic!("missing {node_id}"));
         assert_eq!(item.origin.user_span().start_line, line);
     }
-    assert_eq!(program.entry_span().expect("entry span").start_line, 9);
+    assert_eq!(program.entry_span().expect("entry span").start_line, 6);
 }
 
 #[test]
@@ -2561,7 +2387,6 @@ fn checked_diagnostics_never_use_zero_sentinel_spans() {
     for source in [
         "func broken(x: Missing) -> i32 { 0 }",
         "actor Worker { value: Missing }",
-        "protocol P { state A { value: Missing } }",
         "session S = Missing",
         "flow F { state A { value: Missing } }",
     ] {
@@ -3008,7 +2833,7 @@ func main() -> i32 { top() }
 }
 
 #[test]
-fn declaration_type_protocol_session_extern_and_flow_catalog_is_complete_and_reorder_stable() {
+fn declaration_type_session_extern_and_flow_catalog_is_complete_and_reorder_stable() {
     let source = r#"
 type Pair<T: Clone, U: Eq> { left: Result<T, string>, right: List<U> }
 type Choice { Some(i32), Empty }
@@ -3016,12 +2841,6 @@ trait Show<T> { func show(value: T, flags: i32) -> string; }
 extern "C" {
     func add(left: i32, right: i32) -> i32;
     func sub(left: i32, right: i32) -> i32;
-}
-protocol Sensor<T> {
-    state Idle
-    state Active { data: T }
-    transition start(Idle) -> Active
-    transition stop(Active) -> Idle
 }
 session Ping = !Result<i32, string> . ?List<i32> . end
 session Pong = dual(Ping)
@@ -3072,11 +2891,6 @@ func catalog<T: Clone, U: Eq>(first: Pair<T, U>, second: Pair<T, U>) -> i32 wher
                 for function in &mut block.funcs {
                     function.params.reverse();
                 }
-            }
-            Item::Protocol(protocol) => {
-                protocol.generics.reverse();
-                protocol.states.reverse();
-                protocol.transitions.reverse();
             }
             Item::Flow(flow) => {
                 flow.generics.reverse();
@@ -3137,7 +2951,6 @@ func catalog<T: Clone, U: Eq>(first: Pair<T, U>, second: Pair<T, U>) -> i32 wher
         "type:Choice",
         "trait:Show",
         "extern:C:add+sub",
-        "protocol:Sensor",
         "session:Ping",
         "session:Pong",
         "flow:Worker",
@@ -3173,12 +2986,6 @@ func catalog<T: Clone, U: Eq>(first: Pair<T, U>, second: Pair<T, U>) -> i32 wher
             "missing NodeMeta kind {kind}"
         );
     }
-    assert!(ids
-        .iter()
-        .any(|node_id| node_id.starts_with("protocol:Sensor/state:")));
-    assert!(ids
-        .iter()
-        .any(|node_id| node_id.starts_with("protocol:Sensor/transition:")));
     assert!(ids
         .iter()
         .any(|node_id| node_id.starts_with("extern:C:add+sub/function:")));

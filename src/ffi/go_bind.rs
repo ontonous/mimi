@@ -70,6 +70,8 @@ impl GoBindGenerator {
         // only import "sync" when callbacks exist (unused imports break Go).
         if has_callbacks {
             writeln!(out, "import \"sync\"")?;
+            writeln!(out, "import \"fmt\"")?;
+            writeln!(out, "import \"os\"")?;
         }
         writeln!(out, "import \"unsafe\"")?;
         writeln!(out)?;
@@ -263,12 +265,37 @@ impl GoBindGenerator {
             writeln!(out, "\tif cb == nil {{")?;
             writeln!(out, "\t\treturn")?;
             writeln!(out, "\t}}")?;
+            writeln!(out, "\tdefer func() {{")?;
+            writeln!(out, "\t\tif r := recover(); r != nil {{")?;
+            writeln!(
+                out,
+                "\t\t\tfmt.Fprintln(os.Stderr, \"mimi: Go callback panic: \", r)"
+            )?;
+            writeln!(out, "\t\t}}")?;
+            writeln!(out, "\t}}()")?;
             writeln!(out, "\t{}", call)?;
         } else {
+            let default_ret = self.go_callback_default_ret(ret_type);
             writeln!(out, "\tif cb == nil {{")?;
-            writeln!(out, "\t\treturn {}", self.go_callback_default_ret(ret_type))?;
+            writeln!(out, "\t\treturn {}", default_ret)?;
             writeln!(out, "\t}}")?;
-            writeln!(out, "\treturn {}({})", self.go_cast_to_c(ret_type), call)?;
+            writeln!(out, "\tvar mimi_cb_ret {}", self.go_cgo_ret_type(ret_type))?;
+            writeln!(out, "\tdefer func() {{")?;
+            writeln!(out, "\t\tif r := recover(); r != nil {{")?;
+            writeln!(
+                out,
+                "\t\t\tfmt.Fprintln(os.Stderr, \"mimi: Go callback panic: \", r)"
+            )?;
+            writeln!(out, "\t\t\tmimi_cb_ret = {}", default_ret)?;
+            writeln!(out, "\t\t}}")?;
+            writeln!(out, "\t}}()")?;
+            writeln!(
+                out,
+                "\tmimi_cb_ret = {}({})",
+                self.go_cast_to_c(ret_type),
+                call
+            )?;
+            writeln!(out, "\treturn mimi_cb_ret")?;
         }
         writeln!(out, "}}")?;
         writeln!(out)?;

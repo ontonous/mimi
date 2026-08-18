@@ -55,7 +55,6 @@ impl Parser {
                 meta: const_meta, ..
             } => *const_meta = meta,
             Item::Flow(def) => def.meta = meta,
-            Item::Protocol(def) => def.meta = meta,
             Item::Session(def) => def.meta = meta,
         }
         Ok(item)
@@ -259,7 +258,6 @@ impl Parser {
                 f.pub_ = pub_;
                 Ok(Item::Flow(f))
             }
-            TokenKind::Protocol => Ok(Item::Protocol(self.parse_protocol_def()?)),
             TokenKind::Session => {
                 let mut s = self.parse_session_def()?;
                 s.pub_ = pub_;
@@ -314,6 +312,14 @@ impl Parser {
                 )?))
             }
             _ => {
+                if self.at_ident_name("protocol") {
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        "`protocol` declarations have been removed in 0.1.7 Phase E; use Flow state/transitions or host-language contracts",
+                        tok.line,
+                        tok.col,
+                    ));
+                }
                 let tok = self.peek();
                 Err(ParseError::new(
                     format!("unexpected token {} at top level", tok.kind),
@@ -1069,7 +1075,6 @@ impl Parser {
         self.expect(TokenKind::LBrace, "`{`")?;
         let mut states = Vec::new();
         let mut transitions = Vec::new();
-        let mut impl_protocols = Vec::new();
         let mut persistent_fields = Vec::new();
         let mut fault_type: Option<crate::ast::Type> = None;
         self.skip_newlines();
@@ -1078,13 +1083,16 @@ impl Parser {
             if self.at(&TokenKind::RBrace) {
                 break;
             }
-            // Check for `impl ProtocolName`
+            // 0.1.7 Phase E: `impl ProtocolName` inside a Flow was only a
+            // checker-only static projection surface. The surface has been
+            // removed; `impl` at this position is now a parse error.
             if self.at(&TokenKind::Impl) {
-                self.advance();
-                let proto = self.expect_ident()?;
-                self.match_semi();
-                impl_protocols.push(proto);
-                continue;
+                let tok = self.peek();
+                return Err(ParseError::new(
+                    "`impl Protocol` inside a Flow has been removed in 0.1.7 Phase E",
+                    tok.line,
+                    tok.col,
+                ));
             }
             // 0.36.53 (Phase D soft-keyword policy): `fault` is no longer a
             // global keyword. Inside a flow body the identifier `fault` is
@@ -1297,7 +1305,6 @@ impl Parser {
             annotations,
             states,
             transitions,
-            impl_protocols,
             persistent_fields,
             fault_type,
         })
@@ -1449,87 +1456,6 @@ impl Parser {
             body,
             is_fallback: false,
             is_ffi_pinned: false,
-        })
-    }
-
-    fn parse_protocol_def(&mut self) -> Result<ProtocolDef, ParseError> {
-        let start_pos = self.pos;
-        self.expect_keyword(TokenKind::Protocol)?;
-        let name = self.expect_ident()?;
-        let generics = self.parse_generic_params()?;
-        self.skip_newlines();
-        self.expect(TokenKind::LBrace, "`{`")?;
-        let mut states = Vec::new();
-        let mut transitions = Vec::new();
-        self.skip_newlines();
-        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
-            self.skip_newlines();
-            if self.at(&TokenKind::RBrace) {
-                break;
-            }
-            match self.peek_kind() {
-                TokenKind::State => {
-                    let state_start = self.pos;
-                    self.advance();
-                    let name = self.expect_ident()?;
-                    let (payload_name, payload_type) = if self.at(&TokenKind::LBrace) {
-                        self.advance();
-                        // Parse single payload type: { data: f32 }
-                        let field_name = self.expect_ident()?;
-                        self.expect(TokenKind::Colon, "`:`")?;
-                        let fty = self.parse_type()?;
-                        self.expect(TokenKind::RBrace, "`}`")?;
-                        (Some(field_name), Some(fty))
-                    } else {
-                        (None, None)
-                    };
-                    self.match_semi();
-                    states.push(ProtocolStateDef {
-                        meta: self.consumed_meta(state_start, AstOrigin::User),
-                        name,
-                        payload_name,
-                        payload_type,
-                    });
-                }
-                TokenKind::Transition => {
-                    let transition_start = self.pos;
-                    self.advance();
-                    let tname = self.expect_ident()?;
-                    self.expect(TokenKind::LParen, "`(`")?;
-                    let from_state = self.expect_ident()?;
-                    self.expect(TokenKind::RParen, "`)`")?;
-                    self.skip_newlines();
-                    self.expect(TokenKind::Arrow, "`->`")?;
-                    let to_state = self.expect_ident()?;
-                    self.match_semi();
-                    transitions.push(ProtocolTransitionDef {
-                        meta: self.consumed_meta(transition_start, AstOrigin::User),
-                        name: tname,
-                        from_state,
-                        to_state,
-                    });
-                }
-                _ => {
-                    let tok = self.peek();
-                    return Err(ParseError::new(
-                        format!(
-                            "expected `state` or `transition` in protocol body, found {}",
-                            tok.kind
-                        ),
-                        tok.line,
-                        tok.col,
-                    ));
-                }
-            }
-            self.skip_newlines();
-        }
-        self.expect(TokenKind::RBrace, "`}`")?;
-        Ok(ProtocolDef {
-            meta: self.consumed_meta(start_pos, AstOrigin::User),
-            name,
-            generics,
-            states,
-            transitions,
         })
     }
 
@@ -1965,7 +1891,31 @@ mod attribute_tests {
     }
 
     #[test]
-    fn flow_protocol_and_session_children_have_exact_metadata() {
+    fn protocol_syntax_removed_at_parser() {
+        let source_id = SourceId::new(99);
+        let source = "protocol Wire<T> { state Open { data: T }; transition send(Open) -> Open; }";
+        let err = parse_with_source(source, source_id)
+            .expect_err("protocol declarations must be rejected after Phase E removal");
+        assert!(
+            err.to_string().contains("removed"),
+            "unexpected protocol error: {err}"
+        );
+    }
+
+    #[test]
+    fn impl_protocol_syntax_removed_at_parser() {
+        let source_id = SourceId::new(99);
+        let source = "flow F { state S { n: i32 } impl Wire { } }";
+        let err = parse_with_source(source, source_id)
+            .expect_err("impl Protocol inside a Flow must be rejected after Phase E removal");
+        assert!(
+            err.to_string().contains("removed"),
+            "unexpected impl Protocol error: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_and_session_children_have_exact_metadata() {
         let source_id = SourceId::new(88);
         let flow_source = "flow Counter @mailbox(depth=8) { state Ready { count: i32 } transition tick(Ready, by: i32) -> Ready { return Ready { count: by } } }";
         let flows = parse_with_source(flow_source, source_id).expect("parse flow");
@@ -2014,26 +1964,6 @@ mod attribute_tests {
         assert_user_meta(
             tick.params[0].meta,
             span_for(flow_source, "by: i32", source_id),
-        );
-
-        let protocol_source =
-            "protocol Wire<T> { state Open { data: T }; transition send(Open) -> Open; }";
-        let protocols =
-            parse_with_source(protocol_source, source_id).expect("parse protocol declaration");
-        let Item::Protocol(protocol) = &protocols.items[0] else {
-            panic!("expected protocol");
-        };
-        assert_user_meta(
-            protocol.meta,
-            span_for(protocol_source, protocol_source, source_id),
-        );
-        assert_user_meta(
-            protocol.states[0].meta,
-            span_for(protocol_source, "state Open { data: T };", source_id),
-        );
-        assert_user_meta(
-            protocol.transitions[0].meta,
-            span_for(protocol_source, "transition send(Open) -> Open;", source_id),
         );
 
         let session_source = "session Stream = !i32 . ?string . end;";

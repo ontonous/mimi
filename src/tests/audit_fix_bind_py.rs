@@ -73,3 +73,45 @@ fn audit_bind_py_fork_removed_from_errno_name_list() {
     assert!(!ERRNO_CHECK_FUNC_NAMES.contains(&"fork"));
     assert!(ERRNO_CHECK_FUNC_NAMES.contains(&"open"));
 }
+
+// ---------------------------------------------------------------------------
+// batch5 P1-31: pybind callback trampolines must catch C++/Python exceptions
+// escaping the user callback instead of terminating through the C ABI.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn audit_bind_py_callback_trampoline_catches_exceptions() {
+    let func = ExternFunc {
+        meta: fixture_meta(),
+        name: "apply_cb".to_string(),
+        params: vec![ExternParam {
+            meta: fixture_meta(),
+            name: "f".to_string(),
+            ty: Type::Func(
+                vec![
+                    Type::Name("i32".to_string(), vec![]),
+                    Type::Name("i64".to_string(), vec![]),
+                ],
+                Box::new(Type::Name("i32".to_string(), vec![])),
+            ),
+            cap_mode: None,
+        }],
+        ret: Some(Type::Name("i32".to_string(), vec![])),
+        requires: None,
+        ensures: None,
+        variadic: false,
+        no_panic: false,
+        returns_errno: false,
+    };
+    let gen = PyBindGenerator::new(HashMap::new(), "audit_mod");
+    let out = gen.generate(&[func]).expect("py bindgen callback fixture");
+    assert!(
+        out.contains("try {"),
+        "must guard callback invocation:\n{out}"
+    );
+    assert!(out.contains("return g_apply_cb_f_cb(arg0, arg1);"));
+    assert!(
+        out.contains("} catch (...) {"),
+        "must catch all exceptions crossing extern \"C\":\n{out}"
+    );
+}

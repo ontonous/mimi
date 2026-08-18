@@ -54,7 +54,11 @@ impl<'a> Checker<'a> {
                         last_expr_type = Some(self.check_expr(ret, expr, scopes));
                         continue;
                     }
-                    Stmt::If { cond, then_, else_ } if else_.is_some() => {
+                    Stmt::If {
+                        cond,
+                        then_,
+                        else_: Some(else_),
+                    } => {
                         // CO-H2 (dx-backlog #7): a tail `if/else` is a value
                         // position in the resolved lowering (`has_tail_result`,
                         // lower.rs — both branches must match the callable's
@@ -69,14 +73,12 @@ impl<'a> Checker<'a> {
                             self.set_pos(meta.span.start_line, meta.span.start_col);
                         }
                         let if_ty =
-                            self.check_if_branch_types(cond, then_, else_.as_ref(), ret, scopes);
+                            self.check_if_branch_types(cond, then_, Some(else_), ret, scopes);
                         // Both branches diverging (e.g. every branch `return`s)
                         // means the if produces no value and there is nothing
                         // to implicitly return.
                         let both_diverging = crate::core::infer::helpers::block_is_diverging(then_)
-                            && crate::core::infer::helpers::block_is_diverging(
-                                else_.as_ref().expect("guarded is_some"),
-                            );
+                            && crate::core::infer::helpers::block_is_diverging(else_);
                         last_expr_type = if both_diverging { None } else { Some(if_ty) };
                         continue;
                     }

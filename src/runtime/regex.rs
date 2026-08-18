@@ -737,8 +737,12 @@ impl RegexEngine {
 
 const MAX_REGEX_PATTERN_LEN: usize = 512;
 
+///
+/// # Safety
+/// Text/pattern/replacement pointers must be valid NUL-terminated
+/// C strings or null where documented.
 #[no_mangle]
-pub extern "C" fn mimi_regex_match(
+pub unsafe extern "C" fn mimi_regex_match(
     text: *const std::ffi::c_char,
     pattern: *const std::ffi::c_char,
 ) -> i32 {
@@ -755,8 +759,12 @@ pub extern "C" fn mimi_regex_match(
     RegexEngine::match_pattern(&t, &p) as i32
 }
 
+///
+/// # Safety
+/// Text/pattern/replacement pointers must be valid NUL-terminated
+/// C strings or null where documented.
 #[no_mangle]
-pub extern "C" fn mimi_regex_find(
+pub unsafe extern "C" fn mimi_regex_find(
     text: *const std::ffi::c_char,
     pattern: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -771,16 +779,24 @@ pub extern "C" fn mimi_regex_find(
         return alloc_c_string("");
     }
     match RegexEngine::find_match(&t, &p) {
-        Some((start, end)) => {
-            let matched = &t[start..end];
-            alloc_c_string(matched)
-        }
+        Some((start, end)) => match t.get(start..end) {
+            // The regex engine can return a byte offset inside a UTF-8
+            // character for `.` on non-ASCII text. Slicing at a non-char
+            // boundary panics across the extern "C" boundary; return no match
+            // instead (same as the safe path used by find_all).
+            Some(matched) => alloc_c_string(matched),
+            None => alloc_c_string(""),
+        },
         None => alloc_c_string(""),
     }
 }
 
+///
+/// # Safety
+/// Text/pattern/replacement pointers must be valid NUL-terminated
+/// C strings or null where documented.
 #[no_mangle]
-pub extern "C" fn mimi_regex_replace(
+pub unsafe extern "C" fn mimi_regex_replace(
     text: *const std::ffi::c_char,
     pattern: *const std::ffi::c_char,
     replacement: *const std::ffi::c_char,
@@ -803,8 +819,12 @@ pub extern "C" fn mimi_regex_replace(
 
 /// Finds all non-overlapping matches of pattern in text.
 /// Returns a JSON array of matched strings: ["match1","match2",...]
+///
+/// # Safety
+/// Text/pattern/replacement pointers must be valid NUL-terminated
+/// C strings or null where documented.
 #[no_mangle]
-pub extern "C" fn mimi_regex_find_all(
+pub unsafe extern "C" fn mimi_regex_find_all(
     text: *const std::ffi::c_char,
     pattern: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
@@ -815,6 +835,9 @@ pub extern "C" fn mimi_regex_find_all(
     let t = unsafe { cstr_to_string(text) };
     // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
+    if p.len() > MAX_REGEX_PATTERN_LEN {
+        return alloc_c_string("[]");
+    }
     let mut matches = Vec::new();
     let mut cursor = 0;
     let t_bytes = t.as_bytes();
@@ -842,7 +865,13 @@ pub extern "C" fn mimi_regex_find_all(
         if found < 0 {
             break;
         }
-        cursor = found_start + found as usize;
+        // Avoid infinite/duplicate zero-width matches: always advance by at
+        // least one byte when the regex consumed nothing (batch4-06 P2).
+        cursor = if found == 0 {
+            found_start.saturating_add(1)
+        } else {
+            found_start + found as usize
+        };
     }
     let mut result = String::from("[");
     let mut first = true;
@@ -859,6 +888,8 @@ pub extern "C" fn mimi_regex_find_all(
                 '\n' => result.push_str("\\n"),
                 '\r' => result.push_str("\\r"),
                 '\t' => result.push_str("\\t"),
+                '\u{2028}' => result.push_str("\\u2028"),
+                '\u{2029}' => result.push_str("\\u2029"),
                 c if c < '\x20' => {
                     result.push_str(&format!("\\u{:04x}", c as u32));
                 }
@@ -877,8 +908,12 @@ pub extern "C" fn mimi_regex_find_all(
 ///
 /// Standalone runtime has no `regex` crate; uses the in-tree `RegexEngine`
 /// with capture/`{n}` support so codegen duals match `mimi run`.
+///
+/// # Safety
+/// Text/pattern/replacement pointers must be valid NUL-terminated
+/// C strings or null where documented.
 #[no_mangle]
-pub extern "C" fn mimi_regex_capture_groups(
+pub unsafe extern "C" fn mimi_regex_capture_groups(
     text: *const std::ffi::c_char,
     pattern: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {

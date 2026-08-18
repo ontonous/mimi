@@ -16,11 +16,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     // (http), turning real network errors (ECONNRESET, refused, …) into
     // Ok(dangling/empty string) on the compiled path — the exact blind spot
     // that shipped in Wave-1's stdlib net change. Fix: NULL → trap with a
-    // VM-shaped message. KNOWN LIMITATION (escalated to agent RT):
-    // `mimi_recv` also returns NULL for the n == 0 case (peer closed /
-    // EOF), which the VM maps to Ok(""); until the runtime distinguishes
-    // EOF from error, compiled `recv` traps on EOF too. The `Err` shape
-    // contract (deliverable for STDLIB's codegen-side assertions):
+    // VM-shaped message. Runtime `mimi_recv` now returns a non-NULL empty
+    // string for the n == 0 / EOF case, so compiled `recv` preserves the
+    // VM's Ok("") EOF semantics while still trapping on real errors.
+    // The `Err` shape contract (deliverable for STDLIB's codegen-side
+    // assertions):
     //   recv:     "recv: buf_size must be positive"            (buf_size<=0)
     //   recv:     "recv() failed: fd=%ld, buf_size=%ld (network error)"
     //   http_get: "http_get: request failed"
@@ -224,6 +224,64 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
+        // VM parity: reject ports outside the u16 range before the C socket
+        // bind, instead of silently truncating (batch5-03 P2-2).
+        let i64_ty = self.context.i64_type();
+        let port_64 = if port.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(port, i64_ty, "bind_port_sext")
+                .map_err(|e| format!("bind port sext error: {}", e))?
+        } else {
+            port
+        };
+        let bad_port = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                port_64,
+                i64_ty.const_int(0, false),
+                "bind_port_lt0",
+            )
+            .map_err(|e| format!("bind port lt0 error: {}", e))?;
+        let port_gt_max = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                port_64,
+                i64_ty.const_int(65535, false),
+                "bind_port_gt_max",
+            )
+            .map_err(|e| format!("bind port gt error: {}", e))?;
+        let is_bad_port = self
+            .builder
+            .build_or(bad_port, port_gt_max, "bind_bad_port")
+            .map_err(|e| format!("bind port or error: {}", e))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("bind: no current function".into()))?;
+        let port_ok_bb = self.context.append_basic_block(function, "bind_port_ok_bb");
+        let port_trap_bb = self
+            .context
+            .append_basic_block(function, "bind_port_trap_bb");
+        self.builder
+            .build_conditional_branch(is_bad_port, port_trap_bb, port_ok_bb)
+            .map_err(|e| format!("bind cbr error: {}", e))?;
+        self.builder.position_at_end(port_trap_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr("bind: port must be in 0..=65535", "bind_port_msg")
+            .map_err(|e| format!("bind global string error: {}", e))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            "bind_port_abort",
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| format!("bind unreachable error: {}", e))?;
+        self.builder.position_at_end(port_ok_bb);
         let func = self
             .module
             .get_function("mimi_bind")
@@ -330,23 +388,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let data_ptr = self.extract_raw_str_ptr(&args[1])?;
-        // Get string length via strlen
-        let strlen_fn = self
-            .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let data_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(data_ptr)],
-                "send_strlen",
-            )
-            .map_err(|e| format!("strlen error: {}", e))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
+        // Use the Mimi string's explicit length when available so embedded
+        // NUL bytes are sent intact (VM parity) rather than truncating at
+        // the first NUL via strlen.
+        let (data_ptr, data_len) = self.extract_raw_str_ptr_len(&args[1])?;
         let func = self
             .module
             .get_function("mimi_send")
@@ -421,13 +466,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "recv_bs_bad",
             )
             .map_err(|e| format!("icmp error: {}", e))?;
+        let bs_too_big = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                bs64,
+                i64_ty.const_int(100_000_000, false),
+                "recv_bs_too_big",
+            )
+            .map_err(|e| format!("icmp error: {}", e))?;
+        let bs_size_ok_bb = self
+            .context
+            .append_basic_block(function, "recv_bs_size_ok_bb");
         let bs_ok_bb = self.context.append_basic_block(function, "recv_bs_ok_bb");
         let bs_trap_bb = self.context.append_basic_block(function, "recv_bs_trap_bb");
+        let bs_trap_big_bb = self
+            .context
+            .append_basic_block(function, "recv_bs_trap_big_bb");
         self.builder
-            .build_conditional_branch(bs_bad, bs_trap_bb, bs_ok_bb)
+            .build_conditional_branch(bs_bad, bs_trap_bb, bs_size_ok_bb)
             .map_err(|e| format!("branch error: {}", e))?;
         self.builder.position_at_end(bs_trap_bb);
         self.emit_net_trap("recv: buf_size must be positive", "recv_bs")?;
+        self.builder.position_at_end(bs_size_ok_bb);
+        self.builder
+            .build_conditional_branch(bs_too_big, bs_trap_big_bb, bs_ok_bb)
+            .map_err(|e| format!("branch error: {}", e))?;
+        self.builder.position_at_end(bs_trap_big_bb);
+        self.emit_net_trap(
+            "recv: buf_size exceeds 100 MB cap (refusing unbounded allocation)",
+            "recv_bs_big",
+        )?;
         self.builder.position_at_end(bs_ok_bb);
 
         // Allocate an i64 on stack to receive out_len

@@ -32,6 +32,33 @@ pub enum AbiTypeRef {
     Void,
 }
 
+/// Make a string safe to embed as an identifier in generated source.
+fn safe_ident(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 1);
+    for (i, c) in name.chars().enumerate() {
+        if i == 0 && c.is_ascii_digit() {
+            out.push('_');
+            out.push(c);
+        } else if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
+/// Make a string safe to embed inside a generated-language comment.
+fn safe_comment(s: &str) -> String {
+    s.replace("*/", "* /")
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
+}
+
 impl AbiTypeRef {
     /// True if this is a primitive type.
     pub fn is_primitive(&self) -> bool {
@@ -72,20 +99,31 @@ impl AbiTypeRef {
         }
         match self {
             AbiTypeRef::Primitive(p) => p.c_name().to_string(),
-            AbiTypeRef::Named(name) => name.clone(),
+            AbiTypeRef::Named(name) => safe_ident(name),
             AbiTypeRef::Pointer(inner) => format!("{}*", inner.c_type_name_depth(depth + 1)),
             AbiTypeRef::Slice(inner) => {
-                format!("MimiSlice/* {} */", inner.c_type_name_depth(depth + 1))
+                format!(
+                    "MimiSlice/* {} */",
+                    safe_comment(&inner.c_type_name_depth(depth + 1))
+                )
             }
-            AbiTypeRef::Opaque(name) => format!("MimiHandle/* {} */", name),
+            AbiTypeRef::Opaque(name) => {
+                format!("MimiHandle/* {} */", safe_comment(&safe_ident(name)))
+            }
             AbiTypeRef::FatPointer {
                 element,
                 has_capacity,
             } => {
                 if *has_capacity {
-                    format!("MimiString/* {} */", element.c_type_name_depth(depth + 1))
+                    format!(
+                        "MimiString/* {} */",
+                        safe_comment(&element.c_type_name_depth(depth + 1))
+                    )
                 } else {
-                    format!("MimiSlice/* {} */", element.c_type_name_depth(depth + 1))
+                    format!(
+                        "MimiSlice/* {} */",
+                        safe_comment(&element.c_type_name_depth(depth + 1))
+                    )
                 }
             }
             AbiTypeRef::Void => "void".to_string(),
@@ -105,14 +143,14 @@ impl AbiTypeRef {
         }
         match self {
             AbiTypeRef::Primitive(p) => p.rust_name().to_string(),
-            AbiTypeRef::Named(name) => name.clone(),
+            AbiTypeRef::Named(name) => safe_ident(name),
             AbiTypeRef::Pointer(inner) => {
                 format!("*mut {}", inner.rust_type_name_depth(depth + 1))
             }
             AbiTypeRef::Slice(inner) => {
                 format!("&[{}]", inner.rust_type_name_depth(depth + 1))
             }
-            AbiTypeRef::Opaque(name) => format!("{}Handle", name),
+            AbiTypeRef::Opaque(name) => format!("{}Handle", safe_ident(name)),
             AbiTypeRef::FatPointer {
                 element,
                 has_capacity,

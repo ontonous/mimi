@@ -51,6 +51,13 @@ pub type NetError {
     HttpPostFailed
 }
 
+// NOTE (audit P1-41): the low-level network builtins still fail hard on
+// OS/connection errors (bytecode VM raises a fatal error; codegen traps).
+// Therefore the `NetError` variants below are currently unreachable from the
+// wrappers that call `recv`/`http_get`/`http_post` directly. They are kept
+// for API stability and future non-fatal `try_*` builtins; do not rely on
+// matching `Err(RecvFailed)`/`Err(HttpGetFailed)` today.
+
 // NetOps: Trait for network operations on file descriptors and URLs.
 trait NetOps {
     func send(data: string) -> Result<i32, NetError>
@@ -67,6 +74,8 @@ impl NetOps for i64 {
         if n < 0 { Err(SendFailed) } else { Ok(n as i32) }
     }
     func recv(buf_size: i32) -> Result<string, NetError> {
+        // See the NetError note: hard failures are fatal in the current
+        // builtins, so only EOF/empty reads reach this Ok path.
         // The recv builtin returns "" on EOF (peer closed); hard failures
         // abort before returning, so an empty result is a successful read.
         let data = recv(self, buf_size)
@@ -81,14 +90,14 @@ impl NetOps for string {
     func send(data: string) -> Result<i32, NetError> { Err(SendFailed) }
     func recv(buf_size: i32) -> Result<string, NetError> { Err(RecvFailed) }
     func fetch() -> Result<string, NetError> {
-        // The http_get builtin aborts on failure; any returned body —
-        // including an empty one — is a successful response.
+        // See the NetError note: http failures are fatal; any returned body
+        // — including an empty one — is a successful response.
         let body = http_get(self)
         Ok(body)
     }
     func fetch_post(body: string) -> Result<string, NetError> {
-        // The http_post builtin aborts on failure; an empty response body
-        // is still a successful response.
+        // See the NetError note: http failures are fatal; an empty response
+        // body is still a successful response.
         let resp = http_post(self, body)
         Ok(resp)
     }
@@ -144,23 +153,23 @@ pub func tcp_send(fd: i64, data: string) -> Result<i64, NetError> {
 
 // tcp_recv: Receives up to buf_size bytes from socket fd (Ok("") means EOF).
 pub func tcp_recv(fd: i64, buf_size: i32) -> Result<string, NetError> {
-    // The recv builtin returns "" only for a successful zero-byte read
-    // (peer closed the connection); empty is not an error here.
+    // See the NetError note: hard recv failures are fatal in the current
+    // builtins; "" is only a successful zero-byte read (peer closed).
     let data = recv(fd, buf_size)
     Ok(data)
 }
 
 // fetch: Performs HTTP GET, returns body string on success (possibly empty).
 pub func fetch(url: string) -> Result<string, NetError> {
-    // The http_get builtin fails hard on real errors, so any returned body
-    // — including an empty one — is a successful response.
+    // See the NetError note: http failures are fatal; any returned body —
+    // including an empty one — is a successful response.
     let body = http_get(url)
     Ok(body)
 }
 
 // fetch_post: Performs HTTP POST with body, returns response on success (possibly empty).
 pub func fetch_post(url: string, body: string) -> Result<string, NetError> {
-    // The http_post builtin fails hard on real errors; an empty response
+    // See the NetError note: http failures are fatal; an empty response
     // body is still a successful response.
     let resp = http_post(url, body)
     Ok(resp)

@@ -308,7 +308,6 @@ impl Parser {
                         TokenKind::Impl,
                         TokenKind::Extern,
                         TokenKind::Flow,
-                        TokenKind::Protocol,
                         TokenKind::Use,
                         TokenKind::RBrace,
                         TokenKind::Eof,

@@ -31,8 +31,11 @@ thread_local! {
 /// v0.29.44: Allocate memory with a shadow tag.
 /// Returns a pointer to the allocated memory, or null on failure.
 /// The memory is tracked in the shadow map with the given tag and label.
+///
+/// # Safety
+/// Pointers/label must be valid for the shadow-MTE ABI (null accepted where documented).
 #[no_mangle]
-pub extern "C" fn mimi_shadow_alloc(
+pub unsafe extern "C" fn mimi_shadow_alloc(
     size: usize,
     tag: u8,
     label: *const std::ffi::c_char,
@@ -67,8 +70,11 @@ pub extern "C" fn mimi_shadow_alloc(
 
 /// v0.29.44: Tag an existing memory region with a shadow tag.
 /// Returns 0 on success, -1 if the pointer is not in the shadow map.
+///
+/// # Safety
+/// Pointers/label must be valid for the shadow-MTE ABI (null accepted where documented).
 #[no_mangle]
-pub extern "C" fn mimi_shadow_tag(ptr: *const u8, tag: u8) -> i32 {
+pub unsafe extern "C" fn mimi_shadow_tag(ptr: *const u8, tag: u8) -> i32 {
     if ptr.is_null() {
         return -1;
     }
@@ -85,8 +91,11 @@ pub extern "C" fn mimi_shadow_tag(ptr: *const u8, tag: u8) -> i32 {
 
 /// v0.29.44: Check that a pointer's shadow tag matches the expected tag.
 /// Returns 1 if tag matches, 0 if mismatch or pointer not tracked.
+///
+/// # Safety
+/// Pointers/label must be valid for the shadow-MTE ABI (null accepted where documented).
 #[no_mangle]
-pub extern "C" fn mimi_shadow_check(ptr: *const u8, expected_tag: u8) -> i32 {
+pub unsafe extern "C" fn mimi_shadow_check(ptr: *const u8, expected_tag: u8) -> i32 {
     if ptr.is_null() {
         return 0;
     }
@@ -105,8 +114,11 @@ pub extern "C" fn mimi_shadow_check(ptr: *const u8, expected_tag: u8) -> i32 {
 }
 
 /// v0.29.44: Free shadow-tagged memory and remove from shadow map.
+///
+/// # Safety
+/// Pointers/label must be valid for the shadow-MTE ABI (null accepted where documented).
 #[no_mangle]
-pub extern "C" fn mimi_shadow_free(ptr: *mut u8) {
+pub unsafe extern "C" fn mimi_shadow_free(ptr: *mut u8) {
     if ptr.is_null() {
         return;
     }
@@ -165,12 +177,12 @@ mod tests {
     #[test]
     fn shadow_alloc_zero_size_is_safe() {
         let label = std::ffi::CString::new("zero").unwrap();
-        let ptr = mimi_shadow_alloc(0, 1, label.as_ptr());
+        let ptr = unsafe { mimi_shadow_alloc(0, 1, label.as_ptr()) };
         assert!(!ptr.is_null());
-        assert_eq!(mimi_shadow_check(ptr, 1), 1);
-        assert_eq!(mimi_shadow_tag(ptr, 2), 0);
-        assert_eq!(mimi_shadow_check(ptr, 2), 1);
-        mimi_shadow_free(ptr);
-        assert_eq!(mimi_shadow_check(ptr, 2), 0);
+        assert_eq!(unsafe { mimi_shadow_check(ptr, 1) }, 1);
+        assert_eq!(unsafe { mimi_shadow_tag(ptr, 2) }, 0);
+        assert_eq!(unsafe { mimi_shadow_check(ptr, 2) }, 1);
+        unsafe { mimi_shadow_free(ptr) };
+        assert_eq!(unsafe { mimi_shadow_check(ptr, 2) }, 0);
     }
 }

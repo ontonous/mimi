@@ -49,7 +49,7 @@ pub use diff::{diff_abi, AbiChange, AbiDiff};
 pub use gen::{mimi_type_to_abi, register_core_runtime_abi, AbiGenerator};
 pub use handle::{Handle, HandleError, HandleKind, HandleRegistry, RuntimeId};
 pub use rust_bind::generate_rust_bindings;
-pub use serialize::{MimiAbi, MimiAbiError};
+pub use serialize::{MimiAbi, MimiAbiError, MimiAbiType, MimiAbiTypeRef};
 pub use symbol::*;
 pub use types::*;
 pub use wire::*;
@@ -180,10 +180,24 @@ impl ComponentIr {
                     });
                 }
             }
-            AbiTypeRef::Pointer(inner) | AbiTypeRef::Slice(inner) => {
+            AbiTypeRef::Pointer(inner) => {
+                Self::check_type_refs(inner, known_types, context, errors);
+            }
+            AbiTypeRef::Slice(inner) => {
+                // Slice/FatPointer are not yet supported by the C/Rust
+                // generators in a consistent way (batch4-09 P2-4); fail
+                // closed rather than emit mismatched ABI bindings.
+                errors.push(ComponentIrError::UnsupportedTypeRef {
+                    ty: "Slice".to_string(),
+                    context: context.to_string(),
+                });
                 Self::check_type_refs(inner, known_types, context, errors);
             }
             AbiTypeRef::FatPointer { element, .. } => {
+                errors.push(ComponentIrError::UnsupportedTypeRef {
+                    ty: "FatPointer".to_string(),
+                    context: context.to_string(),
+                });
                 Self::check_type_refs(element, known_types, context, errors);
             }
             _ => {}
@@ -204,6 +218,8 @@ pub enum ComponentIrError {
     DuplicateType(String),
     /// Named/Opaque type reference does not resolve to a type definition.
     UnresolvedTypeRef { name: String, context: String },
+    /// A type reference uses an ABI feature not yet supported by generators.
+    UnsupportedTypeRef { ty: String, context: String },
 }
 
 /// Component identity: name, semver, ABI version.
@@ -362,6 +378,42 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ComponentIrError::UnresolvedTypeRef { name, .. } if name == "MissingType")));
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_slice_and_fat_pointer() {
+        let mk = |ret: AbiTypeRef| ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "mimi_uses_unsupported".to_string(),
+                kind: AbiSymbolKind::Function,
+                params: vec![],
+                ret,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let slice = mk(AbiTypeRef::Slice(Box::new(AbiTypeRef::Primitive(
+            crate::component::types::AbiPrimitive::I64,
+        ))));
+        let fat = mk(AbiTypeRef::FatPointer {
+            element: Box::new(AbiTypeRef::Primitive(
+                crate::component::types::AbiPrimitive::I64,
+            )),
+            has_capacity: true,
+        });
+        assert!(slice.validate().iter().any(|e| matches!(
+            e,
+            ComponentIrError::UnsupportedTypeRef { ty, .. } if ty == "Slice"
+        )));
+        assert!(fat.validate().iter().any(|e| matches!(
+            e,
+            ComponentIrError::UnsupportedTypeRef { ty, .. } if ty == "FatPointer"
+        )));
     }
 
     // ── End-to-end pipeline integration test ──

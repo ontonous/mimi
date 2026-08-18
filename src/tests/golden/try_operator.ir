@@ -51,6 +51,8 @@ declare void @exit(i32)
 
 declare i64 @mimi_map_new()
 
+declare i64 @mimi_map_clone(i64)
+
 declare i64 @mimi_map_from_json_i64(ptr)
 
 declare i64 @mimi_map_from_json_string(ptr)
@@ -351,15 +353,23 @@ declare ptr @mimi_value_type_name(i64)
 
 declare ptr @mimi_str_split(ptr, ptr)
 
+declare ptr @mimi_str_join_ll(ptr, ptr, i64, ptr)
+
 declare ptr @mimi_str_join(ptr, ptr)
 
 declare ptr @mimi_str_concat(ptr, ptr)
 
+declare ptr @mimi_str_concat_ll(ptr, i64, ptr, i64)
+
 declare ptr @mimi_str_char_at(ptr, i64)
+
+declare ptr @mimi_str_char_at_ll(ptr, i64, i64)
 
 declare ptr @mimi_str_substring(ptr, i64, i64)
 
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
+
+declare ptr @mimi_str_replace_ll(ptr, i64, ptr, i64, ptr, i64, ptr)
 
 declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
@@ -372,6 +382,12 @@ declare ptr @mimi_to_string_f64(double)
 declare i64 @mimi_str_clone(ptr, i64)
 
 declare void @mimi_string_free(ptr)
+
+declare i64 @mimi_str_index_of(ptr, i64, ptr, i64)
+
+declare i64 @mimi_str_starts_with(ptr, i64, ptr, i64)
+
+declare i64 @mimi_str_ends_with(ptr, i64, ptr, i64)
 
 declare i32 @mimi_str_count_substring(ptr, ptr)
 
@@ -438,7 +454,9 @@ declare void @mimi_sleep(i64)
 
 declare ptr @mimi_getenv(ptr)
 
-declare void @mimi_args_init(i64, ptr)
+declare ptr @mimi_read_stdin_line()
+
+declare void @mimi_args_init(i32, ptr)
 
 declare i64 @mimi_args_count()
 
@@ -600,6 +618,8 @@ declare void @mimi_file_stat_free(ptr)
 
 declare ptr @mimi_file_stat(ptr, ptr)
 
+declare i64 @mimi_append_file_ll(ptr, ptr, i64)
+
 declare i64 @mimi_append_file(ptr, ptr)
 
 declare i64 @mimi_set_env(ptr, ptr)
@@ -608,9 +628,15 @@ declare ptr @mimi_exec_pipe(ptr)
 
 declare ptr @mimi_read_file_partial(ptr, i64)
 
+declare ptr @mimi_read_file_partial_ll(ptr, i64, ptr)
+
 declare ptr @mimi_read_file_bytes(ptr)
 
-declare i64 @mimi_write_file_bytes(ptr, ptr)
+declare ptr @mimi_read_file_bytes_ll(ptr, ptr)
+
+declare i32 @mimi_write_file_bytes_ll(ptr, ptr, i64)
+
+declare i32 @mimi_write_file_bytes(ptr, ptr)
 
 declare ptr @mimi_read_lines_json(ptr)
 
@@ -917,8 +943,7 @@ define i32 @main(i32 %0, ptr %1) {
 entry:
   %b = alloca i32, align 4
   %a = alloca i32, align 4
-  %main_argc_64 = zext i32 %0 to i64
-  call void @mimi_args_init(i64 %main_argc_64, ptr %1)
+  call void @mimi_args_init(i32 %0, ptr %1)
   %call = call i32 @double(i32 5)
   store i32 %call, ptr %a, align 4
   %a1 = load i32, ptr %a, align 4
@@ -1118,4 +1143,4 @@ declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
 
-!0 = !{!"branch_weights", i32 0, i32 1}
+!0 = !{i32 0, i32 1}

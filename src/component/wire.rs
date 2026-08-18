@@ -452,6 +452,11 @@ impl WireType {
                         return None;
                     }
                     let (_, n) = elem.decode_value_depth(&data[consumed..], depth + 1)?;
+                    // A zero-size element (e.g. Unit) would make this loop
+                    // spin without consuming input. Reject rather than DoS.
+                    if n == 0 {
+                        return None;
+                    }
                     consumed = consumed.checked_add(n)?;
                 }
                 Some((data[..consumed].to_vec(), consumed))
@@ -463,11 +468,17 @@ impl WireType {
                         return None;
                     }
                     let (_, kn) = k.decode_value_depth(&data[consumed..], depth + 1)?;
+                    if kn == 0 {
+                        return None;
+                    }
                     consumed = consumed.checked_add(kn)?;
                     if consumed > data.len() {
                         return None;
                     }
                     let (_, vn) = v.decode_value_depth(&data[consumed..], depth + 1)?;
+                    if vn == 0 {
+                        return None;
+                    }
                     consumed = consumed.checked_add(vn)?;
                 }
                 Some((data[..consumed].to_vec(), consumed))
@@ -1237,6 +1248,16 @@ mod tests {
         assert_eq!(consumed, 8);
         // Truncation.
         assert!(WireType::I64.decode_value(&[1, 2, 3]).is_none());
+
+        // Zero-size elements must not cause unbounded decode loops.
+        let unit_array = WireType::Array(Box::new(WireType::Unit));
+        let unit_map = WireType::Map(Box::new(WireType::Unit), Box::new(WireType::Unit));
+        assert!(unit_array
+            .decode_value(&WireType::encode_array_header(1))
+            .is_none());
+        assert!(unit_map
+            .decode_value(&WireType::encode_map_header(1))
+            .is_none());
     }
 
     #[test]

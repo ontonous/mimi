@@ -1,7 +1,7 @@
 use crate::codegen::CallSiteValueExt;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -14,44 +14,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_contains expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_contains")?;
-        let sub_ptr = self.extract_string_arg(&args[1], "str_contains")?;
-        // strstr(s, sub) -> i8* (or NULL if not found)
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let strstr_fn = self
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_contains")?;
+        let (sub_ptr, sub_len) = self.extract_string_arg_ptr_len(&args[1], "str_contains")?;
+        // Explicit-length search: `mimi_str_index_of` handles embedded NUL
+        // bytes that C `strstr` would truncate at (P1-13).
+        let idx_fn = self
             .module
-            .get_function("strstr")
-            .or_else(|| {
-                let ty = i8_ptr.fn_type(
-                    &[
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                    ],
-                    false,
-                );
-                Some(self.module.add_function(
-                    "strstr",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                ))
-            })
-            .ok_or_else(|| "failed to get or create strstr function".to_string())?;
-        let result = self
+            .get_function("mimi_str_index_of")
+            .ok_or_else(|| "mimi_str_index_of not declared".to_string())?;
+        let idx = self
             .builder
             .build_call(
-                strstr_fn,
+                idx_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
                     BasicMetadataValueEnum::PointerValue(sub_ptr),
+                    BasicMetadataValueEnum::IntValue(sub_len),
                 ],
-                "strstr_call",
+                "str_contains_idx",
             )
-            .map_err(|e| CompileError::LlvmError(format!("strstr error: {}", e)))?
+            .map_err(|e| CompileError::LlvmError(format!("str_contains call: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("strstr returned void")?;
+            .ok_or("mimi_str_index_of returned void")?
+            .into_int_value();
+        let zero = self.context.i64_type().const_int(0, false);
         let cmp = self
             .builder
-            .build_is_not_null(result.into_pointer_value(), "found")
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, zero, "str_contains_found")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         // 2026-08-06 (audit 1): return i1 (bool) — the checker infers `bool`
         // for str_contains; zext to i64 made `println(str_contains(..))` print
@@ -68,68 +58,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_starts_with expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_starts_with")?;
-        let prefix_ptr = self.extract_string_arg(&args[1], "str_starts_with")?;
-        let _i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Call C helper: strncmp(s, prefix, strlen(prefix)) == 0
-        let strlen_fn = self
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_starts_with")?;
+        let (prefix_ptr, prefix_len) =
+            self.extract_string_arg_ptr_len(&args[1], "str_starts_with")?;
+        // Explicit-length prefix check keeps embedded NUL bytes from acting
+        // as string terminators (P1-13).
+        let starts_fn = self
             .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let prefix_len = self
+            .get_function("mimi_str_starts_with")
+            .ok_or_else(|| "mimi_str_starts_with not declared".to_string())?;
+        let result = self
             .builder
             .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(prefix_ptr)],
-                "prefix_len",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
-        let strncmp_fn = self
-            .module
-            .get_function("strncmp")
-            .or_else(|| {
-                let ty = self.context.i32_type().fn_type(
-                    &[
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                    ],
-                    false,
-                );
-                Some(self.module.add_function(
-                    "strncmp",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                ))
-            })
-            .ok_or_else(|| "failed to get or create strncmp function".to_string())?;
-        let cmp_result = self
-            .builder
-            .build_call(
-                strncmp_fn,
+                starts_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
                     BasicMetadataValueEnum::PointerValue(prefix_ptr),
                     BasicMetadataValueEnum::IntValue(prefix_len),
                 ],
-                "strncmp_call",
+                "starts_with_call",
             )
-            .map_err(|e| CompileError::LlvmError(format!("strncmp error: {}", e)))?
+            .map_err(|e| CompileError::LlvmError(format!("starts_with call: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("strncmp returned void")?;
-        let zero = self.context.i32_type().const_int(0, false);
+            .ok_or("mimi_str_starts_with returned void")?
+            .into_int_value();
+        let zero = self.context.i64_type().const_int(0, false);
         let eq = self
             .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                cmp_result.into_int_value(),
-                zero,
-                "starts_with",
-            )
+            .build_int_compare(inkwell::IntPredicate::NE, result, zero, "starts_with")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         // 2026-08-06 (audit 1): return i1 (bool) — checker infers `bool`;
         // zext to i64 made native print "1" vs VM "true" (L1 divergence).
@@ -145,126 +102,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_ends_with expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_ends_with")?;
-        let suffix_ptr = self.extract_string_arg(&args[1], "str_ends_with")?;
-        let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let i64_ty = self.context.i64_type();
-        // s_len = strlen(s), suffix_len = strlen(suffix)
-        let strlen_fn = self
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_ends_with")?;
+        let (suffix_ptr, suffix_len) =
+            self.extract_string_arg_ptr_len(&args[1], "str_ends_with")?;
+        // Explicit-length suffix check keeps embedded NUL bytes from acting
+        // as string terminators (P1-13).
+        let ends_fn = self
             .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let s_len = self
+            .get_function("mimi_str_ends_with")
+            .ok_or_else(|| "mimi_str_ends_with not declared".to_string())?;
+        let result = self
             .builder
             .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(s_ptr)],
-                "s_len",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
-        let suffix_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(suffix_ptr)],
-                "suffix_len",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
-        // If suffix_len > s_len, return false
-        let gt = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGT, suffix_len, s_len, "gt")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let function = self
-            .current_function()
-            .ok_or_else(|| "codegen: no current function for str_ends_with".to_string())?;
-        let check_bb = self.context.append_basic_block(function, "check_suffix");
-        let false_bb = self.context.append_basic_block(function, "suffix_false");
-        let merge_bb = self.context.append_basic_block(function, "suffix_done");
-        self.builder
-            .build_conditional_branch(gt, false_bb, check_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // Compare s + (s_len - suffix_len) with suffix
-        self.builder.position_at_end(check_bb);
-        let start_pos = self
-            .builder
-            .build_int_sub(s_len, suffix_len, "start_pos")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        let s_suffix_ptr = {
-            self.gep()
-                .build_in_bounds_gep(i8_ty, s_ptr, &[start_pos], "s_suffix")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let strncmp_fn = self
-            .module
-            .get_function("strncmp")
-            .or_else(|| {
-                let ty = self.context.i32_type().fn_type(
-                    &[
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::IntType(i64_ty),
-                    ],
-                    false,
-                );
-                Some(self.module.add_function(
-                    "strncmp",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                ))
-            })
-            .ok_or_else(|| "failed to get or create strncmp function".to_string())?;
-        let cmp_result = self
-            .builder
-            .build_call(
-                strncmp_fn,
+                ends_fn,
                 &[
-                    BasicMetadataValueEnum::PointerValue(s_suffix_ptr),
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
                     BasicMetadataValueEnum::PointerValue(suffix_ptr),
                     BasicMetadataValueEnum::IntValue(suffix_len),
                 ],
-                "strncmp_call",
+                "ends_with_call",
             )
-            .map_err(|e| CompileError::LlvmError(format!("strncmp error: {}", e)))?
+            .map_err(|e| CompileError::LlvmError(format!("ends_with call: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("strncmp returned void")?;
-        let zero = self.context.i32_type().const_int(0, false);
+            .ok_or("mimi_str_ends_with returned void")?
+            .into_int_value();
+        let zero = self.context.i64_type().const_int(0, false);
         let eq = self
             .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                cmp_result.into_int_value(),
-                zero,
-                "ends_with",
-            )
+            .build_int_compare(inkwell::IntPredicate::NE, result, zero, "ends_with")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // False path
-        self.builder.position_at_end(false_bb);
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        // Merge — phi over i1 (bool); checker infers `bool` for str_ends_with,
+        // 2026-08-06 (audit 1): return i1 (bool) — checker infers `bool`;
         // zext to i64 made native print "1" vs VM "true" (L1 divergence).
-        self.builder.position_at_end(merge_bb);
-        let phi = self
-            .builder
-            .build_phi(self.context.bool_type(), "result")
-            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-        phi.add_incoming(&[
-            (&self.context.bool_type().const_zero(), false_bb),
-            (&eq, check_bb),
-        ]);
-        Ok(phi.as_basic_value())
+        Ok(eq.into())
     }
     pub(in crate::codegen) fn compile_regex_match(
         &self,
@@ -336,7 +206,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("regex_find error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_regex_find returned void")?;
-        Ok(result)
+        let result_ptr = match result {
+            BasicValueEnum::PointerValue(pv) => pv,
+            _ => return Err("mimi_regex_find should return a pointer".into()),
+        };
+        self.register_heap_alloc(result_ptr);
+        self.wrap_c_string(result_ptr)
     }
 
     pub(in crate::codegen) fn compile_regex_replace(
@@ -369,7 +244,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("regex_replace error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_regex_replace returned void")?;
-        Ok(result)
+        let result_ptr = match result {
+            BasicValueEnum::PointerValue(pv) => pv,
+            _ => return Err("mimi_regex_replace should return a pointer".into()),
+        };
+        self.register_heap_alloc(result_ptr);
+        self.wrap_c_string(result_ptr)
     }
 
     pub(in crate::codegen) fn compile_str_index_of(
@@ -381,67 +261,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_index_of expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_index_of")?;
-        let sub_ptr = self.extract_string_arg(&args[1], "str_index_of")?;
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_index_of")?;
+        let (sub_ptr, sub_len) = self.extract_string_arg_ptr_len(&args[1], "str_index_of")?;
         let i64_ty = self.context.i64_type();
-        // strstr(s, sub) -> pointer or NULL
-        let strstr_fn = self
+        // Explicit-length search returning a byte offset, preserving embedded
+        // NUL bytes that C `strstr` would truncate at (P1-13).
+        let idx_fn = self
             .module
-            .get_function("strstr")
-            .or_else(|| {
-                let ty = i8_ptr.fn_type(
-                    &[
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                    ],
-                    false,
-                );
-                Some(self.module.add_function(
-                    "strstr",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                ))
-            })
-            .ok_or_else(|| "failed to get or create strstr function".to_string())?;
-        let found = self
-            .builder
-            .build_call(
-                strstr_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(s_ptr),
-                    BasicMetadataValueEnum::PointerValue(sub_ptr),
-                ],
-                "strstr_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strstr error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strstr returned void")?
-            .into_pointer_value();
-        // found - s = BYTE offset
-        let found_int = self
-            .builder
-            .build_ptr_to_int(found, i64_ty, "found_int")
-            .map_err(|e| CompileError::LlvmError(format!("ptr_to_int error: {}", e)))?;
-        let s_int = self
-            .builder
-            .build_ptr_to_int(s_ptr, i64_ty, "s_int")
-            .map_err(|e| CompileError::LlvmError(format!("ptr_to_int error: {}", e)))?;
+            .get_function("mimi_str_index_of")
+            .ok_or_else(|| "mimi_str_index_of not declared".to_string())?;
         let byte_idx = self
             .builder
-            .build_int_sub(found_int, s_int, "byte_index")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        // Check if strstr returned NULL (not found)
+            .build_call(
+                idx_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
+                    BasicMetadataValueEnum::PointerValue(sub_ptr),
+                    BasicMetadataValueEnum::IntValue(sub_len),
+                ],
+                "str_index_of_idx",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("str_index_of call: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_index_of returned void")?
+            .into_int_value();
+        // Check if the helper returned -1 (not found).
+        let zero = i64_ty.const_int(0, false);
         let is_null = self
             .builder
-            .build_is_null(found, "is_null")
-            .map_err(|e| CompileError::LlvmError(format!("is_null: {}", e)))?;
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                byte_idx,
+                zero,
+                "str_index_of_not_found",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("not found compare: {}", e)))?;
         // Byte offset → char index: the VM returns `s[..byte_idx].chars().count()`
         // (interp/bytecode/builtins/string.rs builtin_str_index_of), not the byte
         // offset. Count UTF-8 leading bytes in s[0..byte_idx]. When not found,
-        // the byte offset is garbage (NULL ptrtoint − s) — clamp the scan bound
-        // to 0 so the loop never iterates; the payload is unobserved (disc=0).
-        let zero = i64_ty.const_int(0, false);
+        // clamp the scan bound to 0 so the loop never iterates; the payload is
+        // unobserved (disc=0).
         let char_bound = self
             .builder
             .build_select(is_null, zero, byte_idx, "char_bound")
@@ -525,6 +385,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_regex_find_all returned void")?
             .into_pointer_value();
+        self.register_heap_alloc(raw_ptr);
         self.wrap_c_string(raw_ptr)
     }
 
@@ -557,6 +418,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_regex_capture_groups returned void")?
             .into_pointer_value();
+        self.register_heap_alloc(raw_ptr);
         self.wrap_c_string(raw_ptr)
     }
 

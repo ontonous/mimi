@@ -237,6 +237,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(payload);
         }
 
+        // 0.1.7 audit P0-2: built-in Result/Option must also propagate when
+        // the enclosing function returns the same built-in Result/Option type,
+        // matching the VM's return-early semantics instead of exiting.
+        let propagates_builtin = !is_user_enum
+            && inner_type_name
+                .as_ref()
+                .zip(self.current_fn_ret_ty_ast.as_ref())
+                .is_some_and(|(inner_name, ret_ty)| crate::core::fmt_type(ret_ty) == *inner_name);
+        if propagates_builtin {
+            self.flush_heap_scopes_to_boundary()?;
+            self.builder
+                .build_return(Some(&struct_val))
+                .map_err(|e| CompileError::LlvmError(format!("try built-in prop ret: {e}")))?;
+            self.builder.position_at_end(ok_bb);
+            return Ok(payload);
+        }
+
+        // Determine if the error type is string (Result<T, string>) to display
+        // the actual error message instead of a numeric pointer value.
         // Determine if the error type is string (Result<T, string>) to display
         // the actual error message instead of a numeric pointer value.
         let is_string_err = if is_result {
@@ -566,6 +585,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     iv
                 }
             }
+            BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => self
+                .builder
+                .build_bit_cast(
+                    BasicValueEnum::FloatValue(fv),
+                    BasicTypeEnum::IntType(i64_ty),
+                    "try_rej_err_f64_bits",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("err f64 bits: {e}")))?
+                .into_int_value(),
             _ => {
                 return Err("try_rej: unsupported error value type".into());
             }
