@@ -167,6 +167,15 @@ mod tests {
         // Regression: raw extern symbols must be in a submodule so wrappers can reuse function names.
         assert!(out.contains("mod ffi_raw"));
         assert!(out.contains("super::ffi_raw::add("));
+        // FFI-01 (audit 2026-08-20): `StringTransfer` wrappers emit
+        // `super::ffi_raw::malloc`, which was previously undeclared in the
+        // `ffi_raw` extern block — the generated Rust binding failed to
+        // compile. Lock that `malloc`/`free` are now declared (resolving to
+        // libc, matching the C-side `libc::free` deallocation contract).
+        assert!(
+            out.contains("pub fn malloc(size: usize) -> *mut c_void)"),
+            "ffi_raw must declare malloc so generated StringTransfer wrappers compile"
+        );
         // P2-3: StringBorrow wrappers must not panic on embedded NUL bytes.
         assert!(out.contains(".bytes().filter(|&b| b != 0)"));
 

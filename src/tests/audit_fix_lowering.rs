@@ -2134,3 +2134,32 @@ fn audit_transition_result_type_aligned_dual() {
         assert_eq!(native.trim(), "15", "native transition result mismatch");
     }
 }
+
+/// FC-1 (2026-08-20 critical audit): `atan` was wrongly in the SD-9 float-chain
+/// convergence whitelist. `atan(±Inf) = ±π/2` is finite, so `atan` *heals* a
+/// non-finite input; the O1 convergence pass then deleted the finiteness trap
+/// and native diverged from the VM (which traps E0813). `atan` is now excluded
+/// from the propagating-libm whitelist, so both backends trap.
+#[test]
+fn audit_float_chain_atan_heals_inf_traps_both_backends() {
+    let src = r#"
+    func main() {
+        let big = 1e300;
+        let huge = big * big;
+        let r = atan(huge);
+        println(to_string(r));
+    }
+    "#;
+    let vm = run_source_bytecode_result(src);
+    assert!(
+        vm.is_err(),
+        "VM must trap E0813 on atan(Inf) (non-finite multiplication), got Ok"
+    );
+    if crate::tests::can_link() {
+        let cg = checked_codegen_compile_and_run(src);
+        assert!(
+            cg.is_err(),
+            "codegen (O1) must trap E0813 on atan(Inf), got Ok -> SD-9 divergence"
+        );
+    }
+}

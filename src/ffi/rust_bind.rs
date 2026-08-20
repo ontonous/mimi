@@ -56,6 +56,13 @@ impl RustBindGenerator {
             "        // Mimi runtime helpers referenced by generated wrappers"
         )?;
         writeln!(out, "        pub fn mimi_string_free(c_str: *mut c_char);")?;
+        // FFI-01 (audit 2026-08-20): `StringTransfer` wrappers allocate a
+        // libc-malloc'd buffer via `super::ffi_raw::malloc`, but `malloc` was
+        // never declared in this extern block, so the generated Rust binding
+        // failed to compile. Declare `malloc`/`free` here (they resolve to the
+        // system libc and match the C-side `libc::free` deallocation contract).
+        writeln!(out, "        pub fn malloc(size: usize) -> *mut c_void;")?;
+        writeln!(out, "        pub fn free(ptr: *mut c_void);")?;
         writeln!(out)?;
         for func in extern_funcs {
             let contract = self.build_contract(func);
