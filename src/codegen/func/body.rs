@@ -724,14 +724,26 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()>
     where
         Before: FnOnce(&mut Self, &mut HashMap<String, VarEntry<'ctx>>) -> MimiResult<()>,
-        After: FnOnce(&mut Self, &mut HashMap<String, VarEntry<'ctx>>) -> MimiResult<()>,
+        After: Fn(&mut Self, &mut HashMap<String, VarEntry<'ctx>>) -> MimiResult<()>,
     {
         // CG-H4: save outer break/continue targets and always restore them,
         // even when body compilation returns Err (nested-loop target leak).
         let old_break = self.loop_break.take();
         let old_continue = self.loop_continue.take();
+
+        // AUD-1: a `continue` must run after_body (index increment / cursor
+        // advance) before re-checking the loop condition, otherwise the loop
+        // index and loop variable freeze and the loop runs forever. Branch
+        // `continue` to a dedicated latch block that runs after_body and then
+        // jumps to the loop header. The normal fall-through path (below) already
+        // runs after_body, so each iteration increments exactly once.
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("codegen: no current function for loop latch".to_string())
+        })?;
+        let latch_bb = self.context.append_basic_block(function, "loop_latch");
+
         self.loop_break = Some(merge_bb);
-        self.loop_continue = Some(loop_header);
+        self.loop_continue = Some(latch_bb);
         let result = (|| {
             before_body(self, vars)?;
             self.compile_block(body, vars)?;
@@ -745,6 +757,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Ok(())
         })();
+
+        // Latch block: reached only via `continue`. Runs after_body (increment)
+        // exactly once, then branches to the loop header for the next check.
+        self.builder.position_at_end(latch_bb);
+        after_body(self, vars)?;
+        self.build_br(loop_header)?;
+
         self.loop_break = old_break;
         self.loop_continue = old_continue;
         result

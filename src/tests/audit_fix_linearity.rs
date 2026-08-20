@@ -1055,3 +1055,25 @@ func main() -> i32 {
         check_source(src)
     );
 }
+
+/// AUD-4 (2026-08-20 critical audit): a linear capability passed into OR out of
+/// an actor mailbox must be rejected — the mailbox byte-copies the handle,
+/// which would duplicate a linear resource (exactly-once violation). Regression
+/// asserts E0432 on both the parameter and the return type.
+#[test]
+fn audit_linear_cap_cannot_enter_actor_mailbox_e0432() {
+    let src = r#"
+cap File
+actor A {
+    func m(c: cap File) -> cap File {
+        c
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let codes = rejection_codes(src);
+    assert!(
+        codes.iter().any(|c| c == crate::diagnostic::codes::E0432),
+        "linear cap in actor mailbox must reject with E0432, got: {codes:?}"
+    );
+}

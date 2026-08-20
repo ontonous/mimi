@@ -6984,39 +6984,55 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
         // Body
         self.generator.builder.position_at_end(body_bb);
-        self.loop_stack.push(LoopContext { header, exit });
+        // AUD-1 (2026-08-20): point `continue` at a latch block that
+        // increments, so the counter advances instead of freezing.
+        let latch_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "for_latch");
+        self.loop_stack.push(LoopContext {
+            header: latch_bb,
+            exit,
+        });
         // 0.37.30: deterministic per-iteration drop for loop-body locals.
         self.generator.push_heap_scope();
         self.emit_block(body, loop_body, frame)?;
         self.loop_stack.pop();
 
-        // Increment and loop back
+        // Normal (non-terminated) body fall-through -> latch. `continue`
+        // already targets `latch_bb` via LoopContext.header.
         if !self.current_block_terminated() {
             self.generator.free_heap_allocs()?;
         } else {
             self.generator.drain_heap_scope();
         }
         if !self.current_block_terminated() {
-            let current = self
-                .generator
-                .build_load(llvm_type, storage, "for_reload")?;
-            let current_int = match current {
-                BasicValueEnum::IntValue(int) => int,
-                _ => {
-                    return Err(CompileError::Unsupported(
-                        "for-loop counter is not an integer".into(),
-                    ))
-                }
-            };
-            let one = current_int.get_type().const_int(1, false);
-            let next = self
-                .generator
-                .builder
-                .build_int_add(current_int, one, "for_next")
-                .map_err(|e| CompileError::LlvmError(format!("for increment: {e}")))?;
-            self.generator.build_store(storage, next)?;
-            self.generator.build_br(header)?;
+            self.generator.build_br(latch_bb)?;
         }
+
+        // Latch: increment the counter and branch back to the condition header.
+        // If the body already terminated (break/return) this block is
+        // unreachable, but it still needs a valid terminator, so always emit.
+        self.generator.builder.position_at_end(latch_bb);
+        let current = self
+            .generator
+            .build_load(llvm_type, storage, "for_reload")?;
+        let current_int = match current {
+            BasicValueEnum::IntValue(int) => int,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "for-loop counter is not an integer".into(),
+                ))
+            }
+        };
+        let one = current_int.get_type().const_int(1, false);
+        let next = self
+            .generator
+            .builder
+            .build_int_add(current_int, one, "for_next")
+            .map_err(|e| CompileError::LlvmError(format!("for increment: {e}")))?;
+        self.generator.build_store(storage, next)?;
+        self.generator.build_br(header)?;
 
         // Exit
         self.generator.builder.position_at_end(exit);
@@ -7156,35 +7172,51 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let elem_val = self.convert_list_elem_i64(elem_i64, elem_llvm_ty)?;
         self.generator.build_store(elem_storage, elem_val)?;
 
-        self.loop_stack.push(LoopContext { header, exit });
+        // AUD-1 (2026-08-20): point `continue` at a latch block that
+        // increments the index, so the loop advances instead of freezing.
+        let latch_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "for_list_latch");
+        self.loop_stack.push(LoopContext {
+            header: latch_bb,
+            exit,
+        });
         // 0.37.30: deterministic per-iteration drop for loop-body locals.
         self.generator.push_heap_scope();
         self.emit_block(body, loop_body, frame)?;
         self.loop_stack.pop();
 
-        // Increment idx and loop back.
+        // Normal (non-terminated) body fall-through -> latch. `continue`
+        // already targets `latch_bb` via LoopContext.header.
         if !self.current_block_terminated() {
             self.generator.free_heap_allocs()?;
         } else {
             self.generator.drain_heap_scope();
         }
         if !self.current_block_terminated() {
-            let cur_idx = self
-                .generator
-                .build_load(
-                    BasicTypeEnum::IntType(i64_ty),
-                    idx_storage,
-                    "for_list_idx_reload",
-                )?
-                .into_int_value();
-            let next_idx = self
-                .generator
-                .builder
-                .build_int_add(cur_idx, i64_ty.const_int(1, false), "for_list_idx_next")
-                .map_err(|e| CompileError::LlvmError(format!("for-list increment: {e}")))?;
-            self.generator.build_store(idx_storage, next_idx)?;
-            self.generator.build_br(header)?;
+            self.generator.build_br(latch_bb)?;
         }
+
+        // Latch: increment idx and branch back to the condition header.
+        // Unreachable when the body terminated (break/return) but still needs
+        // a valid terminator, so always emit it.
+        self.generator.builder.position_at_end(latch_bb);
+        let cur_idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "for_list_idx_reload",
+            )?
+            .into_int_value();
+        let next_idx = self
+            .generator
+            .builder
+            .build_int_add(cur_idx, i64_ty.const_int(1, false), "for_list_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("for-list increment: {e}")))?;
+        self.generator.build_store(idx_storage, next_idx)?;
+        self.generator.build_br(header)?;
 
         // Exit
         self.generator.builder.position_at_end(exit);
