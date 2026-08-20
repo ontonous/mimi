@@ -1,5 +1,5 @@
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
     func increment() { self.count = self.count + 1 }
     func get() -> i32 { return self.count }
 }

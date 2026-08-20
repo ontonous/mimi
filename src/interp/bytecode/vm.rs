@@ -2124,6 +2124,54 @@ impl BytecodeVM {
                     }
                     self.set_reg(rd, Value::Record(type_name_str, fields));
                 }
+                Op::UpdateRecord {
+                    rd,
+                    type_name,
+                    ra,
+                    base,
+                    count,
+                } => {
+                    let type_name_str = match &proto.constants.get(type_name as usize) {
+                        Some(ConstValue::Str(s)) => {
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.clone())
+                            }
+                        }
+                        _ => None,
+                    };
+                    let mut fields = match self.get_reg(ra) {
+                        Value::Record(_, fields) => fields.clone(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "UpdateRecord: expected record rest value, got {:?}",
+                                other
+                            )));
+                        }
+                    };
+                    // Field names are stored in constants[type_name+1..type_name+1+count].
+                    for i in 0..count {
+                        let idx = (type_name + 1 + i as u32) as usize;
+                        let field_name = match proto.constants.get(idx) {
+                            Some(ConstValue::Str(s)) => s.clone(),
+                            _ => {
+                                if idx < proto.constants.len() {
+                                    format!("_{}", i)
+                                } else {
+                                    return Err(InterpError::new(format!(
+                                        "UpdateRecord: field constant {} out of bounds (len {})",
+                                        idx,
+                                        proto.constants.len()
+                                    )));
+                                }
+                            }
+                        };
+                        let value = self.get_reg(base + i).clone();
+                        fields.insert(field_name, value);
+                    }
+                    self.set_reg(rd, Value::Record(type_name_str, fields));
+                }
                 Op::RecordGet { rd, ra, field } => {
                     let field_name = match &proto.constants[field as usize] {
                         ConstValue::Str(s) => s.clone(),
@@ -2756,6 +2804,25 @@ impl BytecodeVM {
                     frame.ieee_depth = frame.ieee_depth.saturating_sub(1);
                 }
 
+                // ── Spawn / Await (0.1.8 Phase 0: real task + join) ──
+                Op::Spawn {
+                    rd,
+                    func,
+                    args_base,
+                    argc,
+                } => {
+                    let args: Vec<Value> = (0..argc)
+                        .map(|i| self.get_reg(args_base + i).clone())
+                        .collect();
+                    let handle = self.spawn_task(func, args)?;
+                    self.set_reg(rd, handle);
+                }
+                Op::Await { rd, ra } => {
+                    let handle = self.get_reg(ra).clone();
+                    let value = self.await_task(handle)?;
+                    self.set_reg(rd, value);
+                }
+
                 // ── Actor / Flow / Session (Phase D) ──────────
                 Op::ActorSpawn { rd, actor } => {
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
@@ -3211,6 +3278,7 @@ impl BytecodeVM {
                 }
 
                 // ── Not yet implemented ────────────────────────
+                #[allow(unreachable_patterns)]
                 _ => {
                     return Err(InterpError::new(format!(
                         "bytecode VM: opcode {:?} not yet implemented",
@@ -3960,7 +4028,10 @@ impl BytecodeVM {
                 Some(Value::Tuple(items))
             }
             // Record literal: Type { field: expr, ... }
-            Expr::Record { ty, fields } => {
+            Expr::Record { ty, fields, rest } => {
+                if rest.is_some() {
+                    return None;
+                }
                 let mut map = std::collections::HashMap::new();
                 for field in fields {
                     let val = Self::eval_init_expr(field.value.unlocated())?;
@@ -3987,6 +4058,72 @@ impl BytecodeVM {
     /// Spawn an actor by name, reusing the ActorHandle infrastructure.
     /// The actor's worker thread uses BytecodeVM internally (v0.33 migration).
     /// Main program and actor workers both run on bytecode.
+    /// Start a spawned function on a fresh OS thread and return a Future
+    /// handle. 0.1.8 Phase 0: same observation as native `mimi_spawn_future`
+    /// — the body does not run in the parent frame.
+    fn spawn_task(&mut self, func: FuncIdx, args: Vec<Value>) -> Result<Value, InterpError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let program = self.program.clone();
+        let stdout = self.stdout_buf();
+        let verify = self.verify_contracts;
+        std::thread::Builder::new()
+            .name(format!("mimi-spawn-{}", func))
+            .spawn(move || {
+                let mut vm = BytecodeVM::new(program);
+                if let Some(buf) = stdout {
+                    vm.set_stdout_buf(buf);
+                }
+                vm.verify_contracts = verify;
+                let result = vm.call_function(func, &args);
+                let _ = tx.send(result);
+            })
+            .map_err(|e| InterpError::new(format!("spawn: failed to start task thread: {e}")))?;
+        Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::interp::PollFuture::Pending(rx),
+        ))))
+    }
+
+    /// Join a spawned Future. A non-Future operand is a hard error — there is
+    /// no sequential-eval fallback on the await success path.
+    fn await_task(&mut self, handle: Value) -> Result<Value, InterpError> {
+        let Value::Future(fut) = handle else {
+            return Err(InterpError::new(format!(
+                "await: expected Future from spawn (no sequential fallback), got {}",
+                handle
+            )));
+        };
+        let mut state = fut.lock().unwrap_or_else(|e| e.into_inner());
+        let taken = std::mem::replace(
+            &mut *state,
+            crate::interp::PollFuture::Ready(Ok(Value::Unit)),
+        );
+        match taken {
+            crate::interp::PollFuture::Pending(rx) => {
+                drop(state);
+                rx.recv().map_err(|_| {
+                    InterpError::new("await: spawn task hung or dropped before completion")
+                })?
+            }
+            crate::interp::PollFuture::Ready(result) => result,
+            deferred @ crate::interp::PollFuture::Deferred { .. } => {
+                *state = deferred;
+                crate::interp::poll_deferred(&mut state);
+                match std::mem::replace(
+                    &mut *state,
+                    crate::interp::PollFuture::Ready(Ok(Value::Unit)),
+                ) {
+                    crate::interp::PollFuture::Ready(result) => result,
+                    other => {
+                        *state = other;
+                        Err(InterpError::new(
+                            "await: deferred spawn did not produce a Ready result",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn spawn_actor(
         &mut self,
         actor_name: &str,

@@ -4,7 +4,7 @@ use super::*;
 fn actor_await_method() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func increment() {
         self.count = self.count + 1;
@@ -18,7 +18,7 @@ actor Counter {
 func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
-    let val = await c.get();
+    let val = c.get();
     val
 }
 "#;
@@ -30,7 +30,7 @@ func main() -> i32 {
 fn actor_sync_method_still_works() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func get() -> i32 {
         return self.count;
@@ -50,7 +50,7 @@ func main() -> i32 {
 fn actor_await_multiple_methods() {
     let src = r#"
 actor Calculator {
-    mut value: i32 = 0;
+    value: i32 = 0;
 
     func add(n: i32) {
         self.value = self.value + n;
@@ -65,7 +65,7 @@ func main() -> i32 {
     let calc = Calculator.spawn();
     calc.add(10);
     calc.add(20);
-    let result = await calc.get();
+    let result = calc.get();
     result
 }
 "#;
@@ -77,7 +77,7 @@ func main() -> i32 {
 fn actor_await_with_args() {
     let src = r#"
 actor Greeter {
-    mut name: string = "world";
+    name: string = "world";
 
     func greet() -> string {
         return "Hello, " + self.name;
@@ -86,7 +86,7 @@ actor Greeter {
 
 func main() {
     let g = Greeter.spawn();
-    let msg = await g.greet();
+    let msg = g.greet();
     println(msg);
 }
 "#;
@@ -98,7 +98,7 @@ func main() {
 fn actor_method_with_param() {
     let src = r#"
 actor Accumulator {
-    mut total: i32 = 0;
+    total: i32 = 0;
 
     func add(n: i32) {
         self.total = self.total + n;
@@ -113,7 +113,7 @@ func main() -> i32 {
     let a = Accumulator.spawn();
     a.add(5);
     a.add(10);
-    await a.get()
+    a.get()
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(15));
@@ -203,7 +203,7 @@ func main() -> i32 {
 fn actor_method_not_shadowed_by_prelude() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func increment() {
         self.count = self.count + 1;
@@ -249,7 +249,7 @@ actor Processor {
 
 func main() -> i32 {
     let p = Processor.spawn();
-    await p.process(5)
+    p.process(5)
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(10));
@@ -270,7 +270,7 @@ actor Messenger {
 
 func main() -> string {
     let m = Messenger.spawn();
-    await m.format()
+    m.format()
 }
 "#;
     assert_eq!(
@@ -440,7 +440,8 @@ func main() -> i32 {
 
 #[test]
 fn actor_runs_flow_rejects_mut_field() {
-    // v0.31.11: actors that `runs` a Flow must not have mut business fields.
+    // 0.1.8 Phase D: any user-visible business `mut` actor field is rejected,
+    // including `runs Flow` actors. State must be carried by the Flow.
     let src = r#"
 flow Counter {
     state Zero { n: i32 }
@@ -461,5 +462,56 @@ func main() -> i32 {
     assert!(
         result.is_err(),
         "actor runs flow with mut field should be rejected"
+    );
+}
+
+#[test]
+fn actor_business_mut_rejected() {
+    // 0.1.8 Phase D negative lock: SD-5 escape hatch is removed. A plain
+    // actor's `mut` business field is as illegal as one on a `runs Flow`
+    // actor; the diagnostic must suggest moving state into a Flow.
+    let src = r#"
+actor Bank {
+    mut balance: i32 = 0
+}
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).expect_err("business mut actor field must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some(crate::diagnostic::codes::E0402)),
+        "expected E0402, got: {:?}",
+        errors
+    );
+    let text = format!("{:?}", errors);
+    assert!(
+        text.contains("business state must live in a Flow"),
+        "expected rewrite guidance, got: {text}"
+    );
+}
+
+#[test]
+fn actor_runs_flow_ok() {
+    // 0.1.8 Phase D positive lock: `actor Name runs FlowName` remains the
+    // supported business-actor shape.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition init(Active) -> Active {
+        return Active { balance: self.balance }
+    }
+}
+
+actor Teller runs Account {
+}
+
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "actor runs Flow should still check, got: {:?}",
+        result
     );
 }

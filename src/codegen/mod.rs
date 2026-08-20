@@ -801,6 +801,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_failed_functions: std::collections::HashSet::new(),
         }
     }
+
+    /// Function names the resolved emitter attempted and then handed to
+    /// legacy. Phase 0 core-callee policy treats a non-empty set on
+    /// Flow/Session/spawn/linear functions as a hard compile error; tests
+    /// still inspect this to prove a core Flow program stayed resolved.
+    pub fn resolved_failed_functions(&self) -> &std::collections::HashSet<String> {
+        &self.resolved_failed_functions
+    }
+
     pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {
         self.resolved_method_signatures
             .as_ref()
@@ -3459,14 +3468,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .into_int_value();
         let elem_ptr = self.build_int_to_ptr(elem_i64, ptr_ty, &format!("{tag}_elem_ptr"))?;
+        // 0.1.8 Phase B fat ABI: list<string> slots contain MimiStr box
+        // handles. Free the box (and its owned bytes) with the dedicated
+        // runtime helper instead of treating the slot as a raw C string.
         let free_str = self
             .module
-            .get_function("mimi_string_free")
-            .ok_or_else(|| CompileError::LlvmError("mimi_string_free not declared".into()))?;
+            .get_function("mimi_str_free_box")
+            .ok_or_else(|| CompileError::LlvmError("mimi_str_free_box not declared".into()))?;
+        let box_i64 = self
+            .build_ptr_to_int(elem_ptr, i64_ty, &format!("{tag}_elem_box_i64"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: box i64 {e}")))?;
         self.builder
             .build_call(
                 free_str,
-                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
+                &[BasicMetadataValueEnum::IntValue(box_i64)],
                 &format!("{tag}_elem_free"),
             )
             .map_err(|e| CompileError::LlvmError(format!("{tag}: elem free {e}")))?;

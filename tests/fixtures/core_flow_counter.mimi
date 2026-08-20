@@ -1,0 +1,14 @@
+// 0.1.8 Phase 0 core Flow program: dispatch must stay resolved
+// (legacy_fallback=0 on the Flow/spawn-related callees).
+
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+}
+
+func main() -> i32 {
+    let c = Zero { n: 1 }
+    let c2 = Counter::inc(c)
+    println(c2.n)
+    0
+}

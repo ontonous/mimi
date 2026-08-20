@@ -600,6 +600,9 @@ pub enum Expr {
     Record {
         ty: Option<String>,
         fields: Vec<RecordFieldExpr>,
+        /// 0.1.8 Phase F: `..rest` — copy all fields from `rest` then apply
+        /// the explicit fields as overrides (move-rest in flow transitions).
+        rest: Option<Box<Expr>>,
     },
     /// Block expression `{ stmt; ...; expr }`
     Block(Block),

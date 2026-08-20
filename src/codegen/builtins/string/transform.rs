@@ -408,31 +408,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // KNOWN LIMITATION (batch5-03 P1-1 / string NUL tracking):
-        // mimi_str_split returns a List<string> whose elements are raw
-        // NUL-terminated C string pointers. Embedded NUL bytes in the input
-        // or delimiter therefore cannot be represented faithfully inside the
-        // resulting list elements. A length-aware string list element
-        // representation is required to close this gap.
         if args.len() != 2 {
             return Err(CompileError::WrongArgCount(
                 "str_split expects 2 arguments (string, delimiter)".to_string(),
             ));
         }
-        let s_ptr = self.extract_string_arg(&args[0], "str_split")?;
-        let delim_ptr = self.extract_string_arg(&args[1], "str_split")?;
-        let func = self.get_runtime_fn("mimi_str_split")?;
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_split")?;
+        let (delim_ptr, delim_len) = self.extract_string_arg_ptr_len(&args[1], "str_split")?;
+        let func = self.get_runtime_fn("mimi_str_split_ll")?;
         let result_ptr = self
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
                     BasicMetadataValueEnum::PointerValue(delim_ptr),
+                    BasicMetadataValueEnum::IntValue(delim_len),
                 ],
                 "str_split_call",
             )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_split returned void")?
+            .ok_or("mimi_str_split_ll returned void")?
             .into_pointer_value();
         self.copy_list_struct_fields(result_ptr)
     }
@@ -595,7 +591,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Call strlen on a raw string pointer.
-    pub(super) fn string_len(&self, ptr: PointerValue<'ctx>) -> MimiResult<IntValue<'ctx>> {
+    pub(in crate::codegen) fn string_len(
+        &self,
+        ptr: PointerValue<'ctx>,
+    ) -> MimiResult<IntValue<'ctx>> {
         let strlen_fn = self.get_runtime_fn("strlen")?;
         Ok(self
             .build_call(

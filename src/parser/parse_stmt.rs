@@ -383,14 +383,16 @@ impl Parser {
     }
 
     fn parse_mms_block(&mut self) -> Result<(), ParseError> {
+        let start = self.peek().clone();
         self.expect_ident_name("mms")?;
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         if matches!(self.peek_kind(), TokenKind::String(_)) {
             self.expect_string()?;
         } else {
-            // 0.35.13 trivia-ization: consume the body validating only the
-            // brace structure — the text is a super-comment, no AST node.
+            // Consume and validate the brace structure so the error is
+            // anchored at the `mms` keyword and not a cascade inside the
+            // rejected block.
             let mut depth = 1u32;
             while !self.at(&TokenKind::Eof) {
                 match self.peek_kind() {
@@ -408,9 +410,13 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "`}`")?;
         self.match_semi();
-        // 0.35.13 trivia-ization: the content is parsed (validating the
-        // brace structure) but discarded — mms{} is a super-comment.
-        Ok(())
+        // 0.1.8 Phase E: the `mms{}` sketch container is removed. Mimi is the
+        // production surface; do not use MimiSpec as an executing block.
+        Err(ParseError::new(
+            "`mms {}` is removed (0.1.8); write production .mimi instead of MimiSpec sketch blocks",
+            start.line,
+            start.col,
+        ))
     }
 
     fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {
@@ -1189,7 +1195,9 @@ impl Parser {
                 continue;
             }
             if self.at_ident_name("mms") {
-                let _ = self.parse_mms_block();
+                if let Err(e) = self.parse_mms_block() {
+                    self.errors.push(e);
+                }
                 continue;
             }
             match self.parse_stmt() {

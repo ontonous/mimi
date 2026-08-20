@@ -781,6 +781,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // (count_basic_blocks != 0) prevents double-emission in the fifth pass.
         if let Some((program, Some(eligible))) = resolved_ctx {
             if let Err(diagnostics) = self.compile_resolved_subset(program, eligible) {
+                // 0.1.8 Phase 0: core-callee emit failures are hard errors
+                // (function name + reason), not a quiet legacy downgrade.
+                if let Some(diag) = diagnostics
+                    .iter()
+                    .find(|d| d.message.contains("core callee"))
+                {
+                    return Err(CompileError::Unsupported(diag.message.clone()));
+                }
                 if std::env::var("MIMI_VERBOSE").is_ok() {
                     for d in &diagnostics {
                         eprintln!("warning: resolved subset issue: {}", d.message);

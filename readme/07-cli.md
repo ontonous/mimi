@@ -31,18 +31,13 @@ mimi check <file.mimi>
 
 | 选项 | 说明 |
 |------|------|
-| `--extract-contracts` | 提取并显示 `mms{}` 块中的 MimiSpec 契约 |
-| `--strict` | 对含 MimiSpec 意图后缀（`$$` 等）的文件强制锁语义 |
-| `--verify-rules` | 验证 `mms{}` 中 MimiSpec rule 附着一致性 |
+| （无 MimiSpec 专用选项） | 0.1.8 已移除 `--extract-contracts` / `--strict` / `--verify-rules` |
 
 ### 示例
 
 ```bash
 # 基本类型检查
 mimi check src/main.mimi
-
-# 提取契约
-mimi check --extract-contracts src/payment.mimi
 
 # 严格模式
 mimi check --strict src/critical.mimi
@@ -223,22 +218,10 @@ Verifying contracts in src/account.mimi...
 
 ---
 
-## 7. promote - 提升草图
+## 7. promote - 提升草图（已移除）
 
-```bash
-mimi promote <file.mms>
-```
-
-将 `.mms` 草图文件转换为 `.mimi` 生产文件。
-
-### 示例
-
-```bash
-# 提升单个文件
-mimi promote sketches/payment.mms
-
-# 提升后文件变为 payment.mimi
-```
+> 0.1.8 Phase E：MimiSpec `.mms` 已从 Mimi 拆离，`mimi promote` 不再接受
+> `.mms` 草稿。用户直接编写 `.mimi` 生产文件。
 
 ### 要求
 

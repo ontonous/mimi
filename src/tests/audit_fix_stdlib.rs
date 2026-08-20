@@ -1162,31 +1162,3 @@ func main() -> i32 {
         "codegen truncate must match the VM"
     );
 }
-
-// ===== mimispec/lexer.mimi — batch5 P2-5: remove dummy first token =====
-
-#[test]
-fn audit_stdlib_mimispec_lexer_no_dummy_first_token() {
-    let src = r#"
-func main() -> i32 {
-    let toks = tokenize("foo bar")
-    println(len(toks))
-    println(toks[0].0)
-    println(toks[1].0)
-    let empty_toks = tokenize("")
-    println(len(empty_toks))
-    let (toks2, errs2) = tokenize_with_errors("foo !")
-    println(len(errs2))
-    println(errs2[0].0)
-    0
-}
-"#;
-    let combined = format!("{}\n{}", audit2_stdlib_src("mimispec/lexer.mimi"), src);
-    let (v, out) = run_source_with_stdout(&combined);
-    assert_eq!(v, interp::Value::Int(0));
-    assert_eq!(
-        out.trim(),
-        "4\nnewline\nident\n1\n1\nunexpected `!`, expected `!=`",
-        "tokenize must not prepend a dummy empty token or duplicate eof, and errors must be exposed"
-    );
-}

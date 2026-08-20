@@ -1106,6 +1106,7 @@ mod func;
 mod generics;
 mod items;
 mod linear_blackbox;
+mod narrow;
 mod pattern;
 mod types;
 mod vars;

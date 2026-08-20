@@ -1983,7 +1983,9 @@ impl BodyLowerer<'_> {
                     arms,
                 }
             }
-            Expr::Record { fields, .. } => self.lower_record(&node_id, fields, role, &ty)?,
+            Expr::Record { fields, rest, .. } => {
+                self.lower_record(&node_id, fields, rest.as_deref(), role, &ty)?
+            }
             Expr::MapLiteral { entries } => {
                 let mut lowered = Vec::with_capacity(entries.len());
                 for index in 0..entries.len() {
@@ -2191,6 +2193,7 @@ impl BodyLowerer<'_> {
         &mut self,
         node_id: &NodeId,
         fields: &[crate::ast::RecordFieldExpr],
+        rest: Option<&crate::ast::Expr>,
         role: &str,
         ty: &ResolvedTypeId,
     ) -> Result<ResolvedExprKind, Vec<ResolvedBodyError>> {
@@ -2236,12 +2239,16 @@ impl BodyLowerer<'_> {
         }
         let mut lowered = Vec::with_capacity(declared.len());
         for declaration in &declared {
-            let value = surface.remove(declaration.as_str()).ok_or_else(|| {
-                vec![ResolvedBodyError::new(
+            let Some(value) = surface.remove(declaration.as_str()) else {
+                // 0.1.8 Phase F: `..rest` supplies omitted fields.
+                if rest.is_some() {
+                    continue;
+                }
+                return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!("record field '{declaration}' has no checked value"),
-                )]
-            })?;
+                )]);
+            };
             let field_id = self.resolve_field(node_id, ty, declaration)?;
             let declaration_ty = self.field_types.get(&field_id).ok_or_else(|| {
                 vec![ResolvedBodyError::new(
@@ -2267,9 +2274,13 @@ impl BodyLowerer<'_> {
                 format!("record field '{extra}' has no declaration"),
             )]);
         }
+        let rest = rest
+            .map(|expr| self.lower_expr(expr, &format!("{role}.rest")).map(Box::new))
+            .transpose()?;
         Ok(ResolvedExprKind::Record {
             nominal,
             fields: lowered,
+            rest,
         })
     }
 
@@ -4254,6 +4265,43 @@ impl BodyLowerer<'_> {
                 },
             });
         }
+        // 0.1.8 Phase E: SessionChan method calls (`ch.send(v)` etc.) carry a
+        // checker session action exactly like the free `session_*` builtins.
+        // Propagate it into ResolvedCall.session so resource lowering treats
+        // the first argument as a session transfer/drop instead of a generic
+        // consume/receiver move.
+        let session = if let Some(action) = self.session_actions.get(node_id).cloned() {
+            let endpoint = self.lookup_local(&action.endpoint).ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "session endpoint '{}' has no resolved local",
+                        action.endpoint
+                    ),
+                )]
+            })?;
+            let is_argument = lowered.first().is_some_and(|argument| {
+                matches!(
+                    &argument.value.kind,
+                    ResolvedExprKind::Load(place)
+                        if place.base == endpoint && place.projections.is_empty()
+                )
+            });
+            if !is_argument {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "session residual fact does not identify a direct endpoint argument",
+                )]);
+            }
+            vec![super::SessionTransition {
+                endpoint,
+                before: action.before,
+                after: action.after,
+                terminal: action.terminal,
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(Some(ResolvedCall {
             callee: ResolvedCallee::Builtin(builtin),
             result: self.expression_type(node_id)?,
@@ -4261,7 +4309,7 @@ impl BodyLowerer<'_> {
             arguments: lowered,
             permission: Some(method.permission),
             effects: Vec::new(),
-            session: Vec::new(),
+            session,
         }))
     }
 

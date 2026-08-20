@@ -553,6 +553,37 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(handle("ListHandle"))
             .effect("alloc")
     });
+    gen.export("mimi_str_split_ll", |f| {
+        f.param("s", ptr(prim(U8)))
+            .param("s_len", prim(I64))
+            .param("delim", ptr(prim(U8)))
+            .param("delim_len", prim(I64))
+            .returns(handle("ListHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_box", |f| {
+        f.param("ptr", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_unbox", |f| {
+        f.param("boxed", prim(I64))
+            .param("out_ptr", ptr(ptr(prim(U8))))
+            .param("out_len", ptr(prim(I64)))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_str_free_box", |f| {
+        f.param("boxed", prim(I64)).effect("dealloc")
+    });
+    gen.export("mimi_list_string_abi_version", |f| f.returns(prim(I32)));
+    gen.export("mimi_list_read_string", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("index", prim(I64))
+            .param("out_ptr", ptr(ptr(prim(U8))))
+            .param("out_len", ptr(prim(I64)))
+            .returns(prim(I32))
+    });
     gen.export("mimi_str_join_ll", |f| {
         f.param("list", handle("ListHandle"))
             .param("sep", ptr(prim(U8)))
@@ -789,6 +820,32 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_channel_drop", |f| {
         f.param("handle", prim(I64)).effect("dealloc")
+    });
+
+    // ── Flow TransitionEpoch (Phase C) ──
+    gen.export("mimi_flow_pack", |f| {
+        f.param("payload", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
+    });
+    gen.export("mimi_flow_epoch", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_flow_check_epoch", |f| {
+        f.param("handle", prim(I64))
+            .param("expected", prim(I64))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_flow_bump_epoch", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_flow_unpack", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_flow_pack_count", |f| f.returns(prim(I64)));
+    gen.export("mimi_flow_last_error", |f| f.returns(prim(I32)));
+    gen.export("mimi_flow_reject_bare_record", |f| {
+        f.param("raw", prim(I64)).returns(prim(I32))
     });
 
     // ── Concurrency: Session ──
@@ -1564,6 +1621,9 @@ mod tests {
             "mimi_to_string_i64",
             "mimi_to_string_f64",
             "mimi_any_to_string",
+            "mimi_str_box",
+            "mimi_str_unbox",
+            "mimi_str_free_box",
             // Runtime control
             "mimi_runtime_abort",
             "mimi_try_exit",
@@ -1580,6 +1640,9 @@ mod tests {
             "mimi_channel_new",
             "mimi_channel_send",
             "mimi_channel_recv",
+            "mimi_flow_pack",
+            "mimi_flow_check_epoch",
+            "mimi_flow_bump_epoch",
             "mimi_session_pair",
             // File I/O
             "mimi_is_dir",

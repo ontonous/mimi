@@ -594,6 +594,15 @@ pub enum Op {
         base: Reg,
         count: u16,
     },
+    /// rd = clone of ra, then fields from [base..base+count) override by name.
+    /// Field names are stored in constants[type_name..type_name+count].
+    UpdateRecord {
+        rd: Reg,
+        type_name: ConstIdx,
+        ra: Reg,
+        base: Reg,
+        count: u16,
+    },
     /// rd = ra.field[field_name] — field name is a string constant
     RecordGet {
         rd: Reg,
@@ -929,6 +938,7 @@ impl Op {
             | NewList { rd, .. }
             | NewTuple { rd, .. }
             | NewRecord { rd, .. }
+            | UpdateRecord { rd, .. }
             | NewVariant { rd, .. }
             | NewMap { rd, .. }
             | NewSet { rd, .. }
@@ -1208,6 +1218,9 @@ impl Op {
                 reads_range(*base, *arity, reg)
             }
             NewRecord { base, count, .. } => reads_range(*base, *count, reg),
+            UpdateRecord {
+                ra, base, count, ..
+            } => *ra == reg || reads_range(*base, *count, reg),
             // Conservative: any op not enumerated above may read the register.
             _ => true,
         }

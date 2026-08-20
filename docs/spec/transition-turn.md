@@ -59,3 +59,18 @@ Terminal 前 checker 必须证明 ledger 中每个线性资源恰好一个最终
 ## 6. 稀疏图和动态边界
 
 未声明 `(state,event)` 不产生 transition。静态调用不存在即 check error。网络/FFI/IPC 输入依次执行 decode、schema、Protocol、generation/state 校验；失败返回 typed boundary error，只有显式 Flow 策略可以将其升级为 Fault。
+
+## 7. TransitionEpoch 与逃逸打包
+
+> 0.1.8 Phase C（`E0443`）：每个 Flow 值概念上携带 `TransitionEpoch`。
+> 本地 turn/actor 内可剥离 epoch；跨 Channel/FFI/actor mailbox 必须显式打包。
+> Clause 5.1 silent stay 用“本地自我循环不产生原子纪元税”表达这一规则。
+
+- 本地 self-loop（`return SourceState { ... }`、recover/reset 等未逃逸状态更替）
+  不调用 `flow_pack`，`flow_pack_count` 不增加。
+- 裸 Flow record 跨 Channel、FFI 或 actor mailbox 被 checker 拒绝
+  （`E0443`）；crossing 前必须 `flow_pack` 发布 handle。
+- `flow_check_epoch` 对仍持旧 epoch 的对端返回 `EPOCH_ERR_STALE`（2），
+  不是静默别名/UAF。
+- escaped Flow 的 `recover` 是 `flow_bump_epoch`：消费旧 handle、发布新 epoch；
+  缓冲复用只是优化，观察者看到新世代。

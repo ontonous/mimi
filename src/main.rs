@@ -36,8 +36,6 @@ mod lint_cmd;
 mod list;
 #[path = "main/lsp_cmd.rs"]
 mod lsp_cmd;
-#[path = "main/mms.rs"]
-mod mms;
 #[path = "main/promote.rs"]
 mod promote;
 #[path = "main/publish.rs"]
@@ -285,7 +283,7 @@ enum Command {
     /// Generate documentation from Mimi source
     Doc {
         path: PathBuf,
-        /// Output format: markdown (default), mms
+        /// Output format: markdown (default)
         #[arg(short, long, default_value = "markdown")]
         format: String,
         /// Output file (default: stdout)
@@ -310,27 +308,6 @@ enum Command {
         /// Output directory for generated bindings
         #[arg(short, long, default_value = "bindings")]
         output: PathBuf,
-    },
-    /// Parse and process .mms files (MimiSpec)
-    Mms {
-        /// .mms file(s) to parse; use - for stdin
-        files: Vec<PathBuf>,
-
-        /// Show AST structure
-        #[arg(short, long)]
-        ast: bool,
-
-        /// Output results as JSON (useful for editor integrations)
-        #[arg(short, long)]
-        json: bool,
-
-        /// Render AST back to MimiSpec source
-        #[arg(short, long)]
-        render: bool,
-
-        /// Render math as LaTeX
-        #[arg(short, long)]
-        latex: bool,
     },
     /// Display Mimi usage statistics
     Stats { path: Option<PathBuf> },
@@ -647,13 +624,6 @@ fn main() {
             format,
             output,
         } => doc::doc(&path, &format, output.as_deref()),
-        Command::Mms {
-            files,
-            ast,
-            json,
-            render,
-            latex,
-        } => mms::mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats::stats(path.as_deref()),
         Command::Stat { path, depth, hash } => {
             let dir = path

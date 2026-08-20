@@ -920,8 +920,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         if elem_is_string {
-            // String list: data contains *mut c_char pointers
-            // Load element as pointer, then wrap into Mimi string struct
+            // String list: data contains pointers to fat MimiStr {magic, ptr, len}.
             let elem_ptr = self
                 .gep()
                 .build_in_bounds_gep(
@@ -931,20 +930,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "elem",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let raw_str_ptr = match self.build_load(
+            let boxed = match self.build_load(
                 BasicTypeEnum::PointerType(i8_ptr_ty),
                 elem_ptr,
-                "raw_str_ptr",
+                "fat_str_slot",
             )? {
                 BasicValueEnum::PointerValue(pv) => pv,
                 _ => {
                     return Err(CompileError::LlvmError(
-                        "raw_str_ptr must be pointer".to_string(),
+                        "fat_str_slot must be pointer".to_string(),
                     ))
                 }
             };
-            // Wrap C string into Mimi string struct {ptr, len}
-            let mimi_str = self.wrap_c_string(raw_str_ptr)?;
+            let mimi_str = self.load_fat_list_string(boxed)?;
             let str_ty = mimi_str.get_type();
             let elem_alloca = self.build_alloca(str_ty, var)?;
             self.build_store(elem_alloca, mimi_str)?;

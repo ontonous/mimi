@@ -27,8 +27,8 @@ use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
 
 use self::eligibility::{
-    eligible_function_ids_with_stats, require_resolved_native_program, DispatchStats,
-    UnsupportedResolvedNode,
+    eligible_function_ids_with_stats, is_core_kernel_function, require_resolved_native_program,
+    DispatchStats, UnsupportedResolvedNode,
 };
 use self::types::{llvm_type_for_resolved, llvm_type_for_resolved_with};
 
@@ -346,6 +346,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // mangling); a leftover terminator-less stub
                             // segfaults LLVM's pass pipeline.
                             self.clear_partial_body(llvm_fn);
+                            if is_core_kernel_function(self.program, function) {
+                                return Err(CompileError::Unsupported(format!(
+                                    "resolved emitter hard-error for core callee '{}': LLVM verification failed",
+                                    symbol
+                                )));
+                            }
                             failed += 1;
                             continue;
                         }
@@ -365,6 +371,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // never leave a terminator-less stub in the module.
                     if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
                         self.clear_partial_body(llvm_fn);
+                    }
+                    if is_core_kernel_function(self.program, function) {
+                        return Err(CompileError::Unsupported(format!(
+                            "resolved emitter hard-error for core callee '{}': {}",
+                            function.qualified_name, e
+                        )));
                     }
                     if std::env::var("MIMI_VERBOSE").is_ok() {
                         eprintln!(
@@ -1469,6 +1481,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let value = value
                     .map(|value| self.coerce_to(value, result_type))
                     .transpose()?;
+                // 0.35.23 parity: a bare `return` in a unit function must
+                // `ret i64 0` — the unit signature is i64, so `ret void`
+                // would be invalid IR for the resolved emitter too.
+                let value = match value {
+                    Some(value) => Some(value),
+                    None => Some(self.generator.zero_value_for(result_type)),
+                };
                 // Deep-eval 2026-08-09: same string-return ownership probe on
                 // early-return paths (see the implicit-return funnel).
                 let value = value
@@ -1684,10 +1703,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .build_int_mul(len_val, sizeof_i64, "list_alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("list alloc mul: {e}")))?;
         let data_ptr = self.generator.malloc_or_abort(alloc_size, "list_malloc")?;
-        // Store each element as i64.
+        // Store each element as i64. Since 0.38.26 `List<string>`
+        // elements are fat `MimiStr` boxes (`{ptr,len}`), not raw C-string
+        // pointers, so resolved list literals must box strings to keep
+        // readers/contains/zip/enumerate consistent with the runtime.
         for (i, element) in elements.iter().enumerate() {
             let value = self.emit_expr(element, frame)?;
-            let iv = self.coerce_to_i64(value)?;
+            let iv = if resolved_type_display_name(self.program, &element.ty) == "string" {
+                self.coerce_string_to_i64(value)?
+            } else {
+                self.coerce_to_i64(value)?
+            };
             let idx = i64_ty.const_int(i as u64, false);
             let elem_ptr =
                 self.generator
@@ -1998,26 +2024,63 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 Ok(BasicValueEnum::IntValue(set_handle))
             }
             // 0.32.5: Record construction. Build LLVM struct from field
-            // value types, allocate, store each field.
-            ResolvedExprKind::Record { nominal: _, fields } => {
-                // Build the LLVM struct type from field value types.
-                let field_types: Vec<BasicTypeEnum<'ctx>> = fields
-                    .iter()
-                    .map(|f| self.lower_type(&f.value.ty))
-                    .collect::<Result<_, _>>()?;
-                let struct_ty = self.generator.context.struct_type(&field_types, false);
+            // value types, allocate, store each field. 0.1.8 Phase F:
+            // `..rest` starts from the rest record and overrides explicit
+            // fields by declared position.
+            ResolvedExprKind::Record {
+                nominal: _,
+                fields,
+                rest,
+            } => {
+                let struct_ty = match self.lower_type(&expression.ty)? {
+                    BasicTypeEnum::StructType(sty) => sty,
+                    _ => {
+                        return Err(CompileError::Unsupported(
+                            "record construction on non-struct nominal type".into(),
+                        ))
+                    }
+                };
                 let alloca = self.generator.build_alloca(struct_ty, "record_alloc")?;
-                for (i, field) in fields.iter().enumerate() {
+                if let Some(rest_expr) = rest {
+                    let rest_val = self.emit_expr(rest_expr, frame)?;
+                    match rest_val {
+                        BasicValueEnum::StructValue(sv) => {
+                            self.generator.build_store(alloca, sv)?;
+                        }
+                        BasicValueEnum::PointerValue(pv) => {
+                            let loaded = self.generator.build_load(
+                                BasicTypeEnum::StructType(struct_ty),
+                                pv,
+                                "rest_record",
+                            )?;
+                            self.generator.build_store(alloca, loaded)?;
+                        }
+                        other => {
+                            return Err(CompileError::Unsupported(format!(
+                                "record update `..rest` expected struct, got {}",
+                                other.get_type()
+                            )));
+                        }
+                    }
+                }
+                for field in fields {
                     let value = self.emit_expr(&field.value, frame)?;
+                    let field_name = self.lookup_field_name(&field.field)?;
+                    let field_idx = self.lookup_field_index(&field.field, &field_name)?;
                     let field_ptr = self
                         .generator
                         .builder
-                        .build_struct_gep(struct_ty, alloca, i as u32, "rec_field")
+                        .build_struct_gep(struct_ty, alloca, field_idx, &field_name)
                         .map_err(|e| CompileError::LlvmError(format!("record gep: {e}")))?;
                     let field_ty =
-                        struct_ty.get_field_type_at_index(i as u32).ok_or_else(|| {
-                            CompileError::LlvmError(format!("record field {i} type absent"))
-                        })?;
+                        struct_ty
+                            .get_field_type_at_index(field_idx)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "record field {} type absent",
+                                    field_name
+                                ))
+                            })?;
                     let value = self.numeric_convert(value, field_ty)?;
                     self.generator.build_store(field_ptr, value)?;
                 }
@@ -2455,6 +2518,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "index_of" => Some("str_index_of"),
                                 "parse_int" => Some("str_parse_int"),
                                 "parse_float" => Some("str_parse_float"),
+                                _ => None,
+                            };
+                            if let Some(mapped) = mapped {
+                                name = mapped;
+                            }
+                        }
+                        // 0.1.8 Phase E: resolved SessionChan METHOD calls
+                        // (`ch.send(v)` etc.) arrive as
+                        // `builtin.method.session.X`; map them to the existing
+                        // session_* free-function builtins.
+                        if let Some(method) = name.strip_prefix("builtin.method.session.") {
+                            let mapped = match method {
+                                "send" => Some("session_send"),
+                                "recv" => Some("session_recv"),
+                                "close" => Some("session_close"),
                                 _ => None,
                             };
                             if let Some(mapped) = mapped {
@@ -2900,6 +2978,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             "str_substring",
                             "str_substring_strict",
                             "str_split",
+                            "str_join",
                             "str_replace",
                         ];
                         let runtime_fn_name = if STRING_ABI_BUILTINS.contains(&name)
@@ -2980,6 +3059,55 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         &resolved_type_display_name(self.program, &arg.value.ty),
                                     )
                                 });
+                        }
+                        // The resolved emitter does not set legacy pending
+                        // helpers that `compile_to_string` needs for `Any`.
+                        // Tell it when the argument is an untyped map value so
+                        // `to_string(values(record)[i])` goes through
+                        // `mimi_any_to_string` instead of snprintf on the
+                        // raw ValueHandle.
+                        if name == "to_string" && call.arguments.len() == 1 {
+                            let arg_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            self.generator.pending_to_string_is_any =
+                                matches!(arg_ty.as_str(), "Any" | "any" | "unknown");
+                            self.generator.pending_to_string_arg_type = Some(arg_ty);
+                        }
+                        // 0.1.8 Phase D: the resolved emitter must not lower
+                        // typed `from_json::<T>` through the untyped
+                        // `mimi_from_json` ABI. Route it through the legacy
+                        // typed deserializer so `List<string>` uses fat MimiStr
+                        // boxes, records use typed structs, etc.
+                        if name == "from_json"
+                            && !call.type_arguments.is_empty()
+                            && call.arguments.len() == 1
+                        {
+                            let display = resolved_type_display_name(self.program, &expression.ty);
+                            if let Some(ty) =
+                                crate::codegen::expr::call::helpers::parse_type_str(&display)
+                            {
+                                let raw_ptr = match arguments[0] {
+                                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                                    BasicMetadataValueEnum::StructValue(sv) => self
+                                        .generator
+                                        .builder
+                                        .build_extract_value(sv, 0, "from_json_str_ptr")
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "extract from_json string: {e}"
+                                            ))
+                                        })?
+                                        .into_pointer_value(),
+                                    _ => {
+                                        return Err(CompileError::Unsupported(
+                                            "resolved from_json requires a string argument".into(),
+                                        ))
+                                    }
+                                };
+                                return self.generator.compile_from_json_raw(&ty, raw_ptr);
+                            }
                         }
                         let result = self.generator.compile_builtin_call(name, &arguments)?;
                         // ABI bridge: builtins return raw ptr for strings, but the
@@ -4103,6 +4231,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         arms: &[crate::core::ir::MatchArm],
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // 0.36.56 (Phase E): single-target flow results are plain state
+        // records. Their first field may be f64/bool, and the match does not
+        // have a __MultiTarget enum tag; the arm naming the scrutinee's static
+        // state binds fields directly from the record, while other state arms
+        // are statically dead but still compile with sentinel bindings.
+        let scrutinee_display = resolved_type_display_name(self.program, &scrutinee.ty);
+        let is_static_flow = scrutinee_display.starts_with("state:")
+            && arms.iter().all(|arm| {
+                matches!(
+                    &arm.pattern.kind,
+                    crate::core::ir::ResolvedPatternKind::Constructor { variant, .. }
+                        if variant.0.starts_with("state:")
+                )
+            });
+        if is_static_flow {
+            return self.emit_static_flow_match(
+                expression,
+                scrutinee,
+                arms,
+                frame,
+                scrutinee_display,
+            );
+        }
+
         let result_type = self.lower_type(&expression.ty)?;
         let result_alloca = self.generator.build_alloca(result_type, "match_result")?;
         let scrutinee_val = self.emit_expr(scrutinee, frame)?;
@@ -4779,6 +4931,186 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .build_load(result_type, result_alloca, "match_val")
     }
 
+    /// 0.36.56 (Phase E): single-target flow-result match lowering.
+    ///
+    /// The scrutinee's static type is exactly one state of a flow (a plain
+    /// record, no `__MultiTarget` enum). The arm naming that static state
+    /// binds its fields directly from the record; all other state arms are
+    /// statically dead but still compile with sentinel bindings so the match
+    /// result type unifies.
+    fn emit_static_flow_match(
+        &mut self,
+        expression: &ResolvedExpr,
+        scrutinee: &ResolvedExpr,
+        arms: &[crate::core::ir::MatchArm],
+        frame: &mut ResolvedFrame<'ctx>,
+        static_display: String,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let result_type = self.lower_type(&expression.ty)?;
+        let result_alloca = self.generator.build_alloca(result_type, "match_result")?;
+        let scrutinee_val = self.emit_expr(scrutinee, frame)?;
+        let scrutinee_val = if let BasicValueEnum::PointerValue(pv) = scrutinee_val {
+            let sty = self.lower_type(&scrutinee.ty)?;
+            self.generator
+                .build_load(sty, pv, "static_match_scrutinee")?
+        } else {
+            scrutinee_val
+        };
+        let sv = match scrutinee_val {
+            BasicValueEnum::StructValue(sv) => sv,
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "static flow match scrutinee must be a record struct, got {other:?}"
+                )))
+            }
+        };
+
+        let function = self.current_function()?;
+        let merge_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "static_match_merge");
+        let callable_body = &self
+            .program
+            .callable(&frame.owner)
+            .ok_or_else(|| {
+                CompileError::Unsupported("callable absent for static flow match".into())
+            })?
+            .body;
+
+        let mut fallthrough_bb = self.generator.builder.get_insert_block().ok_or_else(|| {
+            CompileError::LlvmError("no insert block for static flow match".into())
+        })?;
+
+        for (arm_index, arm) in arms.iter().enumerate() {
+            let is_last = arm_index == arms.len() - 1;
+            let variant = match &arm.pattern.kind {
+                crate::core::ir::ResolvedPatternKind::Constructor { variant, .. } => variant,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "static flow match arm is not a state constructor".into(),
+                    ))
+                }
+            };
+            let is_static_arm = variant.0 == static_display;
+            let arm_bb = self
+                .generator
+                .context
+                .append_basic_block(function, &format!("static_arm{arm_index}"));
+
+            if !is_static_arm {
+                // Statically dead arm: fall through to the next arm's dispatch.
+                let next_bb = self
+                    .generator
+                    .context
+                    .append_basic_block(function, &format!("static_dead_next{arm_index}"));
+                self.generator.builder.position_at_end(fallthrough_bb);
+                self.generator.build_br(next_bb)?;
+                fallthrough_bb = next_bb;
+            } else if let Some(guard) = &arm.guard {
+                // Live arm with guard: bind the state fields before evaluating
+                // the guard, mirroring legacy match semantics.
+                let guard_bb = self
+                    .generator
+                    .context
+                    .append_basic_block(function, &format!("static_guard{arm_index}"));
+                let next_bb = if is_last {
+                    merge_bb
+                } else {
+                    self.generator
+                        .context
+                        .append_basic_block(function, &format!("static_guard_next{arm_index}"))
+                };
+                self.generator.builder.position_at_end(fallthrough_bb);
+                self.generator.build_br(guard_bb)?;
+                self.generator.builder.position_at_end(guard_bb);
+                self.bind_flow_arm_variables(arm, sv, true, callable_body, frame)?;
+                let guard_val = self.emit_expr(guard, frame)?;
+                let guard_bool = self.ensure_bool(guard_val)?;
+                self.generator.build_cond_br(guard_bool, arm_bb, next_bb)?;
+                if !is_last {
+                    fallthrough_bb = next_bb;
+                }
+            } else {
+                // Live arm without guard: always taken.
+                let next_bb = if is_last {
+                    None
+                } else {
+                    Some(
+                        self.generator
+                            .context
+                            .append_basic_block(function, &format!("static_next{arm_index}")),
+                    )
+                };
+                self.generator.builder.position_at_end(fallthrough_bb);
+                self.generator.build_br(arm_bb)?;
+                if let Some(nb) = next_bb {
+                    fallthrough_bb = nb;
+                }
+            }
+
+            // Emit the arm body. The live guarded arm already bound its
+            // variables in the guard block; the other arms bind here.
+            self.generator.builder.position_at_end(arm_bb);
+            if !is_static_arm {
+                self.bind_flow_arm_variables(arm, sv, false, callable_body, frame)?;
+            } else if arm.guard.is_none() {
+                self.bind_flow_arm_variables(arm, sv, true, callable_body, frame)?;
+            }
+            let arm_value = self.emit_expr(&arm.body, frame)?;
+            if !self.current_block_terminated() {
+                let arm_value = self.coerce_to(arm_value, result_type)?;
+                self.generator.build_store(result_alloca, arm_value)?;
+                self.generator.build_br(merge_bb)?;
+            }
+        }
+
+        // Any remaining fallthrough block (from a dead/guarded last arm) must
+        // be terminated. It is unreachable in practice but still a CFG edge.
+        if fallthrough_bb.get_terminator().is_none() {
+            self.generator.builder.position_at_end(fallthrough_bb);
+            self.generator.build_br(merge_bb)?;
+        }
+
+        self.generator.builder.position_at_end(merge_bb);
+        self.generator
+            .build_load(result_type, result_alloca, "static_match_val")
+    }
+
+    /// Bind pattern variables for a single flow-state match arm from a plain
+    /// state record. For the live arm, extract real fields; for dead arms use
+    /// zero-initialized sentinels of the bound pattern's type.
+    fn bind_flow_arm_variables(
+        &mut self,
+        arm: &crate::core::ir::MatchArm,
+        sv: inkwell::values::StructValue<'ctx>,
+        is_static: bool,
+        callable_body: &crate::core::ir::ResolvedBody,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let crate::core::ir::ResolvedPatternKind::Constructor { fields, .. } = &arm.pattern.kind
+        else {
+            return Ok(());
+        };
+        for (field_id, sub_pattern) in fields {
+            let field_name = self.lookup_field_name(field_id)?;
+            let field_idx = self.lookup_field_index(field_id, &field_name)?;
+            let val = if is_static {
+                self.generator
+                    .builder
+                    .build_extract_value(sv, field_idx, "static_flow_field")
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("static flow field extract: {e}"))
+                    })?
+            } else {
+                let ty = self.lower_type(&sub_pattern.ty)?;
+                ty.const_zero().into()
+            };
+            self.bind_pattern(callable_body, sub_pattern, val, frame)?;
+        }
+        Ok(())
+    }
+
     fn emit_unary(
         &mut self,
         op: ResolvedUnaryOp,
@@ -5338,6 +5670,63 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
     }
 
+    /// Coerce a `string` value to an i64 list-slot handle. Since 0.38.26
+    /// `List<string>` slots store a fat `MimiStr { magic, ptr, len }` box
+    /// (`mimi_str_box`), not the raw C-string pointer. The legacy
+    /// `coerce_to_i64` path is still used for non-string values.
+    fn coerce_string_to_i64(
+        &self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let (raw_ptr, raw_len) = match value {
+            BasicValueEnum::PointerValue(pv) => {
+                let len = self.generator.string_len(pv)?;
+                (pv, len)
+            }
+            BasicValueEnum::StructValue(sv) => {
+                let sv_fields = sv.get_type().get_field_types();
+                if sv_fields.len() != 2
+                    || !matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
+                    || !matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                {
+                    return Err(CompileError::Unsupported(format!(
+                        "resolved string list element is not {{ptr, len}}: {sv_fields:?}"
+                    )));
+                }
+                let raw_ptr = self
+                    .generator
+                    .build_extract_value(sv.into(), 0, "str_list_ptr")?
+                    .into_pointer_value();
+                let raw_len = self
+                    .generator
+                    .build_extract_value(sv.into(), 1, "str_list_len")?
+                    .into_int_value();
+                (raw_ptr, raw_len)
+            }
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved string list element cannot become a fat string box: {other:?}"
+                )))
+            }
+        };
+        let box_fn = self.generator.get_runtime_fn("mimi_str_box")?;
+        let boxed = self
+            .generator
+            .build_call(
+                box_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                    BasicMetadataValueEnum::IntValue(raw_len),
+                ],
+                "resolved_str_box",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_box returned void")?
+            .into_int_value();
+        Ok(boxed)
+    }
+
     /// Coerce a value to i64 for list element storage. Handles int
     /// sign/zero-extension, float-to-int, bool zext, pointer ptrtoint,
     /// and struct-value pointer extraction (for string/record/nested list
@@ -5463,47 +5852,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     && matches!(&fields[0], BasicTypeEnum::PointerType(_))
                     && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
                 if is_string {
-                    // String struct {i8*, i64}: the i64 IS the raw char* pointer.
-                    // Build a proper {i8*, i64} struct from it.
-                    let raw_ptr =
+                    // String list slots hold a pointer to a fat MimiStr box.
+                    let boxed =
                         self.generator
                             .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                    // Call strlen to get the length.
-                    let strlen_fn = self
-                        .generator
-                        .module
-                        .get_function("strlen")
-                        .ok_or_else(|| "strlen not declared in module".to_string())?;
-                    let str_len = self
-                        .generator
-                        .builder
-                        .build_call(
-                            strlen_fn,
-                            &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
-                            "strlen",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("strlen call: {e}")))?
-                        .try_as_basic_value_opt()
-                        .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?;
-                    // Build {i8*, i64} struct in an alloca then load.
-                    let str_alloca = self.generator.build_alloca(sty, "str_struct")?;
-                    // Store ptr (field 0)
-                    let ptr_gep = self
-                        .generator
-                        .builder
-                        .build_struct_gep(sty, str_alloca, 0, "str_ptr_gep")
-                        .map_err(|e| CompileError::LlvmError(format!("str ptr gep: {e}")))?;
-                    self.generator.build_store(ptr_gep, raw_ptr)?;
-                    // Store len (field 1)
-                    let len_gep = self
-                        .generator
-                        .builder
-                        .build_struct_gep(sty, str_alloca, 1, "str_len_gep")
-                        .map_err(|e| CompileError::LlvmError(format!("str len gep: {e}")))?;
-                    self.generator.build_store(len_gep, str_len)?;
-                    // Load the full struct
-                    self.generator
-                        .build_load(BasicTypeEnum::StructType(sty), str_alloca, "str_val")
+                    self.generator.load_fat_list_string(boxed)
                 } else {
                     // Non-string struct: stored as heap pointer.
                     let struct_ptr = self
@@ -5580,6 +5933,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 return Ok(name.to_string());
             }
         }
+        // 0.36.56: Flow state constructor variants are `state:F::B`. There is
+        // no synthetic enum type in type_defs; the state name is the last
+        // `::` segment of the state path.
+        if let Some(rest) = id_str.strip_prefix("state:") {
+            let path = rest.split('/').next().unwrap_or(rest);
+            let name = path.rsplit("::").next().unwrap_or(path);
+            return Ok(name.to_string());
+        }
         Err(CompileError::Unsupported(format!(
             "variant '{}' not found in any type definition",
             variant_id.0
@@ -5621,6 +5982,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
             }
         }
+        // 0.1.8 Phase D/F: builtin record schemas (PeerFault, ExecResult,
+        // StatResult, ...) live outside the checked type_defs catalog. Their
+        // field ids are `builtin:type:PeerFault/field:peer_id`; map them back
+        // to the canonical schema name.
+        if let Some(owner_part) = field_id.0.strip_prefix("builtin:type:") {
+            let owner = format!(
+                "builtin:type:{}",
+                owner_part.split('/').next().unwrap_or("")
+            );
+            if let Some(schema) = crate::core::resolved::builtin_record_schema(&owner) {
+                if let Some(field_path) = owner_part.split('/').nth(1) {
+                    if let Some(field_name) = field_path.strip_prefix("field:") {
+                        if schema.iter().any(|(name, _)| *name == field_name) {
+                            return Ok(field_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
         Err(CompileError::Unsupported(format!(
             "field '{}' not found in any type definition",
             field_id.0
@@ -5655,6 +6035,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         })
     }
 
+    /// Fallback for checker-internal builtin record fields whose TypeDefs are
+    /// not part of the checked program's type_defs catalog. `field_id` has the
+    /// form `builtin:type:PeerFault/field:peer_id`.
+    fn builtin_schema_field_index(field_id: &str, field_name: &str) -> Option<u32> {
+        let id = field_id.strip_prefix("builtin:type:")?;
+        let owner = format!("builtin:type:{}", id.split('/').next()?);
+        let schema = crate::core::resolved::builtin_record_schema(&owner)?;
+        schema
+            .iter()
+            .position(|(name, _)| *name == field_name)
+            .map(|i| i as u32)
+    }
+
     fn parse_flow_field_id(field_id: &NodeId) -> Option<(String, String)> {
         let id_str = &field_id.0;
         let state_path = id_str.strip_prefix("state:")?;
@@ -5663,30 +6056,32 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // Extract span: last segment after the last ':'-separated hash.
         // Format after slash: "node:decl.field@external:HASH:L:C-L:C"
         let after_slash = &state_path[slash_pos + 1..];
-        // Find the span part: "L:C-L:C" at the end.
-        let span_str = after_slash.rsplit_once(':').map(|(_, s)| s)?;
-        // span_str is now "L:C-L:C" — but we need to handle the case where
-        // the hash contains colons. Use a more robust extraction: find the
-        // pattern "digits:digits-digits:digits" at the end.
-        let span_str = span_str
-            .rsplit_once('-')
-            .map(|(start, end)| {
-                // start might be "L:C" or "HASH:L:C"
-                let start = start
-                    .rsplit_once(':')
-                    .map(|(_, c)| {
-                        // Reconstruct "L:C" from the last two segments
-                        let line = start
-                            .rsplit_once(':')
-                            .map(|(l, _)| l.rsplit_once(':').map_or(l, |(_, l2)| l2))
-                            .unwrap_or(start);
-                        format!("{}:{}", line, c)
-                    })
-                    .unwrap_or(start.to_string());
-                format!("{}-{}", start, end)
-            })
-            .unwrap_or(span_str.to_string());
-        Some((format!("flow::{state_name}"), span_str))
+        // The trailing span is usually `LINE:COL-LINE:COL`; it may be preceded
+        // by either an external hash (`@external:HASH:4:15-4:25`) or a simple
+        // source marker (`@unknown-source:4:15-4:25`). Parse from the last
+        // hyphen so both forms work. For generated fault fields there is no
+        // source span (`generated:decl.field:...last_state`); still return a
+        // best-effort suffix so `lookup_field_index` can match by name.
+        if let Some(hyphen) = after_slash.rfind('-') {
+            let end_part = &after_slash[hyphen + 1..];
+            let start_part = &after_slash[..hyphen];
+            let end_parts: Vec<&str> = end_part.split(':').collect();
+            let start_parts: Vec<&str> = start_part.split(':').collect();
+            if end_parts.len() >= 2 && start_parts.len() >= 2 {
+                if let (Ok(end_line), Ok(end_col), Ok(start_line), Ok(start_col)) = (
+                    end_parts[end_parts.len() - 2].parse::<usize>(),
+                    end_parts[end_parts.len() - 1].parse::<usize>(),
+                    start_parts[start_parts.len() - 2].parse::<usize>(),
+                    start_parts[start_parts.len() - 1].parse::<usize>(),
+                ) {
+                    return Some((
+                        format!("flow::{state_name}"),
+                        format!("{start_line}:{start_col}-{end_line}:{end_col}"),
+                    ));
+                }
+            }
+        }
+        Some((format!("flow::{state_name}"), after_slash.to_string()))
     }
 
     /// Match a field by comparing source spans. The span_str format is
@@ -5865,6 +6260,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         if let Some(index) = Self::builtin_trace_field_index(field_name) {
             return Ok(index);
         }
+        // 0.1.8 Phase D: builtin record schemas (PeerFault, ExecResult,
+        // StatResult, ...) also live outside the checked type_defs catalog.
+        // Field ids are `builtin:type:PeerFault/field:peer_id`; map them by
+        // the canonical schema order.
+        if let Some(index) = Self::builtin_schema_field_index(field_id.0.as_str(), field_name) {
+            return Ok(index);
+        }
         Err(CompileError::Unsupported(format!(
             "field '{field_name}' ({}) not found in any type definition",
             field_id.0
@@ -6021,8 +6423,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 && matches!(&fields[0], BasicTypeEnum::PointerType(_))
                                 && matches!(&fields[1], BasicTypeEnum::IntType(bit) if bit.get_bit_width() == 64);
                             if is_string {
-                                // String: the i64 IS the raw char* pointer.
-                                // Construct a full {i8*, i64} string struct.
+                                // String: the i64 is a pointer to a fat MimiStr box.
                                 let loaded = self
                                     .generator
                                     .build_load(
@@ -6035,50 +6436,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     .generator
                                     .context
                                     .ptr_type(inkwell::AddressSpace::default());
-                                let raw_ptr = self.generator.build_int_to_ptr(
+                                let boxed = self.generator.build_int_to_ptr(
                                     loaded,
                                     ptr_ty,
                                     "elem_str_ptr",
                                 )?;
-                                // Call strlen to get the length.
-                                let strlen_fn = self
-                                    .generator
-                                    .module
-                                    .get_function("strlen")
-                                    .ok_or_else(|| "strlen not declared".to_string())?;
-                                let str_len = self
-                                    .generator
-                                    .builder
-                                    .build_call(
-                                        strlen_fn,
-                                        &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
-                                        "strlen",
-                                    )
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("strlen call: {e}"))
-                                    })?
-                                    .try_as_basic_value_opt()
-                                    .ok_or_else(|| {
-                                        CompileError::LlvmError("strlen returned void".into())
-                                    })?;
-                                // Build {i8*, i64} struct in alloca.
+                                let str_val = self.generator.load_fat_list_string(boxed)?;
                                 let str_alloca = self.generator.build_alloca(sty, "str_struct")?;
-                                let ptr_gep = self
-                                    .generator
-                                    .builder
-                                    .build_struct_gep(sty, str_alloca, 0, "str_ptr_gep")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("str gep: {e}"))
-                                    })?;
-                                self.generator.build_store(ptr_gep, raw_ptr)?;
-                                let len_gep = self
-                                    .generator
-                                    .builder
-                                    .build_struct_gep(sty, str_alloca, 1, "str_len_gep")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("len gep: {e}"))
-                                    })?;
-                                self.generator.build_store(len_gep, str_len)?;
+                                self.generator.build_store(str_alloca, str_val)?;
                                 current_ptr = str_alloca;
                                 current_type = elem_llvm_ty;
                             } else {
@@ -9063,10 +9428,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(())
     }
 
-    /// Emit `spawn expr` as an eager, already-completed future. The resolved
-    /// slice does not yet generate a dedicated poll wrapper; evaluating the
-    /// expression synchronously preserves the value/result ABI and keeps the
-    /// spawn/await test corpus on the resolved path.
     /// Real-thread spawn for direct calls to named functions.
     ///
     /// This is the default path when the environment variable
@@ -10398,22 +10759,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let elem_ptr =
             self.generator
                 .build_int_to_ptr(elem_i64, ptr_ty, "ret_list_str_elem_ptr")?;
-        let strlen_fn = self.generator.get_runtime_fn("strlen")?;
-        let len_val = self
-            .generator
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
-                "ret_list_str_strlen",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("ret list str strlen: {e}")))?
-            .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("ret list str strlen returned void".into()))?
-            .into_int_value();
+        // 0.1.8 Phase B fat ABI: each list slot is a MimiStr box handle.
+        // Unpack the box to `{ptr, len}`, ensure the payload is heap-owned,
+        // then update the box's `ptr`/`len` fields in place. The slot must
+        // continue to hold the box pointer (not a raw string pointer).
         let string_sv = self
             .generator
-            .build_string_struct(elem_ptr, len_val)?
+            .load_fat_list_string(elem_ptr)?
             .into_struct_value();
         let owned = self
             .generator
@@ -10423,10 +10775,32 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .generator
             .build_extract_value(owned.into(), 0, "ret_list_str_owned_ptr")?
             .into_pointer_value();
-        let new_i = self
+        let new_len = self
             .generator
-            .build_ptr_to_int(new_ptr, i64_ty, "ret_list_str_owned_i64")?;
-        self.generator.build_store(elem_slot, new_i)?;
+            .build_extract_value(owned.into(), 1, "ret_list_str_owned_len")?
+            .into_int_value();
+        let i32_ty = self.generator.context.i32_type();
+        let fat_ty = self.generator.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::PointerType(ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let fat_ptr_gep = self
+            .generator
+            .gep()
+            .build_struct_gep(fat_ty, elem_ptr, 2, "ret_list_str_box_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("ret list str box ptr: {e}")))?;
+        self.generator.build_store(fat_ptr_gep, new_ptr)?;
+        let fat_len_gep = self
+            .generator
+            .gep()
+            .build_struct_gep(fat_ty, elem_ptr, 3, "ret_list_str_box_len")
+            .map_err(|e| CompileError::LlvmError(format!("ret list str box len: {e}")))?;
+        self.generator.build_store(fat_len_gep, new_len)?;
         let next = self
             .generator
             .builder

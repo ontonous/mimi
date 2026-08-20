@@ -731,12 +731,10 @@ mod tests {
         }
     }
 
-    /// 0.35.13 (DX backlog #10 trivia-ization): mms{} blocks are consumed
-    /// as trivia — nested braces must still be balanced-consumed without
-    /// breaking the surrounding parse, and NO statement enters the AST.
-    /// (Previously this test asserted verbatim content preservation.)
+    /// 0.1.8 Phase E: `mms{}` is removed. The parser must reject the block even
+    /// when it contains nested braces — no super-comment path remains.
     #[test]
-    fn mms_block_nested_braces_consumed_as_trivia() {
+    fn mms_block_nested_braces_rejected() {
         let src = r#"func test() -> i32 {
             mms{
                 desc {
@@ -746,30 +744,17 @@ mod tests {
             return 0
         }"#;
         let tokens = Lexer::new(src).tokenize().expect("lex");
-        let file = flow_parse(
+        let err = flow_parse(
             tokens,
             ParseMode::Production,
             SourceId::UNKNOWN,
             SourceRegistry::default(),
         )
-        .expect("parse");
-        let func_body = file
-            .items
-            .first()
-            .and_then(|i| match i {
-                crate::ast::Item::Func(f) => Some(&f.body),
-                _ => None,
-            })
-            .expect("expected first item to be a function");
-        assert_eq!(
-            func_body.len(),
-            1,
-            "mms{{}} must be trivia: only the return statement survives, got {} stmts",
-            func_body.len()
-        );
+        .expect_err("mms{} must be rejected");
         assert!(
-            matches!(func_body[0].unlocated(), crate::ast::Stmt::Return(..)),
-            "the surviving statement must be the return"
+            err.message.contains("mms") || err.message.contains("removed"),
+            "expected mms-removal diagnostic, got: {}",
+            err.message
         );
     }
 }

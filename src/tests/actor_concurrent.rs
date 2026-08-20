@@ -263,7 +263,7 @@ fn actor_system_kill_cascades_but_preserves_detached_child() {
 fn actor_sync_method_call() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func get() -> i32 {
         return self.count;
@@ -282,7 +282,7 @@ func main() -> i32 {
 fn actor_await_method() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func increment() {
         self.count = self.count + 1;
@@ -296,7 +296,7 @@ actor Counter {
 func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
-    await c.get()
+    c.get()
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(1));
@@ -325,8 +325,8 @@ func main() -> i32 {
 fn actor_multiple_methods() {
     let src = r#"
 actor Calc {
-    mut x: i32 = 3;
-    mut y: i32 = 7;
+    x: i32 = 3;
+    y: i32 = 7;
 
     func add() -> i32 {
         return self.x + self.y;
@@ -351,7 +351,7 @@ func main() -> i32 {
 fn actor_await_multiple_methods() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func increment() {
         self.count = self.count + 1;
@@ -366,7 +366,7 @@ func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
     c.increment();
-    await c.get()
+    c.get()
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(2));
@@ -376,7 +376,7 @@ func main() -> i32 {
 fn actor_state_persistence() {
     let src = r#"
 actor State {
-    mut counter: i32 = 100;
+    counter: i32 = 100;
 
     func get() -> i32 {
         return self.counter;
@@ -385,7 +385,7 @@ actor State {
 
 func main() -> i32 {
     let s = State.spawn();
-    await s.get()
+    s.get()
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(100));

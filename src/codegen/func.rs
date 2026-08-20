@@ -142,9 +142,16 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
                 collect_old_idents_walker(g, out);
             }
         }
-        Expr::Record { ty: _, fields } => {
+        Expr::Record {
+            ty: _,
+            fields,
+            rest,
+        } => {
             for f in fields {
                 collect_old_idents_walker(&f.value, out);
+            }
+            if let Some(rest) = rest {
+                collect_old_idents_walker(rest, out);
             }
         }
         Expr::MapLiteral { entries } => {
@@ -215,9 +222,16 @@ fn collect_idents_in_old(expr: &crate::ast::Expr, out: &mut Vec<String>) {
                 collect_idents_in_old(e, out);
             }
         }
-        Expr::Record { ty: _, fields } => {
+        Expr::Record {
+            ty: _,
+            fields,
+            rest,
+        } => {
             for f in fields {
                 collect_idents_in_old(&f.value, out);
+            }
+            if let Some(rest) = rest {
+                collect_idents_in_old(rest, out);
             }
         }
         // For complex expressions inside old(), collect all Idents recursively.
@@ -301,9 +315,16 @@ fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, dept
                 collect_all_idents_depth(e, out, d);
             }
         }
-        Expr::Record { ty: _, fields } => {
+        Expr::Record {
+            ty: _,
+            fields,
+            rest,
+        } => {
             for f in fields {
                 collect_all_idents_depth(&f.value, out, d);
+            }
+            if let Some(rest) = rest {
+                collect_all_idents_depth(rest, out, d);
             }
         }
         Expr::MapLiteral { entries } => {
@@ -2465,6 +2486,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if let Expr::Record {
                             ty: Some(tn),
                             fields,
+                            ..
                         } = init.unlocated()
                         {
                             self.var_type_names.insert(name.clone(), tn.clone());
@@ -3129,6 +3151,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
+                        // 0.1.8 Phase E: `let (ch0, ch1) = session_pair::<S>()`
+                        // destructures two SessionChan endpoints. The runtime
+                        // values are i64 handles, so without a type-name hint
+                        // `ch.send` would be mistaken for a socket i64 handle.
+                        let is_session_pair_init = match init.unlocated() {
+                            Expr::Turbofish(n, _, _) => n == "session_pair",
+                            Expr::Call(callee, _) => matches!(
+                                callee.unlocated(),
+                                Expr::Turbofish(n, _, _) if n == "session_pair"
+                            ),
+                            _ => false,
+                        };
+                        if is_session_pair_init {
+                            for sub in sub_pats {
+                                if let PatternKind::Variable(name) = &sub.kind {
+                                    self.var_type_names
+                                        .insert(name.clone(), "SessionChan".to_string());
+                                }
+                            }
+                        }
                     }
                     if let PatternKind::Variable(name) = &pat.kind {
                         // 2026-08-06 (audit 1j): Set literals `{1, 2}` compile
@@ -3144,6 +3186,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         if matches!(init.unlocated(), Expr::MapLiteral { .. }) {
                             self.var_type_names.insert(name.clone(), "Map".to_string());
+                        }
+                        // 0.1.8 Phase E: `let ch = session_open::<S>()` is also
+                        // an i64 handle; register the SessionChan type name for
+                        // method dispatch.
+                        let is_session_open_init = match init.unlocated() {
+                            Expr::Turbofish(n, _, _) => n == "session_open",
+                            Expr::Call(callee, _) => matches!(
+                                callee.unlocated(),
+                                Expr::Turbofish(n, _, _) if n == "session_open"
+                            ),
+                            _ => false,
+                        };
+                        if is_session_open_init {
+                            self.var_type_names
+                                .insert(name.clone(), "SessionChan".to_string());
                         }
                         // 2026-08-06 (audit 1l): enum variant constructors
                         // (`let e = FileNotFound`) compile to a tagged

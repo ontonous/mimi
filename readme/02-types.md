@@ -104,22 +104,10 @@ type MutablePoint {
 }
 ```
 
-### 带 mms 块的记录
+### 带 mms 块的记录（已移除）
 
-```mimi
-type Order {
-    mms {
-        type Order:
-            desc "订单数据模型"
-            id: u64
-            status: OrderStatus
-    }
-
-    id: u64,
-    status: OrderStatus,
-    amount: f64
-}
-```
+> 0.1.8 Phase E：`mms{...}` 不再解析，MimiSpec 已拆离。
+> 类型定义只包含普通字段/变体。
 
 ---
 

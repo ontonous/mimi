@@ -1,7 +1,7 @@
 // Full test of actor functionality - spawn and method calls
 
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func increment() {
         self.count = self.count + 1;

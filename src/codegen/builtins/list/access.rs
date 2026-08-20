@@ -141,7 +141,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(body_bb);
         let eq = if is_string {
-            // String list: elements are `i8*` C-string pointers.
+            // String list: elements are `MimiStr` fat boxes (`i8*` to a
+            // {magic, ptr, len} allocation) since 0.38.26. Unbox before
+            // comparing with the target C string pointer.
             let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let data_raw = self.load_list_data_raw(list_ptr)?;
             let elem_ptr_ptr = self
@@ -153,13 +155,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "elem_ptr_ptr",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let elem_str_ptr = self
+            let elem_box_ptr = self
                 .builder
                 .build_load(
                     BasicTypeEnum::PointerType(i8_ptr_ty),
                     elem_ptr_ptr,
-                    "elem_str",
+                    "elem_box",
                 )
+                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                .into_pointer_value();
+            let elem_box_i64 = self
+                .builder
+                .build_ptr_to_int(elem_box_ptr, i64_ty, "elem_box_int")
+                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?;
+            let out_ptr_alloca = self
+                .builder
+                .build_alloca(i8_ptr_ty, "contains_str_out_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+            let out_len_alloca = self
+                .builder
+                .build_alloca(i64_ty, "contains_str_out_len")
+                .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+            self.build_call(
+                self.get_runtime_fn("mimi_str_unbox")?,
+                &[
+                    BasicMetadataValueEnum::IntValue(elem_box_i64),
+                    BasicMetadataValueEnum::PointerValue(out_ptr_alloca),
+                    BasicMetadataValueEnum::PointerValue(out_len_alloca),
+                ],
+                "contains_str_unbox",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_unbox returned void")?;
+            let elem_str_ptr = self
+                .builder
+                .build_load(i8_ptr_ty, out_ptr_alloca, "elem_str")
                 .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
                 .into_pointer_value();
             let strcmp_fn = self.get_runtime_fn("strcmp")?;

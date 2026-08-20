@@ -157,15 +157,51 @@ impl<'a> Checker<'a> {
                             let coerced = is_numeric_coercion(expected, &actual_clean);
                             if !coerced && self.unification.unify(expected, &actual_clean).is_err()
                             {
+                                // 0.1.8 Phase F (sparse DX): when the source
+                                // state does not match this event, list the
+                                // events that are legal from the actual state.
+                                let mut legal_tail = String::new();
+                                if index == 0 {
+                                    let actual_state_name = match actual_clean.unlocated() {
+                                        Type::Name(n, _) => n.clone(),
+                                        _ => String::new(),
+                                    };
+                                    if !actual_state_name.is_empty() {
+                                        let flow_prefix = format!("flow::{}::", module_name);
+                                        let state_suffix = format!("::{}", actual_state_name);
+                                        let mut legal_events: Vec<String> = self
+                                            .funcs
+                                            .keys()
+                                            .filter_map(|key| {
+                                                let rest = key.strip_prefix(&flow_prefix)?;
+                                                let event = rest.strip_suffix(&state_suffix)?;
+                                                if !event.is_empty() && !event.contains("::") {
+                                                    Some(event.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        legal_events.sort();
+                                        if !legal_events.is_empty() {
+                                            legal_tail = format!(
+                                                "; legal events from {}: {}",
+                                                actual_state_name,
+                                                legal_events.join(", ")
+                                            );
+                                        }
+                                    }
+                                }
                                 self.errors.push(Diagnostic::error_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
-                                        "argument {} of flow transition '{}::{}' expected {}, found {}",
+                                        "argument {} of flow transition '{}::{}' expected {}, found {}{}",
                                         index + 1,
                                         module_name,
                                         method_name,
                                         fmt_type(expected),
-                                        fmt_type(actual)
+                                        fmt_type(actual),
+                                        legal_tail
                                     ),
                                     self.diagnostic_span(),
                                 ));
@@ -174,13 +210,50 @@ impl<'a> Checker<'a> {
                     }
                     return ret_type;
                 }
+                let from_state_name = match from_short.unlocated() {
+                    Type::Name(n, _) => n.clone(),
+                    _ => String::new(),
+                };
+                // 0.1.8 Phase F (sparse DX): an unavailable (state, event) is
+                // rejected at compile time; make the rejection actionable by
+                // listing the currently-legal events from that state.
+                let flow_prefix = format!("flow::{}::", module_name);
+                let state_suffix = if from_state_name.is_empty() {
+                    String::new()
+                } else {
+                    format!("::{}", from_state_name)
+                };
+                let mut legal_events: Vec<String> = self
+                    .funcs
+                    .keys()
+                    .filter_map(|key| {
+                        let rest = key.strip_prefix(&flow_prefix)?;
+                        let event = rest.strip_suffix(&state_suffix)?;
+                        if !state_suffix.is_empty() && !event.is_empty() && !event.contains("::") {
+                            Some(event.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                legal_events.sort();
+                let legal_tail = if legal_events.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; legal events from {}: {}",
+                        from_state_name,
+                        legal_events.join(", ")
+                    )
+                };
                 self.emit_code(
                     crate::diagnostic::codes::E0211,
                     format!(
-                        "no flow transition overload '{}::{}' accepts source state {}",
+                        "no flow transition overload '{}::{}' accepts source state {}{}",
                         module_name,
                         method_name,
-                        fmt_type(&from_ty)
+                        fmt_type(&from_ty),
+                        legal_tail
                     ),
                 );
                 return Type::Name("unit".into(), vec![]);
@@ -283,6 +356,18 @@ impl<'a> Checker<'a> {
             }
         };
         if !type_name.is_empty() {
+            // 0.1.8 Phase E: SessionChan method surface.
+            // `ch.send(v)` == `session_send(ch, v)`, `ch.recv() == session_recv(ch)`,
+            // `ch.close() == session_close(ch)`. Builtin methods deliberately
+            // shadow trait impls (same ruling as List/Set/String methods).
+            if type_name == "SessionChan" && type_args.len() == 1 {
+                match method_name {
+                    "send" | "recv" | "close" => {
+                        return self.check_session_method(obj, &obj_ty, method_name, args, scopes)
+                    }
+                    _ => {}
+                }
+            }
             // Check built-in Option/Result methods; fall through to trait dispatch for unknown methods
             if type_name == "Option" && type_args.len() == 1 {
                 let known = [
@@ -408,6 +493,7 @@ impl<'a> Checker<'a> {
                                 for (i, (arg, param)) in
                                     args.iter().zip(method.params.iter()).enumerate()
                                 {
+                                    self.reject_narrow_across_mailbox_arg(arg, scopes);
                                     let declared = self.resolve_type(&param.ty);
                                     let at = self.infer_expr(arg, scopes);
                                     // IF-C1/C4: strict unify rejects escape hatches at call sites.
@@ -755,6 +841,7 @@ impl<'a> Checker<'a> {
                         );
                     } else {
                         for (i, (arg, param)) in args.iter().zip(method_params.iter()).enumerate() {
+                            self.reject_narrow_across_mailbox_arg(arg, scopes);
                             let at = self.infer_expr(arg, scopes);
                             if self.unification.unify(&at, param).is_err() {
                                 self.emit_code(

@@ -27,11 +27,11 @@
 //!
 //! # Bootstrap interface (v0.29)
 //!
-//! The v0.29 bootstrap will compile the MimiSpec parser using Mimi itself. The
-//! expected bootstrap pipeline is:
+//! The v0.29 bootstrap pipeline is part of Mimi's history; the compiler now
+//! parses and checks `.mimi` directly:
 //!
 //! ```text
-//! mimispec source
+//! .mimi source
 //!     -> lexer::Lexer::tokenize
 //!     -> parser::Parser::parse_file
 //!     -> core::check
@@ -39,8 +39,7 @@
 //!     -> object file / executable
 //! ```
 //!
-//! The `mimispec` external crate remains the canonical parser during the
-//! transition; `mimi mms` exposes it through `mimispec::parse`.
+//! The external `mimispec` crate and `mimi mms` were removed in 0.1.8.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![allow(unexpected_cfgs)]

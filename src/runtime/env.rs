@@ -187,7 +187,8 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
             // SAFETY: i < count and `ptr` is a fresh allocation of `count`
             // pointer slots; writing each slot exactly once.
             unsafe {
-                *ptr.add(i) = alloc_c_string(&s);
+                *ptr.add(i) =
+                    super::list_string::alloc_mimi_str(s.as_bytes()) as *mut std::ffi::c_char;
             }
         }
         ptr
@@ -317,16 +318,37 @@ mod tests {
         let list = mimi_args_list();
         assert!(!list.is_null());
         // SAFETY: `list` was just allocated by mimi_args_list with len == 2;
-        // data points to a malloc'd array of 2 elements.
+        // slots are current fat List<string> elements.
         unsafe {
             assert_eq!((*list).len, 2);
-            assert_eq!(cstr_to_string(*(*list).data), "alpha");
-            assert_eq!(cstr_to_string(*(*list).data.add(1)), "beta");
+            assert_eq!((*list).string_abi, crate::runtime::LIST_STRING_ABI_FAT);
             // H-26 flag contract: args_list is a header-less owning list —
             // list_cap/list_free must never read data[-8] for it.
             assert!(!(*list).has_header);
             assert!((*list).owns_data);
         }
+        let mut p0 = std::ptr::null_mut();
+        let mut n0 = -2i64;
+        let mut p1 = std::ptr::null_mut();
+        let mut n1 = -2i64;
+        assert_eq!(
+            unsafe { crate::runtime::mimi_list_read_string(list, 0, &mut p0, &mut n0) },
+            0
+        );
+        assert_eq!(
+            unsafe { crate::runtime::mimi_list_read_string(list, 1, &mut p1, &mut n1) },
+            0
+        );
+        assert_eq!(n0, 5);
+        assert_eq!(n1, 4);
+        assert_eq!(
+            unsafe { crate::runtime::list_string::slot_bytes(p0, n0) },
+            b"alpha"
+        );
+        assert_eq!(
+            unsafe { crate::runtime::list_string::slot_bytes(p1, n1) },
+            b"beta"
+        );
         // The old Vec-buffer ABI failed exactly here: list_cap read data[-8]
         // OOB and mimi_list_free freed a Vec buffer via libc::free. With the
         // has_header flag the free goes straight to the malloc'd base.

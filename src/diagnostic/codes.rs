@@ -140,6 +140,8 @@ pub const E0438: &str = "E0438"; // generic type argument count mismatch (§3-�
 pub const E0439: &str = "E0439"; // verification engine divergence: resolved vs flow_ast disagree, fail-closed (ADR-008 §3, 0.34.44)
 pub const E0440: &str = "E0440"; // Fault is not a legal transition source (only recover/reset) — 二次 Fault 升级 (0.36.6)
 pub const E0441: &str = "E0441"; // Fault is a state, not a value — forbidden as a function return type (裁决 3, 0.36.7)
+pub const E0442: &str = "E0442"; // view/mutate/ref cannot cross a task boundary (spawn / Channel / Future / mailbox)
+pub const E0443: &str = "E0443"; // bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -160,6 +162,7 @@ pub const W010: &str = "W010"; // unused import
 pub const W011: &str = "W011"; // progressive Typestate migration (script → explicit flow)
 pub const W012: &str = "W012"; // type escape hatch (`_` or `Any`) at let-binding — bypasses type checks
 pub const W013: &str = "W013"; // newtype used interchangeably with its inner type (transparent-newtype mix)
+pub const W014: &str = "W014"; // session free-function API deprecated (use ch.send/recv/close method surface)
 pub const W0400: &str = "W0400"; // flow state unreachable (no transition targets to it)
 pub const W0401: &str = "W0401"; // flow state has no outgoing transitions (terminal state)
 pub const W0402: &str = "W0402"; // flow state unqualified name shadowed by another flow (qualified name required)
@@ -392,6 +395,8 @@ pub fn describe(code: &str) -> &'static str {
         E0439 => "verification engine divergence: resolved and flow_ast disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3). Arithmetic properties (e.g. `ensures: result == x * x`) commonly trigger this: the flow engine models integers as unbounded while the resolved engine applies i32/i64 checked semantics, so overflow-prone contracts may verify one engine and disprove the other. Add explicit bounds (e.g. `requires: x <= 46340`) to remove the divergence, or compare with bounded arithmetic (`requires: -2**31 <= x && x <= 2**31 - 1`)",
         E0440 => "Fault is not a legal transition source: a transition may only leave Fault via the system verbs `recover`/`reset` (二次 Fault 升级, phase A verdict 4). Any other event on Fault would silently loop Fault → Fault; fail-closed, trap instead",
         E0441 => "Fault is a state, not a value: a function may not return the Fault sink (phase A verdict 3). Fault is entered by unexpected control-flow breakage (undeclared event / trap / panic / FFI crash) and may only be left via `recover`/`reset`; expected failures travel as `Result<T, E>` values instead",
+        E0442 => "view/mutate/ref cannot cross a task boundary (spawn, Channel element, Future capture, or actor mailbox). Synchronous func parameters (including DSP mutate) are not a task boundary",
+        E0443 => "bare Flow record cannot cross Channel, FFI, or an actor mailbox: pack a TransitionEpoch with flow_pack. Local self-loops strip the epoch (clause 5.1 silent stay)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -448,6 +453,7 @@ pub fn describe(code: &str) -> &'static str {
         W011 => "progressive Typestate migration (script mode → explicit flow)",
         W012 => "type escape hatch (`_` or `Any`) bypasses static checks",
         W013 => "newtype used interchangeably with its inner type (transparent newtype is intentional; opt-in strict mode at 1.1)",
+        W014 => "session free-function API deprecated (use ch.send/recv/close method surface)",
         W0400 => "flow state is unreachable (no transition targets it)",
         W0401 => "flow state is terminal (no outgoing transitions)",
         W0402 => "flow-state unqualified name shadows another flow (qualified name required)",
@@ -616,6 +622,8 @@ mod tests {
             super::E0439,
             super::E0440,
             super::E0441,
+            super::E0442,
+            super::E0443,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,
@@ -676,6 +684,8 @@ mod tests {
             super::W010,
             super::W011,
             super::W012,
+            super::W013,
+            super::W014,
             super::W0400,
             super::W0401,
             super::W0402,

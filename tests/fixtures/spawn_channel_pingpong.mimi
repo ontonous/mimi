@@ -1,0 +1,28 @@
+// 0.1.8 Phase 0 CLI fixture: spawn + channel + await.
+// Sequential-eval spawn hangs (ping recvs before pong starts).
+// Real task+join prints 8.
+
+func ping(out_ch: Channel<i64>, in_ch: Channel<i64>) -> i32 {
+    channel_send(out_ch, 7)
+    let v = channel_recv(in_ch)
+    println(v)
+    0
+}
+
+func pong(in_ch: Channel<i64>, out_ch: Channel<i64>) -> i32 {
+    let v = channel_recv(in_ch)
+    channel_send(out_ch, v + 1)
+    0
+}
+
+func main() -> i32 {
+    let a = channel_new()
+    let b = channel_new()
+    let t1 = spawn ping(a, b)
+    let t2 = spawn pong(a, b)
+    let _ = await t1
+    let _ = await t2
+    channel_drop(a)
+    channel_drop(b)
+    0
+}

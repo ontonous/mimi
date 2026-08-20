@@ -253,6 +253,8 @@ impl<'a> Checker<'a> {
                                     context
                                 ),
                             );
+                        } else if name == "Channel" {
+                            self.reject_narrow_channel_element(&args[0]);
                         }
                     }
                     _ => {}

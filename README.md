@@ -56,7 +56,7 @@ flow Order {
 | `requires / ensures` | Dynamically checked or statically proven contracts |
 | `component / foreign` | Cross-language boundary with typed ownership, errors, and effects |
 
-Mimi is the production compilation backend. Intent-level design lives in **MimiSpec** (`.mms`), which promotes to Mimi via `mimi promote`.
+Mimi is the production compilation backend. MimiSpec (`.mms`) was removed in 0.1.8; write production Mimi directly (`.mimi`).
 
 ---
 
@@ -314,8 +314,7 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 | `mimi publish` | Publish to local registry |
 | `mimi search <query>` | Search packages |
 | `mimi doc <path>` | Generate documentation |
-| `mimi promote <path>` | Upgrade `.mms` → `.mimi` |
-| `mimi mms <files>` | Process MimiSpec files |
+| `mimi promote <path>` | Upgrade legacy `.mms` sketch to `.mimi` (removed from user-facing surface after 0.1.8) |
 | `mimi stats <path>` | Usage statistics |
 | `mimi stat <path>` | Directory analysis |
 | `mimi bindgen <path>` | Generate multi-language FFI bindings |

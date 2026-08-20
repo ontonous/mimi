@@ -28,7 +28,7 @@ fn generated_expr(expr: Expr, origin: AstOrigin, span: Span) -> Expr {
         Expr::Field(target, field) => {
             Expr::Field(Box::new(generated_expr(*target, origin, span)), field)
         }
-        Expr::Record { ty, fields } => Expr::Record {
+        Expr::Record { ty, fields, rest } => Expr::Record {
             ty,
             fields: fields
                 .into_iter()
@@ -38,6 +38,7 @@ fn generated_expr(expr: Expr, origin: AstOrigin, span: Span) -> Expr {
                     value: generated_expr(field.value, origin, span),
                 })
                 .collect(),
+            rest: rest.map(|e| Box::new(generated_expr(*e, origin, span))),
         },
         Expr::Call(callee, args) => Expr::Call(
             Box::new(generated_expr(*callee, origin, span)),
@@ -302,6 +303,7 @@ fn rebuild_root_body(
         Stmt::Return(Some(Expr::Record {
             ty: Some(root.to_string()),
             fields,
+            rest: None,
         })),
         origin,
         flow.meta.span,
@@ -346,6 +348,7 @@ fn default_type_value_depth(ty: &Type, shapes: &HashMap<String, Vec<Field>>, dep
                         value: default_type_value_depth(&f.ty, shapes, depth + 1),
                     })
                     .collect(),
+                rest: None,
             }
         }
         Type::Name(n, args) if n == "List" || n == "list" => {
@@ -516,6 +519,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
             Stmt::Return(Some(Expr::Record {
                 ty: Some(target.to_string()),
                 fields,
+                rest: None,
             })),
             origin,
             flow.meta.span,
@@ -658,6 +662,9 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
     if !has_recover {
         // recover: rebuild root, pulling persistent fields from Fault shadow copy.
         // When no persistent fields exist, recover == reset (still provided for API).
+        // 0.38.46 Phase C: recover of an *escaped* Flow is `flow_bump_epoch`
+        // (new TransitionEpoch). Local recover constructs a new record and
+        // strips the epoch (clause 5.1 silent stay).
         // H2: codegen uses this body as-is (no separate dirty check). Interp may
         // further degrade to reset when non-transactional persistent fields were
         // dirtied mid-turn (`persistent_dirty_for_recover`); that path needs a
@@ -846,6 +853,7 @@ pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr 
                             value: Expr::Literal(Lit::Int(0)),
                         },
                     ],
+                    rest: None,
                 },
             },
             // v0.29.39: PanicPayload
@@ -876,9 +884,11 @@ pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr 
                             value: Expr::Literal(Lit::String(snapshot.to_string())),
                         },
                     ],
+                    rest: None,
                 },
             },
         ],
+        rest: None,
     }
 }
 
@@ -945,6 +955,7 @@ fn fault_return_body(
         Stmt::Return(Some(Expr::Record {
             ty: Some("Fault".to_string()),
             fields,
+            rest: None,
         })),
         origin,
         flow.meta.span,
@@ -1012,6 +1023,7 @@ fn default_field_value(
                             value: Expr::Literal(Lit::Int(0)),
                         },
                     ],
+                    rest: None,
                 };
             }
         }
@@ -1042,6 +1054,7 @@ fn default_field_value(
                             value: Expr::Literal(Lit::String(snapshot.to_string())),
                         },
                     ],
+                    rest: None,
                 };
             }
         }
@@ -1223,6 +1236,7 @@ mod tests {
                         name: "count".to_string(),
                         value: Expr::Literal(Lit::Int(1)),
                     }],
+                    rest: None,
                 }))]),
                 fails: None,
                 is_fallback: false,
@@ -1392,6 +1406,7 @@ mod tests {
                     name: "trace".to_string(),
                     value: Expr::Literal(Lit::String("user".into())),
                 }],
+                rest: None,
             }))]),
             fails: None,
             is_fallback: false,

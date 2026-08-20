@@ -1,7 +1,8 @@
 use crate::core::{
     CheckedConversionKind, CheckedProgram, NodeId, Origin, PrimitiveType, ResolvedBlock,
-    ResolvedCallable, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedPattern,
-    ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    ResolvedCallable, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFunction,
+    ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType,
+    ResolvedTypeId,
 };
 
 /// Structured per-function resolved/legacy dispatch statistics (0.34.40,
@@ -1185,6 +1186,26 @@ fn require_expr(
                     // through the resolved emitter.
                 }
             }
+            // 0.1.8 Phase D/E hardening: `unwrap` uses VM-style control
+            // flow that the resolved emitter has not implemented yet
+            // (unwrap_or is supported). Keep these functions on the legacy
+            // slice so core-kernel shapes (spawn/await + Result unwrap) do
+            // not hard-error the resolved subset.
+            if let ResolvedCallee::Builtin(ref id) = call.callee {
+                if matches!(
+                    id.as_str(),
+                    "builtin.method.result.unwrap" | "builtin.method.option.unwrap"
+                ) {
+                    return Err(UnsupportedResolvedNode::new(
+                        owner,
+                        &expression.node_id,
+                        format!(
+                            "builtin '{}' is not in the resolved native slice",
+                            id.as_str()
+                        ),
+                    ));
+                }
+            }
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
                 require_expr(program, owner, &argument.value, entry_source, locals)?;
@@ -1231,9 +1252,10 @@ fn require_expr(
             // alloc) keep their implicit value on the resolved native slice.
             require_block(program, owner, body, entry_source, locals)
         }
-        // 0.37.x: Spawn/Await are accepted as eager/synchronous futures in
-        // the resolved slice (the resolved emitter produces a completed
-        // future immediately; awaiting it loads the stored result).
+        // 0.1.8 Phase 0: Spawn/Await are in the resolved slice. Named-call
+        // spawn uses mimi_spawn_future (real thread); await joins. Sequential
+        // eager-complete was the 0.1.7 shape and is no longer the documented
+        // design.
         ResolvedExprKind::Spawn(value) | ResolvedExprKind::Await(value) => {
             require_expr(program, owner, value, entry_source, locals)
         }
@@ -1501,5 +1523,228 @@ fn require_list_iterable_type(
             owner,
             "for-in iterable has a missing canonical type",
         )),
+    }
+}
+
+/// 0.1.8 Phase 0: Flow / Session / spawn / linear callees must not silently
+/// fall back to the legacy emitter. A fallback on these is a hard error
+/// carrying the function name and reason.
+pub(super) fn is_core_kernel_function(
+    program: &CheckedProgram,
+    function: &ResolvedFunction,
+) -> bool {
+    if function.node_id.0.starts_with("transition:")
+        || function.qualified_name.starts_with("transition:")
+    {
+        return true;
+    }
+    let Some(callable) = program.callable(&function.node_id) else {
+        return false;
+    };
+    if callable
+        .signature
+        .parameters
+        .iter()
+        .any(|p| type_id_is_core_kernel(program, &p.ty))
+        || type_id_is_core_kernel(program, &callable.signature.result)
+    {
+        return true;
+    }
+    block_is_core_kernel(program, &callable.body.root)
+}
+
+fn type_id_is_core_kernel(program: &CheckedProgram, id: &ResolvedTypeId) -> bool {
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal {
+            item,
+            arguments,
+            is_linear,
+            ..
+        }) => {
+            *is_linear
+                || item.as_str().contains("Session")
+                || arguments
+                    .iter()
+                    .any(|arg| type_id_is_core_kernel(program, arg))
+        }
+        Some(ResolvedType::Capability(_)) | Some(ResolvedType::FlowStateSet { .. }) => true,
+        Some(ResolvedType::Option(inner) | ResolvedType::Slice(inner)) => {
+            type_id_is_core_kernel(program, inner)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            type_id_is_core_kernel(program, ok) || type_id_is_core_kernel(program, error)
+        }
+        Some(ResolvedType::Tuple(elems)) => {
+            elems.iter().any(|e| type_id_is_core_kernel(program, e))
+        }
+        Some(ResolvedType::Array { element, .. }) => type_id_is_core_kernel(program, element),
+        Some(ResolvedType::Reference { target, .. } | ResolvedType::Ownership { target, .. }) => {
+            type_id_is_core_kernel(program, target)
+        }
+        Some(ResolvedType::Newtype { inner, .. }) => type_id_is_core_kernel(program, inner),
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters
+                .iter()
+                .any(|p| type_id_is_core_kernel(program, p))
+                || type_id_is_core_kernel(program, result)
+        }
+        _ => false,
+    }
+}
+
+fn block_is_core_kernel(program: &CheckedProgram, block: &ResolvedBlock) -> bool {
+    if block
+        .statements
+        .iter()
+        .any(|stmt| stmt_is_core_kernel(program, &stmt.kind))
+    {
+        return true;
+    }
+    block
+        .result
+        .as_ref()
+        .is_some_and(|expr| expr_is_core_kernel(program, expr))
+}
+
+fn stmt_is_core_kernel(program: &CheckedProgram, kind: &ResolvedStmtKind) -> bool {
+    match kind {
+        ResolvedStmtKind::Bind { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|e| expr_is_core_kernel(program, e)),
+        ResolvedStmtKind::Assign { value, .. }
+        | ResolvedStmtKind::Expr(value)
+        | ResolvedStmtKind::Contract {
+            condition: value, ..
+        } => expr_is_core_kernel(program, value),
+        ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+            .as_ref()
+            .is_some_and(|e| expr_is_core_kernel(program, e)),
+        ResolvedStmtKind::While { condition, body } => {
+            expr_is_core_kernel(program, condition) || block_is_core_kernel(program, body)
+        }
+        ResolvedStmtKind::WhileLet {
+            initializer, body, ..
+        }
+        | ResolvedStmtKind::For {
+            iterable: initializer,
+            body,
+            ..
+        } => expr_is_core_kernel(program, initializer) || block_is_core_kernel(program, body),
+        ResolvedStmtKind::IfLet {
+            initializer,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_is_core_kernel(program, initializer)
+                || block_is_core_kernel(program, then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|b| block_is_core_kernel(program, b))
+        }
+        ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+            block_is_core_kernel(program, body)
+        }
+        ResolvedStmtKind::Pinned { value, body, .. } => {
+            expr_is_core_kernel(program, value) || block_is_core_kernel(program, body)
+        }
+        ResolvedStmtKind::Math(exprs) => exprs.iter().any(|e| expr_is_core_kernel(program, e)),
+        ResolvedStmtKind::Continue
+        | ResolvedStmtKind::Drop(_)
+        | ResolvedStmtKind::NestedCallable(_) => false,
+    }
+}
+
+fn expr_is_core_kernel(program: &CheckedProgram, expr: &ResolvedExpr) -> bool {
+    if type_id_is_core_kernel(program, &expr.ty) {
+        return true;
+    }
+    match &expr.kind {
+        ResolvedExprKind::Spawn(_) | ResolvedExprKind::Await(_) => true,
+        ResolvedExprKind::Call(call) => {
+            if matches!(call.callee, ResolvedCallee::Transition(_)) || !call.session.is_empty() {
+                return true;
+            }
+            call.arguments
+                .iter()
+                .any(|arg| expr_is_core_kernel(program, &arg.value))
+        }
+        ResolvedExprKind::Binary { left, right, .. } => {
+            expr_is_core_kernel(program, left) || expr_is_core_kernel(program, right)
+        }
+        ResolvedExprKind::Unary { operand, .. }
+        | ResolvedExprKind::Project { value: operand, .. }
+        | ResolvedExprKind::OptionalChain {
+            receiver: operand, ..
+        }
+        | ResolvedExprKind::TypeOf(operand)
+        | ResolvedExprKind::Old(operand)
+        | ResolvedExprKind::Try { value: operand, .. }
+        | ResolvedExprKind::Cast { value: operand, .. } => expr_is_core_kernel(program, operand),
+        ResolvedExprKind::Tuple(elems)
+        | ResolvedExprKind::List(elems)
+        | ResolvedExprKind::Set(elems) => elems.iter().any(|e| expr_is_core_kernel(program, e)),
+        ResolvedExprKind::Map(pairs) => pairs
+            .iter()
+            .any(|(k, v)| expr_is_core_kernel(program, k) || expr_is_core_kernel(program, v)),
+        ResolvedExprKind::Record { fields, .. } => fields
+            .iter()
+            .any(|f| expr_is_core_kernel(program, &f.value)),
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Scope { body: block, .. }
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => block_is_core_kernel(program, block),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_is_core_kernel(program, condition)
+                || block_is_core_kernel(program, then_block)
+                || block_is_core_kernel(program, else_block)
+        }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            expr_is_core_kernel(program, scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|g| expr_is_core_kernel(program, g))
+                        || expr_is_core_kernel(program, &arm.body)
+                })
+        }
+        ResolvedExprKind::Range { start, end } => {
+            expr_is_core_kernel(program, start) || expr_is_core_kernel(program, end)
+        }
+        ResolvedExprKind::Slice { target, start, end } => {
+            expr_is_core_kernel(program, target)
+                || start
+                    .as_ref()
+                    .is_some_and(|s| expr_is_core_kernel(program, s))
+                || end
+                    .as_ref()
+                    .is_some_and(|e| expr_is_core_kernel(program, e))
+        }
+        ResolvedExprKind::Comprehension {
+            value,
+            iterable,
+            guard,
+            ..
+        } => {
+            expr_is_core_kernel(program, value)
+                || expr_is_core_kernel(program, iterable)
+                || guard
+                    .as_ref()
+                    .is_some_and(|g| expr_is_core_kernel(program, g))
+        }
+        ResolvedExprKind::FString(parts) => parts.iter().any(|part| match part {
+            crate::core::ir::ResolvedFStringPart::Interpolation(inner) => {
+                expr_is_core_kernel(program, inner)
+            }
+            _ => false,
+        }),
+        ResolvedExprKind::Lambda(lambda) => block_is_core_kernel(program, &lambda.body),
+        _ => false,
     }
 }

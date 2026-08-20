@@ -913,7 +913,7 @@ fn audit2_pm_actor_soft_keyword_field_names_parse() {
     let src = r#"
 actor Counter {
     view: i32
-    mut end: i32
+    end: i32
 }
 func main() -> i32 { 0 }
 "#;

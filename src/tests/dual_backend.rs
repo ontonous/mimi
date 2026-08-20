@@ -72,6 +72,53 @@ macro_rules! dual_assert {
     }};
 }
 
+/// Production dual: `check` + checked interp + `compile_checked` + native run.
+/// Core spawn/Flow evidence for 0.1.8 Phase 0 must go through this path, not
+/// the legacy `compile_file` harness used by `dual_assert!`.
+macro_rules! dual_assert_prod {
+    ($src:expr, $expected:expr) => {{
+        check_source($src).unwrap_or_else(|diags| {
+            panic!(
+                "checker rejected dual_assert_prod source:\n{}",
+                diags
+                    .iter()
+                    .map(|d| format!("{}", d))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        });
+        let __interp_run = std::panic::catch_unwind(|| checked_run_source_with_stdout($src));
+        assert!(
+            __interp_run.is_ok(),
+            "checked interpreter panicked for dual_assert_prod source"
+        );
+        let (_interp_val, __interp_stdout) = __interp_run.unwrap();
+        let __codegen = checked_codegen_compile_and_run($src)
+            .expect("production compile_checked native path failed");
+        assert_eq!(
+            __codegen.trim(),
+            $expected,
+            "checked-native mismatch\nnative: {}\nexpected: {}",
+            __codegen.trim(),
+            $expected
+        );
+        assert_eq!(
+            __interp_stdout.trim(),
+            $expected,
+            "checked-interpreter stdout mismatch\ninterp: {}\nexpected: {}",
+            __interp_stdout.trim(),
+            $expected
+        );
+        assert_eq!(
+            __interp_stdout.trim(),
+            __codegen.trim(),
+            "production dual-backend stdout diverge\ninterp: {}\nnative: {}",
+            __interp_stdout.trim(),
+            __codegen.trim()
+        );
+    }};
+}
+
 /// Soft-typecheck variant of `dual_assert!` for tests that exercise features
 /// the checker does not yet support (0.31.29 止血线 §7: tests that bypass
 /// CheckedProgram must be explicitly marked, not silently counted as stable
@@ -5599,6 +5646,37 @@ func main() -> i32 {
     assert_eq!(vm.trim(), expected, "vm");
 }
 
+// 0.1.8 Phase E: the method surface (`ch.send` / `ch.recv` / `ch.close`) must
+// behave identically to the free session_* functions on all backends.
+#[test]
+fn dual_session_method_roundtrip() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+session Echo = !i32 . ?i32 . end
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<Echo>()
+    ch0.send(42)
+    let n = ch1.recv()
+    ch1.send(n * 2)
+    let r = ch0.recv()
+    ch0.close()
+    ch1.close()
+    println(n)
+    println(r)
+    0
+}
+"#;
+    let expected = "42\n84";
+    let checked = checked_codegen_compile_and_run(src).expect("resolved codegen session methods");
+    assert_eq!(checked.trim(), expected, "resolved(codegen)");
+    let unga = compile_and_run(src).expect("legacy codegen session methods");
+    assert_eq!(unga.trim(), expected, "legacy(codegen)");
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), expected, "vm");
+}
+
 // L2: the hi end carries the DUAL residual — its FIRST action must be recv
 // (dual of !i32... is ?i32...); a send-first hi end (and symmetrically a
 // recv-first lo end) is a static E0414. Also pins E0413 for unknown session
@@ -7058,7 +7136,7 @@ fn dual_actor_spawn_sync() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func get() -> i32 {
                 return self.count;
             }
@@ -7081,7 +7159,7 @@ fn dual_actor_await_get() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func increment() { self.count = self.count + 1; }
             func get() -> i32 { return self.count; }
         }
@@ -7098,33 +7176,32 @@ fn dual_actor_await_get() {
 }
 
 #[test]
-fn dual_actor_field_writable_regardless_of_mut_marker() {
-    // 0.36.13 (Phase B 状态语义, SD-5 L1 证据): the `mut` marker is a
-    // declarative concurrency-isolation hint, never write-enforced — a
-    // non-`mut` actor field is mutated identically on both backends (same as
-    // the marked twin). Pins the §6.4 clarified semantics (and the stale
-    // "removed from stable set" wording that 0.36.13 removed).
+fn dual_actor_non_mut_field_is_writable() {
+    // 0.36.13 (Phase B 状态语义) + 0.1.8 Phase D: the `mut` marker was
+    // declarative, never write-enforced; Phase D removes the user-visible
+    // `mut` field syntax entirely. Non-`mut` per-instance actor metadata is
+    // still writable on both backends.
     if !can_link() {
         return;
     }
     dual_assert!(
         r#"
-        actor Unmarked {
+        actor Left {
             count: i32 = 0;
             func bump() { self.count = self.count + 1 }
             func get() -> i32 { self.count }
         }
-        actor Marked {
-            mut count: i32 = 0;
+        actor Right {
+            count: i32 = 0;
             func bump() { self.count = self.count + 1 }
             func get() -> i32 { self.count }
         }
         func main() -> i32 {
-            let u = Unmarked.spawn();
+            let u = Left.spawn();
             u.bump();
             u.bump();
             println(u.get());
-            let m = Marked.spawn();
+            let m = Right.spawn();
             m.bump();
             println(m.get());
             0
@@ -7136,9 +7213,9 @@ fn dual_actor_field_writable_regardless_of_mut_marker() {
 
 #[test]
 fn dual_actor_runs_flow_non_mut_field_allowed() {
-    // 0.36.13 (Phase B 状态语义): `actor runs FlowName` rejects `mut` business
-    // fields (E0402), but non-`mut` per-instance fields remain legal — the
-    // ban is scoped to the escape hatch, not to all fields.
+    // 0.1.8 Phase D: `actor runs FlowName` is the supported business-actor
+    // shape; `mut` fields are rejected in every actor, while non-`mut`
+    // per-instance metadata fields remain legal.
     let src = r#"
 flow Job {
     state Idle { n: i32 }
@@ -7186,7 +7263,7 @@ fn dual_actor_with_param() {
     dual_assert!(
         r#"
         actor Accumulator {
-            mut total: i32 = 0;
+            total: i32 = 0;
             func add(n: i32) { self.total = self.total + n; }
             func get() -> i32 { return self.total; }
         }
@@ -7217,7 +7294,7 @@ fn dual_actor_state_persistence_mailbox() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func add(n: i32) { self.count = self.count + n; }
             func get() -> i32 { return self.count; }
         }
@@ -7246,7 +7323,7 @@ fn dual_actor_two_independent_instances() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func add(n: i32) { self.count = self.count + n; }
             func get() -> i32 { return self.count; }
         }
@@ -7276,7 +7353,7 @@ fn dual_actor_method_with_return_value() {
     dual_assert!(
         r#"
         actor Calculator {
-            mut base: i32 = 10;
+            base: i32 = 10;
             func add(n: i32) -> i32 { self.base = self.base + n; return self.base; }
             func get() -> i32 { return self.base; }
         }
@@ -7305,7 +7382,7 @@ fn dual_actor_stress_many_calls() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func increment() { self.count = self.count + 1; }
             func get() -> i32 { return self.count; }
         }
@@ -7341,7 +7418,7 @@ fn dual_actor_long_lived_state() {
     dual_assert!(
         r#"
         actor Accum {
-            mut total: i32 = 0;
+            total: i32 = 0;
             func add_one() { self.total = self.total + 1; }
             func get() -> i32 { return self.total; }
         }
@@ -7376,7 +7453,7 @@ fn dual_actor_1000_mailbox_calls() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func increment() { self.count = self.count + 1; }
             func get() -> i32 { return self.count; }
         }
@@ -7407,7 +7484,7 @@ fn dual_actor_field_init_expression() {
     dual_assert!(
         r#"
         actor Counter {
-            mut count: i32 = 100;
+            count: i32 = 100;
             func get() -> i32 { return self.count; }
             func reset() { self.count = 0; }
         }
@@ -7434,7 +7511,7 @@ fn dual_actor_bool_field() {
     dual_assert!(
         r#"
         actor Toggle {
-            mut on: bool = false;
+            on: bool = false;
             func flip() { self.on = !self.on; }
             func is_on() -> bool { return self.on; }
         }
@@ -7466,7 +7543,7 @@ fn dual_actor_negative_int_field() {
     dual_assert!(
         r#"
         actor Counter {
-            mut value: i32 = -42;
+            value: i32 = -42;
             func get() -> i32 { return self.value; }
             func set(v: i32) { self.value = v; }
         }
@@ -7497,7 +7574,7 @@ fn dual_actor_f64_return() {
     dual_assert!(
         r#"
         actor Stats {
-            mut value: f64 = 1.5;
+            value: f64 = 1.5;
             func add(x: f64) { self.value = self.value + x; }
             func get() -> f64 { return self.value; }
         }
@@ -7527,7 +7604,7 @@ fn dual_actor_i32_return_via_truncate() {
     dual_assert!(
         r#"
         actor Box {
-            mut big: i32 = 0;
+            big: i32 = 0;
             func set_big(v: i32) { self.big = v + 0; }
             func get_i32() -> i32 { return 42; }
         }
@@ -7552,12 +7629,12 @@ fn dual_actor_interleaved_two_actors() {
     dual_assert!(
         r#"
         actor A {
-            mut x: i32 = 0;
+            x: i32 = 0;
             func bump() { self.x = self.x + 1; }
             func get() -> i32 { return self.x; }
         }
         actor B {
-            mut x: i32 = 0;
+            x: i32 = 0;
             func bump() { self.x = self.x + 10; }
             func get() -> i32 { return self.x; }
         }
@@ -7590,7 +7667,7 @@ fn dual_actor_void_method() {
     dual_assert!(
         r#"
         actor Sink {
-            mut count: i32 = 0;
+            count: i32 = 0;
             func touch() { self.count = self.count + 1; }
             func get() -> i32 { return self.count; }
         }
@@ -7619,7 +7696,7 @@ fn dual_actor_method_with_string_param() {
     dual_assert!(
         r#"
         actor Logger {
-            mut len: i32 = 0;
+            len: i32 = 0;
             func log(msg: string) { self.len = self.len + 1; }
             func get_count() -> i32 { return self.len; }
         }
@@ -15329,6 +15406,250 @@ fn dual_channel_cross_thread_send_recv_no_deadlock() {
     );
 }
 
+// ─── 0.1.8 Phase 0 — L1 spawn/await same-semantics ─────────────────────
+// Sequential-move spawn (compile inner + Mov / await = eval inner) cannot
+// pass these: ping must send before pong recvs, so both tasks have to run.
+
+const PHASE0_SPAWN_CHANNEL_SRC: &str = r#"
+        func ping(out_ch: Channel<i64>, in_ch: Channel<i64>) -> i32 {
+            channel_send(out_ch, 7)
+            let v = channel_recv(in_ch)
+            println(v)
+            0
+        }
+        func pong(in_ch: Channel<i64>, out_ch: Channel<i64>) -> i32 {
+            let v = channel_recv(in_ch)
+            channel_send(out_ch, v + 1)
+            0
+        }
+        func main() -> i32 {
+            let a = channel_new()
+            let b = channel_new()
+            let t1 = spawn ping(a, b)
+            let t2 = spawn pong(a, b)
+            let _ = await t1
+            let _ = await t2
+            channel_drop(a)
+            channel_drop(b)
+            0
+        }
+    "#;
+
+const PHASE0_SPAWN_DEADLOCK_SRC: &str = r#"
+        func left(wait_ch: Channel<i64>, send_ch: Channel<i64>) -> i32 {
+            let v = channel_recv(wait_ch)
+            channel_send(send_ch, v)
+            println(v)
+            0
+        }
+        func right(wait_ch: Channel<i64>, send_ch: Channel<i64>) -> i32 {
+            let v = channel_recv(wait_ch)
+            channel_send(send_ch, v)
+            println(v)
+            0
+        }
+        func main() -> i32 {
+            let a = channel_new()
+            let b = channel_new()
+            let t1 = spawn left(a, b)
+            let t2 = spawn right(b, a)
+            let _ = await t1
+            let _ = await t2
+            channel_drop(a)
+            channel_drop(b)
+            0
+        }
+    "#;
+
+const PHASE0_CORE_FLOW_SRC: &str = r#"
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+}
+func main() -> i32 {
+    let c = Zero { n: 1 }
+    let c2 = Counter::inc(c)
+    println(c2.n)
+    0
+}
+"#;
+
+#[test]
+fn dual_spawn_channel_same_completion() {
+    if !can_link() {
+        return;
+    }
+    // Sequential spawn hangs on ping's recv (pong never starts). Real
+    // task+join prints the communicated value 8 on both backends.
+    dual_assert_prod!(PHASE0_SPAWN_CHANNEL_SRC, "8");
+}
+
+#[test]
+fn dual_spawn_deadlock_is_deadlock() {
+    if !can_link() {
+        return;
+    }
+    check_source(PHASE0_SPAWN_DEADLOCK_SRC).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected deadlock source:\n{}",
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
+    let cap = std::time::Duration::from_secs(2);
+    let interp = run_with_timeout(cap, || {
+        std::panic::catch_unwind(|| checked_run_source_with_stdout(PHASE0_SPAWN_DEADLOCK_SRC))
+    });
+    match interp {
+        Ok(Ok((_, stdout))) => panic!(
+            "interpreter sequential false-success: deadlock program returned stdout {:?}",
+            stdout
+        ),
+        Ok(Err(_)) => panic!("interpreter panicked instead of hanging on mutual-wait"),
+        Err(msg) => {
+            let lower = msg.to_ascii_lowercase();
+            assert!(
+                lower.contains("hang") || lower.contains("deadlock"),
+                "interpreter timeout must identify hang/deadlock, got: {msg}"
+            );
+        }
+    }
+    let native = checked_codegen_compile_and_run_timeout(PHASE0_SPAWN_DEADLOCK_SRC, cap);
+    match native {
+        Ok(stdout) => panic!(
+            "native sequential false-success: deadlock program returned stdout {:?}",
+            stdout
+        ),
+        Err(msg) => {
+            let lower = msg.to_ascii_lowercase();
+            assert!(
+                lower.contains("hang") || lower.contains("deadlock"),
+                "native timeout must identify hang/deadlock, got: {msg}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dual_production_checked_path_spawn() {
+    if !can_link() {
+        return;
+    }
+    // Minimal spawn program locked to compile_checked (not legacy compile_file).
+    dual_assert_prod!(
+        r#"
+        func double(n: i32) -> i32 { n * 2 }
+        func main() -> i32 {
+            let task = spawn double(21)
+            let r = await task
+            println(r)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dispatch_core_flow_zero_legacy_fallback() {
+    if !can_link() {
+        return;
+    }
+    let failed = checked_codegen_failed_functions(PHASE0_CORE_FLOW_SRC)
+        .expect("core Flow program must compile_checked");
+    assert!(
+        failed.is_empty(),
+        "core Flow program had resolved emit fallback: {:?}",
+        failed
+    );
+    let stdout = checked_codegen_compile_and_run(PHASE0_CORE_FLOW_SRC)
+        .expect("core Flow program native run");
+    assert_eq!(stdout.trim(), "2");
+    let (_val, interp) = checked_run_source_with_stdout(PHASE0_CORE_FLOW_SRC);
+    assert_eq!(interp.trim(), "2");
+}
+
+// ─── 0.38.26 Phase B — List<string> fat / NUL-preserving dual lock ─────
+
+const LIST_STRING_NUL_SRC: &str = r#"
+func main() -> i32 {
+    let s = "a" + chr(0) + "b" + "," + "c"
+    let parts = str_split(s, ",")
+    let joined = str_join(parts, ",")
+    println(len(joined))
+    0
+}
+"#;
+
+#[test]
+fn dual_list_string_embedded_nul_roundtrip() {
+    if !can_link() {
+        return;
+    }
+    // Today's C-string list element would print 1 (truncate at NUL).
+    // Fat {ptr,len} elements must print the full logical length 5.
+    dual_assert_prod!(LIST_STRING_NUL_SRC, "5");
+}
+
+#[test]
+fn dual_list_string_empty_element() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func main() -> i32 {
+            let parts = str_split("x,,y", ",")
+            println(len(parts[1]))
+            let joined = str_join(parts, ",")
+            println(len(joined))
+            0
+        }
+        "#,
+        "0\n4"
+    );
+}
+
+#[test]
+fn dual_list_string_utf8_element() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func main() -> i32 {
+            let parts = str_split("你好,世界", ",")
+            println(len(parts[0]))
+            println(parts[0])
+            0
+        }
+        "#,
+        "2\n你好"
+    );
+}
+
+#[test]
+fn dual_list_string_nested_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func main() -> i32 {
+            let inner = str_split("a" + chr(0) + "b", ",")
+            let outer = [inner]
+            let joined = str_join(outer[0], ",")
+            println(len(joined))
+            0
+        }
+        "#,
+        "3"
+    );
+}
+
 // ─── v0.28.21 — Comptime codegen ────────────────────────────────────────
 //
 // These dual-backend tests verify that the codegen path resolves
@@ -15792,7 +16113,7 @@ fn dual_actor_map_set_get_string_key() {
     dual_assert!(
         r#"
         actor A {
-            mut m: Record = map_new()
+            m: Record = map_new()
 
             func put(k: string, v: string) {
                 let m2 = map_set(self.m, k, v)
@@ -15827,7 +16148,7 @@ fn dual_actor_map_set_get_i32() {
     dual_assert!(
         r#"
         actor A {
-            mut m: Record = map_new()
+            m: Record = map_new()
 
             func put(k: string, v: i32) {
                 let m2 = map_set(self.m, k, v)
@@ -15862,7 +16183,7 @@ fn dual_actor_list_field_len_and_index() {
     dual_assert!(
         r#"
         actor Box {
-            mut items: List<i32> = [0, 5, 10]
+            items: List<i32> = [0, 5, 10]
             func get_len() -> i32 { len(self.items) }
             func get0() -> i32 { self.items[0] }
         }
@@ -15886,7 +16207,7 @@ fn dual_actor_record_field() {
         r#"
         type Point { x: i32, y: i32 }
         actor Box {
-            mut p: Point = Point { x: 10, y: 20 }
+            p: Point = Point { x: 10, y: 20 }
             func get_x() -> i32 { self.p.x }
             func get_y() -> i32 { self.p.y }
         }
@@ -15909,7 +16230,7 @@ fn dual_actor_string_field_literal_init() {
     dual_assert!(
         r#"
         actor Person {
-            mut name: string = "Alice"
+            name: string = "Alice"
             func greet() -> string { println(self.name); self.name }
         }
         func main() -> i32 {
@@ -19424,4 +19745,63 @@ fn dual_production_checked_path_smoke() {
     assert_eq!(interp_out.trim(), "42");
     assert_eq!(native_out.trim(), "42");
     assert_eq!(checked_out.trim(), "42");
+}
+
+#[test]
+fn flow_epoch_channel_stale_rejected() {
+    // Phase C: a packed Flow/transition handle that crosses a Channel keeps
+    // its TransitionEpoch. A receiver holding an older expected epoch must see
+    // the typed stale error (2), not a silent alias or success. This runs the
+    // production checked path so the epoch API is locked in both interp and
+    // native LLVM codegen.
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func main() -> i32 {
+            let h = flow_pack(42)
+            let e = flow_epoch(h)
+            let ch = channel_new()
+            channel_send(ch, h)
+            let got = channel_recv(ch)
+            let stale = flow_check_epoch(got, e - 1)
+            let last = flow_epoch_last_error()
+            println(to_string(stale))
+            println(to_string(last))
+            0
+        }
+        "#,
+        "2\n2"
+    );
+}
+
+#[test]
+fn flow_epoch_local_self_loop_no_tax() {
+    // Phase C clause 5.1: a local self-loop stays in the turn/actor and must
+    // not create/pack a TransitionEpoch. The pack counter delta over the call
+    // is zero, so local Flow calls are not taxed as cross-boundary escapes.
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        flow Counter {
+            state Active { n: i32 }
+            transition noop(Active) -> Active {
+                return Active { n: self.n }
+            }
+        }
+        func main() -> i32 {
+            let before = flow_pack_count()
+            let s = Active { n: 7 }
+            let s2 = Counter::noop(s)
+            let after = flow_pack_count()
+            println(to_string(after - before))
+            println(to_string(s2.n))
+            0
+        }
+        "#,
+        "0\n7"
+    );
 }

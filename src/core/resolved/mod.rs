@@ -393,11 +393,14 @@ pub struct ResolvedTransition {
     pub parameter_ids: Vec<NodeId>,
     pub is_fallback: bool,
     pub is_ffi_pinned: bool,
-    /// 追加 A: Silent Transition — true if this transition has no
-    /// cross-boundary operations (Channel send, FFI call, Actor event emit).
-    /// When true, codegen can skip Generation increment (amendment clause 5.1).
-    /// v0.34.11: renamed from silent_stay — the property is about boundary ops,
-    /// not the terminal form (ADR-001 removed become/stay).
+    /// 追加 A / 0.38.46 Phase C: Silent Transition — true if this
+    /// transition has no cross-boundary operations (Channel send, FFI call,
+    /// Actor event emit). When true, lowering **strips** `TransitionEpoch`
+    /// (amendment clause 5.1 silent stay / local self-loop, no atomic tax).
+    /// Crossing Channel / FFI / mailbox must pack the epoch; mismatch is a
+    /// typed boundary error. v0.34.11: renamed from silent_stay — the
+    /// property is about boundary ops, not the terminal form (ADR-001
+    /// removed become/stay).
     pub silent_transition: bool,
     pub origin: Origin,
     pub span: Span,
@@ -3517,10 +3520,21 @@ fn collect_nested_function_records_in_expr(
                 );
             }
         }
-        Expr::Record { fields, .. } => {
+        Expr::Record { fields, rest, .. } => {
             for field in fields {
                 collect_nested_function_records_in_expr(
                     &field.value,
+                    owner,
+                    parent_qualified,
+                    (ids, inherited_generic_binders),
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            if let Some(rest) = rest {
+                collect_nested_function_records_in_expr(
+                    rest,
                     owner,
                     parent_qualified,
                     (ids, inherited_generic_binders),
@@ -3792,6 +3806,7 @@ fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
                         "session_close",
                         "channel_send",
                         "channel_recv",
+                        "flow_pack",
                         "emit",
                         "send_event",
                         "spawn_actor",
@@ -6035,7 +6050,7 @@ fn collect_expr_meta(
                 );
             }
         }
-        Expr::Record { fields, .. } => {
+        Expr::Record { fields, rest, .. } => {
             for field in fields {
                 let field_role = format!("{role}.field.{}", stable_id_fragment(&field.name));
                 insert_child_meta(
@@ -6052,6 +6067,17 @@ fn collect_expr_meta(
                     &field.value,
                     owner,
                     &format!("{field_role}.value"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            if let Some(rest) = rest {
+                collect_expr_meta(
+                    rest,
+                    owner,
+                    &format!("{role}.rest"),
                     fallback,
                     ids,
                     out,
@@ -6546,7 +6572,8 @@ fn collect_flow(
                 .collect(),
             is_fallback: transition.is_fallback,
             is_ffi_pinned: transition.is_ffi_pinned,
-            // 追加 A: Silent Transition — detect transitions with no cross-boundary ops
+            // 追加 A / Phase C: Silent Transition — local self-loop strips
+            // TransitionEpoch (clause 5.1). Cross-boundary ops force packing.
             silent_transition: {
                 // A stay transition targets only the source state
                 let is_stay = transition.to_states.len() == 1
@@ -7613,13 +7640,27 @@ fn collect_expr_call_sites(
                 );
             }
         }
-        Expr::Record { fields, .. } => {
+        Expr::Record { fields, rest, .. } => {
             for field in fields {
                 let field_role = format!("{role}.field.{}", stable_id_fragment(&field.name));
                 collect_expr_call_sites(
                     &field.value,
                     owner,
                     &format!("{field_role}.value"),
+                    fallback,
+                    ids,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                    errors,
+                );
+            }
+            if let Some(rest) = rest {
+                collect_expr_call_sites(
+                    rest,
+                    owner,
+                    &format!("{role}.rest"),
                     fallback,
                     ids,
                     functions,

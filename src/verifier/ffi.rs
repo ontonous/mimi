@@ -667,7 +667,7 @@ fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
                 })
                 .collect(),
         ),
-        Expr::Record { ty, fields } => Expr::Record {
+        Expr::Record { ty, fields, rest } => Expr::Record {
             ty: ty.clone(),
             fields: fields
                 .iter()
@@ -677,6 +677,9 @@ fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
                     value: substitute_args(&f.value, params, args),
                 })
                 .collect(),
+            rest: rest
+                .as_ref()
+                .map(|e| Box::new(substitute_args(e, params, args))),
         },
         Expr::Try(inner) => Expr::Try(Box::new(substitute_args(inner, params, args))),
         Expr::OptionalChain(inner, name) => {

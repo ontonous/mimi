@@ -188,7 +188,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             if is_string_struct {
                 let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+                return Ok(Some(self.load_fat_list_string(elem_ptr)?));
             }
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
             let struct_val =
@@ -201,7 +201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if type_name == "List<string>" {
                 let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+                return Ok(Some(self.load_fat_list_string(elem_ptr)?));
             }
         }
 
@@ -229,7 +229,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                             let elem_ptr =
                                 self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                            return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+                            return Ok(Some(self.load_fat_list_string(elem_ptr)?));
                         }
                         if elem_name == "bool" {
                             // bool is stored as i64 0/1 — no conversion needed
@@ -280,7 +280,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if obj_type == "List<string>" {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-            return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+            return Ok(Some(self.load_fat_list_string(elem_ptr)?));
         }
 
         // Handle bool — stored as i64 0/1, no conversion needed

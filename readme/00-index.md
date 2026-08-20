@@ -1,9 +1,10 @@
 # Mimi 语言文档
 
-> ⚠ **文档族状态（0.34.33 标注）**：本教程系列主体写于 MimiSpec 时代（v0.7 前后）。
+> ⚠ **文档族状态（0.34.33 标注，0.1.8 更新）**：本教程系列主体写于 MimiSpec 时代（v0.7 前后）。
 > 语言自 0.29 起演进为 **Flow-first typestate** 范式，并经 0.1.4（0.34）语法冻结：
-> `do`/`become`/`stay` 已删除、multi-target tagged-union 已 stable、`desc`/`rule`/`mms`
-> 仍为超注释语句。**本系列的关键字表（01-syntax §2、llmprompt §2.4）已同步冻结实况**；
+> `do`/`become`/`stay` 已删除、multi-target tagged-union 已 stable。0.1.8 Phase E
+> 将 `desc`/`rule`/`mms` 与 `.mms` 外部文件移除：MimiSpec 不再是 Mimi 的一部分，
+> `mms{}` 为硬错误。**本系列的关键字表（01-syntax §2、llmprompt §2.4）已同步冻结实况**；
 > 其余章节的 Flow/transition 覆盖与部分示例可能滞后，正在按既有计划降级/重写。
 > 权威语法入口：`docs/language-spec.md` + `docs/syntax-reference.md`（golden EBNF 渲染副本）；
 > 现行 Flow 语料示例见 `tests/real_world/` 与根 README "Hello, Flow"。
@@ -25,7 +26,6 @@
 | [06-模块与包管理](./06-modules.md) | use 导入、模块系统、mimi.toml 包管理 | 所有 Mimi 开发者 |
 | [07-CLI 参考](./07-cli.md) | 所有 CLI 命令详解 | 所有 Mimi 开发者 |
 | [08-示例集](./08-examples.md) | 覆盖所有特性的完整代码示例 | 所有 Mimi 开发者 |
-| [09-MimiSpec 集成](./09-mms-integration.md) | mms {} 块、意图嵌入、契约绑定 | AI 协作开发者 |
 | [10-FFI 与跨语言](./10-ffi.md) | extern "C"、cap 授权、跨语言调用 | 需要跨语言集成的开发者 |
 
 ---
@@ -107,15 +107,9 @@ func main() -> string {
 
 // 6. Actor
 actor Counter {
-    mut count: i32 = 0;
-    func increment() { self.count += 1; }
-    func get() -> i32 { self.count }
+    func ping() -> i32 { 0 }
+    // 0.1.8: 业务状态只放 Flow；业务 actor 的用户可见 `mut` 字段已废止。
 }
-
-// 7. 意图后缀（仅 MimiSpec .mms，不是 Mimi .mimi 语法）
-//    MimiSpec 示例：
-//    func$$ critical_logic() { ... }   // 强锁定：AI 不得修改
-//    func? maybe_change() { ... }      // 不确定：AI 可审视
 ```
 
 ---
@@ -139,8 +133,7 @@ actor Counter {
 | `requires` / `ensures` | ✅ | 契约断言, `old()`, `result` |
 | `cap` 线性能力 | ✅ | `cap`, `.split()`, `drop()` |
 | `comptime` | ✅ | `comptime func`, `quote!` |
-| `mms {}` 块 | ✅ | MimiSpec 嵌入 |
-| 意图后缀 | ✅（MimiSpec） | `$`, `$$`, `?`, `??`；仅 `.mms`，非 `.mimi` 语法 |
+| `mms {}` / `.mms` | ❌（0.1.8 removed） | Parser 硬拒绝；MimiSpec 已从 Mimi 拆离 |
 | `extern "C"` | ✅ | FFI 块 + LLVM codegen |
 | `pub` 可见性 | ✅ | 函数、类型、Actor |
 | 列表推导 | ✅ | `[expr for x in list]` |

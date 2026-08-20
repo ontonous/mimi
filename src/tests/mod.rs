@@ -22,6 +22,7 @@ pub(crate) mod error_handling;
 pub(crate) mod extern_blocks;
 pub(crate) mod generics;
 pub(crate) mod interpreter_features;
+pub(crate) mod narrow;
 pub(crate) mod ownership;
 pub(crate) mod stdlib_comprehensive;
 pub(crate) mod strings;
@@ -102,6 +103,10 @@ pub(crate) mod fuzz;
 
 // === Dual-backend equivalence tests ===
 pub(crate) mod dual_backend;
+pub(crate) mod epoch;
+pub(crate) mod flow_epoch;
+pub(crate) mod handle_lease;
+pub(crate) mod list_string_abi;
 
 // === Deep-eval 2026-08-09 regression locks (demos differential findings) ===
 pub(crate) mod deep_eval_20260809;
@@ -621,6 +626,9 @@ pub(crate) struct E2EConfig {
     pub valgrind_args: Vec<String>,
     /// Optional extra C source code to compile and link into the test binary.
     pub extra_c_src: Option<String>,
+    /// Wall-clock cap for the native binary. On expiry the child is killed and
+    /// the error text identifies a hang/deadlock (0.1.8 Phase 0).
+    pub run_timeout: Option<std::time::Duration>,
 }
 
 impl Default for E2EConfig {
@@ -636,6 +644,7 @@ impl Default for E2EConfig {
                 "--leak-check=full".into(),
             ],
             extra_c_src: None,
+            run_timeout: None,
         }
     }
 }
@@ -761,6 +770,8 @@ fn link_and_run_module<'ctx>(
         }
         cmd.arg(&bin_path);
         cmd.output().map_err(|e| format!("valgrind run: {}", e))?
+    } else if let Some(timeout) = config.run_timeout {
+        run_binary_with_timeout(&bin_path, timeout)?
     } else {
         Command::new(&bin_path)
             .output()
@@ -806,6 +817,163 @@ pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, Strin
         .compile_checked(&checked_program)
         .map_err(|e| format!("{:?}", e))?;
     link_and_run_module(&codegen, &E2EConfig::default(), counter)
+}
+
+/// Production interp path: typecheck + install CheckedProgram + VM stdout.
+/// Used by Phase 0 dual tests so spawn/Flow evidence is not green only via
+/// the legacy `compile_file` harness.
+pub(crate) fn checked_run_source_with_stdout(src: &str) -> (interp::Value, String) {
+    let file = parse(src);
+    let program = core::check_program(&file).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected checked_run_source_with_stdout source:\n{}",
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&program);
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed in checked_run_source_with_stdout");
+    let mut vm = interp::bytecode::BytecodeVM::new(prog);
+    vm.enable_stdout_capture();
+    let val = vm
+        .run_value()
+        .expect("bytecode run_value failed in checked_run_source_with_stdout");
+    let stdout = vm.take_stdout();
+    (val, stdout)
+}
+
+/// Compile via `compile_checked` then run the native binary with a wall-clock
+/// cap. Timeout error text contains `hang` so deadlock tests can distinguish
+/// a hang from a wrong computed value.
+pub(crate) fn checked_codegen_compile_and_run_timeout(
+    src: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let file = parse(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|e| format!("{:?}", e))?;
+    link_and_run_module(
+        &codegen,
+        &E2EConfig {
+            run_timeout: Some(timeout),
+            ..E2EConfig::default()
+        },
+        counter,
+    )
+}
+
+/// Run `f` on a helper thread. If it does not finish within `timeout`, return
+/// an error whose text identifies a hang (not a computed value).
+pub(crate) fn run_with_timeout<T, F>(timeout: std::time::Duration, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("mimi-test-timeout".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("hang: failed to start timeout worker: {e}"))?;
+    rx.recv_timeout(timeout).map_err(|_| {
+        format!(
+            "hang: wall-clock timeout after {:?} (deadlock or sequential spawn blocked)",
+            timeout
+        )
+    })
+}
+
+fn run_binary_with_timeout(
+    bin_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut child = Command::new(bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run: {}", e))?;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe.take() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe.take() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "hang: native binary deadlocked or did not finish within {:?}",
+                    timeout
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => return Err(format!("run: {}", e)),
+        }
+    };
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Production compile_checked: function names the resolved emitter attempted
+/// and then silently handed to legacy. Empty means no emit-time fallback.
+pub(crate) fn checked_codegen_failed_functions(
+    src: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let file = parse(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|e| format!("{:?}", e))?;
+    Ok(codegen.resolved_failed_functions().clone())
 }
 
 /// Standard E2E codegen test: compile and run, return stdout.
