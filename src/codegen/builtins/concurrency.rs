@@ -780,6 +780,92 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(call_try_basic_value(&result).ok_or("mimi_channel_recv returned void")?)
     }
 
+    // ---------- Flow TransitionEpoch ----------
+
+    fn compile_flow_i64_call(
+        &self,
+        symbol: &str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let func = self
+            .module
+            .get_function(symbol)
+            .ok_or_else(|| format!("{symbol} not declared"))?;
+        let result = self
+            .builder
+            .build_call(func, args, symbol)
+            .map_err(|e| format!("{symbol} error: {e}"))?;
+        let value =
+            call_try_basic_value(&result).ok_or_else(|| format!("{symbol} returned void"))?;
+        match value {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() < 64 {
+                    Ok(BasicValueEnum::IntValue(
+                        self.builder
+                            .build_int_s_extend(
+                                iv,
+                                self.context.i64_type(),
+                                &format!("{symbol}_sext"),
+                            )
+                            .map_err(|e| format!("{symbol} sext: {e}"))?,
+                    ))
+                } else {
+                    Ok(BasicValueEnum::IntValue(iv))
+                }
+            }
+            other => Ok(other),
+        }
+    }
+
+    pub(super) fn compile_flow_pack(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_pack", args)
+    }
+
+    pub(super) fn compile_flow_epoch(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_epoch", args)
+    }
+
+    pub(super) fn compile_flow_check_epoch(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_check_epoch", args)
+    }
+
+    pub(super) fn compile_flow_bump_epoch(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_bump_epoch", args)
+    }
+
+    pub(super) fn compile_flow_unpack(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_unpack", args)
+    }
+
+    pub(super) fn compile_flow_pack_count(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_pack_count", args)
+    }
+
+    pub(super) fn compile_flow_epoch_last_error(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_flow_i64_call("mimi_flow_last_error", args)
+    }
+
     pub(super) fn compile_channel_try_recv(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

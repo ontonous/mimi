@@ -5,6 +5,7 @@
   scripts/dispatch_stat.py generate   # 跑基线语料，生成基线 JSON 入仓
   scripts/dispatch_stat.py check       # 跑基线语料，与基线对比，禁静默回退率上升
   scripts/dispatch_stat.py check --zero # 同时要求每个程序 legacy_fallback == 0
+  scripts/dispatch_stat.py check --core # 只扫核语料（Flow / spawn fixtures）
   scripts/dispatch_stat.py report     # 打印当前语料 fallback 报告（不对比）
   scripts/dispatch_stat.py classify [baseline.json] [--output FILE]
                                       # 对基线 skip_reasons 做根因分类，生成清单
@@ -102,6 +103,15 @@ def corpus() -> list[Path]:
     return files
 
 
+def core_corpus() -> list[Path]:
+    """0.1.8 Phase 0 核语料：一条核 Flow + 一条 spawn+channel。"""
+    files = [
+        ROOT / "tests" / "fixtures" / "core_flow_counter.mimi",
+        ROOT / "tests" / "fixtures" / "spawn_channel_pingpong.mimi",
+    ]
+    return [p for p in files if p.is_file()]
+
+
 def mimi_binary() -> Path:
     env = os.environ.get("MIMI")
     if env:
@@ -150,17 +160,18 @@ def compile_with_stat(
     return stats
 
 
-def collect_all(reachable: bool = False) -> dict:
+def collect_all(reachable: bool = False, core: bool = False) -> dict:
     """跑全部基线语料，返回 {程序相对路径: stats}。
 
     reachable=True 时设置 MIMI_REACHABLE_DISPATCH=1，度量仅含从入口可达的函数。
+    core=True 时只扫 0.1.8 Phase 0 核语料（Flow / spawn fixtures）。
     """
     results: dict[str, dict] = {}
     bin_path = mimi_binary()
     if not bin_path.exists():
         print(f"[dispatch-stat] mimi 二进制不存在：{bin_path}（先 cargo build）", file=sys.stderr)
         sys.exit(2)
-    files = corpus()
+    files = core_corpus() if core else corpus()
     print(f"[dispatch-stat] 语料 {len(files)} 个 .mimi 文件", file=sys.stderr)
     skipped = 0
     # 工作区内临时目录（sandbox 下 /tmp 可能只读）。
@@ -562,6 +573,34 @@ def cmd_report(args: list[str]) -> int:
 def cmd_check(args: list[str]) -> int:
     reachable = "--reachable" in args
     require_zero = "--zero" in args
+    core_only = "--core" in args
+    if core_only:
+        results = collect_all(reachable=reachable, core=True)
+        if not results:
+            print("[dispatch-stat] --core 核语料无任何程序编译成功", file=sys.stderr)
+            return 2
+        zero_violations: list[str] = []
+        for name, s in sorted(results.items()):
+            lg = s.get("legacy_fallback", 0)
+            el = s.get("eligible", 0)
+            print(
+                f"  [core] {name}: eligible={el} legacy_fallback={lg} "
+                f"emitter={'resolved' if el > 0 else 'none'}"
+            )
+            # 核函数门禁：程序必须走进 resolved（eligible>0），且不得静默
+            # fallback。transition 基础设施可能仍记在 skip 里，所以 --core
+            # 要求 eligible>0；--core --zero 才要求整程序 fallback==0。
+            if el == 0:
+                zero_violations.append(f"{name}: eligible=0（核程序必须 resolved）")
+            if require_zero and lg > 0:
+                zero_violations.append(f"{name}: legacy_fallback={lg}（--zero 要求 0）")
+        if zero_violations:
+            print("\n[dispatch-stat] ❌ 核语料门禁未满足：", file=sys.stderr)
+            for v in zero_violations:
+                print(f"    - {v}", file=sys.stderr)
+            return 1
+        print("[dispatch-stat] ✅ 核语料 emitter=resolved，无静默 core fallback")
+        return 0
     if not BASELINE_PATH.exists():
         print(
             f"[dispatch-stat] 基线不存在：{BASELINE_PATH.relative_to(ROOT)}，"

@@ -413,6 +413,31 @@ impl<'a> Checker<'a> {
                 }
                 self.generic_scope
                     .truncate(self.generic_scope.len() - generic_names.len());
+                // 0.38.46 Phase C: FFI must not take a bare Flow record as
+                // a safe handle. Pack a TransitionEpoch first.
+                if f.extern_abi.is_some() {
+                    self.extern_funcs.insert(qualified_name.clone());
+                    for (i, pty) in params.iter().enumerate() {
+                        if self.is_flow_state_type(pty) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0443,
+                                format!(
+                                    "extern function '{}' cannot take bare Flow record '{}' as a handle; pack a TransitionEpoch with flow_pack",
+                                    qualified_name, f.params[i].name
+                                ),
+                            );
+                        }
+                    }
+                    if self.is_flow_state_type(&ret) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0443,
+                            format!(
+                                "extern function '{}' cannot return a bare Flow record; pack a TransitionEpoch with flow_pack",
+                                qualified_name
+                            ),
+                        );
+                    }
+                }
                 // For async functions, the declared return type is wrapped in Future<T>.
                 // e.g., `async func foo() -> i32` has signature `foo() -> Future<i32>`.
                 let func_sig_ret = if f.is_async {
@@ -422,10 +447,6 @@ impl<'a> Checker<'a> {
                 };
                 self.funcs
                     .insert(qualified_name.clone(), (params, func_sig_ret));
-                // 追加 C: track extern functions for `?` rejection (FFI failures are Faults)
-                if f.extern_abi.is_some() {
-                    self.extern_funcs.insert(qualified_name.clone());
-                }
                 // Store generic parameters if present
                 if !f.generics.is_empty() {
                     self.func_generics
@@ -616,19 +637,26 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
-                    // v0.31.11: actors that run a Flow must not have mut business fields.
-                    // State is carried by the Flow; mutable fields break the atomic turn guarantee.
-                    for field in &actor.fields {
-                        if field.mut_ {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0402,
-                                format!(
-                                    "actor '{}' runs flow '{}' — mutable field '{}' is not allowed; \
-                                     business state must be carried by the Flow's state payloads",
-                                    actor.name, flow_name, field.name
-                                ),
-                            );
-                        }
+                }
+                // 0.1.8 Phase D: user-visible business `mut` actor fields are
+                // forbidden even on actors that do not `runs Flow`. Business
+                // state must live in Flow state payloads; `mut` is no longer a
+                // simple-state escape hatch (SD-5 废止).
+                for field in &actor.fields {
+                    if field.mut_ {
+                        let field_ty = crate::core::fmt_type(&field.ty);
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!(
+                                "actor '{}' mutable field '{}' is not allowed; business state must live in a Flow. \
+                                 Remove `mut` for per-instance metadata, or rewrite as: \
+                                 `flow {} {{ state Ready {{ {}: {} }} \
+                                 transition init(Ready) -> Ready {{ return Ready {{ {}: self.{} }} }} }}` \
+                                 with `actor {} runs {}`",
+                                actor.name, field.name, actor.name, field.name, field_ty,
+                                field.name, field.name, actor.name, actor.name
+                            ),
+                        );
                     }
                 }
                 // Register actor type so it can be used as a type
@@ -1355,6 +1383,21 @@ impl<'a> Checker<'a> {
                 // Check actor methods
                 for method in &actor.methods {
                     self.set_span(method.meta.span);
+                    self.reject_narrow_mailbox_params(&method.params, &actor.name, &method.name);
+                    for p in &method.params {
+                        if p.name == "self" {
+                            continue;
+                        }
+                        if self.is_flow_state_type(&p.ty) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0443,
+                                format!(
+                                    "bare Flow record cannot enter actor mailbox {}.{} as '{}'; pack a TransitionEpoch with flow_pack",
+                                    actor.name, method.name, p.name
+                                ),
+                            );
+                        }
+                    }
                     // Add implicit self parameter to scope for actor methods
                     let self_ty = Type::Name(actor.name.clone(), vec![]);
                     let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
@@ -1753,7 +1796,30 @@ impl<'a> Checker<'a> {
                 if !block.unsafe_ {
                     for func in &block.funcs {
                         self.set_span(func.meta.span);
+                        // 0.38.46 Phase C: even if the raw record is ABI-layout
+                        // compatible, a bare Flow record has no TransitionEpoch
+                        // and cannot be used as a safe handle across FFI.
+                        for param in &func.params {
+                            if self.is_flow_state_type(&param.ty) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0443,
+                                    format!(
+                                        "extern function '{}' cannot take bare Flow record '{}' as a handle; pack a TransitionEpoch with flow_pack",
+                                        func.name, param.name
+                                    ),
+                                );
+                            }
+                        }
                         if let Some(ret_ty) = &func.ret {
+                            if self.is_flow_state_type(ret_ty) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0443,
+                                    format!(
+                                        "extern function '{}' cannot return a bare Flow record; pack a TransitionEpoch with flow_pack",
+                                        func.name
+                                    ),
+                                );
+                            }
                             let resolved = self.resolve_type(ret_ty);
                             if !self.is_valid_extern_type(&resolved, false) {
                                 self.emit_code(

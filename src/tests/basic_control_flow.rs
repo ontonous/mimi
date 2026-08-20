@@ -1149,7 +1149,7 @@ fn actor_method_requires_checked() {
     // I-H3: actor methods honor requires when verify_contracts is on.
     let src = r#"
 actor Box {
-    mut x: i32 = 0
+    x: i32 = 0
     func set(n: i32) {
         requires: n >= 0
         self.x = n

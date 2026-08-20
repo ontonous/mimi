@@ -58,6 +58,7 @@ fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
     let run_result = Expr::Record {
         ty: Some("Single".to_string()),
         fields: vec![],
+        rest: None,
     }
     .with_meta(AstNodeMeta::new(span, run_origin));
     let run_body =

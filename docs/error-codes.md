@@ -175,6 +175,8 @@
 | E0437 | trait method call on a bounded generic parameter (monomorphization deferred to 1.x; Clone is the supported exception) |
 | E0438 | generic type argument count mismatch (split from E0231, §3-诊断卫生 2026-08-07) |
 | E0439 | verification engine divergence: resolved and flow_ast engines disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3, 0.34.44). Arithmetic properties (e.g. `ensures: result == x * x`) commonly trigger this — the flow engine models integers as unbounded while the resolved engine applies i32/i64 checked semantics. Add explicit bounds (e.g. `requires: x <= 46340`) to remove the divergence |
+| E0442 | view/mutate/ref cannot cross a task boundary (spawn, Channel element, Future capture, or actor mailbox) |
+| E0443 | bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch with `flow_pack` |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |

@@ -2,23 +2,20 @@ use std::fs;
 use std::path::Path;
 
 pub(crate) fn doc(path: &Path, format: &str, output: Option<&Path>) -> Result<(), String> {
+    if path.extension().map(|e| e == "mms").unwrap_or(false) {
+        return Err(
+            "MimiSpec (.mms) support is removed in 0.1.8; promote sketches to .mimi first".into(),
+        );
+    }
+
     let source = mimi::path_safety::read_source_capped(path)?;
 
-    let is_mms = path.extension().map(|e| e == "mms").unwrap_or(false);
-
     let doc_text = match format {
-        "markdown" | "md" => {
-            if is_mms {
-                mimi::doc_core::generate_markdown_from_mms(&source)?
-            } else {
-                mimi::doc_core::generate_markdown(&source)?
-            }
-        }
+        "markdown" | "md" => mimi::doc_core::generate_markdown(&source)?,
         "mms" => {
-            if !is_mms {
-                return Err("mms output format requires .mms input".into());
-            }
-            mimi::doc_core::generate_mms(&source)?
+            return Err(
+                "MimiSpec (.mms) output is removed in 0.1.8; use Markdown from .mimi".into(),
+            );
         }
         _ => return Err(format!("unsupported doc format: {}", format)),
     };

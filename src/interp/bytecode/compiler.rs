@@ -1471,6 +1471,9 @@ impl BytecodeCompiler {
                                         }
                                         VarType::Unknown
                                     }
+                                    Type::Name(n, _) if n == "SessionChan" => {
+                                        VarType::User(n.clone())
+                                    }
                                     _ => {
                                         let inferred = self.infer_expr_type(fc, init_expr);
                                         // §6-#57: a list LITERAL init records
@@ -1496,7 +1499,9 @@ impl BytecodeCompiler {
                                 // tag would misroute `xs = []` into a
                                 // CHECK_I32 on a list value).
                                 let inferred = self.infer_expr_type(fc, init_expr);
-                                if let Expr::List(_) = init_expr.unlocated() {
+                                if let Some(sess_ty) = self.session_init_var_type(init_expr) {
+                                    sess_ty
+                                } else if let Expr::List(_) = init_expr.unlocated() {
                                     if let PatternKind::Variable(name) = &pat.kind {
                                         fc.list_elem_types.insert(name.clone(), inferred);
                                     }
@@ -1513,6 +1518,9 @@ impl BytecodeCompiler {
                             fc.emit(Op::Mov { rd: new_r, rs: r });
                             fc.vars_mut().insert(name.clone(), new_r);
                         } else {
+                            if self.session_init_var_type(init_expr).is_some() {
+                                self.set_session_pair_pattern_types(fc, pat);
+                            }
                             self.bind_pattern(fc, pat, r);
                         }
                     } else {
@@ -2023,7 +2031,9 @@ impl BytecodeCompiler {
                 });
                 Ok(rd)
             }
-            Expr::Record { ty, fields } => self.compile_record(fc, ty.as_deref(), fields),
+            Expr::Record { ty, fields, rest } => {
+                self.compile_record(fc, ty.as_deref(), fields, rest.as_deref())
+            }
             Expr::Lambda {
                 params,
                 ret: _,
@@ -2365,25 +2375,9 @@ impl BytecodeCompiler {
                 self.compile_expr(fc, inner)
             }
 
-            Expr::Spawn(inner) => {
-                // spawn(expr) — compile the inner expression as a closure and spawn.
-                // §9-#15 / B-8 (closed 0.36.86 by design): the current
-                // sequential fallback is the documented concurrency-runtime
-                // design shape (Phase D/Wave-3), not a 0.1.6 safety blocker.
-                // Full async support will emit `Op::Spawn` when the runtime
-                // lands.
-                let r = self.compile_expr(fc, inner)?;
-                let rd = fc.proto.alloc_reg();
-                fc.emit(Op::Mov { rd, rs: r });
-                Ok(rd)
-            }
+            Expr::Spawn(inner) => self.compile_spawn(fc, inner),
 
-            Expr::Await(inner) => {
-                // await(expr) — for now, just evaluate the inner expression.
-                // §9-#15 / B-8 (closed 0.36.86 by design): see the spawn arm;
-                // sequential await matches the current Phase D design shape.
-                self.compile_expr(fc, inner)
-            }
+            Expr::Await(inner) => self.compile_await(fc, inner),
 
             Expr::Comptime(block) => {
                 // Comptime blocks are evaluated at runtime like a plain block
@@ -2798,7 +2792,12 @@ impl BytecodeCompiler {
                 });
                 fc.emit(Op::QuoteLambda { spec_idx });
             }
-            Expr::Record { ty, fields } => {
+            Expr::Record { ty, fields, rest } => {
+                if rest.is_some() {
+                    return Err(InterpError::new(
+                        "bytecode quote: record update `..rest` is not supported in quote context",
+                    ));
+                }
                 // Emit field values onto quote stack, then QuoteRecord.
                 for f in fields {
                     self.compile_quote_expr(fc, &f.value, shadowed)?;
@@ -3865,6 +3864,34 @@ impl BytecodeCompiler {
                 },
                 _ => vec![],
             };
+            // 0.1.8 Phase E: SessionChan method surface lowers directly to the
+            // existing session_* free-function builtins. This must happen before
+            // generic builtin/method-table dispatch because the receiver's
+            // runtime representation is just an i64 channel handle.
+            let session_builtin = if receiver_impl_types
+                .iter()
+                .any(|t| t.starts_with("SessionChan") || t.starts_with("session_chan"))
+            {
+                match method.as_str() {
+                    "send" => Some("session_send"),
+                    "recv" => Some("session_recv"),
+                    "close" => Some("session_close"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(builtin_name) = session_builtin {
+                if let Some(&bidx) = self.builtin_table.get(builtin_name) {
+                    fc.emit(Op::CallBuiltin {
+                        rd,
+                        builtin: bidx,
+                        args_base: new_args_base,
+                        argc: total_args as u16,
+                    });
+                    return Ok(rd);
+                }
+            }
             let impl_shadows_builtin = !receiver_impl_types.is_empty()
                 && receiver_impl_types
                     .iter()
@@ -5476,11 +5503,12 @@ impl BytecodeCompiler {
         fc: &mut FuncCompiler,
         ty: Option<&str>,
         fields: &[RecordFieldExpr],
+        rest: Option<&Expr>,
     ) -> Result<Reg, InterpError> {
         // IMPORTANT: Add type name + field names to constant pool FIRST,
         // before compiling field values. Use add_const_raw (no dedup) to
-        // ensure contiguous indices — the VM's NewRecord handler reads
-        // field names from constants[type_name+1..type_name+1+count].
+        // ensure contiguous indices — the VM's NewRecord/UpdateRecord handler
+        // reads field names from constants[type_name+1..type_name+1+count].
         let type_name_idx = fc.proto.add_const_raw(ConstValue::Str(
             ty.map(|s| s.to_string()).unwrap_or_default(),
         ));
@@ -5504,12 +5532,125 @@ impl BytecodeCompiler {
         }
 
         let rd = fc.proto.alloc_reg();
-        fc.emit(Op::NewRecord {
+        if let Some(rest_expr) = rest {
+            let ra = self.compile_expr(fc, rest_expr)?;
+            fc.emit(Op::UpdateRecord {
+                rd,
+                type_name: type_name_idx,
+                ra,
+                base,
+                count: fields.len() as u16,
+            });
+        } else {
+            fc.emit(Op::NewRecord {
+                rd,
+                type_name: type_name_idx,
+                base,
+                count: fields.len() as u16,
+            });
+        }
+        Ok(rd)
+    }
+
+    /// Compile `spawn expr` to `Op::Spawn` (task + join). 0.1.7 sequential
+    /// eval (`compile inner` + `Mov` / await-as-eval) is closed: the success
+    /// path never falls back to evaluating the body in the parent frame.
+    ///
+    /// Named-function calls (`spawn foo(a, b)`) spawn that proto directly.
+    /// Any other shape is compiled as a fresh wrapper proto whose parameters
+    /// are the captured outer locals — same observation as native
+    /// `mimi_spawn_future`.
+    fn compile_spawn(&mut self, fc: &mut FuncCompiler, inner: &Expr) -> Result<Reg, InterpError> {
+        if let Expr::Call(callee, args) = inner.unlocated() {
+            if let Expr::Ident(name) = callee.unlocated() {
+                if let Some(&fidx) = self.func_table.get(name.as_str()) {
+                    return self.emit_spawn_call(fc, fidx, args);
+                }
+            }
+        }
+        self.emit_spawn_wrapper(fc, inner)
+    }
+
+    fn emit_spawn_call(
+        &mut self,
+        fc: &mut FuncCompiler,
+        func: FuncIdx,
+        args: &[Expr],
+    ) -> Result<Reg, InterpError> {
+        let args_base = fc.proto.alloc_reg();
+        for _ in 1..args.len() {
+            fc.proto.alloc_reg();
+        }
+        for (i, arg) in args.iter().enumerate() {
+            let target = args_base + i as Reg;
+            let r = self.compile_expr_into(fc, arg, target)?;
+            if r != target {
+                fc.emit(Op::Mov { rd: target, rs: r });
+            }
+        }
+        let rd = fc.proto.alloc_reg();
+        fc.emit(Op::Spawn {
             rd,
-            type_name: type_name_idx,
-            base,
-            count: fields.len() as u16,
+            func,
+            args_base,
+            argc: args.len() as u16,
         });
+        Ok(rd)
+    }
+
+    fn emit_spawn_wrapper(
+        &mut self,
+        fc: &mut FuncCompiler,
+        inner: &Expr,
+    ) -> Result<Reg, InterpError> {
+        let wrapper_idx = self.functions.len() as FuncIdx;
+        let wrapper_name = format!("__spawn_{}_{}", fc.proto.name, wrapper_idx);
+
+        let mut local_vars = std::collections::HashSet::new();
+        let mut free_vars = std::collections::HashSet::new();
+        self.collect_free_vars_expr(inner, &mut local_vars, &mut free_vars);
+        let captures: Vec<(String, Reg)> = free_vars
+            .iter()
+            .filter_map(|name| fc.lookup_var(name).map(|reg| (name.clone(), reg)))
+            .collect();
+
+        let mut wrapper_fc = FuncCompiler::new(wrapper_name.clone(), captures.len() as u16);
+        self.functions.push(FunctionProto::new(
+            wrapper_name.clone(),
+            captures.len() as u16,
+        ));
+
+        for (i, (name, _)) in captures.iter().enumerate() {
+            wrapper_fc.vars[0].insert(name.clone(), i as Reg);
+            if let Some(ty) = fc.var_types.get(name) {
+                wrapper_fc.var_types.insert(name.clone(), ty.clone());
+            }
+        }
+        while wrapper_fc.proto.register_count < captures.len() as u16 {
+            wrapper_fc.proto.alloc_reg();
+        }
+
+        let result = self.compile_expr(&mut wrapper_fc, inner)?;
+        wrapper_fc.emit(Op::Ret { ra: result });
+        self.functions[wrapper_idx as usize] = wrapper_fc.proto;
+
+        self.emit_spawn_call(
+            fc,
+            wrapper_idx,
+            &captures
+                .iter()
+                .map(|(name, _)| Expr::Ident(name.clone()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Compile `await expr` to `Op::Await`. Joins the spawned task; does not
+    /// re-evaluate the inner expression (0.1.8 Phase 0 closed the 0.1.7
+    /// sequential-await design).
+    fn compile_await(&mut self, fc: &mut FuncCompiler, inner: &Expr) -> Result<Reg, InterpError> {
+        let ra = self.compile_expr(fc, inner)?;
+        let rd = fc.proto.alloc_reg();
+        fc.emit(Op::Await { rd, ra });
         Ok(rd)
     }
 
@@ -5633,6 +5774,41 @@ impl BytecodeCompiler {
             capture_count: captures.len() as u16,
         });
         Ok(rd)
+    }
+
+    /// 0.1.8 Phase E: light-weight bytecode type tracing for session endpoints.
+    /// The bytecode compiler does not carry the full resolved type table, but
+    /// session endpoints are always produced by `session_open::<S>()` (single
+    /// endpoint) or `session_pair::<S>()` (tuple of two endpoints). Knowing
+    /// the prefix `SessionChan` lets method dispatch route `send`/`recv`/`close`
+    /// to the session_* builtins instead of the socket `send`/`recv` builtins.
+    fn session_init_var_type(&self, expr: &Expr) -> Option<VarType> {
+        let name = match expr.unlocated() {
+            Expr::Call(callee, _) => match callee.unlocated() {
+                Expr::Ident(n) | Expr::Turbofish(n, _, _) => n.clone(),
+                _ => return None,
+            },
+            Expr::Turbofish(n, _, _) => n.clone(),
+            _ => return None,
+        };
+        if name == "session_open" || name == "session_pair" {
+            Some(VarType::User("SessionChan".to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// Mark each variable in a destructuring pattern with SessionChan when the
+    /// initializer is `session_pair::<S>()`. (The exact concrete session type
+    /// is not needed for method dispatch; the runtime value is an i64 handle.)
+    fn set_session_pair_pattern_types(&self, fc: &mut FuncCompiler, pat: &Pattern) {
+        if let PatternKind::Tuple(pats) = &pat.kind {
+            for p in pats {
+                if let PatternKind::Variable(name) = &p.kind {
+                    fc.set_reg_type(name, VarType::User("SessionChan".to_string()));
+                }
+            }
+        }
     }
 
     fn bind_pattern(&self, fc: &mut FuncCompiler, pat: &Pattern, reg: Reg) {
@@ -6379,7 +6555,11 @@ fn value_to_const_expr(value: &crate::interp::Value) -> Expr {
                     value: value_to_const_expr(v),
                 })
                 .collect();
-            Expr::Record { ty, fields }
+            Expr::Record {
+                ty,
+                fields,
+                rest: None,
+            }
         }
         Value::Newtype(name, inner) => synth(Expr::Call(
             Box::new(synth(Expr::Ident(name.clone()))),
@@ -6692,6 +6872,7 @@ fn quoted_ast_to_expr(
             Expr::Record {
                 ty: ty.clone(),
                 fields: converted_fields,
+                rest: None,
             }
         }
         QuotedAst::Try(e) => Expr::Try(Box::new(quoted_ast_to_expr(

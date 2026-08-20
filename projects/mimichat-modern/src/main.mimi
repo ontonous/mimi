@@ -53,9 +53,9 @@ flow ChatSession {
 }
 
 actor RoomService {
-    mut total: i64 = 0 as i64
-    mut rooms: i64 = 0 as i64
-    mut last_room: string = ""
+    total: i64 = 0 as i64
+    rooms: i64 = 0 as i64
+    last_room: string = ""
 
     func register(room: string) -> i64 {
         self.rooms = self.rooms + 1

@@ -105,6 +105,7 @@ impl<'a> Checker<'a> {
         &mut self,
         ty: &Option<String>,
         fields: &[RecordFieldExpr],
+        rest: Option<&Expr>,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         let tdef = ty.as_ref().and_then(|n| self.types.get(n)).cloned();
@@ -157,6 +158,8 @@ impl<'a> Checker<'a> {
                         })
                         .collect();
 
+                    let ret = Type::Name(tdef.name.clone(), type_args);
+
                     for (name, value) in fields.iter().map(|f| (&f.name, &f.value)) {
                         if let Some(expected_ty) = expected.get(name) {
                             // Use check_expr to propagate expected type (enables empty list inference)
@@ -205,16 +208,56 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    for name in expected.keys() {
-                        if !fields.iter().any(|f| &f.name == name) {
+
+                    // 0.1.8 Phase F: `..rest` supplies every field not explicitly
+                    // written and must be the same record type.
+                    if let Some(rest_expr) = rest {
+                        let rest_root = match rest_expr.unlocated() {
+                            Expr::Ident(name) => Some(name.clone()),
+                            _ => None,
+                        };
+                        for field in fields {
+                            if let Expr::Field(base, field_name) = field.value.unlocated() {
+                                if let Expr::Ident(base_name) = base.unlocated() {
+                                    if rest_root.as_deref() == Some(base_name.as_str())
+                                        && field_name == &field.name
+                                    {
+                                        self.emit_code(
+                                            crate::diagnostic::codes::E0256,
+                                            format!(
+                                                "move-rest field '{}' is copied by both the explicit override and `..{}`; \\
+                                                 linear fields must be moved, not copied",
+                                                field.name, base_name
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let rest_ty = self.check_expr(&ret, rest_expr, scopes);
+                        if self.unification.unify(&ret, &rest_ty).is_err() {
                             self.emit_code(
-                                crate::diagnostic::codes::E0248,
-                                format!("missing field '{}' in record literal", name),
+                                crate::diagnostic::codes::E0247,
+                                format!(
+                                    "record update `..rest` expected {}, found {}",
+                                    fmt_type(&ret),
+                                    fmt_type(&rest_ty)
+                                ),
                             );
                         }
                     }
 
-                    let ret = Type::Name(tdef.name.clone(), type_args);
+                    if rest.is_none() {
+                        for name in expected.keys() {
+                            if !fields.iter().any(|f| &f.name == name) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0248,
+                                    format!("missing field '{}' in record literal", name),
+                                );
+                            }
+                        }
+                    }
+
                     self.unification.zonk_or_unknown(&ret)
                 }
                 _ => {

@@ -1,0 +1,9 @@
+// Phase B CLI fixture: split/join a string containing an embedded NUL and
+// print the full logical length. C-string list elements would print 1.
+func main() -> i32 {
+    let s = "a" + chr(0) + "b" + "," + "c"
+    let parts = str_split(s, ",")
+    let joined = str_join(parts, ",")
+    println(len(joined))
+    0
+}

@@ -520,6 +520,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        // 5a. 0.1.8 Phase E: SessionChan method surface.
+        // `ch.send(v)` → `session_send(ch, v)`; `ch.recv()` → `session_recv(ch)`;
+        // `ch.close()` → `session_close(ch)`.
+        if obj_type.starts_with("SessionChan") || obj_type.starts_with("session_chan") {
+            let builtin_name = match method_name {
+                "send" => Some("session_send"),
+                "recv" => Some("session_recv"),
+                "close" => Some("session_close"),
+                _ => None,
+            };
+            if let Some(builtin_name) = builtin_name {
+                let obj_expr = obj.clone();
+                let mut all_args = vec![obj_expr];
+                all_args.extend(args.iter().cloned());
+                let call_expr =
+                    Expr::Call(Box::new(Expr::Ident(builtin_name.to_string())), all_args);
+                return self.compile_expr(&call_expr, vars);
+            }
+        }
+
         // 5b. Builtin string method fallback: s.trim() → str_trim(s)
         //     Mirrors the interpreter's hardcoded string methods (interp/call.rs:704-769).
         if obj_type == "string" {
@@ -2501,10 +2521,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     Type::Name(n, _) if n == "string" => {
                         // json_get_element already returns a heap-allocated C-string.
-                        // List<string> stores elements as bare C-string pointers (i8*)
-                        // in the data array (ptrtoint'd to i64). This matches the
-                        // convention used by mimi_list_free.
-                        self.build_ptr_to_int(elem_json, i64_ty, "elem_as_i64")?
+                        // 0.1.8 Phase B fat ABI: list<string> slots must store a
+                        // MimiStr box handle. `mimi_str_box` takes ownership of
+                        // the heap-allocated element string, so no extra copy is
+                        // needed.
+                        let strlen_fn = self.get_runtime_fn("strlen")?;
+                        let str_len = self
+                            .build_call(
+                                strlen_fn,
+                                &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                                "elem_str_len",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("strlen returned void")?
+                            .into_int_value();
+                        let box_fn = self.get_runtime_fn("mimi_str_box")?;
+                        self.build_call(
+                            box_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(elem_json),
+                                BasicMetadataValueEnum::IntValue(str_len),
+                            ],
+                            "elem_str_box",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_str_box returned void")?
+                        .into_int_value()
                     }
                     Type::Name(n, _) if n == "f32" || n == "f64" => {
                         let parser = self.get_runtime_fn("mimi_json_as_f64")?;

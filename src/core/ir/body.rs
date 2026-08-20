@@ -374,6 +374,7 @@ pub enum ResolvedExprKind {
     Record {
         nominal: NominalTypeId,
         fields: Vec<ResolvedRecordField>,
+        rest: Option<Box<ResolvedExpr>>,
     },
     Block(Box<ResolvedBlock>),
     Scope {
@@ -1068,7 +1069,11 @@ impl BodyValidator<'_> {
             ResolvedExprKind::TypeOf(value) | ResolvedExprKind::Old(value) => {
                 self.visit_expr(value);
             }
-            ResolvedExprKind::Record { nominal, fields } => {
+            ResolvedExprKind::Record {
+                nominal,
+                fields,
+                rest,
+            } => {
                 if nominal.as_str().trim().is_empty() {
                     self.error(&expression.node_id, "record nominal identity is empty");
                 }
@@ -1083,6 +1088,9 @@ impl BodyValidator<'_> {
                         &field.conversion,
                         Some(&field.value.ty),
                     );
+                }
+                if let Some(rest) = rest {
+                    self.visit_expr(rest);
                 }
             }
             ResolvedExprKind::Block(block)

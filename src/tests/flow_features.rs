@@ -3240,6 +3240,7 @@ flow Parent { state Working { child: CIdle } }
             let Expr::Record {
                 ty: Some(t),
                 fields,
+                ..
             } = expr.unlocated()
             else {
                 panic!("expected record return expression, got {:?}", expr);
@@ -3251,6 +3252,7 @@ flow Parent { state Working { child: CIdle } }
                 Expr::Record {
                     ty: Some(ct),
                     fields: cfields,
+                    ..
                 } => {
                     assert_eq!(ct, "CIdle");
                     assert_eq!(cfields.len(), 1);
@@ -3324,6 +3326,93 @@ func main() -> i32 { 0 }
         check_source(src).is_ok(),
         "good order: {:?}",
         check_source(src)
+    );
+}
+
+#[test]
+fn session_free_function_deprecation_warning() {
+    // 0.1.8 Phase E: session_send/recv/close are deprecated in favor of the
+    // method surface. Existing programs must still typecheck, but teaching and
+    // dogfood should move to `ch.send/recv/close`.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<S>()
+    session_send(ch0, 1)
+    let x = session_recv(ch1)
+    session_send(ch1, x + 1)
+    let y = session_recv(ch0)
+    session_close(ch0)
+    session_close(ch1)
+    y
+}
+"#;
+    let warnings = check_source_warnings(src);
+    let deprecations: Vec<_> = warnings
+        .iter()
+        .filter(|d| d.code.as_deref() == Some(crate::diagnostic::codes::W014))
+        .collect();
+    assert_eq!(
+        deprecations.len(),
+        6,
+        "expected six session free-function deprecation warnings, got {warnings:?}"
+    );
+    assert!(
+        deprecations
+            .iter()
+            .all(|d| d.message.contains("deprecated")),
+        "deprecation messages must name the migration"
+    );
+}
+
+#[test]
+fn session_method_check_order_ok() {
+    // 0.1.8 Phase E: method surface `ch.send(v)` / `ch.recv()` / `ch.close()`
+    // is equivalent to the free session_* functions and must typecheck the
+    // same residual protocol.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func client(ch: SessionChan<S>) -> i32 {
+    ch.send(1)
+    let x = ch.recv()
+    ch.close()
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "session method good order: {:?}",
+        check_source(src)
+    );
+}
+
+#[test]
+fn session_method_check_order_violation_rejected() {
+    // `recv` before `send` must be rejected even in method form.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func bad(ch: SessionChan<S>) -> i32 {
+    let x = ch.recv()
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "recv-before-send via method must fail");
+    let msgs: String = err
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        msgs.contains("order")
+            || msgs.contains("E0414")
+            || msgs.contains("ExpectedRecv")
+            || msgs.contains("recv"),
+        "expected order violation, got: {}",
+        msgs
     );
 }
 
@@ -6705,11 +6794,18 @@ func main() -> i32 {
     0
 }
 "#;
-    // Calling open(Open) should fail — no fallback injected in sparse mode
-    let result = check_source(src);
+    // Calling open(Open) should fail — no fallback injected in sparse mode.
+    let result =
+        check_source(src).expect_err("sparse flow should reject undefined (state, event) pair");
+    let msgs: String = result
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
     assert!(
-        result.is_err(),
-        "sparse flow should reject undefined (state, event) pair"
+        msgs.contains("legal events from Open"),
+        "sparse rejection should list currently-legal events for the failing state, got: {}",
+        msgs
     );
 }
 
@@ -7119,4 +7215,70 @@ fn fault_nominal_verb_ordinal_scoped_multi_flow_dual_backend() {
             "elevator round {round}: fault unexpected_event must be its own flow's EventId, got:\n{bc}"
         );
     }
+}
+#[test]
+fn move_rest_three_fields_self_loop() {
+    // 0.1.8 Phase F: `return S { a: self.a + 1, ..self }` moves the
+    // unspecified fields into the new state and overrides the named field.
+    let src = r#"
+flow Counter {
+    state S { a: i32, b: i32, c: i32 }
+
+    transition step(S) -> S {
+        return S { a: self.a + 1, ..self }
+    }
+}
+
+func main() -> i32 {
+    let s0 = S { a: 1, b: 2, c: 3 }
+    let s1 = Counter::step(s0)
+    println(s1.a)
+    println(s1.b)
+    println(s1.c)
+    0
+}
+"#;
+    let expected = "2\n2\n3\n";
+    let (_, bc) = run_source_bytecode_with_stdout(src);
+    assert_eq!(bc, expected, "bytecode move-rest roundtrip");
+    let native =
+        checked_codegen_compile_and_run(src).expect("checked pipeline must compile move-rest");
+    assert_eq!(native, expected, "resolved/native move-rest roundtrip");
+    let legacy = compile_and_run(src).expect("legacy pipeline must compile move-rest");
+    assert_eq!(legacy, expected, "legacy/native move-rest roundtrip");
+}
+
+#[test]
+fn move_rest_rejects_copying_linear_field() {
+    // Move-rest must not silently copy a field that is also named explicitly.
+    // `data: self.data, ..self` would put the same linear field in both the
+    // explicit override and the rest move — reject it as a copy attempt.
+    let src = r#"
+flow Counter {
+    state S { data: List<i32>, extra: i32 }
+
+    transition dup(S) -> S {
+        return S { data: self.data, extra: self.extra, ..self }
+    }
+}
+
+func main() -> i32 {
+    let s0 = S { data: [1, 2, 3], extra: 2 }
+    let s1 = Counter::dup(s0)
+    println(len(s1.data))
+    0
+}
+"#;
+    let err = check_source(src)
+        .expect_err("move-rest must reject copying an explicitly overridden field");
+    let msgs: String = err
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        msgs.contains("move-rest") || msgs.contains("E0256"),
+        "expected move-rest copy rejection, got: {}",
+        msgs
+    );
 }

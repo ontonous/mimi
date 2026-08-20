@@ -65,10 +65,19 @@ fn malloc_c_string_array(items: Vec<*mut std::ffi::c_char>) -> *mut *mut std::ff
         return std::ptr::null_mut();
     }
     for (i, p) in items.iter().enumerate() {
+        // 0.38.26: wrap each C string in a fat `{ptr, len}` box so List<string>
+        // readers never strlen-truncate. The original C string is consumed.
+        let boxed = if p.is_null() {
+            super::list_string::alloc_mimi_str(b"")
+        } else {
+            let rust = unsafe { cstr_to_string(*p) };
+            super::mimi_free(*p as *mut std::ffi::c_void);
+            super::list_string::alloc_mimi_str(rust.as_bytes())
+        };
         // SAFETY: i < items.len() and `ptr` is a fresh allocation of
         // items.len() pointer slots; each slot is written exactly once.
         unsafe {
-            *ptr.add(i) = *p;
+            *ptr.add(i) = boxed as *mut std::ffi::c_char;
         }
     }
     ptr
@@ -708,12 +717,19 @@ pub unsafe extern "C" fn mimi_exec_safe(
     let mut cmd = std::process::Command::new(&prog_str);
     for i in 0..lst.len as isize {
         // SAFETY: i is within bounds (0..lst.len).
-        let item_ptr = unsafe { *lst.data.offset(i) as *const std::ffi::c_char };
+        let item_ptr = unsafe { *lst.data.offset(i) };
         if item_ptr.is_null() {
             continue;
         }
-        // SAFETY: item_ptr is non-null (checked above).
-        let s = unsafe { cstr_to_string(item_ptr) };
+        // Current List<string> slots are fat boxes. Fall back to a C string
+        // only when the slot is not a current element (legacy prefix).
+        let s = match unsafe { crate::runtime::list_string::read_mimi_str(item_ptr) } {
+            Ok((ptr, len)) => String::from_utf8_lossy(unsafe {
+                crate::runtime::list_string::slot_bytes(ptr, len)
+            })
+            .into_owned(),
+            Err(_) => unsafe { cstr_to_string(item_ptr) },
+        };
         cmd.arg(s);
     }
     let (stdout_bytes, stderr_bytes, code) = run_exec_capped(&mut cmd);
@@ -975,20 +991,25 @@ mod tests {
 
     fn list_to_strings(list: *mut MimiList) -> Vec<String> {
         // SAFETY: caller passes a list just returned by mimi_listdir /
-        // mimi_walk_dir; `data` holds `len` NUL-terminated C strings.
+        // mimi_walk_dir. Current List<string> slots are fat `{ptr, len}` boxes;
+        // read them through the shipped element path, not CStr::from_ptr.
         unsafe {
             let lst = &*list;
             let mut out = Vec::new();
-            for i in 0..lst.len as isize {
-                let p = *lst.data.offset(i);
-                if !p.is_null() {
-                    out.push(
-                        CStr::from_ptr(p as *const std::ffi::c_char)
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
-                }
+            for i in 0..lst.len {
+                let mut ptr = std::ptr::null_mut();
+                let mut len = -1i64;
+                let rc = crate::runtime::mimi_list_read_string(list, i, &mut ptr, &mut len);
+                assert_eq!(
+                    rc, 0,
+                    "listdir/walk_dir element {i} must be a current fat string"
+                );
+                out.push(
+                    String::from_utf8_lossy(crate::runtime::list_string::slot_bytes(ptr, len))
+                        .into_owned(),
+                );
             }
+            let _ = lst;
             out
         }
     }
@@ -1080,6 +1101,7 @@ mod tests {
             owns_data: false,
             element_kind: ListElementKind::String,
             has_header: false,
+            string_abi: 0,
         };
         let res = unsafe { mimi_exec_safe(prog.as_ptr(), &mut bad_len) };
         assert!(!res.is_null());
@@ -1100,6 +1122,7 @@ mod tests {
             owns_data: false,
             element_kind: ListElementKind::String,
             has_header: false,
+            string_abi: 0,
         };
         let res = unsafe { mimi_exec_safe(prog.as_ptr(), &mut null_data) };
         assert!(!res.is_null());
@@ -1121,6 +1144,7 @@ mod tests {
             owns_data: false,
             element_kind: ListElementKind::I64,
             has_header: false,
+            string_abi: 0,
         };
         let res = unsafe { mimi_exec_safe(prog.as_ptr(), &mut empty) };
         assert!(!res.is_null());

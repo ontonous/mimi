@@ -597,7 +597,7 @@ fn visit_expr_for_refs(expr: &Expr, name: &str, count: &mut usize) {
                 visit_expr_for_refs(&arm.body, name, count);
             }
         }
-        Expr::Record { ty, fields } => {
+        Expr::Record { ty, fields, rest } => {
             if let Some(ty) = ty {
                 if ty == name {
                     *count += 1;
@@ -605,6 +605,9 @@ fn visit_expr_for_refs(expr: &Expr, name: &str, count: &mut usize) {
             }
             for field in fields {
                 visit_expr_for_refs(&field.value, name, count);
+            }
+            if let Some(rest) = rest {
+                visit_expr_for_refs(rest, name, count);
             }
         }
         Expr::Block(block) | Expr::Quote(block) | Expr::Comptime(block) | Expr::Arena(block) => {

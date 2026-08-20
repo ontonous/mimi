@@ -157,7 +157,7 @@ fn doc_with_output_file() {
 }
 
 #[test]
-fn doc_mms_input_to_markdown() {
+fn doc_mms_input_to_markdown_rejected() {
     let dir = temp_dir();
     let src_path = dir.join("shop.mms");
     fs::write(
@@ -175,26 +175,12 @@ fn doc_mms_input_to_markdown() {
     )
     .expect("write mms");
 
-    let output_path = dir.join("output.md");
-    let result = super::main_doc(&src_path, "markdown", Some(&output_path));
+    let result = super::main_doc(&src_path, "markdown", None);
+    let err = result.expect_err(".mms input must be rejected in 0.1.8");
     assert!(
-        result.is_ok(),
-        "doc should succeed on .mms input: {:?}",
-        result.err()
-    );
-    assert!(output_path.exists(), "output file should exist");
-    let content = fs::read_to_string(&output_path).expect("read output");
-    assert!(
-        content.contains("Shop"),
-        "output should contain module name"
-    );
-    assert!(
-        content.contains("Pay"),
-        "output should contain function name"
-    );
-    assert!(
-        content.contains("Shop module description"),
-        "output should contain desc"
+        err.contains("removed"),
+        "error should mention MimiSpec removal, got: {}",
+        err
     );
 
     // Cleanup
@@ -202,7 +188,7 @@ fn doc_mms_input_to_markdown() {
 }
 
 #[test]
-fn doc_mms_output_mms_format() {
+fn doc_mms_output_mms_format_rejected() {
     let dir = temp_dir();
     let src_path = dir.join("shop.mms");
     fs::write(
@@ -219,22 +205,12 @@ fn doc_mms_output_mms_format() {
     )
     .expect("write mms");
 
-    let output_path = dir.join("output.mms");
-    let result = super::main_doc(&src_path, "mms", Some(&output_path));
+    let result = super::main_doc(&src_path, "mms", None);
+    let err = result.expect_err(".mms output must be rejected in 0.1.8");
     assert!(
-        result.is_ok(),
-        "doc should succeed on mms format: {:?}",
-        result.err()
-    );
-    assert!(output_path.exists(), "output file should exist");
-    let content = fs::read_to_string(&output_path).expect("read output");
-    assert!(
-        content.contains("module Shop"),
-        "output should contain module"
-    );
-    assert!(
-        content.contains("Process payment"),
-        "output should contain desc"
+        err.contains("removed"),
+        "error should mention MimiSpec removal, got: {}",
+        err
     );
 
     // Cleanup

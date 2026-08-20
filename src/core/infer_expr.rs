@@ -276,7 +276,9 @@ impl<'a> Checker<'a> {
                 result
             }
             Expr::Field(obj, field) => self.infer_field_access(obj, field, scopes),
-            Expr::Record { ty, fields } => self.infer_record_expr(ty, fields, scopes),
+            Expr::Record { ty, fields, rest } => {
+                self.infer_record_expr(ty, fields, rest.as_deref(), scopes)
+            }
             Expr::Match(target, arms) => self.infer_match_expr(target, arms, scopes),
             Expr::Unary(op, e) => self.infer_unary(*op, e, scopes),
             Expr::Binary(op, l, r) => self.infer_binary(*op, l, r, scopes),
@@ -336,6 +338,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Spawn(inner) => {
                 let inner_ty = self.infer_expr(inner, scopes);
+                self.reject_narrow_across_spawn(inner, scopes);
                 Type::Name("Future".into(), vec![inner_ty])
             }
             Expr::Await(inner) => self.infer_await(inner, scopes),

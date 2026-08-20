@@ -229,6 +229,11 @@ Primary := Int | Float | String | FString | true | false | unit
          | 'if' Expr '{' Block '}' [ 'else' ... ]  (* if-expr，:177-228 *)
 ```
 
+[事实] v0.1.8 Phase F（move-rest）：记录/状态字面量支持
+`Ident '{' { Ident ':' Expr ',' } [ '..' Expr ] '}'`。Flow transition 中
+`return Target { f: e, ..self }` 先计算显式字段，再把 `self` 中未显式写出的字段移动到新状态；显式字段若直接 `self.f` 与
+`..self` 同时出现会被拒绝（线性字段只移不拷）。
+
 ```
 MatchArm := Pattern [ 'if' Expr ] '=>' ( '{' Block '}' | Expr ) [ ',' ]   (* pattern.rs:6-66 *)
 ```
@@ -324,6 +329,12 @@ SessionType := '!' Type '.' SessionType      (* Send *)
              | 'end'                         (* :1522-1525 *)
              | Ident                         (* 命名引用 *)
 ```
+
+> **0.1.8 Phase E 方法表面**：
+> `SessionMethodCall := Channel '.' ('send' '(' Expr ')' | 'recv' '(' ')' | 'close' '(' ')')`
+> 等价于 `session_send(endpoint, value)` / `session_recv(endpoint)` /
+> `session_close(endpoint)`。自由函数保留但发出 `W014` 弃用诊断，后续切片删除。
+> `.mms` / `mimi mms` / 外部 `mimispec` 解析器已移除，`mms{}` 为硬错误。
 
 ### 6.4 属性（top_level.rs:64-189）
 

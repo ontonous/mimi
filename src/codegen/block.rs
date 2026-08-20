@@ -395,6 +395,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if let Expr::Record {
                             ty: Some(tn),
                             fields,
+                            ..
                         } = init.unlocated()
                         {
                             self.var_type_names.insert(name.clone(), tn.clone());
@@ -1106,6 +1107,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if let PatternKind::Variable(name) = &sub_pats[1].kind {
                                         self.var_type_names.insert(name.clone(), "any".to_string());
                                     }
+                                }
+                            }
+                        }
+                        // 0.1.8 Phase E: destructured session_pair endpoints.
+                        let is_session_pair_init = match init.unlocated() {
+                            Expr::Turbofish(n, _, _) => n == "session_pair",
+                            Expr::Call(callee, _) => matches!(
+                                callee.unlocated(),
+                                Expr::Turbofish(n, _, _) if n == "session_pair"
+                            ),
+                            _ => false,
+                        };
+                        if is_session_pair_init {
+                            for sub in sub_pats {
+                                if let PatternKind::Variable(name) = &sub.kind {
+                                    self.var_type_names
+                                        .insert(name.clone(), "SessionChan".to_string());
                                 }
                             }
                         }
@@ -2014,6 +2032,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if let PatternKind::Variable(name) = &sub_pats[1].kind {
                                         self.var_type_names.insert(name.clone(), "any".to_string());
                                     }
+                                }
+                            }
+                        }
+                        // 0.1.8 Phase E: destructured session_pair endpoints.
+                        let is_session_pair_init = match init.unlocated() {
+                            Expr::Turbofish(n, _, _) => n == "session_pair",
+                            Expr::Call(callee, _) => matches!(
+                                callee.unlocated(),
+                                Expr::Turbofish(n, _, _) if n == "session_pair"
+                            ),
+                            _ => false,
+                        };
+                        if is_session_pair_init {
+                            for sub in sub_pats {
+                                if let PatternKind::Variable(name) = &sub.kind {
+                                    self.var_type_names
+                                        .insert(name.clone(), "SessionChan".to_string());
                                 }
                             }
                         }

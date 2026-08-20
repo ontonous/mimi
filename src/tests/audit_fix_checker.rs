@@ -408,7 +408,7 @@ module util {
     func m(x: i32) -> i32 { x + 1 }
 }
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
     func m(v: i32) -> i32 { v + 2 }
 }
 func main() -> i32 { 0 }
@@ -428,7 +428,7 @@ fn audit41_module_nested_actor_same_name_no_node_id_collision() {
 module util {
     func m(x: i32) -> i32 { x + 1 }
     actor Counter {
-        mut count: i32 = 0;
+        count: i32 = 0;
         func m(v: i32) -> i32 { v + 2 }
         func go(n: i32) -> i32 { n * 2 }
     }

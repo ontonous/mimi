@@ -165,6 +165,7 @@ Different constructs must not compete for the same responsibility. For example, 
 
 - Synchronous failure, Flow Fault, PeerFault, panic, and process exit must be different channels.
 - `?` propagates only based on static `Result`/`Option` type; leaving a normal function returns, entering a transition's declared rollback failure path and returning source generation.
+- Flow `fails E` is a rollback channel: the source generation is returned to the caller with a typed error. Flow `Fault` is a system state: the flow has moved to a recoverable failure state. Diagnostics must describe them as separate channels and must not refer to `Fault` as a second `Result::Err`.
 - Runtime/FFI must not use the same `0`, `null`, or `-1` to represent multiple failures.
 - Recover must be a business-defined state transition, not default-value construction of fake external resources.
 - Dynamic untrusted input must first be decoded into typed events; failure returns typed boundary error.
@@ -280,6 +281,13 @@ Terminal actions are exactly three kinds:
 > explicit `return SourceState { ... }`. Entering `Fault` explicitly is written
 > as `return Fault { ... }` (Fault is a reservable target state); the `?`
 > operator takes the separate rollback path, not the Fault path.
+>
+> v0.1.8 Phase F (move-rest): a transition may keep most fields unchanged with
+> `return Target { f: new_expr, ..self }`. The explicit fields are evaluated
+> first; `..self` then moves every field not explicitly named into the new
+> state and consumes `self`. Copying an explicitly named field back from
+> `self` in the same record update is rejected (linear fields must be moved,
+> not copied). This is a move of the remaining payload, not a silent copy.
 
 Rollback failure conceptually is `Rejected { source: Flow@Source, error: E }`. Transition signature must declare `E`; `?` in body can only enter this path. It does not implicitly enter Fault, exit the process, or discard Source.
 
@@ -317,6 +325,7 @@ This Flow has three business edges. It does not have `pay(Paid)`, `ship(Pending)
 Undeclared `(state, event)` does not generate an implicit business transition.
 
 - When static state is known, that call does not exist in the type system and must fail compilation.
+- The compile-time rejection should list the events that are legal from the actual state (sparse DX), e.g. `legal events from Open: close, peer_fault`.
 - Type-erased or dynamic dispatch must carry verifiable Protocol/VTable metadata.
 - Network, FFI, deserialization, and other untrusted input must first decode and validate state at the boundary.
 - Dynamic validation failure produces typed `UnexpectedEvent`, not a fake business edge to Fault.
@@ -1101,6 +1110,13 @@ func take(x: T)          // by-value consume
 - Rejected (`E0435`): two `mutate` arguments within the same call aliasing the same place (`bump2(self.tag, self.tag)`) — violated exclusive borrow.
 - Nested write-back and cross-call alias tracking are deferred to 1.x (require a backend place-tracking mechanism).
 
+#### Task-boundary narrow `[stable]`
+
+> 0.1.8 Phase A (`E0442`): `view` / `mutate` / `&T` / `&mut T` are task-local.
+> They must not enter `spawn`, Channel elements, Future captures, or actor
+> mailboxes. Synchronous `func` parameters (including the DSP `mutate List`
+> hot path) are not a task boundary and stay legal.
+
 ### 6.3 Ownership: Flow payload and shared/weak `[stable]`
 
 - Flow payload defaults to exclusive, linearly transferred by transition;
@@ -1121,16 +1137,31 @@ func take(x: T)          // by-value consume
 ### 6.4 State: Flow and Actor `[stable]`
 - Flow is the sole model for business state and change;
 - Actor is Flow's concurrent runtime container;
-- Actor fields are writable on every backend regardless of the `mut` marker — the
-  marker is a **declarative concurrency-isolation hint** (simple-state escape
-  hatch, SD-5), never a write-enforced permission (0.36.13 澄清，消除与 SD-5 的
-  双表述并存);
-- `actor Name runs FlowName` rejects `mut` business fields (**E0402**): state must
+- User-visible `mut` actor fields are **removed** (0.1.8 Phase D, `E0402`): the
+  SD-5 simple-state escape hatch is closed. Non-`mut` per-instance metadata
+  fields remain writable on every backend;
+- `actor Name runs FlowName` is the supported business-actor shape: state must
   be carried by the Flow's payloads (atomic-turn guarantee);
 - Actor mailboxes and sync methods perform per-instance field access; business
   state *change* belongs to Flow transitions (migrate mailbox method calls to
   typed Flow events);
 - Actor runtime holds unique Flow instance.
+
+#### TransitionEpoch and boundary packing `[stable]`
+
+> 0.1.8 Phase C (`E0443`): a Flow value conceptually carries a `TransitionEpoch`.
+> Crossing a task boundary requires an explicit `flow_pack` handle; a peer that
+> still holds an older epoch receives a typed stale error instead of a silent
+> alias or use-after-free.
+
+- Bare Flow records cannot cross Channel, FFI, or an actor mailbox (`E0443`);
+  use `flow_pack` to publish a packed TransitionEpoch.
+- Local self-loops stay inside the same turn/actor (clause 5.1 silent stay) and
+  strip the epoch with no packing tax; `flow_pack_count` does not increase.
+- `flow_epoch` reads the live epoch, `flow_check_epoch` verifies a peer's
+  expected epoch, `flow_bump_epoch` publishes a recovered epoch, and
+  `flow_unpack` consumes a packed payload. A stale check returns
+  `EPOCH_ERR_STALE` (2).
 
 ### 6.5 Abstraction: trait and Protocol `[stable]` / `[removed]`
 
@@ -1152,6 +1183,14 @@ Session enters stable set only after:
 - Untracked reports error;
 - No bare `List<i64>` or integer handle user API;
 - Interpreter/native runtime behavior consistent.
+
+#### Session method surface `[0.1.8 Phase E]`
+
+- `ch.send(v)`, `ch.recv()`, and `ch.close()` are the canonical method form;
+- The method form advances the same residual/order proof as the free
+  `session_send`/`session_recv`/`session_close` functions;
+- Free session functions are deprecated (`W014`) and emit a migration hint;
+  new teaching and dogfood code should use `ch.send`/`ch.recv`/`ch.close`.
 
 Recursive protocols, dynamic participants, delegation, multiparty Session, and cross-version residual upgrade remain experimental.
 
@@ -1213,10 +1252,10 @@ General `math { Expr... }` blocks are a stable verifier channel (see §5.6).
 
 ### 6.9 MimiSpec Meta-syntax: `desc`, `rule`, `mms` `[removed]`
 
-- `.mms` retains MimiSpec's `desc`, `rule`, and intent structures;
-- Production `.mimi` `desc`/`rule` statement: **removed** from stable syntax;
-- `mms {}` no longer an executing `Stmt` affecting checker, contract detection, or verifier: **removed**;
-- If needing to associate MimiSpec, use documentation metadata, trivia attachment, or external mapping;
+- **0.1.8 Phase E**：`.mms` / `mimi mms` / the external `mimispec` parser are
+  **removed** from the compiler. `mms {}` is a hard parser error;
+- Production `.mimi` `desc`/`rule` statements: **removed** from stable syntax;
+- If needing to associate external intent, use documentation metadata, trivia attachment, or external mapping;
 - Unrecognized metadata must warning/error; must not pretend verified.
 
 ### 6.10 Comptime `[stable]`

@@ -434,17 +434,14 @@ func impossible(x: i32) -> i32 {
 fn verify_result_count() {
     let src = r#"
 func f1(x: i32) -> i32 {
-    mms { "requires: x == 1" }
     x
 }
 
 func f2(x: i32) -> i32 {
-    mms { "requires: x == 2" }
     x
 }
 
 func f3(x: i32) -> i32 {
-    mms { "requires: x == 3" }
     x
 }
 "#;

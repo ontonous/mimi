@@ -780,10 +780,20 @@ impl Parser {
         }
     }
 
-    fn parse_record_expr_fields(&mut self) -> Result<Vec<RecordFieldExpr>, ParseError> {
+    fn parse_record_expr_fields(
+        &mut self,
+    ) -> Result<(Vec<RecordFieldExpr>, Option<Box<Expr>>), ParseError> {
         let mut fields = Vec::new();
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            // `..rest` — record update / move-rest.
+            if self.at(&TokenKind::DotDot) {
+                self.advance();
+                let rest = self.parse_expr(0)?;
+                self.skip_newlines();
+                // No comma after the rest expression.
+                return Ok((fields, Some(Box::new(rest))));
+            }
             let field_start = self.pos;
             let name = self.expect_ident()?;
             if self.at(&TokenKind::Colon) {
@@ -813,7 +823,7 @@ impl Parser {
                 break;
             }
         }
-        Ok(fields)
+        Ok((fields, None))
     }
 
     fn parse_ident_primary(&mut self, name: String) -> Result<Expr, ParseError> {
@@ -930,11 +940,12 @@ impl Parser {
                         .unwrap_or(false)
                     {
                         self.advance();
-                        let fields = self.parse_record_expr_fields()?;
+                        let (fields, rest) = self.parse_record_expr_fields()?;
                         self.expect(TokenKind::RBrace, "`}`")?;
                         let record = Expr::Record {
                             ty: Some(ty_name),
                             fields,
+                            rest,
                         };
                         e = self.parsed_expr_from(start_pos, record);
                         continue;

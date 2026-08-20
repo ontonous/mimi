@@ -8,6 +8,110 @@
 > 执行 `devdocs/v0.38/README.md`。
 > 0.1.7 已发布（2026-08-19，tag `0.1.7`）。
 
+### 0.38.91–110 — Phase E Session K + 拆 mimispec
+- SessionChan 方法表面：`ch.send(v)` / `ch.recv()` / `ch.close()` 在 checker、
+  resolved/legacy native、bytecode VM 三路全等。tuple 解构的
+  `session_pair::<S>()` 端点在 bytecode 与 legacy codegen 的类型跟踪中识别为
+  `SessionChan`，不再误路由到 socket 的 `send`/`recv`。
+- 负测试 `session_method_check_order_violation_rejected`；生产 dual
+  `dual_session_method_roundtrip`（resolved + legacy + VM stdout `42/84`）。
+- 自由函数 `session_send` / `session_recv` / `session_close` 保留但发出
+  `W014` 弃用诊断，提示迁移到方法表面。
+- 拆 MimiSpec：`mms{}` 由 parser 硬拒绝（不再 trivia 消费）；删除外部
+  `mimispec` crate 依赖、`mimi mms` 命令、`src/main/mms.rs`、`std/mimispec/`；
+  `mimi doc` 对 `.mms`/`mms` 输出给出 removed 错误。`mms_integration` 改锁硬拒绝。
+- 文档同步：`docs/language-spec.md` §6.6/§6.9、`docs/syntax-reference.md` §6.3、
+  README CLI 表更新为 0.1.8 移除态。
+
+### 0.38.111+ — Phase F move-rest + 稀疏诊断/失败分层
+- move-rest 端到端：`return Target { f: e, ..self }` 在 parser、checker、
+  resolved IR、resolved/legacy native、Bytecode VM 同语义；rest 只移动未
+  显式写出的字段，整份 rest 拷贝后覆写显式字段。`Op::UpdateRecord` /
+  `ResolvedExprKind::Record.rest` 支持该动作。
+- 负测试：显式 `self.f` 与 `..self` 同时出现时拒绝（`E0256`，线性字段不拷）；
+  `move_rest_three_fields_self_loop` 锁 bytecode + resolved native + legacy
+  native 三路 `2 2 3`。
+- sparse 拒绝诊断列出当前状态合法事件：`no flow transition ...; legal events
+  from S: a, b`。`flow_sparse_undefined_event_rejected` 断言新信息。
+- 文档：language-spec §3.4 记录 move-rest、§2.3 明确 `fails E` 回滚与 `Fault`
+  系统状态是两条通道（诊断不把 Fault 称作第二个 Err）；syntax-reference 5.3
+  记录 `..expr` 语法。
+
+### 0.38.126+ — Phase G 终测
+- lib 全量 **5529 passed / 0 failed / 7 ignored**；real_world 31、real_world_cli 2、
+  stress 62、dogfood（taskq/ledger/mimichat/mimichat-modern）全绿。
+- ASan 44、TSan 11、Valgrind 18 均通过；生产 dual 核语料 100% resolved、零 fallback。
+- 修复 resolved emitter 两处终测问题：builtin `PeerFault` 字段名查找缺失、
+  unit 函数裸 `return` 误发 `ret void`（应 `ret i64 0`，与 legacy/0.35.23 对齐）。
+- `devdocs/v0.38/quad-final-0.38.md` 记录终测结果与发布建议。
+
+### 0.38.71–90 — Phase D 入口 A（actor 业务 mut 关闭）
+- `E0402` 扩到无 `runs Flow` 的业务 actor：用户可见 `mut` 字段一律非法；
+  诊断给出单状态 Flow + transition 改写骨架。
+- actor 字段在每实例上可读写，但业务状态变更必须落到 Flow transition；
+  保留 `actor Name runs FlowName` 唯一业务 actor 形态。
+- 迁移：仓库 dogfood / demo / real_world 不再教 `BankAccount { mut balance }`
+  逃生舱；相关已迁 Flow 一体化。
+
+### 0.38.26–45 — Phase B 值 ABI
+- `List<string>` 元素改为长度感知 `{ptr, len}`（`MimiStr` 盒 + `string_abi=2`），
+  与裸 `string` 观察等价。`str_split` 走 `mimi_str_split_ll`（ptr+len）；
+  `str_join` 读 fat 槽。嵌入 NUL / 空串 / 多字节 UTF-8 / 嵌套
+  `List<List<string>>` 生产 dual 锁。
+- 旧 C-string 元素 ABI（`string_abi=0` 或非 `MSTR` 魔数）由
+  `mimi_list_read_string` / `mimi_str_join` 拒绝，禁止静默按 NUL 截断。
+  `mimi_list_string_abi_version() == 2`。
+- Map/Set 句柄改为 `HandleGeneration` + per-op lease（名称不是 Flow
+  `TransitionEpoch`）。destroy：停新 lease → 等归零 → 世代 +1。
+  销毁/过期句柄是 typed error（`mimi_handle_last_error` /
+  `mimi_map_try_size`），不是 UAF。测试
+  `map_lease_destroy_waits_active_op` / `map_stale_generation_is_typed_error`
+  及 Set 孪生。
+- 关闭 `devdocs/v0.37/known-blockers-architecture.md` 的 B-STR-001 /
+  B-HANDLE-001。
+
+### 0.38.46–49 — Phase C Flow TransitionEpoch
+- 每个 Flow 值概念上携带 `TransitionEpoch`；裸 Flow record 不得跨
+  Channel / FFI / actor mailbox（新码 E0443），必须先 `flow_pack`。
+  本地 self-loop（clause 5.1 silent stay）剥离 epoch、不产 pack 税。
+- runtime 入口：`flow_pack` / `flow_epoch` / `flow_check_epoch` /
+  `flow_bump_epoch` / `flow_unpack` / `flow_pack_count` /
+  `flow_epoch_last_error`。旧 epoch 的 peer 收到 typed stale 错误
+  （`EPOCH_ERR_STALE`），不是静默别名/UAF。
+- 测试：`epoch_rejects_bare_flow_on_channel` /
+  `epoch_rejects_bare_flow_in_extern` / `epoch_rejects_bare_flow_in_mailbox`
+  （E0443），`flow_epoch_pack_roundtrip` /
+  `flow_epoch_stale_is_typed_error` /
+  `flow_epoch_recover_bump_is_new_epoch`，以及生产 dual
+  `flow_epoch_channel_stale_rejected` / `flow_epoch_local_self_loop_no_tax`。
+- `lookup_variant_name` 增加 `state:Flow::State` 变体回退，resolved 静态 Flow
+  match 可处理单目标/guard Flow 状态匹配。
+
+### 0.38.16–25 — Phase A Narrow
+- checker 单一谓词 `TaskBoundaryKind::may_cross_task_boundary`：`view` /
+  `mutate` / `&T`/`&mut T` 默认不得进入 spawn、Channel 元素、Future 捕获、
+  actor mailbox。同步 `func` 参数（含 DSP `mutate List`）不是任务边界。
+- 新码 E0442；负测试 `narrow_rejects_view_across_spawn` /
+  `narrow_rejects_mutate_in_channel` / `narrow_rejects_ref_in_future_env` /
+  `narrow_rejects_view_in_mailbox`。
+- actor mailbox 测试不再对已返回的方法结果写 `await`：`await` 只接合
+  Future（spawn 任务），同步方法结果直接取值。
+
+### 0.38.0–15 — Phase 0 L1 spawn/await 同语义
+- VM `spawn`/`await` 发 `Op::Spawn` / `Op::Await`：朴素 OS 线程 + join，与
+  native `mimi_spawn_future` 同观察。删除 0.1.7「sequential fallback 即设计」
+  注释；成功路径不再 compile-inner-then-Mov / await-as-eval。
+- 生产 dual：`dual_assert_prod!` = `check` + 装 CheckedProgram 的 interp +
+  `compile_checked` + 跑产物。核 spawn/Flow 证据走此路径，不靠 legacy
+  `compile_file`。
+- Resolved 对 Flow / Session / spawn / 线性核 callee 的 emit 失败改为硬错误
+  （函数名 + 原因），禁止静默 Legacy 降级。`dispatch_stat.py check --core`
+  只扫核语料。
+- 新测试：`dual_spawn_channel_same_completion`（顺序 spawn 过不了）、
+  `dual_spawn_deadlock_is_deadlock`（互等必须 hang，不得假成功）、
+  `dual_production_checked_path_spawn`、
+  `dispatch_core_flow_zero_legacy_fallback`。
+
 ## [0.1.7] — 2026-08-19
 
 > **Wave-3 基建诚实收口已发布**。

@@ -49,6 +49,75 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(str_val.into_struct_value().into())
     }
 
+    /// Build a Mimi string struct `{ ptr, len }` from an explicit length.
+    /// Does not call strlen, so embedded NUL bytes are preserved.
+    pub(in crate::codegen) fn wrap_string_ptr_len(
+        &self,
+        raw_ptr: PointerValue<'ctx>,
+        length: IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let string_struct_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(self.context.i64_type()),
+            ],
+            false,
+        );
+        let str_val = self
+            .builder
+            .build_insert_value(string_struct_ty.get_undef(), raw_ptr, 0, "str_data")
+            .map_err(|e| CompileError::LlvmError(format!("insert str ptr: {}", e)))?;
+        let str_val = self
+            .builder
+            .build_insert_value(str_val, length, 1, "str_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert str len: {}", e)))?;
+        Ok(str_val.into_struct_value().into())
+    }
+
+    /// Load a fat `MimiStr` list slot (`{magic, ptr, len}`) into a Mimi string
+    /// `{ptr, len}` value. Does not call strlen.
+    pub(in crate::codegen) fn load_fat_list_string(
+        &self,
+        boxed: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let fat_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let raw_ptr = self
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                {
+                    self.gep()
+                        .build_struct_gep(fat_ty, boxed, 2, "fat_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("fat str ptr gep: {e}")))?
+                },
+                "fat_str_ptr_val",
+            )?
+            .into_pointer_value();
+        let raw_len = self
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                {
+                    self.gep()
+                        .build_struct_gep(fat_ty, boxed, 3, "fat_str_len")
+                        .map_err(|e| CompileError::LlvmError(format!("fat str len gep: {e}")))?
+                },
+                "fat_str_len_val",
+            )?
+            .into_int_value();
+        self.wrap_string_ptr_len(raw_ptr, raw_len)
+    }
+
     /// Extract a string data pointer from a Mimi string value.
     pub(in crate::codegen) fn extract_string_ptr(
         &self,

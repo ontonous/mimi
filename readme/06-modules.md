@@ -127,8 +127,8 @@ let display = user.to_string();
 
 ```mimi
 // 保留兼容，推荐使用 use
-@import "models.mms"
-@import "utils.mms"
+@import "models.mimi"
+@import "utils.mimi"
 ```
 
 ---
@@ -184,8 +184,8 @@ my_project/
 │   └── utils.mimi
 ├── tests/
 │   └── integration.mimi
-└── sketches/           # 草图文件（可选）
-    └── design.mms
+└── docs/               # 可选
+    └── design.md       # 设计说明（MimiSpec `.mms` 已于 0.1.8 移除）
 ```
 
 ### 6.1 入口文件
@@ -215,31 +215,10 @@ func main() -> i32 {
 
 ---
 
-## 7. MimiSpec 集成
+## 7. MimiSpec 集成（已移除）
 
-### 7.1 mms 块
-
-在 `.mimi` 文件中嵌入 MimiSpec 意图描述：
-
-```mimi
-module Shop {
-    mms {
-        module Shop:
-            desc "订单管理模块"
-            rule "所有操作必须有日志"
-    }
-
-    // Mimi 实现
-}
-```
-
-### 7.2 契约提取
-
-从 `mms {}` 块提取契约：
-
-```bash
-mimi check --extract-contracts file.mimi
-```
+> 0.1.8 Phase E：模块内 `mms{}` 块与 `--extract-contracts` 均已移除。
+> MimiSpec 不再与模块系统集成。
 
 ---
 

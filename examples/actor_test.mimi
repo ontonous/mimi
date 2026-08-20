@@ -1,7 +1,7 @@
 // Test actor definition (syntax only - spawn/await require runtime)
 
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
     func increment() { }
 }
 

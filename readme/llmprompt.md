@@ -40,7 +40,7 @@ func add(a: i32, b: i32) -> i32 {
     a + b
 }
 
-// ❌ 错误：使用缩进体（那是 .mms 草图模式）
+// ❌ 错误：Mimi 不用缩进体（`.mms` 草图模式已于 0.1.8 移除）
 func add(a: i32, b: i32) -> i32:
     a + b
 ```
@@ -65,6 +65,8 @@ func add(a: i32, b: i32) -> i32:
 > 已删除：`do`/`become`/`stay`/`subflow`/`steps`/`consume`（现 tokenize 为标识符）；
 > 0.35.39 裁撤 `c_shared`/`c_borrow`/`c_borrow_mut`/`local_shared`/`weak_local`/`raw_string`/
 > `nothing`/`alloc`/`async`/`with`/`desc`/`rule`/`mms`（共享收敛为 `shared`/`weak` 二态）。
+> 0.1.8 Phase E：`desc`/`rule`/`mms` 不再是超注释或可嵌入块；`.mms` 文件与
+> `mimi mms`/`mimi promote` 已移除。
 
 ```
 module     type       func       fn         actor      newtype
@@ -92,22 +94,15 @@ as
 ```mimi
 module Name:
 type Name:              // 或 type Name: A | B（枚举）
-flow Name:              // 仅 .mms 草图模式
-func Name(...):         // 仅 .mms 草图模式
-ui Name binds Model:    // 仅 .mms 草图模式
-steps:                  // 仅 .mms 草图模式
-if cond:                // 仅 .mms 草图模式
 ```
 
 **在 .mimi 生产模式中**，`func`、`if`、`else`、`for`、`while` 使用花括号，不带冒号。
+`.mms` 草图模式（`flow Name:`/`func Name(...):`/`ui Name`/`steps:`）已于 0.1.8 移除。
 
-### 2.6 意图后缀顺序
+### 2.6 意图后缀（已移除）
 
-后缀附加在关键字或标识符末尾，**无空格**：
-
-- 合法：`?`、`??`、`$`、`$$`、`$?`、`$??`、`$$?`、`$$??`
-- **顺序固定：先锁定，后不确定**。
-- 非法：`?$`、`?$$`、`??$`、`??$$`
+> 0.1.8 Phase E：MimiSpec 的意图后缀 `$`/`$$`/`?`/`??` 已从语言拆离。
+> Mimi 编译器不识别这些后缀。
 
 ```mimi
 func$$ critical() { ... }     // ✅ 强锁定
@@ -621,34 +616,10 @@ extern "C" {
 
 ---
 
-## 12. MimiSpec 集成（mms 块）
+## 12. MimiSpec 集成（已移除）
 
-```mimi
-func pay(order: Order, amount: f64) -> Result<(), string> {
-    mms {
-        func Pay(order, amount):
-            desc "处理支付"
-            rule "必须幂等"
-            requires: order.status == Pending
-            ensures: order.status == Paid
-            steps:
-                check balance
-                charge payment
-                order.status = Paid to done
-    }
-
-    // Mimi 实现
-    requires: order.status == Pending
-    ensures: order.status == Paid
-
-    let balance = check_balance(order)?;
-    charge_payment(amount)?;
-    order.status = OrderStatus::Paid;
-    Ok(())
-}
-```
-
-`mms {}` 块是元数据，编译器忽略其内容，但可用于契约提取。
+> 0.1.8 Phase E：`mms{}` 块不再是元数据，MimiSpec 已从 Mimi 拆离。
+> 在 `.mimi` 中写 `mms {}` 会直接报解析错误。
 
 ---
 

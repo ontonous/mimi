@@ -339,35 +339,10 @@ func main() -> i32 {
 
 ---
 
-## 13. MimiSpec 集成
+## 13. MimiSpec 集成（已移除）
 
-```mimi
-func process_order(order: Order) -> Result<(), string> {
-    mms {
-        func ProcessOrder(order):
-            desc "处理订单：验证、扣款、发货"
-            rule "订单必须幂等"
-            requires: order.status == New
-            ensures: order.status == Paid
-            steps:
-                check inventory
-                charge payment
-                order.status = Paid to done
-    }
-
-    // Mimi 实现
-    requires: order.status == New
-    ensures: order.status == Paid
-
-    let inventory = check_inventory(order)?;
-    if !inventory.available {
-        return Err("out of stock");
-    }
-    charge_payment(order.amount)?;
-    order.status = OrderStatus::Paid;
-    Ok(())
-}
-```
+> 0.1.8 Phase E：`mms{}` 与 `.mms` 已从 Mimi 拆离，不再作为示例特性。
+> 契约写法直接使用 `requires` / `ensures`。
 
 ---
 

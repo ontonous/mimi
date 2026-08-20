@@ -188,6 +188,13 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "channel_recv"
             | "channel_try_recv"
             | "channel_drop"
+            | "flow_pack"
+            | "flow_epoch"
+            | "flow_check_epoch"
+            | "flow_bump_epoch"
+            | "flow_unpack"
+            | "flow_pack_count"
+            | "flow_epoch_last_error"
             | "session_send"
             | "session_recv"
             | "session_close"
@@ -326,6 +333,13 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "channel_recv" => Some(1),
         "channel_send" => Some(2),
         "channel_try_recv" => Some(1),
+        "flow_bump_epoch" => Some(1),
+        "flow_check_epoch" => Some(2),
+        "flow_epoch" => Some(1),
+        "flow_epoch_last_error" => Some(0),
+        "flow_pack" => Some(1),
+        "flow_pack_count" => Some(0),
+        "flow_unpack" => Some(1),
         "char_at" => Some(2),
         "char_code" => Some(2),
         "chr" => Some(1),
@@ -616,6 +630,11 @@ pub fn resolve_builtin_method(
                 "size" | "len" | "is_empty" | "contains" | "insert" | "remove" | "to_list"
             ),
             Permission::View,
+        ),
+        ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:SessionChan" => (
+            "session",
+            matches!(method, "send" | "recv" | "close"),
+            Permission::Consume,
         ),
         _ => return None,
     };

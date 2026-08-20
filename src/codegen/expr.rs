@@ -27,7 +27,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Match(scrutinee, arms) => {
                 self.compile_match_expr(scrutinee, arms, vars, false)
             }
-            Expr::Record { ty, fields } => self.compile_record_expr(ty, fields, vars),
+            Expr::Record { ty, fields, rest } => {
+                    self.compile_record_expr(ty, fields, rest.as_deref(), vars)
+                }
             Expr::Field(obj, field_name) => self.compile_field_expr(obj, field_name, vars),
             Expr::List(elems) => self.compile_list_expr(elems, vars),
             Expr::Index(obj, idx_expr) => self.compile_index_expr(obj, idx_expr, vars),

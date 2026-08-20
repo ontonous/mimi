@@ -181,6 +181,49 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_channel_drop,
     });
+    // Flow TransitionEpoch (Phase C: pack at escape)
+    reg.register(BuiltinDesc {
+        name: "flow_pack",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_flow_pack,
+    });
+    reg.register(BuiltinDesc {
+        name: "flow_epoch",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_flow_epoch,
+    });
+    reg.register(BuiltinDesc {
+        name: "flow_check_epoch",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_flow_check_epoch,
+    });
+    reg.register(BuiltinDesc {
+        name: "flow_bump_epoch",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_flow_bump_epoch,
+    });
+    reg.register(BuiltinDesc {
+        name: "flow_unpack",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_flow_unpack,
+    });
+    reg.register(BuiltinDesc {
+        name: "flow_pack_count",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_flow_pack_count,
+    });
+    reg.register(BuiltinDesc {
+        name: "flow_epoch_last_error",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_flow_epoch_last_error,
+    });
     // Session (cross-wired channels)
     reg.register(BuiltinDesc {
         name: "session_pair",
@@ -567,6 +610,47 @@ fn builtin_channel_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let h = handle(args, 0)?;
     unsafe { crate::runtime::mimi_channel_drop(h) };
     Ok(Value::Unit)
+}
+
+// ── Flow TransitionEpoch ────────────────────────────────
+
+fn builtin_flow_pack(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let payload = handle(args, 0)?;
+    Ok(Value::Int(crate::runtime::mimi_flow_pack(payload)))
+}
+
+fn builtin_flow_epoch(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    Ok(Value::Int(crate::runtime::mimi_flow_epoch(h)))
+}
+
+fn builtin_flow_check_epoch(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    let expected = handle(args, 1)?;
+    Ok(Value::Int(
+        crate::runtime::mimi_flow_check_epoch(h, expected) as i64,
+    ))
+}
+
+fn builtin_flow_bump_epoch(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    Ok(Value::Int(crate::runtime::mimi_flow_bump_epoch(h)))
+}
+
+fn builtin_flow_unpack(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    Ok(Value::Int(crate::runtime::mimi_flow_unpack(h)))
+}
+
+fn builtin_flow_pack_count(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
+    Ok(Value::Int(crate::runtime::mimi_flow_pack_count()))
+}
+
+fn builtin_flow_epoch_last_error(
+    _vm: &mut BytecodeVM,
+    _args: &[Value],
+) -> Result<Value, InterpError> {
+    Ok(Value::Int(crate::runtime::mimi_flow_last_error() as i64))
 }
 
 // ── Session (cross-wired channels) ─────────────────────

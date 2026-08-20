@@ -11,7 +11,7 @@
 | 扩展名 | 模式 | 说明 |
 |--------|------|------|
 | `.mimi` | Production | 生产模式，支持完整语法，函数体必须用花括号 |
-| `.mms` | Sketch | 草图模式，支持缩进体、`...` 占位、`desc`/`rule` |
+| `.mms` | Removed in 0.1.8 | MimiSpec 草图模式已从 Mimi 拆离；`mms{}` 为硬错误 |
 
 ### 注释
 
@@ -407,13 +407,11 @@ while true {
 }
 ```
 
-### 7.5 desc / rule（元数据）
+### 7.5 desc / rule / steps（已移除）
 
-```mimi
-desc "这个函数处理支付逻辑"
-rule "必须幂等"
-func process_payment() { ... }
-```
+> 0.1.8 Phase E：`desc`/`rule`/`steps` 与 `mms{}` 一同移除。MimiSpec 不再嵌入
+> Mimi；这些词 tokenize 为普通标识符，按普通语法位置解析或拒绝。
+> 权威 removed 语法见 `docs/syntax-reference.md` §6.3 与 `docs/language-spec.md` §6.6/§6.9。
 
 ### 7.6 drop
 
@@ -610,21 +608,10 @@ func apply(f: func(i32) -> i32, x: i32) -> i32 {
 let result = apply(double, 5);  // 10
 ```
 
-### 9.10 意图后缀（MimiSpec 专用，非 Mimi 语法）
+### 9.10 意图后缀（MimiSpec 专用，已移除）
 
-> ⚠️ 以下后缀是 **MimiSpec**（`.mms` 意图描述文件）的语法，用于在人类意图与 AI 生成之间建立契约。
-> **Mimi**（`.mimi` 生产代码）不支持这些后缀；在 `.mimi` 文件中写 `func$$` / `func?` 会报解析错误。
-
-```mms
-func$$ locked_func() { ... }     // 强锁定：AI 不得修改
-func$  semi_locked() { ... }     // 锁定：AI 不得修改
-func?  uncertain() { ... }       // 不确定：需要审视
-func?? delegated() { ... }       // 完全委托：AI 可自由生成
-func$? locked_review() { ... }   // 锁定但 AI 可审视
-func$?? locked_delegated() { ... } // 锁定但 AI 可决定是否保留
-```
-
-后缀顺序固定：**先锁定，后不确定**。`?$` / `?$$` / `??$` / `??$$` 非法。
+> 0.1.8 Phase E 将 MimiSpec 从 Mimi 拆离，`.mms` 意图后缀不再属于语言。
+> 在 `.mimi` 文件中写 `func$$` / `func?` 会按普通标识符/解析错误处理。
 
 ---
 
@@ -706,22 +693,10 @@ type User {
 
 自动生成 `to_string()`、`clone()`、`eq()` 方法。
 
-### 10.7 带 mms 块的类型
+### 10.7 带 mms 块的类型（已移除）
 
-```mimi
-type Order {
-    mms {
-        type Order:
-            desc "订单数据"
-            id: u64
-            status: OrderStatus
-    }
-
-    id: u64,
-    status: OrderStatus,
-    amount: f64
-}
-```
+> 0.1.8 Phase E：`mms{...}` 块不再解析为类型内元数据，直接硬错误。
+> 类型定义只包含普通字段/变体。
 
 ---
 
@@ -854,22 +829,10 @@ payment-sdk = { path = "../payment-sdk" }
 
 ---
 
-## 15. 意图后缀（Commitment Suffix）— MimiSpec 专用
+## 15. 意图后缀（Commitment Suffix）— 已移除
 
-> ⚠️ 意图后缀是 **MimiSpec**（`.mms`）的语法，不是 Mimi（`.mimi`）的语法。Mimi 编译器不识别 `func$` / `func?` / `func$$` 等后缀。
-
-后缀附加在关键字、标识符或字符串末尾，无空格：
-
-| 后缀 | 含义 | 能否被 AI 修改 |
-|------|------|---------------|
-| `?` | 不确定 / 请求再审视 | 可 |
-| `??` | 完全委托 | 可 |
-| `$` | 锁定：AI 不得修改 | ❌ |
-| `$$` | 强锁定：需人类显式解锁 | ❌ |
-| `$?` | 锁定但请 AI 审视 | ❌ (但 AI 可提建议) |
-| `$??` | 锁定但 AI 可决定是否保留 | ❌ (但 AI 可决策) |
-
-**顺序固定**：先锁定，后不确定。`?$` / `?$$` / `??$` / `??$$` 非法。
+> 0.1.8 Phase E：MimiSpec 已从 Mimi 拆离，`func$` / `func?` / `func$$` 等
+> 意图后缀不再属于语言。`.mms` 文件不再由 `mimi` 读取，`mms{}` 为硬错误。
 
 ---
 
@@ -892,34 +855,10 @@ type User {
 
 ## 17. 元数据关键字
 
-### desc
+### desc / rule / steps（已移除）
 
-```mimi
-desc "自然语言意图描述"
-```
-
-独立实体，无运行时效果。供 AI 和工具解读。
-
-### rule
-
-```mimi
-rule "约束声明"
-```
-
-前置约束修饰符，附着于下一个实体。连续多条 `rule` 收集为约束列表。
-
-空行阻断附着链；未被接收的 `rule` 变为当前层级全局约束。
-
-### steps（草图模式）
-
-```mimi
-steps:
-    check balance
-    charge payment
-    order.status = Paid
-```
-
-意图步骤骨架，仅在 `.mms` 草图模式中使用。
+> 0.1.8 Phase E：`desc`/`rule`/`steps` 与 `.mms` 草图模式一起移除。
+> 它们不再是 Mimi 关键字；`mms{}` 为硬错误。
 
 ### math
 

@@ -873,24 +873,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                             )
                         {
-                            // string {ptr, len}: ptr + strlen.
-                            // 0.35.20 FIX: the inner {ptr,i64} GEPs must be
-                            // based on field_gep (this field's address inside
-                            // the pair), NOT pair_heap. Using pair_heap with a
-                            // {ptr,i64} type made field-0 GEPs land at offset 0
-                            // regardless of the field index — for zip(string,i32)
-                            // the string is field 0 so the write happened to
-                            // land on its own slot (accidentally correct), but
-                            // enumerate(i32,string) wrote ptr+len over the idx
-                            // and ptr slots, so the formatter read ptr=1 and
-                            // strlen(0x1) SIGSEGV'd. zip+enumerate in one
-                            // function exposed it (type-aware 24B path only
-                            // engaged when a prior zip call primed the pair
-                            // type channel).
+                            // string {ptr, len}: List<string> slots now hold a
+                            // fat `MimiStr { magic, ptr, len }` box (0.38.26).
+                            // The tuple-literal formatter expects the inline
+                            // {ptr, i64} layout, so unbox the slot before
+                            // storing. We keep the 0.35.20 field-GEP fix: the
+                            // inner {ptr,i64} GEPs are based on field_gep, not
+                            // pair_heap.
+                            let out_ptr_alloca = self
+                                .builder
+                                .build_alloca(i8_ptr, "zip_pair_str_out_ptr")
+                                .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                            let out_len_alloca = self
+                                .builder
+                                .build_alloca(i64_ty, "zip_pair_str_out_len")
+                                .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                            let _unbox_rc = self
+                                .builder
+                                .build_call(
+                                    self.get_runtime_fn("mimi_str_unbox")?,
+                                    &[
+                                        BasicMetadataValueEnum::IntValue(src),
+                                        BasicMetadataValueEnum::PointerValue(out_ptr_alloca),
+                                        BasicMetadataValueEnum::PointerValue(out_len_alloca),
+                                    ],
+                                    "zip_pair_str_unbox",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("unbox: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("mimi_str_unbox returned void")?
+                                .into_int_value();
                             let p = self
                                 .builder
-                                .build_int_to_ptr(src, i8_ptr, "zip_pair_str_ptr")
-                                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+                                .build_load(i8_ptr, out_ptr_alloca, "zip_pair_str_unbox_ptr")
+                                .map_err(|e| CompileError::LlvmError(format!("load ptr: {}", e)))?
+                                .into_pointer_value();
+                            let len = self
+                                .builder
+                                .build_load(i64_ty, out_len_alloca, "zip_pair_str_unbox_len")
+                                .map_err(|e| CompileError::LlvmError(format!("load len: {}", e)))?
+                                .into_int_value();
                             let ptr_gep = self
                                 .gep()
                                 .build_struct_gep(*fsty, field_gep, 0, "zip_pair_str_p")
@@ -900,18 +922,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.builder
                                 .build_store(ptr_gep, p)
                                 .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                            let strlen_fn = self.get_runtime_fn("strlen")?;
-                            let len = self
-                                .builder
-                                .build_call(
-                                    strlen_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(p)],
-                                    "zip_pair_strlen",
-                                )
-                                .map_err(|e| CompileError::LlvmError(format!("strlen: {}", e)))?
-                                .try_as_basic_value_opt()
-                                .ok_or("strlen returned void")?
-                                .into_int_value();
                             let len_gep = self
                                 .gep()
                                 .build_struct_gep(*fsty, field_gep, 1, "zip_pair_str_l")

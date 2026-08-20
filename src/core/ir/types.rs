@@ -233,6 +233,9 @@ pub enum ResolvedType {
         is_linear: bool,
     },
     /// Closed result type of a Flow transition with multiple targets.
+    /// Values of this type conceptually carry a `TransitionEpoch` (0.38.46
+    /// Phase C). Local silent-stay lowering strips the epoch; Channel / FFI
+    /// / mailbox packing materializes it. This is not Map/Set `HandleGeneration`.
     FlowStateSet {
         flow: NominalTypeId,
         states: Vec<NominalTypeId>,

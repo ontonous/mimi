@@ -112,7 +112,8 @@ ci-test:
 	cargo test -- --test-threads=4
 
 ci-valgrind:
-	cargo test codegen_e2e dual_backend -- --test-threads=1 --include-ignored
+	cargo test codegen_e2e -- --test-threads=1 --include-ignored
+	cargo test dual_backend -- --test-threads=1 --include-ignored
 
 ci-sanitize:
 	RUSTFLAGS="-Z sanitizer=address" cargo test codegen_e2e -- --test-threads=1 --include-ignored 2>&1 | tail -3

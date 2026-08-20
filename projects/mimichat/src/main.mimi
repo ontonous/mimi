@@ -364,12 +364,12 @@ func is_valid_room_name(name: string) -> bool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 actor UserManager {
-    mut users: Record = map_new()
-    mut nicks: Record = map_new()
-    mut user_info: Record = map_new()
-    mut nick_count: i32 = 0
-    mut msg_history: List<string> = [] as List<string>
-    mut max_history: i32 = 1000
+    users: Record = map_new()
+    nicks: Record = map_new()
+    user_info: Record = map_new()
+    nick_count: i32 = 0
+    msg_history: List<string> = [] as List<string>
+    max_history: i32 = 1000
 
     func push_history(msg_json: string) {
         let src = self.msg_history
@@ -532,9 +532,9 @@ actor UserManager {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 actor RoomManager {
-    mut rooms: Record = map_new()
-    mut room_meta: Record = map_new()
-    mut room_count: i32 = 0
+    rooms: Record = map_new()
+    room_meta: Record = map_new()
+    room_count: i32 = 0
 
     func create(name: string) -> string {
         if len(name) < 1 { return "invalid room name: must be 1-32 chars, alphanumeric/hyphen" }

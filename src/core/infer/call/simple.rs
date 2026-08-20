@@ -993,7 +993,7 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("string".into(), vec![]);
                 }
-                "keys" | "values" => {
+                "keys" => {
                     if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
@@ -1003,6 +1003,17 @@ impl<'a> Checker<'a> {
                         self.infer_expr(&args[0], scopes);
                     }
                     return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+                }
+                "values" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects 1 argument", name),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("List".into(), vec![Type::Name("Any".into(), vec![])]);
                 }
                 "has_key" => {
                     // has_key can be called as a 2-arg global function (json, key)
@@ -1431,6 +1442,33 @@ impl<'a> Checker<'a> {
                         Type::Name("unit".into(), vec![])
                     };
                 }
+                "flow_pack" | "flow_epoch" | "flow_unpack" | "flow_bump_epoch" => {
+                    if let Some(arg) = args.first() {
+                        let t = self.infer_expr(arg, scopes);
+                        if !is_int(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{name} expects i64, found {}", fmt_type(&t)),
+                            );
+                        }
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "flow_check_epoch" => {
+                    for a in args {
+                        let t = self.infer_expr(a, scopes);
+                        if !is_int(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("flow_check_epoch expects i64, found {}", fmt_type(&t)),
+                            );
+                        }
+                    }
+                    return Type::Name("i64".into(), vec![]);
+                }
+                "flow_pack_count" | "flow_epoch_last_error" => {
+                    return Type::Name("i64".into(), vec![]);
+                }
                 "channel_recv" | "channel_try_recv" => {
                     if args.len() != 1 {
                         self.emit_code(
@@ -1509,6 +1547,15 @@ impl<'a> Checker<'a> {
                     }
                     if args.len() > 1 {
                         let value_ty = &arg_tys[1];
+                        if name == "channel_send" {
+                            self.reject_narrow_across_channel_send(&args[1], scopes);
+                            if self.is_flow_state_type(value_ty) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0443,
+                                    "bare Flow record cannot cross Channel; pack a TransitionEpoch with flow_pack".to_string(),
+                                );
+                            }
+                        }
                         let (ok, what) = match name {
                             "atomic_bool_store" => {
                                 (value_ty == &Type::Name("bool".into(), vec![]), "bool")
@@ -1532,14 +1579,28 @@ impl<'a> Checker<'a> {
                     return Type::Name("unit".into(), vec![]);
                 }
                 // v0.29.19 — session endpoint ops with compile-time order checking.
-                "session_send" => {
-                    return self.check_session_send(args, scopes);
-                }
-                "session_recv" => {
-                    return self.check_session_recv(args, scopes);
-                }
-                "session_close" => {
-                    return self.check_session_close(args, scopes);
+                // 0.1.8 Phase E: the method surface is canonical; free
+                // functions are deprecated for teaching and dogfood migration.
+                "session_send" | "session_recv" | "session_close" => {
+                    let method = match name {
+                        "session_send" => "send",
+                        "session_recv" => "recv",
+                        "session_close" => "close",
+                        _ => unreachable!(),
+                    };
+                    self.emit_warning_code(
+                        crate::diagnostic::codes::W014,
+                        format!(
+                            "{} is deprecated; use the SessionChan method surface `endpoint.{}(...)`",
+                            name, method
+                        ),
+                    );
+                    return match name {
+                        "session_send" => self.check_session_send(args, scopes),
+                        "session_recv" => self.check_session_recv(args, scopes),
+                        "session_close" => self.check_session_close(args, scopes),
+                        _ => unreachable!(),
+                    };
                 }
                 "session_open" => {
                     // session_open::<S>() returns SessionChan residual S.
@@ -3217,6 +3278,18 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Option<(Option<String>, crate::ast::SessionType)> {
         let ty = self.infer_expr(expr, scopes);
+        self.residual_of_preinferred_expr(expr, &ty)
+    }
+
+    /// Residual resolution for a receiver that has ALREADY been inferred by
+    /// the method-call checker. Avoids a second `infer_expr` on the same
+    /// SessionChan endpoint, which would otherwise consume/mis-track linear
+    /// resources (0.1.8 Phase E method surface).
+    fn residual_of_preinferred_expr(
+        &mut self,
+        expr: &Expr,
+        ty: &Type,
+    ) -> Option<(Option<String>, crate::ast::SessionType)> {
         let key = Self::place_key(expr);
         if let Some(ref v) = key {
             if let Some(r) = self.residual_for_var(v) {
@@ -3236,8 +3309,7 @@ impl<'a> Checker<'a> {
             // Initialize residual from SessionChan<S> annotation if present
             // (0.36.38: SessionChan<dual X> — the hi end of session_pair::<S>()
             // — resolves X and dualizes).
-            if let Some(resolved) =
-                crate::session::residual_from_chan_type(&ty, &self.session_types)
+            if let Some(resolved) = crate::session::residual_from_chan_type(ty, &self.session_types)
             {
                 self.set_residual(v, resolved.clone());
                 return Some((Some(v.clone()), resolved));
@@ -3396,6 +3468,153 @@ impl<'a> Checker<'a> {
             self.infer_expr(&args[0], scopes);
         }
         Type::Name("unit".into(), vec![])
+    }
+
+    /// 0.1.8 Phase E: SessionChan method surface (`ch.send(v)` / `ch.recv()` /
+    /// `ch.close()`). The receiver has already been inferred by
+    /// `infer_method_call`, so unlike the free `session_*` functions this
+    /// uses `residual_of_preinferred_expr` and never re-infers the endpoint.
+    pub(in crate::core) fn check_session_method(
+        &mut self,
+        obj: &Expr,
+        obj_ty: &Type,
+        method_name: &str,
+        args: &[Expr],
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        let residual_opt = self.residual_of_preinferred_expr(obj, obj_ty);
+        match method_name {
+            "send" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "send expects 1 argument (value)".to_string(),
+                    );
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
+                if let Some((var, residual)) = residual_opt {
+                    let before = residual.clone();
+                    if self.session_recorded_for_call(&residual).is_some() {
+                        self.infer_expr(&args[0], scopes);
+                        return Type::Name("unit".into(), vec![]);
+                    }
+                    match crate::session::apply_action(
+                        &residual,
+                        crate::session::SessionAction::Send,
+                    ) {
+                        Ok((next, expected_ty)) => {
+                            if let Some(et) = expected_ty {
+                                let actual = self.infer_expr(&args[0], scopes);
+                                let et_r = self.resolve_type(&et);
+                                if self.unification.unify(&et_r, &actual).is_err() {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0414,
+                                        format!(
+                                            "send: expected value of type {}, found {}",
+                                            crate::core::fmt_type(&et_r),
+                                            crate::core::fmt_type(&actual)
+                                        ),
+                                    );
+                                }
+                            } else {
+                                self.infer_expr(&args[0], scopes);
+                            }
+                            if let Some(v) = var {
+                                self.record_session_action(&v, before, next.clone(), false);
+                                self.set_residual(&v, next);
+                            }
+                        }
+                        Err(e) => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0414,
+                                format!("session protocol order violation on send: {:?}", e),
+                            );
+                            self.infer_expr(&args[0], scopes);
+                        }
+                    }
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                Type::Name("unit".into(), vec![])
+            }
+            "recv" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "recv takes no arguments".to_string(),
+                    );
+                }
+                if let Some((var, residual)) = residual_opt {
+                    if let Some(existing) = self.session_recorded_for_call(&residual) {
+                        if let Ok((_, payload_ty)) = crate::session::apply_action(
+                            &existing.before,
+                            crate::session::SessionAction::Recv,
+                        ) {
+                            return payload_ty.unwrap_or_else(|| Type::Name("i64".into(), vec![]));
+                        }
+                        return Type::Name("i64".into(), vec![]);
+                    }
+                    let before = residual.clone();
+                    match crate::session::apply_action(
+                        &residual,
+                        crate::session::SessionAction::Recv,
+                    ) {
+                        Ok((next, payload_ty)) => {
+                            if let Some(v) = var {
+                                self.record_session_action(&v, before, next.clone(), false);
+                                self.set_residual(&v, next);
+                            }
+                            payload_ty.unwrap_or_else(|| Type::Name("i64".into(), vec![]))
+                        }
+                        Err(e) => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0414,
+                                format!("session protocol order violation on recv: {:?}", e),
+                            );
+                            Type::Name("unknown".into(), vec![])
+                        }
+                    }
+                } else {
+                    Type::Name("i64".into(), vec![])
+                }
+            }
+            "close" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "close takes no arguments".to_string(),
+                    );
+                }
+                if let Some((var, residual)) = residual_opt {
+                    if self.session_recorded_for_call(&residual).is_some() {
+                        return Type::Name("unit".into(), vec![]);
+                    }
+                    let before = residual.clone();
+                    match crate::session::apply_action(
+                        &residual,
+                        crate::session::SessionAction::Close,
+                    ) {
+                        Ok((next, _)) => {
+                            if let Some(v) = var {
+                                self.record_session_action(&v, before, next.clone(), true);
+                                self.set_residual(&v, next);
+                            }
+                        }
+                        Err(e) => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0414,
+                                format!("session protocol order violation on close: {:?}", e),
+                            );
+                        }
+                    }
+                }
+                Type::Name("unit".into(), vec![])
+            }
+            _ => Type::Name("unknown".into(), vec![]),
+        }
     }
 
     /// 0.36.38: re-inference of the SAME call-site (e.g. the Assign arm's
@@ -3563,6 +3782,9 @@ fn is_impure_builtin(name: &str) -> bool {
             | "exec"
             | "exec_safe"
             | "exec_pipe"
+            | "flow_pack"
+            | "flow_bump_epoch"
+            | "flow_pack_count"
     )
 }
 
@@ -3666,6 +3888,9 @@ mod tests {
             // Allocation
             "alloc",
             "arena_alloc",
+            "flow_pack",
+            "flow_bump_epoch",
+            "flow_pack_count",
         ];
         for name in known_impure {
             assert!(

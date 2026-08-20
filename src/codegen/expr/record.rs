@@ -11,6 +11,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         ty: &Option<String>,
         fields: &[RecordFieldExpr],
+        rest: Option<&Expr>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let type_name = ty.as_deref().unwrap_or("unknown");
@@ -23,6 +24,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         let alloca = self.build_alloca(sty, type_name)?;
+
+        // 0.1.8 Phase F: `..rest` — start from all fields of `rest`, then the
+        // explicit fields below override selected members.
+        if let Some(rest_expr) = rest {
+            let rest_val = self.compile_expr(rest_expr, vars)?;
+            match rest_val {
+                BasicValueEnum::PointerValue(pv) => {
+                    let rest_loaded =
+                        self.build_load(BasicTypeEnum::StructType(sty), pv, "rest_record")?;
+                    self.build_store(alloca, rest_loaded)?;
+                }
+                BasicValueEnum::StructValue(sv) => {
+                    self.build_store(alloca, sv)?;
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "record update `..rest` requires a struct value, got {:?}",
+                        other.get_type()
+                    )));
+                }
+            }
+        }
         // N-2 (0.34.35): declared field AST types, needed to reconstruct the
         // trampoline signature when a runtime fn pointer enters a func field.
         let declared_fields: Option<Vec<(String, Type)>> =
@@ -425,6 +448,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_bit_cast(fv.into(), self.context.i64_type().into(), "f64_to_i64")?
                 .into_int_value()),
             BasicValueEnum::PointerValue(pv) => {
+                if self.expr_is_string(elem_expr)
+                    || self.infer_object_type(elem_expr, vars) == "string"
+                {
+                    let len = self.string_len(pv)?;
+                    let box_fn = self.get_runtime_fn("mimi_str_box")?;
+                    let boxed = self
+                        .build_call(
+                            box_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(pv),
+                                BasicMetadataValueEnum::IntValue(len),
+                            ],
+                            "str_box_ptr",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_str_box returned void")?
+                        .into_int_value();
+                    return Ok(boxed);
+                }
                 self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_i64")
             }
             BasicValueEnum::StructValue(sv) => {
@@ -443,7 +485,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let raw_ptr = self
                         .build_extract_value(sv.into(), 0, "str_ptr")?
                         .into_pointer_value();
-                    return self.build_ptr_to_int(raw_ptr, self.context.i64_type(), "str_to_i64");
+                    let raw_len = self
+                        .build_extract_value(sv.into(), 1, "str_len")?
+                        .into_int_value();
+                    let box_fn = self.get_runtime_fn("mimi_str_box")?;
+                    let boxed = self
+                        .build_call(
+                            box_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                BasicMetadataValueEnum::IntValue(raw_len),
+                            ],
+                            "str_box",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_str_box returned void")?
+                        .into_int_value();
+                    return Ok(boxed);
                 }
                 // Always pack using the (possibly inflated) struct's own type —
                 // inflate already rewrote Err to the full Result layout.

@@ -3,7 +3,7 @@
 // Flow 状态 = 复杂业务状态机（多状态、转移矩阵、generation 追踪）。
 // 简单场景用 mut 字段，复杂状态机用 Flow。两者不冲突。
 actor Counter {
-    mut count: i32 = 0
+    count: i32 = 0
 
     func increment() { self.count = self.count + 1 }
     func decrement() { self.count = self.count - 1 }
@@ -12,8 +12,8 @@ actor Counter {
 }
 
 actor BankAccount {
-    mut balance: i32 = 0
-    mut owner: string = ""
+    balance: i32 = 0
+    owner: string = ""
 
     func init(name: string, initial: i32) {
         self.owner = name

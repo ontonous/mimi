@@ -1911,6 +1911,49 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    module.add_function(
+        "mimi_str_split_ll",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_str_box",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_unbox(i64 boxed, i8** out_ptr, i64* out_len) → i32
+    module.add_function(
+        "mimi_str_unbox",
+        _i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_free_box(i64 boxed) → void
+    module.add_function(
+        "mimi_str_free_box",
+        _void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // str_join_ll(list*, sep, sep_len, out_len*) → i8*
     module.add_function(
         "mimi_str_join_ll",
@@ -3688,6 +3731,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             "channel_new" => self.compile_channel_new(args),
             "channel_send" => self.compile_channel_send(args),
             "channel_recv" => self.compile_channel_recv(args),
+            "flow_pack" => self.compile_flow_pack(args),
+            "flow_epoch" => self.compile_flow_epoch(args),
+            "flow_check_epoch" => self.compile_flow_check_epoch(args),
+            "flow_bump_epoch" => self.compile_flow_bump_epoch(args),
+            "flow_unpack" => self.compile_flow_unpack(args),
+            "flow_pack_count" => self.compile_flow_pack_count(args),
+            "flow_epoch_last_error" => self.compile_flow_epoch_last_error(args),
             // v0.29.34: session endpoint runtime — delegates to channel builtins.
             "session_send" => self.compile_session_send(args),
             "session_recv" => self.compile_session_recv(args),
@@ -4368,6 +4418,49 @@ fn register_atomic_mutex_channel_rt<'ctx>(
     module.add_function(
         "mimi_channel_drop",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // ----- Flow TransitionEpoch (Phase C) -----
+    module.add_function(
+        "mimi_flow_pack",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_epoch",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_check_epoch",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_bump_epoch",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_unpack",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_pack_count",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_last_error",
+        i32.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );
 }

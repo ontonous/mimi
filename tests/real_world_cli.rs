@@ -106,23 +106,12 @@ fn run_mimi_build_and_exec(src: &Path) -> Result<String, String> {
 }
 
 #[test]
-fn std_mimispec_ast_typechecks() {
-    // batch5 P1-2 follow-up: the Mimi-implemented AST definition used forward
-    // references that could not be resolved in a single-file stdlib check.
-    // After reordering declarations and breaking recursive cycles with Any,
-    // `mimi check std/mimispec/ast.mimi` must pass.
-    let src = project_root().join("std").join("mimispec").join("ast.mimi");
-    let output = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("check")
-        .arg(&src)
-        .output()
-        .expect("failed to spawn mimi check");
-    assert!(
-        output.status.success(),
-        "mimi check std/mimispec/ast.mimi failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn std_mimispec_removed() {
+    // 0.1.8 Phase E: the in-repo std/mimispec implementation and external
+    // `mimispec` crate are removed. This test prevents regrowth of the old
+    // sketch-parser surface in the standard library.
+    let dir = project_root().join("std").join("mimispec");
+    assert!(!dir.exists(), "std/mimispec must be removed in 0.1.8");
 }
 
 #[test]

@@ -331,7 +331,7 @@ func main() -> i32 {
 fn interp_actor_spawn_and_methods() {
     let src = r#"
 actor Counter {
-    mut count: i32 = 0;
+    count: i32 = 0;
 
     func increment() {
         self.count = self.count + 1;
@@ -360,8 +360,8 @@ func main() -> i32 {
 fn interp_actor_initial_fields() {
     let src = r#"
 actor Greeter {
-    mut message: string = "hello";
-    mut count: i32 = 0;
+    message: string = "hello";
+    count: i32 = 0;
 
     func greet() -> string {
         return self.message;
