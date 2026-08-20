@@ -718,3 +718,23 @@ fn audit_str_join_preserves_nul_in_separator_dual() {
         "5",
     );
 }
+
+/// AUD-2 (2026-08-20 critical audit): `to_int` on an out-of-range / non-finite
+/// float used `fptosi` directly, which is UNDEFINED BEHAVIOR in LLVM and
+/// miscompiled into a crash at `-O2`. The codegen now saturates via a
+/// branch+phi that never calls `fptosi` out of range, matching the
+/// interpreter's `f64 as i64` semantics. Dual-guarded so both backends agree.
+#[test]
+fn audit_to_int_out_of_range_saturates_dual() {
+    assert_dual(
+        r#"
+        func main() {
+            println(to_string(to_int(1e300)))
+            println(to_string(to_int(-1e300)))
+            println(to_string(to_int(3.9)))
+            println(to_string(to_int(-3.9)))
+        }
+        "#,
+        "9223372036854775807\n-9223372036854775808\n3\n-3",
+    );
+}

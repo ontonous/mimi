@@ -1397,6 +1397,35 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         }
+                        // AUD-4: linear surface types (cap / SessionChan<S> / containers
+                        // or tuples nesting them) cannot cross the actor mailbox boundary.
+                        // The mailbox byte-copies the value (e.g. an i64 capability handle),
+                        // producing a second copy of a linear resource — breaking
+                        // exactly-once (double-use / double-free / leak). They must be
+                        // transferred, not copied. Reuses the recursive
+                        // `is_linear_surface_type` helper (checker.rs), which descends
+                        // through Option/Result/Tuple/Name-args (List/Map/Set) etc.
+                        if self.is_linear_surface_type(&p.ty) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0432,
+                                format!(
+                                    "linear capability / session type cannot enter actor mailbox as parameter '{}' of {}.{}: it must be transferred, not copied (the mailbox byte-copies the handle)",
+                                    p.name, actor.name, method.name
+                                ),
+                            );
+                        }
+                    }
+                    // AUD-4: same linear-surface rejection on the method return type.
+                    if let Some(ret_ty) = &method.ret {
+                        if self.is_linear_surface_type(ret_ty) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0432,
+                                format!(
+                                    "linear capability / session type cannot leave actor mailbox as return type of {}.{}: it must be transferred, not copied (the mailbox byte-copies the handle)",
+                                    actor.name, method.name
+                                ),
+                            );
+                        }
                     }
                     // Add implicit self parameter to scope for actor methods
                     let self_ty = Type::Name(actor.name.clone(), vec![]);

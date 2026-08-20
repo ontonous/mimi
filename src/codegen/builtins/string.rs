@@ -7,7 +7,7 @@ use crate::codegen::CallSiteValueExt;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, IntValue, PointerValue};
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_str_char_at(
@@ -1136,6 +1136,120 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Saturating float->i64 conversion mirroring Rust's `f64 as i64`
+    /// semantics, used for float operands of `to_int` / `str_parse_int`.
+    ///
+    /// LLVM `fptosi` is UNDEFINED BEHAVIOR for values outside the i64 range
+    /// (and for NaN/Inf); at `-O2` the poison result miscompiles into a crash
+    /// (AUD-2). The *safe* fix is to **never** call `fptosi` on an
+    /// out-of-range / non-finite value: branch to a constant result for those
+    /// cases and only emit `fptosi` on the provably in-range arm:
+    ///   NaN            -> 0
+    ///   +Inf / >= 2^63 -> i64::MAX
+    ///   -Inf / <= -2^63 -> i64::MIN
+    ///   finite in range -> `fptosi` (unchanged behavior for normal values)
+    ///
+    /// `i64::MAX as f64` rounds up to exactly 2^63.0, and there is no f64
+    /// between i64::MAX (9.22e18) and 2^63, so the `>= 2^63` threshold
+    /// captures every out-of-range-high float.
+    fn build_saturating_float_to_signed_int(
+        &mut self,
+        fv: FloatValue<'ctx>,
+    ) -> MimiResult<IntValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+        let imax = i64_ty.const_int(i64::MAX as u64, false);
+        let imin = i64_ty.const_int(i64::MIN as u64, false);
+        let zero = i64_ty.const_int(0, false);
+        // `i64::MAX as f64` == 2^63.0 (rounds up); `i64::MIN as f64` == -2^63.0.
+        let thresh_hi = f64_ty.const_float(i64::MAX as f64);
+        let thresh_lo = f64_ty.const_float(i64::MIN as f64);
+
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("ftoi: no enclosing function".into()))?;
+
+        // NaN: a value is UNOrdered with itself.
+        let is_nan = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::UNE, fv, fv, "ftoi_nan")
+            .map_err(|e| CompileError::LlvmError(format!("ftoi nan cmp: {}", e)))?;
+        // Out-of-range high: >= 2^63 (covers +Inf).
+        let ge_hi = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, fv, thresh_hi, "ftoi_ge_hi")
+            .map_err(|e| CompileError::LlvmError(format!("ftoi ge hi: {}", e)))?;
+        // Out-of-range low: <= -2^63 (covers -Inf).
+        let le_lo = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OLE, fv, thresh_lo, "ftoi_le_lo")
+            .map_err(|e| CompileError::LlvmError(format!("ftoi le lo: {}", e)))?;
+
+        // Cascade of basic blocks; `fptosi` is only ever reached on the
+        // provably-in-range arm, so it can never produce UB/poison.
+        let nan_bb = self.context.append_basic_block(function, "ftoi_nan");
+        let range_bb = self.context.append_basic_block(function, "ftoi_range");
+        let hi_bb = self.context.append_basic_block(function, "ftoi_hi");
+        let lo_or_in_bb = self.context.append_basic_block(function, "ftoi_lo_or_in");
+        let lo_bb = self.context.append_basic_block(function, "ftoi_lo");
+        let in_bb = self.context.append_basic_block(function, "ftoi_in");
+        let merge_bb = self.context.append_basic_block(function, "ftoi_merge");
+
+        // is_nan ? nan : range
+        self.builder
+            .build_conditional_branch(is_nan, nan_bb, range_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi br nan: {}", e)))?;
+        // range: >= 2^63 ? hi : lo_or_in
+        self.builder.position_at_end(range_bb);
+        self.builder
+            .build_conditional_branch(ge_hi, hi_bb, lo_or_in_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi br hi: {}", e)))?;
+        // lo_or_in: <= -2^63 ? lo : in (in range)
+        self.builder.position_at_end(lo_or_in_bb);
+        self.builder
+            .build_conditional_branch(le_lo, lo_bb, in_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi br lo: {}", e)))?;
+
+        // nan_bb -> 0
+        self.builder.position_at_end(nan_bb);
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi nan br: {}", e)))?;
+        // hi_bb -> i64::MAX
+        self.builder.position_at_end(hi_bb);
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi hi br: {}", e)))?;
+        // lo_bb -> i64::MIN
+        self.builder.position_at_end(lo_bb);
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi lo br: {}", e)))?;
+        // in_bb -> fptosi(fv); fv is provably in range here, so no UB.
+        self.builder.position_at_end(in_bb);
+        let in_val = self
+            .builder
+            .build_float_to_signed_int(fv, i64_ty, "ftoi_in_val")
+            .map_err(|e| CompileError::LlvmError(format!("ftoi conv: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("ftoi in br: {}", e)))?;
+
+        // merge: phi over the four results.
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(i64_ty, "ftoi_phi")
+            .map_err(|e| CompileError::LlvmError(format!("ftoi phi: {}", e)))?;
+        phi.add_incoming(&[
+            (&zero as &dyn inkwell::values::BasicValue, nan_bb),
+            (&imax as &dyn inkwell::values::BasicValue, hi_bb),
+            (&imin as &dyn inkwell::values::BasicValue, lo_bb),
+            (&in_val as &dyn inkwell::values::BasicValue, in_bb),
+        ]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
     pub(super) fn compile_to_int(
         &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -1146,7 +1260,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         self.pending_to_number_is_any = false;
-        let i64_ty = self.context.i64_type();
         match &args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
                 // `Any` (map_get value) is an untyped i64 handle at LLVM level:
@@ -1160,12 +1273,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return self.emit_any_to_int(*iv);
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
-                let iv = self
-                    .builder
-                    .build_float_to_signed_int(*fv, i64_ty, "to_int_f")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("to_int float->int error: {}", e))
-                    })?;
+                let iv = self.build_saturating_float_to_signed_int(*fv)?;
                 return Ok(iv.into());
             }
             _ => {}
@@ -1435,7 +1543,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         self.pending_to_number_is_any = false;
-        let i64_ty = self.context.i64_type();
         let true_val = self.context.bool_type().const_int(1, false);
         match &args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
@@ -1445,12 +1552,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return self.build_parse_int_tuple(true_val, v);
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
-                let iv = self
-                    .builder
-                    .build_float_to_signed_int(*fv, i64_ty, "to_int_f")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("str_parse_int float->int error: {}", e))
-                    })?;
+                let iv = self.build_saturating_float_to_signed_int(*fv)?;
                 return self.build_parse_int_tuple(true_val, iv);
             }
             _ => {}
