@@ -18,11 +18,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             Lit::Bool(b) => Ok(self.context.bool_type().const_int(*b as u64, false).into()),
             Lit::Unit => Ok(self.context.i64_type().const_int(0, false).into()),
             Lit::String(s) => {
+                // String ABI: a string value is the canonical {ptr, i64} struct
+                // (ptr to null-terminated data, byte length) — the same layout
+                // used by concatenation, `to_string`, f-strings, etc. (see
+                // CodeGenerator::build_string_struct). Returning a bare i8* here
+                // contradicted that ABI and corrupted any downstream string op.
                 let global = self
                     .builder
                     .build_global_string_ptr(s, "str")
                     .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                Ok(global.as_pointer_value().into())
+                let ptr = global.as_pointer_value();
+                let len = self.context.i64_type().const_int(s.len() as u64, false);
+                self.build_string_struct(ptr, len)
             }
             Lit::FString(parts) => Ok(self.compile_fstring(parts, vars)?),
         }

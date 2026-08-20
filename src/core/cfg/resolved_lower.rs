@@ -1065,26 +1065,44 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 },
             );
         }
-        let then_end = self.lower_block(then_block, Some(then_entry))?;
-        self.goto(
-            &then_end,
-            &join,
-            EdgeKind::Fallthrough,
-            &statement.node_id,
-            &statement.origin,
-            "iflet-join-then",
-        );
-        if let Some(else_block) = else_block {
-            let else_end = self.lower_block(else_block, Some(else_entry))?;
+        // Audit CFG-001 (2026-08-20) FIX: do NOT propagate `?` from the branch
+        // `lower_block` calls. A branch that ends in `return`/`break`/`continue`
+        // makes that branch's `lower_block` return `None` (it diverges), but the
+        // *other* branch may still fall through to `join`. The old `?` treated a
+        // single diverging branch as if the whole `if let` diverged, so the
+        // subsequent statements were orphaned (their CFG blocks became
+        // unreachable) and the linear-resource dataflow was polluted. Mirror
+        // `lower_if`/`lower_match`: only fall through if at least one branch
+        // reaches `join`.
+        let then_end = self.lower_block(then_block, Some(then_entry));
+        let mut falls_through = false;
+        if let Some(end) = then_end {
             self.goto(
-                &else_end,
+                &end,
                 &join,
                 EdgeKind::Fallthrough,
                 &statement.node_id,
                 &statement.origin,
-                "iflet-join-else",
+                "iflet-join-then",
             );
+            falls_through = true;
+        }
+        if let Some(else_block) = else_block {
+            let else_end = self.lower_block(else_block, Some(else_entry));
+            if let Some(end) = else_end {
+                self.goto(
+                    &end,
+                    &join,
+                    EdgeKind::Fallthrough,
+                    &statement.node_id,
+                    &statement.origin,
+                    "iflet-join-else",
+                );
+                falls_through = true;
+            }
         } else {
+            // No else arm: the `else_entry` (the `None` path) always falls
+            // through to the join, so the `if let` as a whole falls through.
             self.goto(
                 &else_entry,
                 &join,
@@ -1093,6 +1111,10 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 &statement.origin,
                 "iflet-join-else",
             );
+            falls_through = true;
+        }
+        if !falls_through {
+            return None;
         }
         Some(join)
     }

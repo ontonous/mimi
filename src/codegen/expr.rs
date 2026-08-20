@@ -484,7 +484,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         match val {
             BasicValueEnum::IntValue(iv) => {
                 let bw = iv.get_type().get_bit_width();
-                if bw < 64 {
+                if bw == 1 {
+                    // AUD-6 fix: a bool (i1) payload must zero-extend so true
+                    // == 1, matching the Some()/Ok() constructor which zexts
+                    // i1 → i64. Sign-extending would turn true into -1,
+                    // diverging from the VM and from constructor-produced
+                    // Option<bool>/Result<bool> (L1 invariant).
+                    Ok(self
+                        .builder
+                        .build_int_z_extend(iv, i64_ty, "opt_pay_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?
+                        .into())
+                } else if bw < 64 {
                     Ok(self
                         .builder
                         .build_int_s_extend(iv, i64_ty, "opt_pay_sext")

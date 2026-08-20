@@ -3185,12 +3185,28 @@ impl BodyLowerer<'_> {
                 "transition call has no checker-finalized result type",
             )]
         })?;
-        if signature.result != *call_result
-            && !self.is_system_fault_refinement(&signature.result, call_result)
-            && !self.is_flow_state_set_refinement(&signature.result, call_result)
+        // AUD-18: the transition call's `result` type must stay identical to the
+        // checker-finalized expression type (`call_result` = `node_types[node_id]`)
+        // that every downstream consumer reads via `ResolvedExpr.ty`
+        // (`body.rs:1022` even hard-requires `call.result == expression.ty`). The
+        // canonical `signature.result` is authoritative ONLY when it is a
+        // recognized refinement of `call_result` — the fault / flow-state-set
+        // cases, where the transition body genuinely produces `signature.result`
+        // and `lower_expr` (see the `ResolvedExprKind::Call` refinement block at
+        // ~line 2053) narrows the expression type to it. For any other divergence
+        // (e.g. `Fault` normalized inside a `Result<_, Fault>`, or a type-alias
+        // expansion that yields a different `ResolvedTypeId` for the same type)
+        // the checker-finalized `call_result` wins, so the call site and
+        // `ResolvedCall.result` remain identical instead of erroring out through
+        // the now-removed `identity_conversion` guard.
+        let call_result_type = if signature.result == *call_result
+            || self.is_system_fault_refinement(&signature.result, call_result)
+            || self.is_flow_state_set_refinement(&signature.result, call_result)
         {
-            self.identity_conversion(node_id, &signature.result, call_result)?;
-        }
+            signature.result.clone()
+        } else {
+            call_result.clone()
+        };
         let flow_id = crate::core::FlowId(qualified_flow.clone());
         Ok(ResolvedCall {
             callee: ResolvedCallee::Transition(crate::core::TransitionId {
@@ -3201,7 +3217,7 @@ impl BodyLowerer<'_> {
                     name: source_state.clone(),
                 },
             }),
-            result: signature.result.clone(),
+            result: call_result_type,
             type_arguments: Vec::new(),
             arguments: lowered,
             permission: Some(super::Permission::Consume),
