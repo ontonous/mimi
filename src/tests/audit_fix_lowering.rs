@@ -2081,3 +2081,56 @@ func main() -> i32 {
         );
     }
 }
+
+/// AUD-9 (2026-08-20 critical audit): an `if let` whose branch diverges (via
+/// `return`) used `?` to unwrap the branch's lower result, which orphaned the
+/// post-`if let` block and made the linear analysis treat a trailing resource
+/// consumption as unreachable -> spurious E0256. Now a diverging branch does
+/// not orphan the construct; both paths stay reachable and `tok` is consumed.
+#[test]
+fn audit_iflet_divergent_branch_keeps_post_block_reachable() {
+    let src = r#"
+cap Token
+func main() -> cap Token {
+    let tok = Token
+    let opt: Option<i32> = Some(1)
+    if let Some(_) = opt {
+        return tok
+    }
+    return tok
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "if-let with diverging branch must not orphan linear analysis (E0256)"
+    );
+}
+
+/// AUD-18 (2026-08-20 critical audit): transition `ResolvedCall.result` could
+/// diverge from `ResolvedExpr.ty`, causing a hard lowering error on valid
+/// transition calls. Now the transition result type is aligned to the
+/// checker-finalized node type, keeping VM and native in agreement.
+#[test]
+fn audit_transition_result_type_aligned_dual() {
+    let src = r#"
+        flow Calc {
+            state Zero { v: i32 }
+            state Value { v: i32 }
+            transition add(Zero, amount: i32) -> Value {
+                return Value { v: self.v + amount }
+            }
+        }
+        func main() {
+            let s = Zero { v: 10 }
+            let r = Calc::add(s, 5)
+            println(r.v)
+        }
+        "#;
+    check_source(src).expect("flow transition must check");
+    let (_interp_val, interp_stdout) = run_source_with_stdout(src);
+    assert_eq!(interp_stdout.trim(), "15", "VM transition result mismatch");
+    if crate::tests::can_link() {
+        let native = compile_and_run(src).expect("codegen of flow transition failed");
+        assert_eq!(native.trim(), "15", "native transition result mismatch");
+    }
+}

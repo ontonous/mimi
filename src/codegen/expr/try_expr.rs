@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::{CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue};
 use std::collections::HashMap;
 
@@ -99,8 +99,37 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Build the appropriate struct type for loading
-        let struct_ty_to_use = if is_user_enum {
+        // AUD-5 fix: the constructor side (constructor.rs) widens integer
+        // payloads to i64 but stores EVERY other payload type (struct /
+        // pointer / float / string / record) at its REAL LLVM type. Rebuilding
+        // the load struct with a hardcoded i64 payload field therefore misreads
+        // non-integer payloads — e.g. Option<string> is actually {i1, {ptr,len}}
+        // but was loaded as {i1, i64}, dropping the length half and yielding a
+        // truncated/garbage string. Reuse the value's ACTUAL struct type so
+        // extract_value reads the real element type. This matches the VM's
+        // Op::Unwrap, which yields T at its real type (L1 invariant). The
+        // is_result/is_user_enum flags are reconciled against the real shape so
+        // the downstream err/propagate branches still classify correctly.
+        let actual_struct_ty: Option<StructType<'ctx>> = match result_val.get_type() {
+            BasicTypeEnum::StructType(st) => Some(st),
+            BasicTypeEnum::PointerType(_) => None,
+            _ => None,
+        };
+        let struct_ty_to_use = if let Some(st) = actual_struct_ty {
+            let flds = st.get_field_types();
+            if flds.len() >= 3 {
+                is_result = true;
+                is_user_enum = false;
+            } else if flds.len() == 2 {
+                if let BasicTypeEnum::IntType(disc) = flds[0] {
+                    if disc.get_bit_width() == 32 {
+                        is_user_enum = true;
+                        is_result = false;
+                    }
+                }
+            }
+            BasicTypeEnum::StructType(st)
+        } else if is_user_enum {
             // User-defined enum: {i32 tag, i64 payload} — all payloads stored as i64
             BasicTypeEnum::StructType(self.context.struct_type(
                 &[
@@ -110,7 +139,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 false,
             ))
         } else if is_result {
-            // Built-in Result<T,E>: {i1 disc, T ok, i64 err}
+            // Fallback (no concrete struct type available): integer Ok payloads
+            // are widened to i64 by the constructor, so a hardcoded i64 Ok slot
+            // is safe for integers/heap-pointers.
             BasicTypeEnum::StructType(self.context.struct_type(
                 &[
                     BasicTypeEnum::IntType(self.context.bool_type()),
@@ -120,7 +151,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 false,
             ))
         } else {
-            // Built-in Option<T>: {i1 disc, T payload}
+            // Built-in Option<T>: fallback (integers widened to i64).
             BasicTypeEnum::StructType(self.context.struct_type(
                 &[
                     BasicTypeEnum::IntType(self.context.bool_type()),
@@ -439,7 +470,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
-        let struct_ty_to_use = if is_result {
+        // AUD-5 fix (shared with compile_try_expr): use the value's ACTUAL
+        // struct type so non-integer payloads (string/struct/float) are not
+        // misread through a hardcoded i64 slot. Integer/heap-pointer payloads
+        // are widened to i64 by the constructor, so the fallback is safe.
+        let actual_struct_ty: Option<StructType<'ctx>> = match result_val.get_type() {
+            BasicTypeEnum::StructType(st) => Some(st),
+            BasicTypeEnum::PointerType(_) => None,
+            _ => None,
+        };
+        let struct_ty_to_use = if let Some(st) = actual_struct_ty {
+            BasicTypeEnum::StructType(st)
+        } else if is_result {
             BasicTypeEnum::StructType(self.context.struct_type(
                 &[
                     BasicTypeEnum::IntType(bool_ty),

@@ -738,3 +738,46 @@ fn audit_to_int_out_of_range_saturates_dual() {
         "9223372036854775807\n-9223372036854775808\n3\n-3",
     );
 }
+
+/// AUD-5 (2026-08-20 critical audit): `?` hardcoded an i64 payload slot, so
+/// unwrapping `Option<string>`/`Option<record>` misread the real payload type
+/// (e.g. dropped the length half of a `{ptr,len}` string -> garbage). Now `?`
+/// derives the payload type from the value's actual struct layout, matching VM.
+#[test]
+fn audit_option_string_question_unwraps_real_payload_dual() {
+    assert_dual(
+        r#"
+        func unwrap_opt(o: Option<string>) -> Option<string> {
+            let s = o?;
+            Some(s)
+        }
+        func main() {
+            let r = unwrap_opt(Some("hello"));
+            match r {
+                Some(s) => println(s),
+                None => println("none"),
+            }
+        }
+        "#,
+        "hello",
+    );
+}
+
+/// AUD-7 (2026-08-20 critical audit): a string literal compiled to a bare `i8*`
+/// while the string ABI is `{ptr,len}`. Now it builds the canonical struct so
+/// literals flow into concat/len identically to `to_string()` output.
+#[test]
+fn audit_string_literal_is_ptr_len_struct_dual() {
+    assert_dual(
+        r#"
+        func main() {
+            let s = "hello";
+            println(s);
+            let t = s + " world";
+            println(t);
+            println(to_string(t.len()));
+        }
+        "#,
+        "hello\nhello world\n11",
+    );
+}
