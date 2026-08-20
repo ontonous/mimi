@@ -298,6 +298,29 @@ pub unsafe extern "C" fn test_callback(
     __mimi_extern_test_callback(x, cb)
 }
 
+/// interp F2 regression probe (audit 2026-08-20, HIGH). Invokes the callback
+/// with a STATIC string literal living in `.rodata` — **not** malloc'd. Under
+/// the old behavior Mimi's callback trampoline unconditionally `libc::free`d the
+/// C string pointer, which corrupted the heap (freeing a static is UB). The
+/// string is intentionally a literal, not a `CString`, so the pre-fix free
+/// path crashes here. Post-fix, callback `string` args are borrowed and never
+/// freed by Mimi.
+#[no_mangle]
+pub unsafe extern "C" fn test_callback_str(
+    cb: Option<unsafe extern "C" fn(*const std::ffi::c_char) -> i32>,
+) -> i32 {
+    match cb {
+        // SAFETY: `f` is a valid callback pointer; the static literal below is a
+        // NUL-terminated C string for the duration of the call.
+        Some(f) => unsafe {
+            let s: *const std::ffi::c_char =
+                b"borrowed_static\0".as_ptr() as *const std::ffi::c_char;
+            f(s)
+        },
+        None => -1,
+    }
+}
+
 // Cross-thread callback helper (v0.28.18).
 //
 // `test_callback` invokes the callback on the SAME thread as the caller.

@@ -27,6 +27,22 @@
   （`src/tests/audit_fix_codegen_mod.rs`）双后端锁定逃逸 `List<string>` 跨嵌套
   scope 完整交付。
 
+### 0.38.116 — interp F2：FFI 回调 string 参数默认借用（不再 free）(L3)
+- 修复 `src/interp/ffi/helpers.rs` 的 `compute_arg_free_mask`：此前对**所有**
+  `string` / `CBuffer` 回调参数返回 `true`，导致 trampoline 无条件 `libc::free`
+  传入的 C 字符串指针。C 回调几乎总是传**借用**的 `const char*`（字符串字面量、
+  静态缓冲、`strdup` 后库仍持有的指针），free 它们即堆破坏 / 崩溃（HIGH）。
+- 修复：回调入站方向（C→Mimi）无 borrow/owned 区分，安全默认是**借用**——
+  解码已把字节拷进 `Arc<String>`，Mimi 持有自己的值、绝不 free C 侧指针。
+  `compute_arg_free_mask` 现恒返回全 `false`；未来应以显式 owned 标记
+  （`string_owned` / `#[transfer]`）恢复精确释放。严格更安全（只消除崩溃，
+  不引入双释放）。
+- 回归探针 `test_callback_str`（runtime `ffi_test.rs`）：用 `.rodata` 静态字面量
+  调回调，pre-fix 触发 `free(): invalid pointer` / SIGABRT，post-fix 回调正确
+  收到 `"borrowed_static"` 且程序不崩。
+  `interp_ffi_callback_static_string_not_freed`
+  （`src/tests/ffi_interp_e2e.rs`）双端（pre/post 已证伪）锁定。
+
 ### 0.38.50 — TransitionEpoch 生命周期闭环
 - 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native
   codegen 与 Component ABI；跨边界 Flow 句柄现在可以显式释放，不再只能依赖进程结束
