@@ -8,6 +8,25 @@
 > 执行 `devdocs/v0.38/README.md`。
 > 0.1.7 已发布（2026-08-19，tag `0.1.7`）。
 
+### 0.38.115 — codegen_mod F1：逃逸 List<string> claim 跨嵌套 scope 持久化 (L3)
+- 修复 `codegen/mod.rs` 堆 scope 释放中 `claimed_returned_string_lists` /
+  `claimed_returned_string_list_lists` 的不对称：此前每次嵌套 scope flush
+  （`free_heap_allocs` / `emit_frees_for_top_scope`）都 `mem::take` 抽干且从不
+  恢复，而对称的 closure-env claim（`claimed_returned_envs`）会恢复；free 循环还
+  把空字符串列表 claim 传给 `emit_guarded_scope_free`，导致外层 scope 注册的逃逸
+  `List<string>` 在任意内层 scope 弹出后丢失守卫，可能被释放 → UAF / 双释放。
+- 修复：使字符串列表 claim 与 env claim 对称——存入局部变量、传给 guarded free、
+  并在 `heap_allocs.len() > 1` 时恢复（直到函数级 scope 弹出）。严格更保守（只会
+  增加守卫，绝不减少）。
+- 新增 `MIMI_ASAN=1` AddressSanitizer 验证通道（`src/main/build.rs`，门控环境变量）：
+  为 runtime `rustc` 加 `-Z sanitizer=address`、为最终 `cc` 链接加
+  `-fsanitize=address`，使原生编译的 Mimi 程序可在 ASan 下检验堆安全。正常构建
+  不受影响。
+- 回归：`audit_codegen_mod_f1_escaped_list_string_through_loop` /
+  `audit_codegen_mod_f1_escaped_list_string_through_inner_block`
+  （`src/tests/audit_fix_codegen_mod.rs`）双后端锁定逃逸 `List<string>` 跨嵌套
+  scope 完整交付。
+
 ### 0.38.50 — TransitionEpoch 生命周期闭环
 - 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native
   codegen 与 Component ABI；跨边界 Flow 句柄现在可以显式释放，不再只能依赖进程结束
