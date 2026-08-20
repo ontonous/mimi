@@ -685,10 +685,23 @@ impl LspServer {
 
             // Read JSON body
             let mut body = vec![0u8; len];
-            reader
-                .read_exact(&mut body)
-                .map_err(|e| format!("read error: {}", e))?;
-            let body = String::from_utf8(body).map_err(|e| format!("utf8 error: {}", e))?;
+            if let Err(e) = reader.read_exact(&mut body) {
+                // lsp F1 (audit 2026-08-20): a body-read failure (client
+                // disconnect, truncated frame) must not propagate as an `Err`
+                // out of the server — the `?` here bypassed the per-message
+                // panic catch and surfaced as a hard error in the CLI. Treat a
+                // broken transport as a graceful shutdown instead, matching the
+                // other read-error paths in this loop.
+                eprintln!("[mimi lsp] body read failed (client disconnected?): {e}");
+                return Ok(());
+            }
+            let body = match String::from_utf8(body) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[mimi lsp] body is not valid UTF-8: {e}");
+                    return Ok(());
+                }
+            };
 
             // Trailing empty line after body is consumed by the header-read loop
             // below: `read_line` will return it as an empty line that doesn't
