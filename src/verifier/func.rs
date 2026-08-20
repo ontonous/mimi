@@ -34,7 +34,7 @@ fn expr_has_checked_arith(expr: &Expr) -> bool {
             ) || expr_has_checked_arith(l)
                 || expr_has_checked_arith(r)
         }
-        Expr::Unary(UnOp::Neg, inner) => true || expr_has_checked_arith(inner),
+        Expr::Unary(UnOp::Neg, _) => true,
         Expr::Unary(_, inner) => expr_has_checked_arith(inner),
         Expr::Call(callee, args) => {
             expr_has_checked_arith(callee) || args.iter().any(expr_has_checked_arith)

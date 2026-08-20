@@ -126,6 +126,16 @@ mod tests {
         ("filter", false, true, true),
         ("map", false, true, true),
         ("reduce", false, true, true),
+        // Flow TransitionEpoch builtins (0.1.8 Phase C): packed at escape,
+        // stripped locally. All four layers (check/VM/codegen/component).
+        ("flow_pack", true, true, true),
+        ("flow_epoch", true, true, true),
+        ("flow_check_epoch", true, true, true),
+        ("flow_bump_epoch", true, true, true),
+        ("flow_unpack", true, true, true),
+        ("flow_drop", true, true, true),
+        ("flow_pack_count", true, true, true),
+        ("flow_epoch_last_error", true, true, true),
     ];
 
     #[test]

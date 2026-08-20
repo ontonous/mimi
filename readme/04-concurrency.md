@@ -17,23 +17,30 @@ Mimi 提供两种并发模型：
 
 ## 2. Actor
 
-### 2.1 定义 Actor
+### 2.1 定义 Actor（业务状态活在 Flow）
+
+> 0.1.8 Phase D 废止 SD-5：`actor` 的业务可变字段必须活在 Flow 中，直接写
+> `mut field` 会被 E0402 拒绝。下面的计数器用 `flow Counter` 承载 `count` 状态，
+> 由 `actor Counter runs Counter` 包装为业务 actor。
 
 ```mimi
-actor Counter {
-    mut count: i32 = 0;
-
-    func increment() {
-        self.count += 1;
+flow Counter {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get_count() -> i32 {
-        self.count
+    transition get_count(Ready) -> Ready {
+        return Ready { count: self.count }
     }
-
-    func reset() {
-        self.count = 0;
+    transition reset(Ready) -> Ready {
+        return Ready { count: 0 }
     }
+}
+
+actor Counter runs Counter {
+    func increment() { self.increment() }
+    func get_count() -> i32 { self.get_count().count }
+    func reset() { self.reset() }
 }
 ```
 
@@ -84,33 +91,43 @@ func main() -> i32 {
 
 ### 2.4 Actor 示例：银行账户
 
+> 业务状态 `balance` 必须活在 Flow 中；直接 `mut balance` 会被 E0402 拒绝。
+
 ```mimi
-actor BankAccount {
-    mut balance: f64 = 0.0;
-
-    func deposit(amount: f64) {
-        self.balance += amount;
+flow BankAccount {
+    state Ready { balance: f64 }
+    transition deposit(Ready, amount: f64) -> Ready {
+        requires: amount > 0
+        return Ready { balance: self.balance + amount }
     }
-
-    func withdraw(amount: f64) -> Result<f64, string> {
+    transition withdraw(Ready, amount: f64) -> Ready {
+        requires: amount > 0
         if self.balance >= amount {
-            self.balance -= amount;
-            Ok(amount)
+            return Ready { balance: self.balance - amount }
         } else {
-            Err("insufficient funds")
+            return Ready { balance: self.balance }
         }
     }
-
-    func get_balance() -> f64 {
-        self.balance
+    transition get_balance(Ready) -> Ready {
+        return Ready { balance: self.balance }
     }
+}
+
+actor BankAccount runs BankAccount {
+    func deposit(amount: f64) { self.deposit(amount) }
+    func withdraw(amount: f64) -> bool {
+        let before = self.get_balance().balance;
+        self.withdraw(amount);
+        self.get_balance().balance < before
+    }
+    func get_balance() -> f64 { self.get_balance().balance }
 }
 
 func main() -> i32 {
     let account = BankAccount.spawn();
 
     account.deposit(100.0);
-    let cash = account.withdraw(30.0)?;
+    account.withdraw(30.0);
     let balance = account.get_balance();
 
     println("Balance: ", balance);  // 70.0
@@ -120,21 +137,26 @@ func main() -> i32 {
 
 ### 2.5 Actor 示例：聊天室
 
+> 聊天室的 `messages` 是业务状态，必须活在 Flow 中。
+
 ```mimi
-actor ChatRoom {
-    mut messages: List<string> = [];
-
-    func send(msg: string) {
-        push(self.messages, msg);
+flow ChatRoom {
+    state Ready { messages: List<string> }
+    transition send(Ready, msg: string) -> Ready {
+        return Ready { messages: push(self.messages, msg) }
     }
-
-    func get_messages() -> List<string> {
-        self.messages
+    transition get_messages(Ready) -> Ready {
+        return Ready { messages: self.messages }
     }
-
-    func clear() {
-        self.messages = [];
+    transition clear(Ready) -> Ready {
+        return Ready { messages: [] }
     }
+}
+
+actor ChatRoom runs ChatRoom {
+    func send(msg: string) { self.send(msg) }
+    func get_messages() -> List<string> { self.get_messages().messages }
+    func clear() { self.clear() }
 }
 
 func main() -> i32 {

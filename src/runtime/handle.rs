@@ -156,6 +156,12 @@ impl MapLease {
     pub fn get(&self) -> &super::MimiMap {
         unsafe { &*self.ptr }
     }
+    /// SAFETY: the lease holds a unique borrow of the handle for its lifetime,
+    /// so returning a `&mut` through `&self` is sound only because the runtime
+    /// guarantees no concurrent access to the same handle while a lease is live.
+    /// This mirrors `Rc::get_mut`/`RefCell::get_mut` escape hatches that are
+    /// gated on the caller upholding the single-lease invariant.
+    #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self) -> &mut super::MimiMap {
         unsafe { &mut *self.ptr }
     }
@@ -191,6 +197,9 @@ impl SetLease {
     pub fn get(&self) -> &super::MimiSet {
         unsafe { &*self.ptr }
     }
+    /// SAFETY: see `MapLease::get_mut` — the lease guarantees unique live
+    /// access to the handle for its lifetime.
+    #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self) -> &mut super::MimiSet {
         unsafe { &mut *self.ptr }
     }
@@ -394,6 +403,10 @@ pub fn set_begin_destroy(handle: i64) -> Result<(), HandleError> {
 pub fn map_finish_destroy(handle: i64) -> Result<(), HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
+    // `loop` is intentional: a concurrent release may change `idle`/`gone`
+    // between the snapshot above and the free, so the retry barrier is the
+    // documented spin (see `MapLease`/`SetLease` single-lease invariant).
+    #[allow(clippy::never_loop)]
     loop {
         let (stale, gone, idle) = {
             let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;

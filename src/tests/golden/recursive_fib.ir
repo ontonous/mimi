@@ -773,6 +773,8 @@ declare i64 @mimi_flow_bump_epoch(i64)
 
 declare i64 @mimi_flow_unpack(i64)
 
+declare i32 @mimi_flow_drop(i64)
+
 declare i64 @mimi_flow_pack_count()
 
 declare i32 @mimi_flow_last_error()

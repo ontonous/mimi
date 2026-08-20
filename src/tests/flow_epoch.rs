@@ -9,6 +9,22 @@ use crate::runtime::{
     mimi_flow_last_error, mimi_flow_pack, mimi_flow_pack_count, mimi_flow_reject_bare_record,
     mimi_flow_unpack, EPOCH_ERR_BARE_RECORD, EPOCH_ERR_STALE, EPOCH_INITIAL, EPOCH_OK,
 };
+use crate::tests::check_source;
+
+fn assert_err_code(src: &str, expected: &str) {
+    let errors = match check_source(src) {
+        Err(errors) => errors,
+        Ok(()) => panic!("expected error {expected}, but check succeeded\nsrc: {src}"),
+    };
+    assert!(
+        errors.iter().any(|e| e.code.as_deref() == Some(expected)),
+        "expected {expected}, got codes: {:?}\nsrc: {src}",
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
 
 #[test]
 fn flow_epoch_pack_roundtrip() {
@@ -74,4 +90,42 @@ fn flow_epoch_dropped_handle_is_stale() {
     );
     assert_eq!(mimi_flow_epoch(h), 0);
     assert_eq!(mimi_flow_last_error(), EPOCH_ERR_STALE);
+}
+
+#[test]
+fn flow_drop_is_a_registered_language_builtin() {
+    let source = r#"
+func main() -> i32 {
+    let h = flow_pack(9)
+    flow_drop(h)
+    flow_epoch(h)
+    return 0
+}
+"#;
+    assert!(
+        check_source(source).is_ok(),
+        "flow_drop must be callable from Mimi"
+    );
+}
+
+#[test]
+fn flow_drop_rejects_bad_arity_and_type_at_check() {
+    assert_err_code(
+        r#"
+func main() -> i32 {
+    flow_drop()
+    0
+}
+"#,
+        crate::diagnostic::codes::E0242,
+    );
+    assert_err_code(
+        r#"
+func main() -> i32 {
+    flow_drop("not a handle")
+    0
+}
+"#,
+        crate::diagnostic::codes::E0242,
+    );
 }

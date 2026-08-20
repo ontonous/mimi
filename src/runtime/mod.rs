@@ -161,7 +161,6 @@ mod libc {
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
 
 // Re-export types used by FFI tests and codegen
 // Must match the C layouts exactly.

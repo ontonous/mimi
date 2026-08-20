@@ -271,6 +271,13 @@ fn completion_new_builtins() {
     assert!(labels.contains(&"keys"), "should contain 'keys'");
     assert!(labels.contains(&"values"), "should contain 'values'");
     assert!(labels.contains(&"has_key"), "should contain 'has_key'");
+    // 0.1.8 Phase C: Flow TransitionEpoch builtins are surfaced in completion.
+    assert!(labels.contains(&"flow_pack"), "should contain 'flow_pack'");
+    assert!(labels.contains(&"flow_drop"), "should contain 'flow_drop'");
+    assert!(
+        labels.contains(&"flow_epoch_last_error"),
+        "should contain 'flow_epoch_last_error'"
+    );
 }
 
 #[test]
@@ -290,6 +297,28 @@ fn hover_new_builtins() {
     assert!(
         contents.contains("builtin"),
         "hover should mention builtin: {}",
+        contents
+    );
+}
+
+#[test]
+fn hover_flow_drop_builtin() {
+    // 0.1.8 Phase C: Flow TransitionEpoch builtins surface a hover signature.
+    let server = LspServer::new();
+    let text = "func main() { flow_drop(0) }";
+    let result = server.compute_hover(text, 0, 17);
+    assert!(result.is_some(), "should hover over 'flow_drop'");
+    let hover = result.expect("hover over flow_drop");
+    let contents = hover
+        .get("contents")
+        .expect("contents")
+        .get("value")
+        .expect("value")
+        .as_str()
+        .expect("as_str");
+    assert!(
+        contents.contains("flow_drop") && contents.contains("builtin"),
+        "hover should identify flow_drop as builtin: {}",
         contents
     );
 }

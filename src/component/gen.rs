@@ -842,6 +842,11 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_flow_unpack", |f| {
         f.param("handle", prim(I64)).returns(prim(I64))
     });
+    gen.export("mimi_flow_drop", |f| {
+        f.param("handle", prim(I64))
+            .returns(prim(I32))
+            .effect("dealloc")
+    });
     gen.export("mimi_flow_pack_count", |f| f.returns(prim(I64)));
     gen.export("mimi_flow_last_error", |f| f.returns(prim(I32)));
     gen.export("mimi_flow_reject_bare_record", |f| {
@@ -1643,6 +1648,7 @@ mod tests {
             "mimi_flow_pack",
             "mimi_flow_check_epoch",
             "mimi_flow_bump_epoch",
+            "mimi_flow_drop",
             "mimi_session_pair",
             // File I/O
             "mimi_is_dir",

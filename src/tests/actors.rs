@@ -440,8 +440,8 @@ func main() -> i32 {
 
 #[test]
 fn actor_runs_flow_rejects_mut_field() {
-    // 0.1.8 Phase D: any user-visible business `mut` actor field is rejected,
-    // including `runs Flow` actors. State must be carried by the Flow.
+    // 0.1.8 Phase D (SD-5 废止): any user-visible business `mut` actor field is
+    // rejected, including `runs Flow` actors. State must be carried by the Flow.
     let src = r#"
 flow Counter {
     state Zero { n: i32 }
@@ -467,9 +467,8 @@ func main() -> i32 {
 
 #[test]
 fn actor_business_mut_rejected() {
-    // 0.1.8 Phase D negative lock: SD-5 escape hatch is removed. A plain
-    // actor's `mut` business field is as illegal as one on a `runs Flow`
-    // actor; the diagnostic must suggest moving state into a Flow.
+    // 0.1.8 Phase D (SD-5 废止) negative lock: SD-5 逃生舱已删除。plain actor 的
+    // 业务 `mut` 字段与 `runs Flow` actor 一样非法，诊断必须建议把状态迁进 Flow。
     let src = r#"
 actor Bank {
     mut balance: i32 = 0
