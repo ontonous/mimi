@@ -213,6 +213,12 @@ pub fn register(reg: &mut BuiltinRegistry) {
         func: builtin_flow_unpack,
     });
     reg.register(BuiltinDesc {
+        name: "flow_drop",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_flow_drop,
+    });
+    reg.register(BuiltinDesc {
         name: "flow_pack_count",
         arity: 0,
         category: BuiltinCategory::System,
@@ -640,6 +646,12 @@ fn builtin_flow_bump_epoch(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
 fn builtin_flow_unpack(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     Ok(Value::Int(crate::runtime::mimi_flow_unpack(h)))
+}
+
+fn builtin_flow_drop(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let h = handle(args, 0)?;
+    crate::runtime::mimi_flow_drop(h);
+    Ok(Value::Unit)
 }
 
 fn builtin_flow_pack_count(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {

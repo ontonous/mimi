@@ -1454,6 +1454,23 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("i64".into(), vec![]);
                 }
+                "flow_drop" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "flow_drop expects 1 argument".to_string(),
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !is_int(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("flow_drop expects i64, found {}", fmt_type(&t)),
+                            );
+                        }
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
                 "flow_check_epoch" => {
                     for a in args {
                         let t = self.infer_expr(a, scopes);

@@ -193,6 +193,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "flow_check_epoch"
             | "flow_bump_epoch"
             | "flow_unpack"
+            | "flow_drop"
             | "flow_pack_count"
             | "flow_epoch_last_error"
             | "session_send"
@@ -335,6 +336,7 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "channel_try_recv" => Some(1),
         "flow_bump_epoch" => Some(1),
         "flow_check_epoch" => Some(2),
+        "flow_drop" => Some(1),
         "flow_epoch" => Some(1),
         "flow_epoch_last_error" => Some(0),
         "flow_pack" => Some(1),

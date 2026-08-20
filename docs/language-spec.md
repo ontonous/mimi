@@ -418,20 +418,23 @@ Final syntax is determined by formal grammar design, but semantics must satisfy:
 - Dynamic external message failure is typed boundary error;
 - Ordinary Actor helpers can only perform stateless computation.
 
-#### `mut` Field Semantics (SD-5)
+#### `mut` Field Semantics (SD-5 废止于 0.1.8 Phase D)
 
-An actor field declared `mut` is a **declarative marker** (concurrency-isolation
-hint), not a write-enforced permission:
+0.1.8 Phase D 废止 SD-5 逃生舱：用户可见的业务 `mut` 字段一律非法
+（E0402，见 §3.8 与 checker `items.rs`）。Actor 不再持有第二套可任意修改的
+业务字段模型；其业务载荷必须由 Flow 承载。
 
-- The checker does **not** enforce "non-`mut` fields are unwritable" (all three
-  backends agree the field is writable regardless of the marker);
-- 1.0 does **not** introduce write enforcement for actor fields — the Flow
-  state machine (state transition as the only state-change channel) is the
-  replacement for the borrow checker, and actor `mut` is the simple-state
-  escape hatch (SD-5: `mut` = simple state; Flow = complex state machine);
-- `actor Name runs FlowName` actors still reject `mut` business fields
-  (E0402): state is carried by the Flow, and mutable fields break the atomic
-  turn guarantee.
+- 任何 `actor Name { mut field: T }` 都被 E0402 拒绝，并给出「移除 `mut` 或改写为
+  `flow Name { state Ready { field: T } ... }` + `actor Name runs Name`」的改写提示；
+- `actor Name runs FlowName` 同样拒绝 `mut` 业务字段：状态由 Flow 携带，可变字段
+  破坏原子 turn 保证；
+- 业务可写状态只有一条通道：Flow 状态转移（state transition as the only
+  state-change channel）；
+- 非业务字段（per-instance 元数据、运行时内部状态）可在不写 `mut` 的形态下存在，
+  但不得作为业务状态模型。
+
+> 旧文档称 `mut` 为「并发隔离声明标记 / 简单状态逃生舱」——该叙述属于被废止的
+> SD-5，0.1.8 起不再成立。
 
 #### Lifecycle
 
@@ -1160,8 +1163,13 @@ func take(x: T)          // by-value consume
   strip the epoch with no packing tax; `flow_pack_count` does not increase.
 - `flow_epoch` reads the live epoch, `flow_check_epoch` verifies a peer's
   expected epoch, `flow_bump_epoch` publishes a recovered epoch, and
-  `flow_unpack` consumes a packed payload. A stale check returns
+  `flow_unpack` consumes a packed payload, and `flow_drop` releases a packed
+  handle so later use returns a typed stale error. A stale check returns
   `EPOCH_ERR_STALE` (2).
+- `flow_pack_count` reports the number of live packed handles (debug/diagnostic);
+  `flow_epoch_last_error` returns the last `EpochError` code (`EPOCH_OK` 0,
+  `EPOCH_ERR_INVALID` 1, `EPOCH_ERR_STALE` 2, `EPOCH_ERR_BARE_RECORD` 3) for
+  the current thread.
 
 ### 6.5 Abstraction: trait and Protocol `[stable]` / `[removed]`
 
@@ -1324,9 +1332,9 @@ General `math { Expr... }` blocks are a stable verifier channel (see §5.6).
 - User-visible bare Session `i64` handle;
 - Unknown attribute silent ignore.
 
-> **0.36.13 修正**：~~Actor arbitrary mutable business fields~~ 移除自本清单——
-> SD-5 明确保留 `mut` 为简单状态逃生舱（§6.4 + §Actor `mut` Field Semantics）；
-> 仅 `actor runs FlowName` 场景拒绝 `mut` 业务字段（E0402）。
+> **0.36.13 修正（已被 0.1.8 Phase D 进一步推翻）**：本条原称 SD-5 保留 `mut` 为
+> 简单状态逃生舱；0.1.8 Phase D 废止 SD-5，**任何**业务 `mut` 字段（含
+> `actor runs FlowName`）都被 E0402 拒绝，业务状态只许活在 Flow 中。本条原叙述不再成立。
 
 > **v0.34.28 修正**：`math { Expr... }` 不在此清单——它是 **stable** verifier 通道
 > （§5.6/§6.8），此前误列 Removed，同步战役纠正。

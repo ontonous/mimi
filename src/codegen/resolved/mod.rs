@@ -5678,7 +5678,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         &self,
         value: BasicValueEnum<'ctx>,
     ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
-        let i64_ty = self.generator.context.i64_type();
         let (raw_ptr, raw_len) = match value {
             BasicValueEnum::PointerValue(pv) => {
                 let len = self.generator.string_len(pv)?;

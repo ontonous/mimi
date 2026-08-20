@@ -506,6 +506,17 @@ impl LspServer {
             "keys",
             "values",
             "has_key",
+            // 0.1.8 Phase C: Flow TransitionEpoch builtins — packed at escape,
+            // stripped locally. Exposed for LSP completion parity with the
+            // language surface so users can discover the cross-boundary API.
+            "flow_pack",
+            "flow_epoch",
+            "flow_check_epoch",
+            "flow_bump_epoch",
+            "flow_unpack",
+            "flow_drop",
+            "flow_pack_count",
+            "flow_epoch_last_error",
         ];
 
         for b in builtins {

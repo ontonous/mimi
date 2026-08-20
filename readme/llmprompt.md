@@ -486,19 +486,25 @@ func booking() -> Result<(), string> {
 
 ## 9. 并发
 
-### 9.1 Actor
+### 9.1 Actor（业务状态活在 Flow）
+
+> 0.1.8 Phase D 废止业务 `mut` 字段：业务状态必须活在 Flow 中，由
+> `actor Counter runs Counter` 包装。
 
 ```mimi
-actor Counter {
-    mut count: i32 = 0;
-
-    func increment() {
-        self.count += 1;
+flow Counter {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get() -> i32 {
-        self.count
+    transition get(Ready) -> Ready {
+        return Ready { count: self.count }
     }
+}
+
+actor Counter runs Counter {
+    func increment() { self.increment() }
+    func get() -> i32 { self.get().count }
 }
 
 func main() -> i32 {

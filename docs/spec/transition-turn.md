@@ -74,3 +74,5 @@ Terminal 前 checker 必须证明 ledger 中每个线性资源恰好一个最终
   不是静默别名/UAF。
 - escaped Flow 的 `recover` 是 `flow_bump_epoch`：消费旧 handle、发布新 epoch；
   缓冲复用只是优化，观察者看到新世代。
+- `flow_drop` 释放已打包的 handle；drop 后旧 handle 继续使用返回
+  `EPOCH_ERR_STALE`（2），不得复用 slot 的 payload。

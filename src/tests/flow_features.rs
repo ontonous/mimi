@@ -2976,9 +2976,8 @@ func main() -> i32 {
 
 #[test]
 fn actor_runs_flow_mut_business_field_rejected() {
-    // 0.36.12 (Phase B 预研/Actor mut 定位, L2): SD-5 — plain actors may use
-    // `mut` as the simple-state escape hatch, but `actor Name runs FlowName`
-    // rejects mut business fields (E0402): state must be carried by the Flow.
+    // 0.1.8 Phase D (SD-5 废止, L2): SD-5 逃生舱已删除——不再区分 plain / runs-Flow
+    // actor；任何业务 `mut` 字段都被 E0402 拒绝，业务状态必须活在 Flow 中。
     let src = r#"
 flow Job {
     state Idle { n: i32 }

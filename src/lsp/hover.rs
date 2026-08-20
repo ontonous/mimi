@@ -276,6 +276,15 @@ impl LspServer {
                 "str_replace",
                 "fn str_replace(s: string, from: string, to: string) -> string",
             ),
+            // 0.1.8 Phase C: Flow TransitionEpoch builtins.
+            ("flow_pack", "fn flow_pack(payload: i64) -> i64  // pack a TransitionEpoch handle at escape"),
+            ("flow_epoch", "fn flow_epoch(handle: i64) -> i64  // read live epoch"),
+            ("flow_check_epoch", "fn flow_check_epoch(handle: i64, expected: i64) -> i32  // typed stale check"),
+            ("flow_bump_epoch", "fn flow_bump_epoch(handle: i64) -> i64  // recover: publish new epoch"),
+            ("flow_unpack", "fn flow_unpack(handle: i64) -> i64  // read payload, does not consume"),
+            ("flow_drop", "fn flow_drop(handle: i64) -> unit  // release packed handle; later use returns EPOCH_ERR_STALE"),
+            ("flow_pack_count", "fn flow_pack_count() -> i64  // count of live packs (debug)"),
+            ("flow_epoch_last_error", "fn flow_epoch_last_error() -> i32  // last epoch error code"),
         ];
 
         for (name, sig) in builtins {

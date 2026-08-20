@@ -8,6 +8,14 @@
 > 执行 `devdocs/v0.38/README.md`。
 > 0.1.7 已发布（2026-08-19，tag `0.1.7`）。
 
+### 0.38.50 — TransitionEpoch 生命周期闭环
+- 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native
+  codegen 与 Component ABI；跨边界 Flow 句柄现在可以显式释放，不再只能依赖进程结束
+  回收。
+- 回归覆盖：`flow_drop_is_a_registered_language_builtin` 保持 builtin 可从 Mimi 调用；
+  `flow_drop_production_dual_stale_after_drop` 在生产 dual（checked 解释器 + 编译
+  `compile_checked` native）路径锁定 drop 后旧句柄返回 `EPOCH_ERR_STALE`（2）。
+
 ### 0.38.91–110 — Phase E Session K + 拆 mimispec
 - SessionChan 方法表面：`ch.send(v)` / `ch.recv()` / `ch.close()` 在 checker、
   resolved/legacy native、bytecode VM 三路全等。tuple 解构的

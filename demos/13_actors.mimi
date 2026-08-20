@@ -1,75 +1,78 @@
-// SD-5 裁决（architecture-amendment-1.0.md）：Actor 允许 mut 字段。
-// mut 字段 = actor 隔离的简单可变状态（计数器、标志位），单线程访问，无数据竞争。
-// Flow 状态 = 复杂业务状态机（多状态、转移矩阵、generation 追踪）。
-// 简单场景用 mut 字段，复杂状态机用 Flow。两者不冲突。
-actor Counter {
-    count: i32 = 0
-
-    func increment() { self.count = self.count + 1 }
-    func decrement() { self.count = self.count - 1 }
-    func get_count() -> i32 { self.count }
-    func reset() { self.count = 0 }
+// 0.1.8 Phase D：SD-5 废止——业务状态只许活在 Flow 中。
+// 业务 actor 不再是 `actor { mut field }`，而是 `flow Name { ... }` + `actor Name runs Name`。
+// 简单计数器与银行账户的业务状态都由 Flow 承载，actor 直接把消息转发到 Flow 转移。
+flow Counter {
+    state Zero { n: i32 }
+    transition increment(Zero) -> Zero { return Zero { n: self.n + 1 } }
+    transition decrement(Zero) -> Zero { return Zero { n: self.n - 1 } }
+    transition get_count(Zero) -> Zero { return Zero { n: self.n } }
+    transition reset(Zero) -> Zero { return Zero { n: 0 } }
 }
 
-actor BankAccount {
-    balance: i32 = 0
-    owner: string = ""
+actor Counter runs Counter {
+}
 
-    func init(name: string, initial: i32) {
-        self.owner = name
-        self.balance = initial
+flow BankAccount {
+    state Ready { balance: i32, owner: string }
+    transition init(Ready, name: string, initial: i32) -> Ready {
+        return Ready { balance: initial, owner: name }
     }
-
-    func deposit(amount: i32) {
+    transition deposit(Ready, amount: i32) -> Ready {
         requires: amount > 0
-        self.balance = self.balance + amount
+        return Ready { balance: self.balance + amount, owner: self.owner }
     }
-
-    func withdraw(amount: i32) -> bool {
+    transition withdraw(Ready, amount: i32) -> Ready {
         requires: amount > 0
         if self.balance >= amount {
-            self.balance = self.balance - amount
-            true
-        } else { false }
+            return Ready { balance: self.balance - amount, owner: self.owner }
+        } else {
+            return Ready { balance: self.balance, owner: self.owner }
+        }
     }
+    transition get_balance(Ready) -> Ready { return Ready { balance: self.balance, owner: self.owner } }
+    transition get_owner(Ready) -> Ready { return Ready { balance: self.balance, owner: self.owner } }
+}
 
-    func get_balance() -> i32 { self.balance }
-    func get_owner() -> string { self.owner }
+actor BankAccount runs BankAccount {
 }
 
 func demo_counter() {
-    println("1. Counter Actor:")
+    println("1. Counter Actor (Flow-backed):")
     let c = Counter.spawn()
-    println("  initial count:", c.get_count())
+    println("  initial count:", c.get_count().n)
     c.increment(); c.increment(); c.increment()
-    println("  after 3 increments:", c.get_count())
+    println("  after 3 increments:", c.get_count().n)
     c.decrement()
-    println("  after 1 decrement:", c.get_count())
+    println("  after 1 decrement:", c.get_count().n)
     c.reset()
-    println("  after reset:", c.get_count())
+    println("  after reset:", c.get_count().n)
 }
 
 func demo_bank() {
-    println("\n2. BankAccount Actor:")
+    println("\n2. BankAccount Actor (Flow-backed):")
     let acc = BankAccount.spawn()
     acc.init("Alice", 1000)
-    println("  owner:", acc.get_owner())
-    println("  initial balance:", acc.get_balance())
+    println("  owner:", acc.get_owner().owner)
+    println("  initial balance:", acc.get_balance().balance)
 
     acc.deposit(500)
-    println("  after +500:", acc.get_balance())
+    println("  after +500:", acc.get_balance().balance)
 
-    let ok = acc.withdraw(200)
-    println("  withdraw 200:", if ok { "OK" } else { "FAIL" })
-    println("  balance:", acc.get_balance())
+    let before = acc.get_balance().balance
+    acc.withdraw(200)
+    let after = acc.get_balance().balance
+    println("  withdraw 200:", if after < before { "OK" } else { "FAIL" })
+    println("  balance:", after)
 
-    let fail = acc.withdraw(2000)
-    println("  withdraw 2000:", if fail { "OK" } else { "FAIL (insufficient)" })
-    println("  final balance:", acc.get_balance())
+    let before2 = acc.get_balance().balance
+    acc.withdraw(2000)
+    let after2 = acc.get_balance().balance
+    println("  withdraw 2000:", if after2 == before2 { "FAIL (insufficient)" } else { "OK" })
+    println("  final balance:", after2)
 }
 
 func main() -> i32 {
-    println("=== 13: Actor 并发模型 ===")
+    println("=== 13: Actor 并发模型 (0.1.8 Flow-backed) ===")
     demo_counter()
     demo_bank()
     println("\n=== Actor 测试通过 ===")

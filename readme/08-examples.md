@@ -136,36 +136,46 @@ func booking() -> Result<(), string> {
 
 ## 5. Actor 并发
 
+> 0.1.8 Phase D 废止业务 `mut` 字段：业务状态必须活在 Flow 中。下面用
+> `flow BankAccount` 承载 `balance`，由 `actor BankAccount runs BankAccount` 包装。
+
 ```mimi
-actor BankAccount {
-    mut balance: f64 = 0.0;
-
-    func deposit(amount: f64) {
-        self.balance += amount;
+flow BankAccount {
+    state Ready { balance: f64 }
+    transition deposit(Ready, amount: f64) -> Ready {
+        requires: amount > 0
+        return Ready { balance: self.balance + amount }
     }
-
-    func withdraw(amount: f64) -> Result<f64, string> {
+    transition withdraw(Ready, amount: f64) -> Ready {
+        requires: amount > 0
         if self.balance >= amount {
-            self.balance -= amount;
-            Ok(amount)
+            return Ready { balance: self.balance - amount }
         } else {
-            Err("insufficient funds")
+            return Ready { balance: self.balance }
         }
     }
-
-    func get_balance() -> f64 {
-        self.balance
+    transition get_balance(Ready) -> Ready {
+        return Ready { balance: self.balance }
     }
+}
+
+actor BankAccount runs BankAccount {
+    func deposit(amount: f64) { self.deposit(amount) }
+    func withdraw(amount: f64) -> bool {
+        let before = self.get_balance().balance;
+        self.withdraw(amount);
+        self.get_balance().balance < before
+    }
+    func get_balance() -> f64 { self.get_balance().balance }
 }
 
 func main() -> i32 {
     let account = BankAccount.spawn();
 
     account.deposit(1000.0);
-    let cash = account.withdraw(250.0)?;
+    account.withdraw(250.0);
     let balance = account.get_balance();
 
-    println("Withdrew: ", cash);
     println("Balance: ", balance);
     0
 }

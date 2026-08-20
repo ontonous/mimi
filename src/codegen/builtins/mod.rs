@@ -3736,6 +3736,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             "flow_check_epoch" => self.compile_flow_check_epoch(args),
             "flow_bump_epoch" => self.compile_flow_bump_epoch(args),
             "flow_unpack" => self.compile_flow_unpack(args),
+            "flow_drop" => {
+                self.compile_atomic_drop_helper("mimi_flow_drop", args)?;
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
+            }
             "flow_pack_count" => self.compile_flow_pack_count(args),
             "flow_epoch_last_error" => self.compile_flow_epoch_last_error(args),
             // v0.29.34: session endpoint runtime — delegates to channel builtins.
@@ -4451,6 +4457,11 @@ fn register_atomic_mutex_channel_rt<'ctx>(
     module.add_function(
         "mimi_flow_unpack",
         i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_flow_drop",
+        i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(

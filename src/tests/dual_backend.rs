@@ -7177,10 +7177,8 @@ fn dual_actor_await_get() {
 
 #[test]
 fn dual_actor_non_mut_field_is_writable() {
-    // 0.36.13 (Phase B 状态语义) + 0.1.8 Phase D: the `mut` marker was
-    // declarative, never write-enforced; Phase D removes the user-visible
-    // `mut` field syntax entirely. Non-`mut` per-instance actor metadata is
-    // still writable on both backends.
+    // 0.1.8 Phase D (SD-5 废止): 业务 `mut` 字段被 E0402 拒绝；本测试改用非 `mut`
+    // per-instance 元数据字段（合法且双后端可写）验证 actor 字段可写性。
     if !can_link() {
         return;
     }
@@ -7213,9 +7211,8 @@ fn dual_actor_non_mut_field_is_writable() {
 
 #[test]
 fn dual_actor_runs_flow_non_mut_field_allowed() {
-    // 0.1.8 Phase D: `actor runs FlowName` is the supported business-actor
-    // shape; `mut` fields are rejected in every actor, while non-`mut`
-    // per-instance metadata fields remain legal.
+    // 0.1.8 Phase D (SD-5 废止): `actor runs FlowName` 是受支持的业务 actor 形态；
+    // 任何 actor 的 `mut` 业务字段都被 E0402 拒绝，而 `mut` 元数据字段仍合法。
     let src = r#"
 flow Job {
     state Idle { n: i32 }
@@ -19803,5 +19800,30 @@ fn flow_epoch_local_self_loop_no_tax() {
         }
         "#,
         "0\n7"
+    );
+}
+
+#[test]
+fn flow_drop_production_dual_stale_after_drop() {
+    // Phase C: flow_drop releases the packed handle. After dropping, any use
+    // of the old handle returns the typed stale error (EPOCH_ERR_STALE == 2),
+    // never a silent alias or the stale payload. Locked on both the checked
+    // interpreter and the production compile_checked native path.
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func main() -> i32 {
+            let h = flow_pack(9)
+            flow_drop(h)
+            let stale = flow_check_epoch(h, 0)
+            let last = flow_epoch_last_error()
+            println(to_string(stale))
+            println(to_string(last))
+            0
+        }
+        "#,
+        "2\n2"
     );
 }
