@@ -136,6 +136,7 @@ pub(crate) mod audit_fix_checker;
 pub(crate) mod audit_fix_codegen_expr1;
 pub(crate) mod audit_fix_codegen_expr2;
 pub(crate) mod audit_fix_codegen_infra;
+pub(crate) mod audit_fix_codegen_mod;
 pub(crate) mod audit_fix_codegen_resolved;
 pub(crate) mod audit_fix_component;
 pub(crate) mod audit_fix_fmt_lint;

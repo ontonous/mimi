@@ -2659,11 +2659,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         // are no longer needed. Stale claims are harmless beyond that: they
         // only suppress frees of pointers that can never equal them.
         let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
-        std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
-        std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
+        let claimed_string_lists =
+            std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
+        let claimed_string_list_lists =
+            std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
         let scope = self.heap_allocs.borrow_mut().pop();
         if self.heap_allocs.borrow().len() > 1 {
+            // codegen_mod F1: claims persist across nested scope pops so an
+            // escaping closure env OR `List<string>` registered in an outer
+            // (function-level) scope stays guarded until that scope itself is
+            // popped. The seed scope pushed by the constructor marks the
+            // function boundary — when a pop returns the stack to it, the
+            // function's registrations are all gone and claims are no longer
+            // needed. Without this, an escaped `List<string>` loses its guard
+            // when an inner scope pops and is freed → UAF / double-free.
             *self.claimed_returned_envs.borrow_mut() = claimed.clone();
+            *self.claimed_returned_string_lists.borrow_mut() = claimed_string_lists.clone();
+            *self.claimed_returned_string_list_lists.borrow_mut() =
+                claimed_string_list_lists.clone();
         }
         if let Some(scope) = scope {
             let free_fn = self
@@ -2762,7 +2775,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // caller. Value-exact runtime comparison replaces the old
                     // positional pop (which misfired when unrelated
                     // allocations followed the env registration).
-                    self.emit_guarded_scope_free(free_fn, ptr, &claimed, &[], &[])?;
+                    self.emit_guarded_scope_free(
+                        free_fn,
+                        ptr,
+                        &claimed,
+                        &claimed_string_lists,
+                        &claimed_string_list_lists,
+                    )?;
                 }
                 // L6c (D-4, 2026-08-06): reset the heap slot to null right after
                 // the free. When a conditional (e.g. `if` with a `Some(string)`
@@ -2793,8 +2812,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// where the slots are null (or belong to that path's own allocations).
     pub(super) fn emit_frees_for_top_scope(&mut self) -> Result<(), CompileError> {
         let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
-        std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
-        std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
+        let claimed_string_lists =
+            std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
+        let claimed_string_list_lists =
+            std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
         let scope = self.heap_allocs.borrow().last().cloned();
         if let Some(scope) = scope {
             let free_fn = self
@@ -2879,7 +2900,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
                 } else {
-                    self.emit_guarded_scope_free(free_fn, ptr, &claimed, &[], &[])?;
+                    self.emit_guarded_scope_free(
+                        free_fn,
+                        ptr,
+                        &claimed,
+                        &claimed_string_lists,
+                        &claimed_string_list_lists,
+                    )?;
                 }
                 if let Some(target) = reset_target {
                     let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -2889,7 +2916,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+        // codegen_mod F1: restore string-list claims alongside the env claim so
+        // an escaping `List<string>` stays guarded across this non-destructive
+        // top-scope free (loop break/continue path) until the function's own
+        // scope is popped.
         *self.claimed_returned_envs.borrow_mut() = claimed;
+        *self.claimed_returned_string_lists.borrow_mut() = claimed_string_lists;
+        *self.claimed_returned_string_list_lists.borrow_mut() = claimed_string_list_lists;
         Ok(())
     }
 

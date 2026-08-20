@@ -65,6 +65,32 @@ fn target_linker_flags(target: Option<&str>) -> Vec<&'static str> {
     flags
 }
 
+/// ASan verification channel. When `MIMI_ASAN` is present, the runtime staticlib
+/// is built with `-Z sanitizer=address` (using the nightly toolchain) and the
+/// final `cc` link adds `-fsanitize=address`, so AddressSanitizer instruments the
+/// Mimi runtime heap and catches UAF / OOB / double-free in native-compiled Mimi
+/// programs. The host `mimi` binary is unaffected; only the spawned runtime build
+/// and the produced executable opt in. Never set in normal builds.
+fn asan_enabled() -> bool {
+    std::env::var_os("MIMI_ASAN").is_some()
+}
+
+fn asan_rustc_flags() -> Vec<&'static str> {
+    if asan_enabled() {
+        vec!["-Z", "sanitizer=address"]
+    } else {
+        vec![]
+    }
+}
+
+fn asan_link_flags() -> Vec<&'static str> {
+    if asan_enabled() {
+        vec!["-fsanitize=address"]
+    } else {
+        vec![]
+    }
+}
+
 #[cfg(unix)]
 fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
     let runtime_dir = runtime_rs
@@ -81,6 +107,11 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"mimi-native-runtime-v1\0");
+    if asan_enabled() {
+        // Invalidate the cache for ASan builds so a non-ASan runtime is never
+        // reused for an ASan-instrumented link.
+        hasher.update(b"asan\0");
+    }
     for path in files {
         hasher.update(path.to_string_lossy().as_bytes());
         let contents =
@@ -113,7 +144,8 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
     }
 
     let tmp_path = cache_dir.join(format!("libmimi_runtime_{key}.tmp-{}", std::process::id()));
-    let status = std::process::Command::new("rustc")
+    let mut rt_cmd = std::process::Command::new("rustc");
+    rt_cmd
         .args([
             "--edition",
             "2021",
@@ -123,9 +155,16 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
             "standalone",
         ])
         .args(["--crate-name", "mimi_runtime", "-A", "dead_code"])
+        .args(asan_rustc_flags())
         .arg("-o")
         .arg(&tmp_path)
-        .arg(runtime_rs)
+        .arg(runtime_rs);
+    if asan_enabled() {
+        // `-Z sanitizer=address` requires the nightly compiler; the host `mimi`
+        // may have been built with stable, so pin the spawned rustc to nightly.
+        rt_cmd.env("RUSTUP_TOOLCHAIN", "nightly");
+    }
+    let status = rt_cmd
         .status()
         .map_err(|e| format!("runtime compile (rustc): {e}"))?;
     if !status.success() {
@@ -363,11 +402,16 @@ pub(crate) fn build(
         rt_cmd.arg("--crate-name").arg("mimi_runtime");
         // Runtime symbols are called from LLVM IR (invisible to rustc reachability).
         rt_cmd.arg("-A").arg("dead_code");
+        rt_cmd.args(asan_rustc_flags());
         if let Some(triple) = target {
             rt_cmd.arg("--target").arg(triple);
         }
         if shared {
             rt_cmd.arg("-C").arg("relocation-model=pic");
+        }
+        if asan_enabled() {
+            // `-Z sanitizer=address` requires the nightly compiler.
+            rt_cmd.env("RUSTUP_TOOLCHAIN", "nightly");
         }
         rt_cmd.arg("-o").arg(&runtime_lib);
         rt_cmd.arg(&runtime_rs);
@@ -383,6 +427,7 @@ pub(crate) fn build(
 
     // Link with cc to create executable or shared library
     let mut cmd = std::process::Command::new(&cc_cmd);
+    cmd.args(asan_link_flags());
     // Prefer lld when available — 5× faster than GNU ld on the 28 MB runtime archive.
     if target.is_none() {
         let has_lld = std::process::Command::new("ld.lld")
