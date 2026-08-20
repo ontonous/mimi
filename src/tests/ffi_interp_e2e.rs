@@ -169,6 +169,41 @@ fn interp_ffi_callback() {
     );
 }
 
+/// interp F2 (audit 2026-08-20, HIGH): a C callback passes a **static** string
+/// literal (`.rodata`, not malloc'd). The old trampoline unconditionally
+/// `libc::free`d callback `string` args, which is heap corruption on a static
+/// pointer. Since callback `string` args are now borrowed (never freed by Mimi
+/// — the decode already copies into `Arc<String>`), the callback must receive
+/// the correct value and the program must not crash.
+#[test]
+fn interp_ffi_callback_static_string_not_freed() {
+    if !can_cc() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:108 unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_bytecode_result(
+        r#"
+        extern "C" {
+            func test_callback_str(cb: func(string) -> i32) -> i32
+        }
+        func main() -> i32 {
+            let cb = fn(s: string) -> i32 {
+                if s == "borrowed_static" { 100 } else { 0 }
+            }
+            test_callback_str(cb)
+        }
+    "#,
+    );
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(
+        result.expect("interp F2: callback with static string crashed (pre-fix free of .rodata pointer)"),
+        interp::Value::Int(100),
+    );
+}
+
 /// Cross-thread callback test: spawn a worker thread that invokes the
 /// callback. Exercises the v0.28.18 cross-thread callback infrastructure
 /// (SendFilePtr + CALLBACK_FILE store + evaluate_cross_thread_callback).

@@ -453,8 +453,11 @@ unsafe fn callback_trampoline_inner(
                 *result = 0;
             }
         }
-        // SAFETY: arg_free_mask marks args that were transferred from C as
-        // owned strings (C malloc / strdup). Free with libc::free only (IP-C3).
+        // interp F2: callback `string`/`CBuffer` args are treated as borrowed
+        // (see `compute_arg_free_mask`); the mask is always false, so this loop
+        // is retained for symmetry but performs no free. The decode already
+        // copied the bytes into an `Arc<String>`, so freeing the C-side pointer
+        // (often a static literal) would be heap corruption.
         for (i, &should_free) in arg_free_mask.iter().enumerate() {
             if should_free && i < nargs {
                 let arg_slot = *args.add(i);
@@ -519,9 +522,9 @@ unsafe fn callback_trampoline_inner(
     }
     // active_guard dropped here — decrements count
 
-    // F6: Free C-allocated string pointers that Mimi takes ownership of.
-    // SAFETY: arg_free_mask marks C-owned strings (malloc/strdup). Free with
-    // libc::free only — never CString::from_raw (IP-C3 allocator match).
+    // interp F2: callback `string`/`CBuffer` args are borrowed (see
+    // `compute_arg_free_mask`); the mask is always false, so this loop performs
+    // no free. The decode already copied the bytes into an `Arc<String>`.
     for (i, &should_free) in arg_free_mask.iter().enumerate() {
         if should_free && i < nargs {
             let arg_slot = *args.add(i);

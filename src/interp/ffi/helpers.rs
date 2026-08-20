@@ -184,15 +184,21 @@ impl<'a> Interpreter<'a> {
 }
 
 /// Compute which callback parameters are C-allocated strings that Mimi must free.
-/// `true` for `string` and `CBuffer` types.
+///
+/// interp F2 (audit 2026-08-20, HIGH): the previous implementation returned
+/// `true` for every `string` / `CBuffer` callback parameter, so the trampoline
+/// unconditionally `libc::free`d the C-side pointer. C callbacks almost always
+/// pass *borrowed* `const char*` (string literals, static buffers, `strdup`'d
+/// pointers the library still owns), so freeing them is heap corruption / a
+/// crash. Because the inbound (C→Mimi) direction had no borrow/owned
+/// distinction, the safe default is to treat callback string/CBuffer params as
+/// **borrowed**: the decode (CStr → `Arc<String>`) already copies the bytes,
+/// so Mimi owns its value and must NOT free the C pointer. A future explicit
+/// owned marker (`string_owned` / `#[transfer]`) is the proper long-term fix;
+/// until then, never free callback string args.
 pub(crate) fn compute_arg_free_mask(param_types: &[Type]) -> Vec<bool> {
-    param_types
-        .iter()
-        .map(|pt| {
-            matches!(pt.unlocated(), Type::Name(n, _) if n == "string")
-                || matches!(pt.unlocated(), Type::CBuffer(_))
-        })
-        .collect()
+    // Conservative: no callback string/CBuffer arg is freed by Mimi. See above.
+    vec![false; param_types.len()]
 }
 
 /// IP-H4: map declared callback param types to decode kinds.
