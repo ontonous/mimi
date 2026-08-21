@@ -14488,6 +14488,12 @@ func main() -> i32 {{
 }}
 "#
     );
+    // CHECKER-GAP: same test-harness concatenation limitation as
+    // dual_maps_stdlib_wrapper_any — std/maps.mimi items carry the test
+    // file's SourceKey, not the "stdlib:" prefix the real loader stamps,
+    // so the C3 stdlib-Any E0407 exemption does not apply in this harness.
+    // Real `use std::maps` path is covered by loader_std_maps_import_typechecks
+    // in loader.rs.
     dual_assert_soft!(src.as_str(), "0\n1\n1\n0\n1\n2\n1\n0");
 }
 
