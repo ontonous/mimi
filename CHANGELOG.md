@@ -40,8 +40,28 @@
 - 回归探针 `test_callback_str`（runtime `ffi_test.rs`）：用 `.rodata` 静态字面量
   调回调，pre-fix 触发 `free(): invalid pointer` / SIGABRT，post-fix 回调正确
   收到 `"borrowed_static"` 且程序不崩。
-  `interp_ffi_callback_static_string_not_freed`
-  （`src/tests/ffi_interp_e2e.rs`）双端（pre/post 已证伪）锁定。
+   `interp_ffi_callback_static_string_not_freed`
+   （`src/tests/ffi_interp_e2e.rs`）双端（pre/post 已证伪）锁定。
+
+### 0.38.117 — interp F3：重入 FFI 崩溃的 `FfiGuard` 泄漏→死锁修复 (L3)
+- 修复 `src/interp/ffi/ffi_runtime.rs` `call_extern` 在受保护 FFI 调用期间持有的
+  RAII 资源（核心为 `ffi_guards: Vec<FfiGuard>`，内含 `RwLock` 读/写锁守卫）在
+  **重入 FFI 崩溃**时泄漏的问题。机制：当 C 回调 → Mimi → 嵌套 FFI（B）在外层
+  受保护调用（A）的 `siglongjmp` 边界内崩溃时，外层 `call_guarded` 的
+  `siglongjmp` 跳过 B 的整个栈帧（含其 `ffi_guards`），`RwLock` 守卫永不释放 →
+  后续访问该 `Value` 死锁（HIGH）。
+- 修复：新增线程局部「崩溃清理栈」`CRASH_CLEANUP`（`signal_guard.rs`：
+  `crash_cleanup_push` / `crash_cleanup_base` / `crash_cleanup_drain_above` /
+  `CrashCleanupPopper`）。`call_extern` 在崩溃危险区前把 `ffi_guards` 装箱推入该栈，
+  正常退出由 `CrashCleanupPopper` 弹出释放；重入崩溃时由外层 `call_guarded` 的恢复
+  路径 `crash_cleanup_drain_above(base)` 排空被跳过帧（index ≥ base）的资源。
+  `base` 边界确保外层帧自身资源不被误释放（绝不双释放）。
+- 主路径（非重入）本就安全：`ffi_guards` 位于 `call_extern` 局部、`call_guarded`
+  闭包之外，`call_extern` 帧不被 `siglongjmp` 跳过，正常 drop。
+- 回归：`crash_cleanup_drains_skipped_reentrant_frame` /
+  `crash_cleanup_preserves_outer_frame_resources`
+  （`signal_guard.rs` 白盒测试）分别锁定「被跳过帧资源在恢复时释放」与「外层帧
+  资源不被误释放」。既有 11 个 `signal_guard` 测试 + 92 个 `ffi_` 测试全绿。
 
 ### 0.38.50 — TransitionEpoch 生命周期闭环
 - 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native

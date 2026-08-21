@@ -558,6 +558,19 @@ impl FfiRuntime {
             // Call via libffi with correct ABI and crash protection.
             // SD-4: signal guard replaces fork isolation (POSIX UB in multi-threaded).
             // Struct-by-value return uses custom rvalue buffer; other paths use scalar return.
+
+            // F3 (0.38.117): register leakable RAII resources on the crash-cleanup
+            // stack so a *re-entrant* FFI crash (which skips this frame via the
+            // outer call_guarded's siglongjmp) still releases them. `ffi_guards`
+            // holds `RwLock` guards; a leaked one deadlocks later access to the
+            // guarded Value. The popper drops our entry on every normal (non-skipped)
+            // exit; on a skipped-frame crash the outer recovery drains it instead.
+            let _crash_popper = {
+                let boxed: Box<dyn std::any::Any> = Box::new(std::mem::take(&mut ffi_guards));
+                super::ffi::signal_guard::crash_cleanup_push(boxed);
+                super::ffi::signal_guard::CrashCleanupPopper
+            };
+
             let call_result: Result<i64, String> = if let Some(buf_size) = struct_ret_size {
                 // Allocate zeroed buffer for the struct return value.
                 let mut ret_buf = vec![0u8; buf_size];
