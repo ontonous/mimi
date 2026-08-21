@@ -85,6 +85,25 @@
   必须绑定自身 transition 签名 `T`，而非同名顶层 `run() -> i32`；resolved IR 直接
   断言 + VM 运行时锁定）。
 
+### 0.38.119 — CHK-F02：`Any` 收窄为单向（bottom）unify，消除调用点类型混淆 (L2)
+- 修复 `src/core/unification.rs` 的 `Any` 双向 unify（`(Any, _) | (_, Any) => Ok`）：
+  旧实现让 `Any` 同时充当 top 与 bottom，任何 `Any` 类型的值都能静默冒充任意具体类型
+  （审计 `devdocs/audit0820/*` CHK-F02，HIGH 类型混淆）。
+- 收窄为**单向（bottom）**：`Any` 在左侧（`(Any, T)`）恒 `Ok`——可向下流入任意具体类型，
+  故 `map_get` 返回的 `(bool, Any)` 仍可当具体值用、异构 map/set 的 `Any` 形参仍接受任意实参；
+  **唯一被拒绝的方向是把具体值沉入 `Any` 槽**：`(T_concrete, Any)` → `Err`，即 `Any` 类型的值
+  不能再传给期望具体类型的形参/绑定（调用点类型混淆闭环）。`Any` 仍与类型变量 / `Infer` /
+  自身 / `_` 统一，内部推断不受影响。
+- 取舍：pure TOP-only（`Any` 作 supertype、拒绝 `(Any, T)`）曾考虑，但因 stdlib 异构
+  map/set 在 `Record` 无类型表示上同时用 `Any` 作形参与返回值，top-only 会破坏
+  `set(m, k, concrete)` 及整个 maps/set 模块；bottom-only 是唯一保留该设计且 sound 的单向语义。
+- 回归：`src/core/unification.rs` 内 `chk_f02_any_is_bottom_only` /
+  `checked_unify_rejects_nested_any_sink`（原 `checked_unify_allows_nested_any` 反向，因它
+  原编码了双向漏洞）/`checked_never_allows_escape_on_either_side`（仅保留 `_`/`Infer` 拒绝）；
+  `src/tests/audit_chk_f02.rs` 三测：`chk_f02_any_value_rejected_as_concrete_param`、
+  `chk_f02_any_value_rejected_as_concrete_let_binding`（PoC：Any 值沉入具体类型被拒）、
+  `chk_f02_any_flows_down_as_concrete_value`（伴随：Any 仍可向下当具体值用，map_get 习惯保留）。
+
 ### 0.38.50 — TransitionEpoch 生命周期闭环
 - 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native
   codegen 与 Component ABI；跨边界 Flow 句柄现在可以显式释放，不再只能依赖进程结束

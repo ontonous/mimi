@@ -508,22 +508,44 @@ impl UnificationTable {
                 Ok(())
             }
 
-            // CO-C2 (audit): Type escape hatches — `_` / `Any` / `Infer` unify with anything.
+            // CO-C2 (audit): Type escape hatches — `_` / `Any` / `Infer`.
             // SAFETY: `_` is emitted by the parser when the user writes `let x: _ = ...`.
             //         Such bindings appear ONLY at let-init positions (check_stmt.rs:626)
             //         where the inferred init_ty substitutes for the declared type.
-            //         v0.34.10: `Any` removed from user syntax (golden §2.4) — the branch
-            //         below only serves internal artifact paths.
-            // v0.31-type-engine note (closed 0.36.94 by design): restricting
-            // these to top-level inference boundaries remains an internal
-            // hardening idea, but no user-visible escape has been reproduced.
-            // `_` is parser-only at let-init positions and `Any` is no longer
-            // user syntax (golden §2.4); both only serve internal artifact
-            // paths. E0431 remains reserved if a future boundary leak is found.
+            //         v0.34.10: `Any` removed from user syntax (golden §2.4).
+            // `_` is parser-only at let-init positions — bidirectional wildcard is safe.
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
+
+            // CHK-F02 (audit 2026-08-20, reworked 0.1.8): `Any` is now a
+            // ONE-DIRECTIONAL (bottom) type, not a bidirectional wildcard.
+            //
+            // `Any` on the LEFT flows *down* into any type — `(Any, T)` is
+            // always `Ok`. This keeps the stdlib usable: `map_get` returns
+            // `(bool, Any)` and that `Any` stays usable as a concrete value,
+            // and heterogeneous maps/sets spell `Any` parameters that must
+            // accept any concrete argument.
+            //
+            // The ONE direction we now reject is sinking a *concrete* value
+            // into an `Any` sink: `(T_concrete, Any)` is `Err`. A value that
+            // is statically typed `Any` may no longer be passed to a parameter
+            // expecting a concrete type without an explicit cast — that was
+            // the call-site type confusion (the old bidirectional rule let
+            // `Any` masquerade as both top and bottom). `Any` still unifies
+            // with a type variable / `Infer` / itself / `_` so internal
+            // inference keeps working.
+            //
+            // NOTE: a pure TOP-only (`Any` as supertype, rejecting `(Any, T)`)
+            // was considered but is infeasible here — the stdlib's
+            // heterogeneous maps/sets use `Any` for BOTH parameter and return
+            // positions over an untyped `Record` representation, so top-only
+            // would break `set(m, k, concrete)` and the whole maps/set
+            // modules. Bottom-only is the only sound one-directional semantics
+            // that preserves that design.
             (Type::Name(n, _), _) if n == "Any" => Ok(()),
-            (_, Type::Name(n, _)) if n == "Any" => Ok(()),
+            (Type::TypeVar(_), Type::Name(n, _)) if n == "Any" => Ok(()),
+            (Type::Infer, Type::Name(n, _)) if n == "Any" => Ok(()),
+            (Type::Name(l, _), Type::Name(n, _)) if n == "Any" && (l == "Any" || l == "_") => Ok(()),
 
             // 0.31.42: TyErr poison type — unifies with everything.
             // Once a type error is detected, TyErr replaces the offending type
@@ -927,16 +949,18 @@ mod tests {
     }
 
     #[test]
-    fn checked_unify_allows_nested_any() {
-        // C3 (audit 2026-08-03): nested `Any` inside containers unifies on
-        // the checked path too — the stdlib wrappers (`Option<Any>`,
-        // `List<Any>` in maps/set signatures) must lower through resolved
-        // codegen, and the strict path is now the only path they take.
+    fn checked_unify_rejects_nested_any_sink() {
+        // CHK-F02 (audit 2026-08-20, reworked 0.1.8): `Any` is a BOTTOM type.
+        // `Option<Any>` (the subtype) may unify with `Option<i32>` when `Any`
+        // is on the LEFT (flows down): `unify(Option<Any>, Option<i32>)` => Ok.
+        // But sinking a concrete container into an `Any` container is rejected:
+        // `unify(Option<i32>, Option<Any>)` => Err (the `(T, Any)` sink case).
         let mut table = UnificationTable::new();
         let option_any = Type::Option(Box::new(Type::Name("Any".into(), vec![])));
         let option_i32 = Type::Option(Box::new(i32_ty()));
         assert!(table.unify(&option_any, &option_i32).is_ok());
-        assert!(table.unify_inference(&option_any, &option_i32).is_ok());
+        assert!(table.unify(&option_i32, &option_any).is_err());
+        assert!(table.unify(&option_any, &option_any.clone()).is_ok());
     }
 
     #[test]
@@ -963,20 +987,40 @@ mod tests {
     #[test]
     fn checked_never_allows_escape_on_either_side() {
         let mut table = UnificationTable::new();
-        // C3 (audit 2026-08-03): `Any` is no longer an escape type — it is
-        // the internal polymorphic marker for builtin/stdlib heterogeneous
-        // values (map_get returns `(bool, Any)`), and 0.34.10 (golden §2.4)
-        // removed it from user syntax (E0407 gates the boundary). Checked
-        // unify therefore ACCEPTS Any↔concrete; `_` / `Infer` stay rejected.
-        let any = Type::Name("Any".into(), vec![]);
+        // `_` / `Infer` stay rejected on either side (parser-only escape
+        // hatches, never user-visible confusable types).
         let infer = Type::Infer;
         let underscore = Type::Name("_".into(), vec![]);
-        assert!(table.unify(&any, &i32_ty()).is_ok());
-        assert!(table.unify(&i32_ty(), &any).is_ok());
         for escape in [&infer, &underscore] {
             assert!(table.unify(escape, &i32_ty()).is_err());
             assert!(table.unify(&i32_ty(), escape).is_err());
         }
+    }
+
+    #[test]
+    fn chk_f02_any_is_bottom_only() {
+        // CHK-F02 (audit 2026-08-20): `Any` is a BOTTOM type, not a
+        // bidirectional wildcard. `Any` on the LEFT flows down into any
+        // concrete type (usable as concrete) — that keeps `map_get`'s
+        // `(bool, Any)` usable. The ONE rejected direction is sinking a
+        // *concrete* value into an `Any` sink: `(T_concrete, Any)` is Err,
+        // i.e. an `Any`-typed value may not be passed to a concrete-typed
+        // parameter. `Any` still unifies with a type variable / `Infer` /
+        // itself / `_`.
+        let mut table = UnificationTable::new();
+        let any = Type::Name("Any".into(), vec![]);
+        let v = table.fresh_var();
+        let var_ty = Type::TypeVar(v);
+        // bottom: Any flows DOWN into any concrete type
+        assert!(table.unify(&any, &i32_ty()).is_ok());
+        assert!(table.unify(&any, &string_ty()).is_ok());
+        // Any still unifies with a type variable / itself
+        assert!(table.unify(&any, &var_ty).is_ok());
+        assert!(table.unify(&var_ty, &any).is_ok());
+        assert!(table.unify(&any, &any).is_ok());
+        // rejected sink: a concrete value may NOT be sunk into an `Any`
+        assert!(table.unify(&i32_ty(), &any).is_err());
+        assert!(table.unify(&string_ty(), &any).is_err());
     }
 
     #[test]
