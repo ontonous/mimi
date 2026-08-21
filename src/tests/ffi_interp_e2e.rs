@@ -199,7 +199,9 @@ fn interp_ffi_callback_static_string_not_freed() {
     );
     std::env::remove_var("MIMI_FFI_LIB");
     assert_eq!(
-        result.expect("interp F2: callback with static string crashed (pre-fix free of .rodata pointer)"),
+        result.expect(
+            "interp F2: callback with static string crashed (pre-fix free of .rodata pointer)"
+        ),
         interp::Value::Int(100),
     );
 }

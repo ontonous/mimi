@@ -47,16 +47,10 @@ fn f1_ambiguous_suffix_fails_closed() {
     let mut zonked: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
     // "y::run" belongs to one function (ret i32), "run" to a different one
     // (ret string). Both are suffix candidates for qualified name "x::y::run".
-    zonked.insert(
-        "y::run".to_string(),
-        (vec![zt(tn("i32"))], zt(tn("i32"))),
-    );
+    zonked.insert("y::run".to_string(), (vec![zt(tn("i32"))], zt(tn("i32"))));
     zonked.insert(
         "run".to_string(),
-        (
-            vec![zt(tn("string"))],
-            zt(tn("string")),
-        ),
+        (vec![zt(tn("string"))], zt(tn("string"))),
     );
     let nested: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
 
@@ -80,10 +74,7 @@ fn f1_exact_hit_is_authoritative() {
     let mut zonked: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
     zonked.insert(
         "x::y::run".to_string(),
-        (
-            vec![zt(tn("i32"))],
-            zt(tn("string")),
-        ),
+        (vec![zt(tn("i32"))], zt(tn("string"))),
     );
     let nested: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
     let res = resolve_zonked_signature("x::y::run", &NodeId("n".into()), &zonked, &nested)
@@ -99,10 +90,7 @@ fn f1_exact_hit_is_authoritative() {
 #[test]
 fn f1_single_suffix_accepted() {
     let mut zonked: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
-    zonked.insert(
-        "run".to_string(),
-        (vec![], zt(tn("i32"))),
-    );
+    zonked.insert("run".to_string(), (vec![], zt(tn("i32"))));
     let nested: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
     let res = resolve_zonked_signature("x::y::run", &NodeId("n".into()), &zonked, &nested)
         .expect("single suffix resolves");
@@ -117,10 +105,7 @@ fn f1_single_suffix_accepted() {
 fn f1_nested_node_id_hit() {
     let zonked: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
     let mut nested: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)> = HashMap::new();
-    nested.insert(
-        NodeId("n".into()),
-        (vec![], zt(tn("i32"))),
-    );
+    nested.insert(NodeId("n".into()), (vec![], zt(tn("i32"))));
     let res = resolve_zonked_signature("whatever", &NodeId("n".into()), &zonked, &nested)
         .expect("node-id hit resolves");
     match res {

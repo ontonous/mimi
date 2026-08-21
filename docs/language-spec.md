@@ -55,6 +55,7 @@ These appendices refine this specification and are normative only for the requir
 | `RESOURCE-LINEAR-001` | §3.11 |
 | `FLOW-FAULT-001` | §3.12 |
 | `FLOW-PROGRESSIVE-001` | §3.13 |
+| `FLOW-EPOCH-DROP-001` | §6.4 |
 | `ERROR-ALGEBRA-001`, `ERROR-PROP-001` | §4, §4.2 |
 | `OWN-PERMISSION-001` | §6.2 |
 | `EFFECT-CAP-001` | §2.7 |
@@ -1165,7 +1166,8 @@ func take(x: T)          // by-value consume
   expected epoch, `flow_bump_epoch` publishes a recovered epoch, and
   `flow_unpack` consumes a packed payload, and `flow_drop` releases a packed
   handle so later use returns a typed stale error. A stale check returns
-  `EPOCH_ERR_STALE` (2).
+  `EPOCH_ERR_STALE` (2). (`FLOW-EPOCH-DROP-001` indexes this `flow_drop`
+  release/stale contract; see the Normative Requirement Map §6.4.)
 - `flow_pack_count` reports the number of live packed handles (debug/diagnostic);
   `flow_epoch_last_error` returns the last `EpochError` code (`EPOCH_OK` 0,
   `EPOCH_ERR_INVALID` 1, `EPOCH_ERR_STALE` 2, `EPOCH_ERR_BARE_RECORD` 3) for

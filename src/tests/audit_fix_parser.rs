@@ -1205,9 +1205,15 @@ fn audit_fix_parser_optional_chain_dot_assoc_left_to_right() {
                         base
                     );
                 }
-                other => panic!("inner of a?.b.c must be OptionalChain(a,b), got: {:?}", other),
+                other => panic!(
+                    "inner of a?.b.c must be OptionalChain(a,b), got: {:?}",
+                    other
+                ),
             }
         }
-        other => panic!("a?.b.c must be Field(OptionalChain(a,b), c), got: {:?}", other),
+        other => panic!(
+            "a?.b.c must be Field(OptionalChain(a,b), c), got: {:?}",
+            other
+        ),
     }
 }

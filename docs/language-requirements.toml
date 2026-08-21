@@ -96,6 +96,14 @@ gate = ["static", "trace", "tooling"]
 summary = "Progressive Main is a real Flow lowering with diagnostics mapped to user spans."
 
 [[requirement]]
+id = "FLOW-EPOCH-DROP-001"
+target = "stable"
+spec = "6.4"
+profile = ["mimi-flow-turn-1"]
+gate = ["static", "trace"]
+summary = "A packed Flow handle can be explicitly released with `flow_drop`; later use returns a typed stale (EPOCH_ERR_STALE) error."
+
+[[requirement]]
 id = "ERROR-ALGEBRA-001"
 target = "stable"
 spec = "4"

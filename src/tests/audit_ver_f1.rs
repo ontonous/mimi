@@ -72,7 +72,12 @@ func rmw_chk(x: mutate i32) -> i32 {
     x
 }
 "#;
-        for (name, src) in [("rmw_ge", ge), ("rmw_rev", rev), ("rmw_fld", fld), ("rmw_chk", chk)] {
+        for (name, src) in [
+            ("rmw_ge", ge),
+            ("rmw_rev", rev),
+            ("rmw_fld", fld),
+            ("rmw_chk", chk),
+        ] {
             let st = status_of(src, name);
             assert_ne!(
                 st,

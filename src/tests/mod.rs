@@ -127,6 +127,8 @@ pub(crate) mod audit_round2;
 pub(crate) mod deep_audit;
 
 // === Wave-1 full-audit fix regressions (2026-08-05) ===
+pub(crate) mod audit_chk_f02;
+pub(crate) mod audit_core_resolved_f1;
 pub(crate) mod audit_fix_bind_cpp;
 pub(crate) mod audit_fix_bind_go;
 pub(crate) mod audit_fix_bind_jni;
@@ -157,11 +159,9 @@ pub(crate) mod audit_fix_verifier;
 pub(crate) mod audit_fix_verifier_resolved;
 pub(crate) mod audit_fix_vm;
 pub(crate) mod audit_fix_vm_exec;
+pub(crate) mod audit_ver_f1;
 pub(crate) mod error_co_h2;
 pub(crate) mod fmt_corpus_eval;
-pub(crate) mod audit_core_resolved_f1;
-pub(crate) mod audit_chk_f02;
-pub(crate) mod audit_ver_f1;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
