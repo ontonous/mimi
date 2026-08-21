@@ -173,7 +173,7 @@ mod tests {
         // compile. Lock that `malloc`/`free` are now declared (resolving to
         // libc, matching the C-side `libc::free` deallocation contract).
         assert!(
-            out.contains("pub fn malloc(size: usize) -> *mut c_void)"),
+            out.contains("pub fn malloc(size: usize) -> *mut c_void;"),
             "ffi_raw must declare malloc so generated StringTransfer wrappers compile"
         );
         // P2-3: StringBorrow wrappers must not panic on embedded NUL bytes.

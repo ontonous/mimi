@@ -119,6 +119,25 @@
    控制组确认恒等重赋值可正确 `Proven`（`src/tests/audit_ver_f1.rs`）。回归若复现
    "赋值被忽略" 即被捕获。
 
+### 0.38.122 — 23 项历史失败基线清零（stale 测试预期 + golden 重生成）(测试面)
+- 收口 `audit0820` 有意修复后遗留的 23 项陈旧测试预期，`cargo test --lib` 从
+  `5536 passed / 23 failed / 7 ignored` 清零为 **`5559 passed / 0 failed / 7 ignored`**
+  （= 5566 总数，基线名实相符）。四类：
+  1. **codegen_golden ×20**：`codegen_expr F1`（0.38 wave-2，bcf9e590）把字符串
+     字面量从裸 `i8*`+运行期 `strlen` 改为编译期长度 + `{ptr,i64}` fat 表示，20 份
+     golden `.ir` 未跟随。用 `UPDATE_GOLDEN=1` 重生成对齐（双后端行为测试全绿，
+     证明 codegen 输出正确，纯表示层对齐）。
+  2. **ownership_checker_tracks_actor_method_capabilities**：ACT-F2（86f6c49c）
+     把线性 cap 进 actor 邮箱从「方法末 E0256 未消费」升级为「邮箱边界 E0432 硬拒」，
+     断言同步 E0256→E0432。
+  3. **fix5_session_residuals_do_not_bleed_between_methods**：ACT-F2 使
+     `SessionChan` 不能进 actor 邮箱（E0432），改用普通函数验证每函数会话残差
+     隔离（`leaky`→E0425 点名 ch1；`clean` 完成协议无 ch2）。
+  4. **rust_binding_smoke**：FFI-01（8e55e6a8）已声明 `ffi_raw::malloc`，断言笔误
+     `*mut c_void)` 改为生成输出一致的 `*mut c_void;`。
+- 全部为既有测试预期修正，零编译器/运行时行为变更；`real_world`/stress/dogfood
+  不涉及本切片改动面（仅 lib 内测试与 golden）。
+
 ### 0.38.120 — audit 复核：parser F-01 为 false-positive（可选链左结合即正确语义）
 - `a?.b.c` 解析为 `Field(OptionalChain(a,"b"),"c")` = `(a?.b).c`，与
   JS/TS/C#/Swift 可选链语义一致，`?.` 在 `.c` 处短路、后续 `.` 为非可选访问。

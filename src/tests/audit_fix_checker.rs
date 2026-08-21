@@ -240,15 +240,18 @@ func main() -> i32 { 0 }
 fn fix5_session_residuals_do_not_bleed_between_methods() {
     // leaky leaves its SessionChan mid-protocol (E0425 belongs to leaky/ch1);
     // clean finishes its own endpoint and must NOT inherit ch1's residual.
+    //
+    // ACT-F2 (audit 2026-08-20, 86f6c49c) made `SessionChan` illegal in actor
+    // mailbox parameters (E0432 — the mailbox byte-copies linear handles), so
+    // this isolation is now exercised on ordinary functions where a
+    // `SessionChan<S>` may legally be passed and left/resolved per function.
     let src = r#"
 session S = !i32 . end
-actor A {
-    func leaky(ch1: SessionChan<S>) -> i32 { 0 }
-    func clean(ch2: SessionChan<S>) -> i32 {
-        session_send(ch2, 1)
-        session_close(ch2)
-        0
-    }
+func leaky(ch1: SessionChan<S>) -> i32 { 0 }
+func clean(ch2: SessionChan<S>) -> i32 {
+    session_send(ch2, 1)
+    session_close(ch2)
+    0
 }
 func main() -> i32 { 0 }
 "#;
@@ -269,7 +272,7 @@ func main() -> i32 { 0 }
     );
     assert!(
         !rendered.iter().any(|m| m.contains("ch2")),
-        "per-method reset must keep ch2 out of the diagnostics, got:\n{}",
+        "per-function reset must keep ch2 out of the diagnostics, got:\n{}",
         rendered.join("\n")
     );
 }

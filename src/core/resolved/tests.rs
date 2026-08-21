@@ -3854,6 +3854,12 @@ func main() -> i32 { 0 }
 
 #[test]
 fn ownership_checker_tracks_actor_method_capabilities() {
+    // ACT-F2 (audit 2026-08-20, 86f6c49c): a linear capability cannot cross the
+    // actor mailbox boundary at all — the mailbox byte-copies the handle,
+    // breaking exactly-once. It is now rejected with E0432 at the mailbox
+    // boundary (a stronger guarantee than the previous E0256 end-of-method
+    // "not consumed" check), so a `cap File` parameter can never leak through
+    // an actor method.
     let file = parse(
         r#"
 cap File
@@ -3865,7 +3871,7 @@ func main() -> i32 { 0 }
     );
     let diagnostics = crate::core::check_program(&file).expect_err("actor method leak");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0256)
+        diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0432)
             && diagnostic.message.contains("f")
     }));
 }

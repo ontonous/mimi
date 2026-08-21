@@ -1000,9 +1000,17 @@ entry:
 
 define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Single({} %0) {
 entry:
+  %string_ret31 = alloca { ptr, i64 }, align 8
+  %string_ret27 = alloca { ptr, i64 }, align 8
+  %string_ret23 = alloca { ptr, i64 }, align 8
   %PanicPayload = alloca { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, align 8
+  %string_ret19 = alloca { ptr, i64 }, align 8
   %MemoryDump = alloca { { ptr, i64 }, i32 }, align 8
+  %string_ret14 = alloca { ptr, i64 }, align 8
+  %string_ret9 = alloca { ptr, i64 }, align 8
+  %string_ret5 = alloca { ptr, i64 }, align 8
   %SystemTrace = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, align 8
+  %string_ret = alloca { ptr, i64 }, align 8
   %nominal_variant1 = alloca { i32, i64 }, align 8
   %nominal_variant = alloca { i32, i64 }, align 8
   %Fault = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
@@ -1022,45 +1030,69 @@ entry:
   %variant_val4 = load { i32, i64 }, ptr %nominal_variant1, align 4
   %unexpected_event = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
   store { i32, i64 } %variant_val4, ptr %unexpected_event, align 4
-  %strlen_call = call i64 @strlen(ptr @str)
-  %str_wrap_len = insertvalue { ptr, i64 } { ptr @str, i64 undef }, i64 %strlen_call, 1
+  %str_ptr_gep = getelementptr inbounds { ptr, i64 }, ptr %string_ret, i32 0, i32 0
+  store ptr @str, ptr %str_ptr_gep, align 8
+  %str_len_gep = getelementptr inbounds { ptr, i64 }, ptr %string_ret, i32 0, i32 1
+  store i64 39, ptr %str_len_gep, align 4
+  %string_ret_val = load { ptr, i64 }, ptr %string_ret, align 8
   %snapshot = getelementptr inbounds { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
-  store { ptr, i64 } %str_wrap_len, ptr %snapshot, align 8
-  %strlen_call5 = call i64 @strlen(ptr @str.1)
-  %str_wrap_len6 = insertvalue { ptr, i64 } { ptr @str.1, i64 undef }, i64 %strlen_call5, 1
+  store { ptr, i64 } %string_ret_val, ptr %snapshot, align 8
+  %str_ptr_gep6 = getelementptr inbounds { ptr, i64 }, ptr %string_ret5, i32 0, i32 0
+  store ptr @str.1, ptr %str_ptr_gep6, align 8
+  %str_len_gep7 = getelementptr inbounds { ptr, i64 }, ptr %string_ret5, i32 0, i32 1
+  store i64 6, ptr %str_len_gep7, align 4
+  %string_ret_val8 = load { ptr, i64 }, ptr %string_ret5, align 8
   %last_state_name = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 0
-  store { ptr, i64 } %str_wrap_len6, ptr %last_state_name, align 8
-  %strlen_call7 = call i64 @strlen(ptr @str.2)
-  %str_wrap_len8 = insertvalue { ptr, i64 } { ptr @str.2, i64 undef }, i64 %strlen_call7, 1
-  %unexpected_event9 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 1
-  store { ptr, i64 } %str_wrap_len8, ptr %unexpected_event9, align 8
-  %strlen_call10 = call i64 @strlen(ptr @str.3)
-  %str_wrap_len11 = insertvalue { ptr, i64 } { ptr @str.3, i64 undef }, i64 %strlen_call10, 1
-  %snapshot12 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 2
-  store { ptr, i64 } %str_wrap_len11, ptr %snapshot12, align 8
-  %strlen_call13 = call i64 @strlen(ptr @str.4)
-  %str_wrap_len14 = insertvalue { ptr, i64 } { ptr @str.4, i64 undef }, i64 %strlen_call13, 1
+  store { ptr, i64 } %string_ret_val8, ptr %last_state_name, align 8
+  %str_ptr_gep10 = getelementptr inbounds { ptr, i64 }, ptr %string_ret9, i32 0, i32 0
+  store ptr @str.2, ptr %str_ptr_gep10, align 8
+  %str_len_gep11 = getelementptr inbounds { ptr, i64 }, ptr %string_ret9, i32 0, i32 1
+  store i64 10, ptr %str_len_gep11, align 4
+  %string_ret_val12 = load { ptr, i64 }, ptr %string_ret9, align 8
+  %unexpected_event13 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 1
+  store { ptr, i64 } %string_ret_val12, ptr %unexpected_event13, align 8
+  %str_ptr_gep15 = getelementptr inbounds { ptr, i64 }, ptr %string_ret14, i32 0, i32 0
+  store ptr @str.3, ptr %str_ptr_gep15, align 8
+  %str_len_gep16 = getelementptr inbounds { ptr, i64 }, ptr %string_ret14, i32 0, i32 1
+  store i64 39, ptr %str_len_gep16, align 4
+  %string_ret_val17 = load { ptr, i64 }, ptr %string_ret14, align 8
+  %snapshot18 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 2
+  store { ptr, i64 } %string_ret_val17, ptr %snapshot18, align 8
+  %str_ptr_gep20 = getelementptr inbounds { ptr, i64 }, ptr %string_ret19, i32 0, i32 0
+  store ptr @str.4, ptr %str_ptr_gep20, align 8
+  %str_len_gep21 = getelementptr inbounds { ptr, i64 }, ptr %string_ret19, i32 0, i32 1
+  store i64 0, ptr %str_len_gep21, align 4
+  %string_ret_val22 = load { ptr, i64 }, ptr %string_ret19, align 8
   %fields = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 0
-  store { ptr, i64 } %str_wrap_len14, ptr %fields, align 8
+  store { ptr, i64 } %string_ret_val22, ptr %fields, align 8
   %count = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 1
   store i32 0, ptr %count, align 4
   %memory_dump = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 3
   %load_memory_dump = load { { ptr, i64 }, i32 }, ptr %MemoryDump, align 8
   store { { ptr, i64 }, i32 } %load_memory_dump, ptr %memory_dump, align 8
-  %strlen_call15 = call i64 @strlen(ptr @str.5)
-  %str_wrap_len16 = insertvalue { ptr, i64 } { ptr @str.5, i64 undef }, i64 %strlen_call15, 1
+  %str_ptr_gep24 = getelementptr inbounds { ptr, i64 }, ptr %string_ret23, i32 0, i32 0
+  store ptr @str.5, ptr %str_ptr_gep24, align 8
+  %str_len_gep25 = getelementptr inbounds { ptr, i64 }, ptr %string_ret23, i32 0, i32 1
+  store i64 10, ptr %str_len_gep25, align 4
+  %string_ret_val26 = load { ptr, i64 }, ptr %string_ret23, align 8
   %error_type = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 0
-  store { ptr, i64 } %str_wrap_len16, ptr %error_type, align 8
-  %strlen_call17 = call i64 @strlen(ptr @str.6)
-  %str_wrap_len18 = insertvalue { ptr, i64 } { ptr @str.6, i64 undef }, i64 %strlen_call17, 1
+  store { ptr, i64 } %string_ret_val26, ptr %error_type, align 8
+  %str_ptr_gep28 = getelementptr inbounds { ptr, i64 }, ptr %string_ret27, i32 0, i32 0
+  store ptr @str.6, ptr %str_ptr_gep28, align 8
+  %str_len_gep29 = getelementptr inbounds { ptr, i64 }, ptr %string_ret27, i32 0, i32 1
+  store i64 0, ptr %str_len_gep29, align 4
+  %string_ret_val30 = load { ptr, i64 }, ptr %string_ret27, align 8
   %file = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 1
-  store { ptr, i64 } %str_wrap_len18, ptr %file, align 8
+  store { ptr, i64 } %string_ret_val30, ptr %file, align 8
   %line = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 2
   store i32 0, ptr %line, align 4
-  %strlen_call19 = call i64 @strlen(ptr @str.7)
-  %str_wrap_len20 = insertvalue { ptr, i64 } { ptr @str.7, i64 undef }, i64 %strlen_call19, 1
+  %str_ptr_gep32 = getelementptr inbounds { ptr, i64 }, ptr %string_ret31, i32 0, i32 0
+  store ptr @str.7, ptr %str_ptr_gep32, align 8
+  %str_len_gep33 = getelementptr inbounds { ptr, i64 }, ptr %string_ret31, i32 0, i32 1
+  store i64 39, ptr %str_len_gep33, align 4
+  %string_ret_val34 = load { ptr, i64 }, ptr %string_ret31, align 8
   %stack = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 3
-  store { ptr, i64 } %str_wrap_len20, ptr %stack, align 8
+  store { ptr, i64 } %string_ret_val34, ptr %stack, align 8
   %panic_payload = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 4
   %load_panic_payload = load { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, align 8
   store { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %load_panic_payload, ptr %panic_payload, align 8
@@ -1073,35 +1105,35 @@ entry:
   %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
   %ret_rec_nf = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { i32, i64 } %ret_rec_f, 0
-  %ret_rec_f21 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
-  %ret_rec_nf22 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { i32, i64 } %ret_rec_f21, 1
-  %ret_rec_f23 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf22, 2
-  %ret_rec_nf24 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf22, { ptr, i64 } %ret_rec_f23, 2
-  %ret_rec_f25 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf24, 3
-  %ret_rec_f26 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f25, 0
-  %ret_rec_nf27 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f25, { ptr, i64 } %ret_rec_f26, 0
-  %ret_rec_f28 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf27, 1
-  %ret_rec_nf29 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf27, { ptr, i64 } %ret_rec_f28, 1
-  %ret_rec_f30 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf29, 2
-  %ret_rec_nf31 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf29, { ptr, i64 } %ret_rec_f30, 2
-  %ret_rec_f32 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, 3
-  %ret_rec_f33 = extractvalue { { ptr, i64 }, i32 } %ret_rec_f32, 0
-  %ret_rec_nf34 = insertvalue { { ptr, i64 }, i32 } %ret_rec_f32, { ptr, i64 } %ret_rec_f33, 0
-  %ret_rec_f35 = extractvalue { { ptr, i64 }, i32 } %ret_rec_nf34, 1
-  %ret_rec_nf36 = insertvalue { { ptr, i64 }, i32 } %ret_rec_nf34, i32 %ret_rec_f35, 1
-  %ret_rec_nf37 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf31, { { ptr, i64 }, i32 } %ret_rec_nf36, 3
-  %ret_rec_f38 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf37, 4
-  %ret_rec_f39 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f38, 0
-  %ret_rec_nf40 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f38, { ptr, i64 } %ret_rec_f39, 0
-  %ret_rec_f41 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf40, 1
-  %ret_rec_nf42 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf40, { ptr, i64 } %ret_rec_f41, 1
-  %ret_rec_f43 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf42, 2
-  %ret_rec_nf44 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf42, i32 %ret_rec_f43, 2
-  %ret_rec_f45 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, 3
-  %ret_rec_nf46 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf44, { ptr, i64 } %ret_rec_f45, 3
-  %ret_rec_nf47 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf37, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf46, 4
-  %ret_rec_nf48 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf24, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf47, 3
-  ret { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf48
+  %ret_rec_f35 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, 1
+  %ret_rec_nf36 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf, { i32, i64 } %ret_rec_f35, 1
+  %ret_rec_f37 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf36, 2
+  %ret_rec_nf38 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf36, { ptr, i64 } %ret_rec_f37, 2
+  %ret_rec_f39 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf38, 3
+  %ret_rec_f40 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f39, 0
+  %ret_rec_nf41 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f39, { ptr, i64 } %ret_rec_f40, 0
+  %ret_rec_f42 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf41, 1
+  %ret_rec_nf43 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf41, { ptr, i64 } %ret_rec_f42, 1
+  %ret_rec_f44 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf43, 2
+  %ret_rec_nf45 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf43, { ptr, i64 } %ret_rec_f44, 2
+  %ret_rec_f46 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf45, 3
+  %ret_rec_f47 = extractvalue { { ptr, i64 }, i32 } %ret_rec_f46, 0
+  %ret_rec_nf48 = insertvalue { { ptr, i64 }, i32 } %ret_rec_f46, { ptr, i64 } %ret_rec_f47, 0
+  %ret_rec_f49 = extractvalue { { ptr, i64 }, i32 } %ret_rec_nf48, 1
+  %ret_rec_nf50 = insertvalue { { ptr, i64 }, i32 } %ret_rec_nf48, i32 %ret_rec_f49, 1
+  %ret_rec_nf51 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf45, { { ptr, i64 }, i32 } %ret_rec_nf50, 3
+  %ret_rec_f52 = extractvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf51, 4
+  %ret_rec_f53 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f52, 0
+  %ret_rec_nf54 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_f52, { ptr, i64 } %ret_rec_f53, 0
+  %ret_rec_f55 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf54, 1
+  %ret_rec_nf56 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf54, { ptr, i64 } %ret_rec_f55, 1
+  %ret_rec_f57 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf56, 2
+  %ret_rec_nf58 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf56, i32 %ret_rec_f57, 2
+  %ret_rec_f59 = extractvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf58, 3
+  %ret_rec_nf60 = insertvalue { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf58, { ptr, i64 } %ret_rec_f59, 3
+  %ret_rec_nf61 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf51, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf60, 4
+  %ret_rec_nf62 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf38, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf61, 3
+  ret { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf62
 }
 
 define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Fault({ { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
