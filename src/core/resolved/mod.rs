@@ -694,6 +694,74 @@ pub struct CheckedProgram {
     pub trait_method_generics: HashMap<(String, String), Vec<String>>,
 }
 
+/// Outcome of resolving a resolved function's checker-finalized signature.
+#[derive(Debug, Clone)]
+pub(crate) enum ZonkedResolution {
+    /// Authoritative hit (node-id for nested callables, or exact
+    /// qualified-name match). Always safe to apply.
+    Exact((Vec<ZonkedTy>, ZonkedTy)),
+    /// Non-authoritative suffix fallback hit (taken only when unambiguous
+    /// and type-consistent; see `resolve_zonked_signature`).
+    Suffix((Vec<ZonkedTy>, ZonkedTy)),
+    /// No checker-finalized signature found; the function keeps its
+    /// AST-derived snapshot.
+    None,
+}
+
+/// core_resolved F1 (audit 2026-08-20, reworked 0.1.8): resolve the
+/// checker-finalized (`zonked`) signature for a resolved function.
+///
+/// The checker and resolved catalogs agree on module-qualified keys for
+/// every callable kind, so the exact qualified name is authoritative in
+/// well-formed programs. The suffix fallback exists only as a compatibility
+/// shim for the rare case where the exact key is genuinely absent; it is
+/// taken when *exactly one* suffix candidate exists. Multiple distinct
+/// suffix candidates are rejected because the old `find_map` over suffixes
+/// would silently last-wins misbind a same-suffix, same-arity,
+/// different-typed signature (a soundness hole). The caller additionally
+/// enforces return-type consistency for suffix hits.
+pub(crate) fn resolve_zonked_signature(
+    qualified_name: &str,
+    node_id: &crate::core::NodeId,
+    zonked_func_types: &HashMap<String, (Vec<ZonkedTy>, ZonkedTy)>,
+    zonked_nested_func_types: &HashMap<crate::core::NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
+) -> Result<ZonkedResolution, String> {
+    if let Some(sig) = zonked_nested_func_types.get(node_id) {
+        return Ok(ZonkedResolution::Exact(sig.clone()));
+    }
+    if let Some(sig) = zonked_func_types.get(qualified_name) {
+        return Ok(ZonkedResolution::Exact(sig.clone()));
+    }
+    // Suffix fallback: collect every candidate suffix key actually present.
+    let mut suffixes: Vec<String> = {
+        let mut v = vec![qualified_name.to_string()];
+        let mut cursor = qualified_name;
+        while let Some((_, rest)) = cursor.split_once("::") {
+            v.push(rest.to_string());
+            cursor = rest;
+        }
+        v.into_iter()
+            .skip(1)
+            .filter(|k| zonked_func_types.contains_key(k))
+            .collect()
+    };
+    suffixes.sort();
+    suffixes.dedup();
+    if suffixes.len() > 1 {
+        return Err(format!(
+            "ambiguous across {} suffix candidates (same suffix, different functions); refusing to guess",
+            suffixes.len()
+        ));
+    }
+    match suffixes.into_iter().next() {
+        Some(key) => {
+            let sig = zonked_func_types.get(&key).unwrap().clone();
+            Ok(ZonkedResolution::Suffix(sig))
+        }
+        None => Ok(ZonkedResolution::None),
+    }
+}
+
 impl CheckedProgram {
     /// 0.36.48: number of method-level generic params declared by a trait
     /// method (0 for plain methods like `is_empty`, 1 for `map<U>`).
@@ -730,53 +798,90 @@ impl CheckedProgram {
         // Override declaration snapshots only with mandatory-finalized checker
         // artifacts. Raw checker types are not a backend input.
         for func in program.functions.values_mut() {
-            // Full audit 2026-08-05 (#9): the checker registers actor methods
-            // in its function table WITHOUT the module path
-            // (checker/items.rs: `{actor}::{method}`), while the resolved
-            // catalog is module-qualified. For a module-wrapped actor the
-            // exact-key lookup misses and the function later aborts with "no
-            // checker-finalized signature". Try the exact qualified key
-            // first, then progressively shorter suffixes — longest first,
-            // i.e. `actor::method`, then the plain method key — before
-            // giving up. Nested functions are keyed by NodeId and are
-            // unaffected. The parameter-count cross-check below still guards
-            // against a wrong-shape fallback hit.
-            let mut candidate_keys = vec![func.qualified_name.clone()];
-            let mut cursor = func.qualified_name.as_str();
-            while let Some((_, rest)) = cursor.split_once("::") {
-                candidate_keys.push(rest.to_string());
-                cursor = rest;
-            }
-            let zonked = zonked_nested_func_types.get(&func.node_id).or_else(|| {
-                candidate_keys
-                    .iter()
-                    .find_map(|key| zonked_func_types.get(key))
-            });
-            if let Some((resolved_params, resolved_ret)) = zonked {
-                if resolved_params.len() != func.params.len() {
+            // core_resolved F1 (audit 2026-08-20, reworked 0.1.8): the
+            // checker/resolved catalogs now agree on module-qualified keys for
+            // every callable kind, so the exact qualified name is authoritative
+            // in well-formed programs. The suffix fallback below is only a
+            // compatibility shim for type constructors (newtype/enum ctors),
+            // which the checker registers under a *bare* name. The old code
+            // used `find_map` over progressively shorter suffixes with *only a
+            // parameter-count guard*, so a same-suffix, same-arity,
+            // different-typed signature could be silently bound (a soundness
+            // hole — the wrong function's signature flows into the resolved IR
+            // and downstream codegen/interp). The fallback is now defensive:
+            //   * exact qualified-name hit  -> authoritative, applied silently;
+            //   * node-id hit (nested)       -> authoritative, applied silently;
+            //   * suffix hit only when exactly ONE candidate exists AND it is
+            //     type-consistent with the declaration -> applied;
+            //   * ambiguous (multiple suffix candidates) -> fail-closed
+            //     (TOOL-RESOLUTION-001) instead of last-wins misbinding;
+            //   * single suffix hit that disagrees on a concrete return type ->
+            //     fail-closed (TOOL-RESOLUTION-001) instead of misbinding.
+            let resolution = match resolve_zonked_signature(
+                &func.qualified_name,
+                &func.node_id,
+                &zonked_func_types,
+                &zonked_nested_func_types,
+            ) {
+                Ok(res) => res,
+                Err(msg) => {
                     errors.push(Diagnostic::error(
                         format!(
-                            "TOOL-RESOLUTION-001: zonked signature for '{}' has {} parameters, declaration has {}",
-                            func.qualified_name,
-                            resolved_params.len(),
-                            func.params.len()
+                            "TOOL-RESOLUTION-001: zonked signature for '{}': {}",
+                            func.qualified_name, msg
                         ),
                         func.origin.user_span(),
                     ));
                     continue;
                 }
-                func.params = func
-                    .params
-                    .iter()
-                    .zip(resolved_params.iter())
-                    .map(|((name, _), resolved)| (name.clone(), resolved.as_type().clone()))
-                    .collect();
-                func.ret = resolved_ret.as_type().clone();
-                zonked_by_node.insert(
-                    func.node_id.clone(),
-                    (resolved_params.clone(), resolved_ret.clone()),
-                );
+            };
+            let (resolved_params, resolved_ret, is_exact) = match resolution {
+                ZonkedResolution::None => continue,
+                ZonkedResolution::Exact(sig) => (sig.0, sig.1, true),
+                ZonkedResolution::Suffix(sig) => (sig.0, sig.1, false),
+            };
+            if resolved_params.len() != func.params.len() {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: zonked signature for '{}' has {} parameters, declaration has {}",
+                        func.qualified_name,
+                        resolved_params.len(),
+                        func.params.len()
+                    ),
+                    func.origin.user_span(),
+                ));
+                continue;
             }
+            // Defensive: a non-exact (suffix) hit must agree with the declared
+            // return type when both are concrete; otherwise it is a misbind to
+            // an unrelated same-suffix function (core_resolved F1).
+            if !is_exact
+                && !contains_unresolved_type(&func.ret)
+                && !contains_unresolved_type(resolved_ret.as_type())
+                && crate::core::fmt_type(&func.ret) != crate::core::fmt_type(resolved_ret.as_type())
+            {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: zonked signature for '{}' (suffix fallback) has return type '{}' but the declaration declares '{}'; refusing to misbind",
+                        func.qualified_name,
+                        crate::core::fmt_type(resolved_ret.as_type()),
+                        crate::core::fmt_type(&func.ret)
+                    ),
+                    func.origin.user_span(),
+                ));
+                continue;
+            }
+            func.params = func
+                .params
+                .iter()
+                .zip(resolved_params.iter())
+                .map(|((name, _), resolved)| (name.clone(), resolved.as_type().clone()))
+                .collect();
+            func.ret = resolved_ret.as_type().clone();
+            zonked_by_node.insert(
+                func.node_id.clone(),
+                (resolved_params.clone(), resolved_ret.clone()),
+            );
         }
         if !errors.is_empty() {
             return Err(errors);

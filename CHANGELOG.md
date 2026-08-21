@@ -63,6 +63,28 @@
   （`signal_guard.rs` 白盒测试）分别锁定「被跳过帧资源在恢复时释放」与「外层帧
   资源不被误释放」。既有 11 个 `signal_guard` 测试 + 92 个 `ffi_` 测试全绿。
 
+### 0.38.118 — core_resolved F1：`from_flow_acc` 后缀回退防误绑 (L2 consistency)
+- 修复 `src/core/resolved/mod.rs` `from_flow_acc` 的 checker→resolved 签名对接
+  workaround：旧实现用 `find_map` 在 `m::A::run` → `A::run` → `run` 的**逐步缩短
+  后缀**上取首个命中，且**仅以参数量**做护栏，导致「同后缀 + 同参数量 + 不同类型」
+  的签名被静默误绑（错误函数的签名流入 resolved IR 与下游 codegen/interp）——一个
+  soundness 漏洞（审计 `devdocs/audit0820/core_resolved.md` F1，HIGH）。
+- 现状核实：checker 与 resolved 目录现已对所有 callable 种类（普通函数、actor 方法、
+  transition 合成方法、impl 方法、嵌套函数）达成一致**模块限定键**，故在合法程序中
+  精确键恒为权威命中，旧 `find_map` 实际等价于精确命中（误绑在合格程序中是 latent 的）。
+  但脆弱的回退本身仍是隐患，须消除。
+- 修复：将解析抽取为 `resolve_zonked_signature`（含 `ZonkedResolution` 枚举），语义：
+  * 节点 id 命中（嵌套 callable）/ 精确限定名命中 → 权威，静默应用；
+  * 后缀回退仅在**恰好一个**候选存在时采用；多个不同后缀候选 → **fail-closed**
+    （`TOOL-RESOLUTION-001`）而非 last-wins 误绑；
+  * 单一后缀命中仍须与声明**返回类型一致**（两边均为具体类型时）才应用，否则
+    fail-closed，杜绝同后缀异类型误绑。
+- 回归：`audit_core_resolved_f1.rs` 内 4 个 `resolve_zonked_signature` 白盒单测
+  （模糊后缀→失败闭合、精确命中权威、单一后缀接受、嵌套节点 id 命中）+ 1 个
+  `core_resolved_f1_actor_method_vs_same_named_top_level_dual`（actor 方法 `A::run`
+  必须绑定自身 transition 签名 `T`，而非同名顶层 `run() -> i32`；resolved IR 直接
+  断言 + VM 运行时锁定）。
+
 ### 0.38.50 — TransitionEpoch 生命周期闭环
 - 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native
   codegen 与 Component ABI；跨边界 Flow 句柄现在可以显式释放，不再只能依赖进程结束
