@@ -161,6 +161,7 @@ pub(crate) mod error_co_h2;
 pub(crate) mod fmt_corpus_eval;
 pub(crate) mod audit_core_resolved_f1;
 pub(crate) mod audit_chk_f02;
+pub(crate) mod audit_ver_f1;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;

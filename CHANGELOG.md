@@ -104,6 +104,21 @@
   `chk_f02_any_value_rejected_as_concrete_let_binding`（PoC：Any 值沉入具体类型被拒）、
   `chk_f02_any_flows_down_as_concrete_value`（伴随：Any 仍可向下当具体值用，map_get 习惯保留）。
 
+### 0.38.121 — VER-F1 复核：假证在当前树不可复现，落锁 sound 行为回归 (L2 诚实)
+ - `audit0820` VER-F1（CRITICAL）主张验证器 `old(param)==param` 无条件下断言且
+   守门只拦 checked 算术，普通 `x=y` 绕过 → `ensures` 假证。实测多组 `mutate` 参数
+   RMW + `old()` 合约 PoC：标量 `x=x&1/x|1/x^7/x<<1`（建模→`SolverUnknown`）、
+   `x=-x`（守门→`NotInTrustedSubset`）、记录字段交换 `p=Rec{a:p.b,b:p.a}` +
+   `old(p.a)`（不可建模→`NotInTrustedSubset`）、`x=x+1`（checked 守门）、
+   `x=x`（恒等→正确 `Proven`）；审计原 PoC `x.sorted()` 依赖已删除的 List 方法、
+   自由函数 RMW 被 checker 拒。结论：验证器现已（a）符号执行标量赋值、（b）对不可
+   建模构造 fail-closed，具体假证在 0.1.8 当前树**不可复现**，疑似已被后续验证器
+   升级缓解。
+ - 落锁：`ver_f1_no_false_proof_on_changing_reassignment` 断言任何"改变值的重赋值
+   + old() 合约"绝不返回 `Proven`；`ver_f1_identity_reassignment_is_correctly_proven`
+   控制组确认恒等重赋值可正确 `Proven`（`src/tests/audit_ver_f1.rs`）。回归若复现
+   "赋值被忽略" 即被捕获。
+
 ### 0.38.120 — audit 复核：parser F-01 为 false-positive（可选链左结合即正确语义）
 - `a?.b.c` 解析为 `Field(OptionalChain(a,"b"),"c")` = `(a?.b).c`，与
   JS/TS/C#/Swift 可选链语义一致，`?.` 在 `.c` 处短路、后续 `.` 为非可选访问。
