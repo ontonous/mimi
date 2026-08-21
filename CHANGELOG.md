@@ -104,6 +104,14 @@
   `chk_f02_any_value_rejected_as_concrete_let_binding`（PoC：Any 值沉入具体类型被拒）、
   `chk_f02_any_flows_down_as_concrete_value`（伴随：Any 仍可向下当具体值用，map_get 习惯保留）。
 
+### 0.38.120 — audit 复核：parser F-01 为 false-positive（可选链左结合即正确语义）
+- `a?.b.c` 解析为 `Field(OptionalChain(a,"b"),"c")` = `(a?.b).c`，与
+  JS/TS/C#/Swift 可选链语义一致，`?.` 在 `.c` 处短路、后续 `.` 为非可选访问。
+  审计 F-01 判定此为"误解析"、主张 `OptionalChain(Field(a,"b"),"c")` 反为非标准
+  （会使 `.c` 误入可选链），照做=回归。同 §0 之 ACT-F1/RT-H2 推翻为误报。
+- 落锁：`audit_fix_parser_optional_chain_dot_assoc_left_to_right` 固定该结合性，
+  防止未来误"修复"回退。无行为变更。
+
 ### 0.38.50 — TransitionEpoch 生命周期闭环
 - 暴露 `flow_drop(handle)` 语言 builtin，贯通 checker、Bytecode VM、Resolved/native
   codegen 与 Component ABI；跨边界 Flow 句柄现在可以显式释放，不再只能依赖进程结束

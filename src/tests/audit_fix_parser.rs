@@ -1179,3 +1179,35 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(20)));
 }
+
+#[test]
+fn audit_fix_parser_optional_chain_dot_assoc_left_to_right() {
+    // Locks standard optional-chaining precedence: `a?.b.c` parses as
+    // `(a?.b).c` == Field(OptionalChain(a, "b"), "c"), NOT
+    // OptionalChain(Field(a, "b"), "c"). The latter would make `.c` part of
+    // the optional chain (non-standard; matches JS/TS/C#/Swift). The audit
+    // F-01 claim that the current tree is "误解析" is itself a misjudgment
+    // (same class as the §0 ACT-F1 / RT-H2 overturns).
+    let src = "a?.b.c";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let expr = crate::parser::Parser::new(tokens)
+        .parse_expr(0)
+        .expect("parse a?.b.c");
+    match expr.unlocated() {
+        crate::ast::Expr::Field(inner, name) => {
+            assert_eq!(name, "c", "outer accessor must be `c`");
+            match inner.unlocated() {
+                crate::ast::Expr::OptionalChain(base, oname) => {
+                    assert_eq!(oname, "b", "optional chain field must be `b`");
+                    assert!(
+                        matches!(base.unlocated(), crate::ast::Expr::Ident(x) if x == "a"),
+                        "optional chain base must be `a`, got: {:?}",
+                        base
+                    );
+                }
+                other => panic!("inner of a?.b.c must be OptionalChain(a,b), got: {:?}", other),
+            }
+        }
+        other => panic!("a?.b.c must be Field(OptionalChain(a,b), c), got: {:?}", other),
+    }
+}
