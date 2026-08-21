@@ -27,7 +27,7 @@
 //!   leaked by the longjmp. This is the same limitation as the archived
 //!   C runtime's `#[no_panic]` implementation.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use std::sync::Mutex;
@@ -209,6 +209,69 @@ fn restore_handlers(saved: &SavedHandlers) {
 /// `RECOVERY_BUF` (so the handler's fast path cannot reuse it; the next
 /// guarded call must re-establish it), clear `IN_GUARDED_CALL`, restore the
 /// saved signal handlers, and then resume the unwind via
+/// # Re-entrant crash resource recovery (F3, 0.38.117)
+///
+/// When an FFI call crashes (C signal) *while already inside another guarded
+/// FFI call* (re-entrant: C callback -> Mimi -> nested FFI), the outer
+/// `call_guarded`'s `siglongjmp` skips every Rust stack frame between the
+/// crash and the outer recovery point — including the inner `call_extern`'s
+/// frame. Any RAII resource held there (notably `FfiGuard`'s `RwLock` guards)
+/// is never dropped -> the lock stays held forever -> a later access to that
+/// `Value` deadlocks.
+///
+/// To make those resources recoverable, `call_extern` pushes its leakable
+/// RAII holdings (currently `ffi_guards`) onto this thread-local stack *before*
+/// entering the crash-prone region. On the outer `call_guarded`'s recovery
+/// (signal or panic), everything pushed at or above `base` (i.e. by frames
+/// that may have been skipped) is drained and dropped. Resources at indices
+/// below `base` belong to the still-alive outer frame and are dropped by that
+/// frame's own scope exit as usual — never double-dropped.
+thread_local! {
+    static CRASH_CLEANUP: RefCell<Vec<Box<dyn std::any::Any>>> = RefCell::new(Vec::new());
+}
+
+/// Push a leakable resource onto the crash-cleanup stack. The caller keeps no
+/// other owner; on normal exit its `CrashCleanupPopper` pops this entry, and on
+/// a skipped-frame crash the outer `call_guarded` recovery drains it.
+pub(crate) fn crash_cleanup_push(b: Box<dyn std::any::Any>) {
+    CRASH_CLEANUP.with(|s| s.borrow_mut().push(b));
+}
+
+/// Number of entries currently on the stack; the outer `call_guarded` records
+/// this as its `base` boundary.
+pub(crate) fn crash_cleanup_base() -> usize {
+    CRASH_CLEANUP.with(|s| s.borrow().len())
+}
+
+/// Drop every entry at or above `base`. Used by the outer `call_guarded`
+/// recovery to release resources whose owning frames were skipped by
+/// `siglongjmp`.
+pub(crate) fn crash_cleanup_drain_above(base: usize) {
+    CRASH_CLEANUP.with(|s| {
+        let mut v = s.borrow_mut();
+        if v.len() > base {
+            v.drain(base..);
+        }
+    });
+}
+
+/// RAII token: on normal (non-skipped) scope exit, pop the top entry. Paired
+/// with a `crash_cleanup_push` that placed our resource at the top. On a
+/// skipped-frame crash this token's `Drop` is itself skipped, so the resource
+/// survives until `crash_cleanup_drain_above` releases it.
+pub(crate) struct CrashCleanupPopper;
+
+impl Drop for CrashCleanupPopper {
+    fn drop(&mut self) {
+        CRASH_CLEANUP.with(|s| {
+            let mut v = s.borrow_mut();
+            if !v.is_empty() {
+                v.pop();
+            }
+        });
+    }
+}
+
 /// `std::panic::resume_unwind` (the caller observes the original panic).
 pub(crate) unsafe fn call_guarded<F, R>(f: F) -> Result<R, String>
 where
@@ -227,6 +290,11 @@ where
 
     // Mark this thread as inside a guarded call.
     IN_GUARDED_CALL.with(|flag| flag.set(true));
+
+    // F3 (0.38.117): record the crash-cleanup stack boundary. Resources pushed
+    // at or above this index belong to frames that may be skipped by a later
+    // siglongjmp; we drain them on recovery.
+    let base = crash_cleanup_base();
 
     let saved = install_handlers();
 
@@ -285,6 +353,11 @@ where
             sig_name, sig
         ))
     };
+
+    // F3 (0.38.117): release resources owned by frames skipped by the
+    // siglongjmp (re-entrant FFI crash). The outer frame's own resources sit
+    // below `base` and are dropped by its own scope exit, not here.
+    crash_cleanup_drain_above(base);
 
     // Clear recovery point, re-entrancy flag, and restore handlers.
     RECOVERY_PTR.store(std::ptr::null_mut(), Ordering::Relaxed);
@@ -440,5 +513,73 @@ mod tests {
         assert_eq!(GUARDED_TID.load(Ordering::Relaxed), 0);
         // Sanity: guard still usable afterwards.
         assert_eq!(guarded(|| 7), Ok(7));
+    }
+
+    /// F3 (0.38.117) regression: a resource registered on the crash-cleanup
+    /// stack by a *skipped* (re-entrant crash) frame must be dropped by the
+    /// outer `call_guarded`'s recovery. Without the registry, the `FfiGuard`
+    /// RwLock guard would leak and later deadlock.
+    #[test]
+    fn crash_cleanup_drains_skipped_reentrant_frame() {
+        struct CrashSentinel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for CrashSentinel {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = dropped.clone();
+        let result = guarded(move || -> i32 {
+            // Simulates the inner call_extern: register a resource, then crash.
+            super::crash_cleanup_push(Box::new(CrashSentinel(flag)));
+            // SAFETY: intentional null deref to trigger SIGSEGV.
+            unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
+        });
+        assert!(result.is_err(), "guarded call must report the crash");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::Relaxed),
+            "crash-cleanup registry must drop resources from skipped (re-entrant) frames"
+        );
+    }
+
+    /// F3 (0.38.117) regression: the outer (still-alive) frame's own resource
+    /// must NOT be dropped by the recovery — only the skipped inner frame's is.
+    /// This guards the `base` boundary so we never release a guard that is
+    /// still legitimately held.
+    #[test]
+    fn crash_cleanup_preserves_outer_frame_resources() {
+        struct CrashSentinel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for CrashSentinel {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let outer_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let inner_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let o = outer_dropped.clone();
+        let i = inner_dropped.clone();
+        // Outer "call_extern" registers its resource first (simulating A_box at base).
+        super::crash_cleanup_push(Box::new(CrashSentinel(o)));
+        let result = guarded(move || -> i32 {
+            // Inner "call_extern" registers and crashes (B_box, skipped).
+            super::crash_cleanup_push(Box::new(CrashSentinel(i)));
+            // SAFETY: intentional null deref to trigger SIGSEGV.
+            unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
+        });
+        assert!(result.is_err());
+        assert!(
+            inner_dropped.load(std::sync::atomic::Ordering::Relaxed),
+            "inner (skipped) resource must be dropped by recovery"
+        );
+        assert!(
+            !outer_dropped.load(std::sync::atomic::Ordering::Relaxed),
+            "outer (live) resource must NOT be dropped by recovery"
+        );
+        // Simulate the outer frame's own scope exit releasing its entry.
+        super::crash_cleanup_drain_above(0);
+        assert!(
+            outer_dropped.load(std::sync::atomic::Ordering::Relaxed),
+            "outer resource dropped after its own scope exit"
+        );
     }
 }
