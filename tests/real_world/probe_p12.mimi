@@ -1,0 +1,15 @@
+// Session 类型：双端协议对真实通信（i64 载荷）+ close
+session ClientProto = !i64 . ?i64 . end
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<ClientProto>()
+    let x: i64 = 10
+    session_send(ch0, x)
+    let n = session_recv(ch1)
+    session_send(ch1, n * 3)
+    let reply = session_recv(ch0)
+    println(n)
+    println(reply)
+    session_close(ch0)
+    session_close(ch1)
+    0
+}

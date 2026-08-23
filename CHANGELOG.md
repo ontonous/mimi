@@ -46,6 +46,13 @@ assert、inject_fault、assert_state、match_panic）从 `std::process::abort()`
 trap_semantics 集成测试 2 项（二进制级 stdout 保留锁）、real_world_cli 绿、
 fmt 干净。
 
+**探针收编（e18 类盲区闭合）**：0.39.135 全特性评测的 p01–p14 正向探针
+入册 `tests/real_world/probe_p*.mimi`——real_world_cli_suite 对全部程序做
+VM/native 输出级对拍（TC-C5/L1），内核卡 e18"编译通过但输出分歧"类缺陷
+从此被 CI 门禁拦截，不再依赖 dispatch 门禁的仅编译成功判定。trap 两项由
+tests/trap_semantics.rs 锁定；FFI 探针维持设计边界登记。并发探针连跑三次
+无 flake。
+
 ### 0.39.135 — 可用性修复：全特性真实可用性探针驱动的四项 P0 双后端分歧 + E0444
 
 AI 全特性评测（17 正向探针 + 6 负例 + 合约验证面，双后端对拍）发现并修复：

@@ -1,0 +1,36 @@
+// 结构化并发：spawn/await/Channel 生产者消费者
+func send_id(ch: Channel<i64>, x: i64) -> i32 {
+    channel_send(ch, x * 10)
+    0
+}
+func produce_n(ch: Channel<i64>) -> i32 {
+    let mut i = 0
+    while i < 5 {
+        channel_send(ch, i)
+        i = i + 1
+    }
+    0
+}
+func main() -> i32 {
+    let ch = channel_new()
+    let t0 = spawn send_id(ch, 7)
+    let t1 = spawn send_id(ch, 8)
+    await t0
+    await t1
+    let v0 = channel_recv(ch)
+    let v1 = channel_recv(ch)
+    println(v0 + v1)
+    let ch2 = channel_new()
+    let producer = spawn produce_n(ch2)
+    let mut sum: i64 = 0
+    let mut k: i64 = 0
+    while k < 5 {
+        sum = sum + channel_recv(ch2)
+        k = k + 1
+    }
+    await producer
+    println(sum)
+    channel_drop(ch)
+    channel_drop(ch2)
+    0
+}

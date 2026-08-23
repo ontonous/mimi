@@ -1,0 +1,19 @@
+// view/mutate 借用 + 记录方法
+type Counter { n: i32, label: string }
+func bump(c: mutate Counter) {
+    c.n = c.n + 1
+}
+func bump_by(c: mutate Counter, d: i32) {
+    c.n = c.n + d
+}
+func read(c: view Counter) -> i32 { c.n }
+func describe(c: view Counter) -> string { c.label + "=" + to_string(c.n) }
+func main() -> i32 {
+    let mut c = Counter { n: 0, label: "cnt" }
+    bump(c)
+    bump(c)
+    bump_by(c, 38)
+    println(read(c))
+    println(describe(c))
+    0
+}

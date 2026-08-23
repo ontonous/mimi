@@ -1,0 +1,16 @@
+// 合约：requires/ensures/math（体内子句）运行时行为 + 有界算术
+func clamp_scale(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1000
+    ensures: result == x * 2
+    x * 2
+}
+func checked_div(a: i32, b: i32) -> i32 {
+    requires: b != 0
+    a / b
+}
+func main() -> i32 {
+    println(clamp_scale(21))
+    println(clamp_scale(500))
+    println(checked_div(100, 4))
+    0
+}

@@ -1,0 +1,17 @@
+// 线性种类：linear T 直通 / linear drop T / List<linear> 整表移交
+func pass<linear T>(x: T) -> T { x }
+func consume_id(t: SystemToken) -> i64 { token_id(t) }
+func dropit<linear drop T>(x: T) { drop(x) }
+func main() -> i32 {
+    let t0 = make_token()
+    let t1 = pass(t0)
+    println(consume_id(t1) > 0)
+    let m = mutex_new(7)
+    let g = mutex_lock(m)
+    dropit(g)
+    drop(m)
+    let xs: List<SystemToken> = [make_token(), make_token(), make_token()]
+    let ys = xs
+    drop(ys)
+    0
+}

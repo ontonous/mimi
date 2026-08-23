@@ -1,0 +1,32 @@
+// 数据面：记录/枚举/match/newtype/嵌套结构
+type Point { x: i32, y: i32 }
+type Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Triangle,
+}
+newtype UserId = i32
+func area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.0 * r * r,
+        Rect(w, h) => w * h,
+        Triangle => 1.5,
+    }
+}
+func main() -> i32 {
+    let p = Point { x: 3, y: 4 }
+    println(p.x + p.y)
+    let c = Circle(2.0)
+    println(area(c))
+    let r = Rect(3.0, 4.0)
+    println(area(r))
+    let t = Triangle
+    println(area(t))
+    let shapes = [t, t]
+    let mut acc = 0.0
+    for s in shapes {
+        acc = acc + area(s)
+    }
+    println(acc)
+    0
+}

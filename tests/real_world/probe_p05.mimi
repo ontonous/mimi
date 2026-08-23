@@ -1,0 +1,43 @@
+// Flow 状态机：多状态驱动 + fails E 回滚 + 字段访问
+flow Order {
+    state Pending { item: string, price: i32 }
+    state Paid { item: string, price: i32, txn: string }
+    state Shipped { item: string, tracking: string }
+    transition pay(Pending, txn_id: string) -> Paid fails string {
+        let p = validate_price(self.price)?
+        return Paid { item: self.item, price: p, txn: txn_id }
+    }
+    transition ship(Paid) -> Shipped {
+        return Shipped { item: self.item, tracking: "TRK-001" }
+    }
+}
+func validate_price(p: i32) -> Result<i32, string> {
+    if p <= 0 {
+        return Err("price must be positive")
+    }
+    if p < 10000 { Ok(p) } else { Err("too-expensive") }
+}
+func main() -> i32 {
+    let o0 = Pending { item: "book", price: 25 }
+    match Order::pay(o0, "TXN-42") {
+        Ok(o1) => {
+            println(o1.txn)
+            let shipped = Order::ship(o1)
+            println(shipped.tracking)
+            println(shipped.item)
+        },
+        Err((src, e)) => {
+            println("unexpected:" + e)
+            println(src.item)
+        }
+    }
+    let bad = Pending { item: "x", price: -1 }
+    match Order::pay(bad, "T-0") {
+        Ok(_) => println("unexpected-ok"),
+        Err((src, e)) => {
+            println("rolled-back-to:" + src.item)
+            println("err:" + e)
+        }
+    }
+    0
+}

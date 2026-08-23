@@ -1,0 +1,41 @@
+// 错误面：Option/Result/?/match 解包
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { Err("div-by-zero") } else { Ok(a / b) }
+}
+func parse_pos(s: string) -> Result<i32, string> {
+    let n: i32 = to_int_safe(s, -1)
+    if n > 0 { Ok(n) } else { Err("not-positive") }
+}
+func find_bigger(xs: List<i32>, t: i32) -> Option<i32> {
+    for x in xs {
+        if x > t { return Some(x) }
+    }
+    None
+}
+func main() -> i32 {
+    match safe_div(10, 2) {
+        Ok(v) => println(v),
+        Err(e) => println(e),
+    }
+    let r = safe_div(1, 0)
+    match r {
+        Ok(_) => println("unexpected"),
+        Err(e) => println("caught:" + e),
+    }
+    let v = safe_div(9, 3)?
+    println(v)
+    match parse_pos("-5") {
+        Ok(n) => println(n),
+        Err(e) => println("rejected:" + e),
+    }
+    match find_bigger([1, 5, 9], 4) {
+        Some(x) => println(x),
+        None => println("none"),
+    }
+    let o: Option<i32> = None
+    match o {
+        Some(x) => println(x),
+        None => println("was-none"),
+    }
+    0
+}

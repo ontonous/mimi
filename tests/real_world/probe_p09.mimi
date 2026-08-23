@@ -1,0 +1,22 @@
+// Actor：spawn + 消息往返；runs Flow 声明（业务状态在 Flow）
+flow Ledger {
+    state Open { total: i32 }
+    transition bump(Open) -> Open {
+        return Open { total: self.total + 1 }
+    }
+}
+actor Calc {
+    func answer() -> i32 {
+        42
+    }
+}
+actor LedgerWorker runs Ledger {
+    func ping() -> i32 { 1 }
+}
+func main() -> i32 {
+    let a = Calc.spawn()
+    println(a.answer())
+    let w = LedgerWorker.spawn()
+    drop(w)
+    0
+}

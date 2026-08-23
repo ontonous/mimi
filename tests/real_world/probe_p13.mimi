@@ -1,0 +1,32 @@
+// stdlib 面：strings/collections/mymath trait 方法/map 内建
+use std::strings
+use std::collections
+use std::mymath
+func main() -> i32 {
+    let s = "Hello,Mimi,World"
+    println(s.to_upper())
+    println(count_char("ababab", "b"))
+    let parts = split(s, ",")
+    println(len(parts))
+    println(join(parts, "|"))
+    println(trim("  pad  ") + "|")
+    let nums = [5, 3, 9, 1, 7]
+    println(sum(nums))
+    let sorted = sort_list(nums)
+    println(sorted[0])
+    println(last(sorted))
+    let evens = filter_evens(nums)
+    println(len(evens))
+    let doubled = map_list(nums, fn(x: i32) -> i32 { x * 2 })
+    println(doubled[1])
+    println(17.is_prime())
+    println(10.fibonacci())
+    println(48.gcd(36))
+    println((-5).abs())
+    let m = map_new()
+    map_set(m, "k1", 11)
+    map_set(m, "k2", 22)
+    println(map_size(m))
+    println(map_get(m, "k1"))
+    0
+}

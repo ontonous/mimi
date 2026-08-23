@@ -1,0 +1,24 @@
+// 泛型与闭包：Free T 泛型、高阶函数、闭包捕获
+func identity<T>(x: T) -> T { x }
+func apply<T>(f: func(T) -> T, x: T) -> T { f(x) }
+func compose_call(f: func(i32) -> i32, g: func(i32) -> i32, x: i32) -> i32 {
+    g(f(x))
+}
+func make_adder(delta: i32) -> func(i32) -> i32 {
+    fn(y: i32) -> i32 { y + delta }
+}
+func twice_action(f: func(i32)) {
+    f(1)
+}
+func main() -> i32 {
+    println(identity::<i32>(99))
+    println(identity("str-also-fine"))
+    let inc = fn(x: i32) -> i32 { x + 1 }
+    println(apply(inc, 10))
+    let dbl = fn(x: i32) -> i32 { x * 2 }
+    println(compose_call(inc, dbl, 5))
+    let add5 = make_adder(5)
+    println(add5(37))
+    twice_action(fn(n: i32) { println(n * 100) })
+    0
+}

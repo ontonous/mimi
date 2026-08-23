@@ -1,0 +1,27 @@
+// 同步内核：算术/字符串/控制流/递归
+func fib(n: i32) -> i32 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+func main() -> i32 {
+    let mut sum = 0
+    let mut i = 0
+    while i < 10 {
+        sum = sum + i
+        i = i + 1
+    }
+    println(sum)
+    let total = for_sum([1, 2, 3, 4, 5])
+    println(total)
+    println(fib(15))
+    let msg = "abc" + "-" + "def"
+    println(msg)
+    if sum == 45 && total == 15 { println("ok-logic") } else { println("bad") }
+    0
+}
+func for_sum(xs: List<i32>) -> i32 {
+    let mut s = 0
+    for x in xs {
+        s = s + x
+    }
+    s
+}

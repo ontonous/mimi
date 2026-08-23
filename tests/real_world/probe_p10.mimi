@@ -1,0 +1,10 @@
+// 能力门禁 I/O：SystemToken 收口的 read_file_guarded + std::fs 写入
+use std::fs
+func main() -> i32 {
+    let t = make_token()
+    let path = "/tmp/opencode/mimi-probes/guarded_sample.txt"
+    let w = write(path, "guarded-content-42")
+    let content = read_file_guarded(path, t)
+    println(content)
+    0
+}

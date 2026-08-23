@@ -1,0 +1,25 @@
+// MutexGuard 恰一次 + 原子变量跨线程计数
+func worker(a: AtomicI64) {
+    let mut i = 0
+    while i < 100 {
+        atomic_i64_fetch_add(a, 1)
+        i = i + 1
+    }
+}
+func main() -> i32 {
+    let m = mutex_new(0)
+    let g = mutex_lock(m)
+    mutex_set(g, 41)
+    let n = mutex_get(g)
+    mutex_unlock(g)
+    drop(m)
+    println(n)
+    let a = atomic_i64_new(0)
+    let t0 = spawn worker(a)
+    let t1 = spawn worker(a)
+    await t0
+    await t1
+    println(atomic_i64_load(a))
+    atomic_i64_drop(a)
+    0
+}
