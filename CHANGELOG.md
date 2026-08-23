@@ -15,6 +15,28 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.138 — 内联 module 硬拒绝（E0445，选项 B 落地）
+
+0.39.137 §6.14 评估的"内联 `module` 死面"按裁决收紧为检查期硬拒绝：
+
+- **E0445（新错误码）**：inline `module` 块在 decl 收集期 fail-loud，
+  诊断带迁移指引（pub 项移入独立 .mimi 文件 + `use` 裸名合并）。
+  check 阶段跳过下降——只报最外层一条，无级联噪声。
+- **动因**：死面静默放行声明、调用点才以三种误导性诊断爆炸
+  （裸名 E0401 / 限定 E0400+E0221 / 模块内互调 E0207 unknown），
+  违反 §4.10 Fail-fast；对 Rust 先验的 AI 代码生成是最坏 DX 组合。
+- **测试台账（§14.4）**：11 个纯模块机器件测试（resolved qualified-id ×5、
+  audit41 NodeId ×2、audit9 actor-wrap、V-3 qualified-keys、FFI walker
+  descent、verify_module_nested）挂 `#[ignore]` 并登记退役里程碑——被测
+  机制随 pre-1.0 选项 C（语法+关键字+AST 管道整体删除）一并退役；
+  v1_2 三个用例重写为 E0445 合同断言（含嵌套单条报错形状锁定）。
+  ignored 计数 7→18。
+- **pre-1.0 门禁立案**：`module` 关键字退役（63→62）与 AST 管道删除
+  为 1.0 API 冻结前必做清理项。
+
+门禁：lib **5666/0/18**、real_world_cli + trap_semantics 绿、探针 16/17、
+fmt/check_language_docs 干净。
+
 ### 0.39.137 — 模块系统裁决落地（spec §6.14）+ VM 僵尸管道删除 + csv::get 改名
 
 **评估结论**：模块系统"文档 vs 实现"之争复核后实为伪命题——AGENTS §5.2

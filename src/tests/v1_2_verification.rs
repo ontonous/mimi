@@ -450,6 +450,7 @@ func f3(x: i32) -> i32 {
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn verify_module_nested() {
     let src = r#"
 module Math {

@@ -385,6 +385,7 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn resolved_function_signatures_are_indexed_by_qualified_name() {
     let file = parse(
         r#"
@@ -977,6 +978,7 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn resolved_mailbox_depth_matches_module_qualified_flow() {
     let file = parse(
         r#"
@@ -2008,6 +2010,7 @@ func main() -> i32 { abs(1) }
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn canonical_flow_ids_include_module_path() {
     let file = parse(
         r#"
@@ -3042,6 +3045,7 @@ fn generated_siblings_with_the_same_inherited_span_use_rule_and_semantic_discrim
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn callable_catalog_uses_the_same_impl_and_nested_ids_as_ownership_ledgers() {
     let source = r#"
 module api {
@@ -3780,6 +3784,7 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn ownership_ledgers_use_module_qualified_owner_ids() {
     let file = parse(
         r#"

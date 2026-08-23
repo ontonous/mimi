@@ -55,10 +55,8 @@ func main() -> i32 {
 
 #[test]
 fn module_nested_types() {
-    // 0.39.137 (spec §6.14): inline modules are a non-contract dead surface.
-    // `Math.origin()` must be rejected by the checker (E0220 field access on
-    // unknown type) — the old assertion here locked a VM-only path that no
-    // checked program could ever reach.
+    // 0.39.138（spec §6.14）：含类型与函数的内联 module 整体 E0445 拒绝；
+    // 类型/函数/成员访问都不再有语言级语义。
     let src = r#"
 module Math {
     type Point {
@@ -76,9 +74,9 @@ func main() -> i32 {
     p.x
 }
 "#;
-    let diags = check_source(src).expect_err("inline-module member access must be rejected");
+    let diags = check_source(src).expect_err("inline module with types must be rejected");
     assert!(
-        diags.iter().any(|d| d.code.as_deref() == Some("E0220")),
-        "expected E0220 for inline-module member access, got: {diags:?}"
+        diags.iter().any(|d| d.code.as_deref() == Some("E0445")),
+        "expected E0445 for inline module block, got: {diags:?}"
     );
 }

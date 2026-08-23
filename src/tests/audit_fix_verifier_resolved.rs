@@ -451,6 +451,7 @@ func main() -> i32 { 0 }
 // =========================================================================
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn audit2_verb_v3_module_same_name_isolation() {
     if !z3_or_skip() {
         return;

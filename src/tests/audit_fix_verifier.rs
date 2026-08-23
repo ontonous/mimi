@@ -708,6 +708,7 @@ func n(x: i64) -> i64 {
 /// descend into Item::Module inner functions — modules were a blind spot for
 /// `--verify-ffi` even after Wave-1 exhausted the statement/expr positions.
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn audit2_vera_ffi_walker_descends_into_modules() {
     if !z3_or_skip() {
         return;

@@ -641,6 +641,7 @@ func main() -> i32 {
 // ─── #9 — module-wrapped actors get checker-finalized signatures ─────────────
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn audit9_module_wrapped_actor_methods_get_finalized_signatures() {
     // HIGH: the checker registers actor methods WITHOUT the module path
     // (`A::run`) while the catalog is module-qualified (`m::A::run`); the

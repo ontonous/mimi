@@ -402,6 +402,7 @@ func main() -> i32 {
 // NodeId and aborted a VALID program with TOOL-RESOLUTION-001.
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn audit41_module_func_actor_method_same_name_no_node_id_collision() {
     // Top-level module function `util::m` and top-level actor method
     // `Counter::m` must coexist: qualified keys keep their NodeIds apart.
@@ -421,6 +422,7 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
 fn audit41_module_nested_actor_same_name_no_node_id_collision() {
     // The actor lives INSIDE the module: both `util::m` (function) and
     // `util::Counter::m` (method) must resolve — the method key must carry

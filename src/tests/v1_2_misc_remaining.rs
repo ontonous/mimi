@@ -417,8 +417,10 @@ func main() -> i32 {
 // 已按真实合同重写为 fail-closed 断言。
 
 #[test]
-fn module_prefix_call_rejected_fail_closed() {
-    // 内联 module 的前缀调用：checker 拒绝（E0400 未定义变量 + E0221 非方法）。
+fn module_inline_block_rejected_e0445() {
+    // 0.39.138（spec §6.14）：内联 module 块在检查期被 E0445 硬拒绝——
+    // 其中的项任何语法都调不到，旧"静默放行声明 + 调用点误导性报错"
+    // 违反 §4.10 fail-fast。诊断必须给迁移指引（文件模块 + use）。
     let src = r#"
 module Math {
     func add(a: i32, b: i32) -> i32 {
@@ -427,35 +429,42 @@ module Math {
 }
 
 func main() -> i32 {
-    Math::add(1, 2)
+    let _ = Math::add(1, 2)
+    0
 }
 "#;
-    let diags = check_source(src).expect_err("module-prefix calls must be rejected");
+    let diags = check_source(src).expect_err("inline module blocks must be rejected");
     assert!(
-        diags.iter().any(|d| d.code.as_deref() == Some("E0400")),
-        "expected E0400 for module-prefix call, got: {diags:?}"
+        diags.iter().any(|d| d.code.as_deref() == Some("E0445")),
+        "expected E0445 for inline module block, got: {diags:?}"
     );
 }
 
 #[test]
-fn module_bare_call_rejected_fail_closed() {
-    // 内联 module 函数不能以裸名调用（未 use 合并）：E0401。
+fn module_nested_inline_block_rejected_e0445() {
+    // 嵌套内联 module 同样整体拒绝（每个 module 项各一条 E0445）。
     let src = r#"
-module Utils {
-    func mul(a: i64, b: i64) -> i64 {
-        a * b
+module Outer {
+    module Inner {
+        func hello() -> i32 { 42 }
     }
 }
-
-func main() -> i32 {
-    let _ = mul(3, 4)
-    0
-}
+func main() -> i32 { 0 }
 "#;
-    let diags = check_source(src).expect_err("bare calls into inline modules must be rejected");
+    let diags = check_source(src).expect_err("nested inline modules must be rejected");
+    // 不下降收集 → 只报最外层一条（fail-fast 无级联噪声）。
+    let e0445: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("E0445"))
+        .collect();
+    assert_eq!(
+        e0445.len(),
+        1,
+        "exactly one E0445 for the outer block: {diags:?}"
+    );
     assert!(
-        diags.iter().any(|d| d.code.as_deref() == Some("E0401")),
-        "expected E0401 for bare inline-module call, got: {diags:?}"
+        e0445[0].message.contains("Outer"),
+        "diagnostic must name the outermost module: {diags:?}"
     );
 }
 

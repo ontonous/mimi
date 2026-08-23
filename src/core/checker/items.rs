@@ -614,11 +614,24 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Module(m) => {
-                self.module_path.push(m.name.clone());
-                for inner in &m.items {
-                    self.collect_item_decls(inner);
-                }
-                self.module_path.pop();
+                // 0.39.138 (spec §6.14, E0445): inline `module` blocks are a
+                // dead surface — their items are unreachable by ANY syntax
+                // (bare calls E0401, qualified calls E0400/E0221, intra-module
+                // calls E0207) and native codegen never compiled them. The old
+                // behavior silently accepted declarations and failed at call
+                // sites with misleading diagnostics, violating §4.10
+                // fail-fast. Reject here; do NOT descend (no qualified
+                // registration → no cascading noise from inner items).
+                self.set_span(m.meta.span);
+                self.emit_code(
+                    crate::diagnostic::codes::E0445,
+                    format!(
+                        "inline `module {}` block is not supported: move its pub items \
+                         into their own .mimi file and add `use {};` (file modules merge \
+                         pub functions under bare names)",
+                        m.name, m.name
+                    ),
+                );
             }
             Item::Actor(actor) => {
                 // v0.31.11: validate `runs FlowName` references an existing flow.
@@ -1419,12 +1432,12 @@ impl<'a> Checker<'a> {
                 self.check_func(f)
             }
             Item::Module(m) => {
+                // 0.39.138: already rejected with E0445 during decl collection
+                // (fail-fast, spec §6.14). Skip descent — inner items were not
+                // registered, so checking them would only produce cascading
+                // noise after the primary diagnostic.
                 self.set_span(m.meta.span);
-                self.module_path.push(m.name.clone());
-                for inner in &m.items {
-                    self.check_item(inner);
-                }
-                self.module_path.pop();
+                let _ = m;
             }
             Item::Actor(actor) => {
                 self.set_span(actor.meta.span);
