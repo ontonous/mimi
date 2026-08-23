@@ -1,0 +1,23 @@
+// Task 05 — 失败分层（Result/Option/? 与 fails E 回滚）
+// 要求：函数边界只有 Result；Flow transition 可 fails E 并归还 source。
+// 正例（canonical solution）：
+flow F {
+    state A { n: i32 }
+    state B { n: i32 }
+    transition go(A) -> B fails string {
+        { return B { n: self.n + 1 } }
+    }
+}
+
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { Err("div by zero") } else { Ok(a / b) }
+}
+
+func main() -> i32 {
+    let r = safe_div(10, 2)
+    match r {
+        Ok(v) => println(v)
+        Err(_) => println("no")
+    }
+    0
+}

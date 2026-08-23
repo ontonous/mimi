@@ -1,0 +1,19 @@
+// Task 06 — 对照 CRUD（记录 + 集合 + 读改写）
+// 要求：记录/枚举数据 + 集合读写；双后端同输出。
+// 正例（canonical solution）：
+type Item { id: i32, name: string }
+
+func main() -> i32 {
+    let items: List<Item> = [
+        Item { id: 1, name: "a" },
+        Item { id: 2, name: "b" },
+    ]
+    let n = len(items)
+    let first = items[0]
+    println(n)
+    println(first.name)
+    let more: List<i32> = [1, 2, 3]
+    let has = contains(more, 2)
+    println(has)
+    0
+}

@@ -1,0 +1,15 @@
+// Task 01 — Flow typestate（跨时间状态机）
+// 要求：定义一个 Order flow，Pending -> Shipped，带 item 字段；transition 返回新状态。
+// 正例（canonical solution）：
+flow Order {
+    state Pending { item: string }
+    state Shipped { item: string }
+    transition ship(Pending) -> Shipped {
+        { return Shipped { item: self.item } }
+    }
+}
+
+func main() -> i32 {
+    println("t01_flow ok")
+    0
+}

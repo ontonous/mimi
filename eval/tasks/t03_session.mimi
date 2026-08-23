@@ -1,0 +1,12 @@
+// Task 03 — Session（双向会话端点，恰一次协议）
+// 要求：typed session 端点 open，send 后 close；协议是线性资源。
+// 正例（canonical solution）：
+session Half = !i32 . end
+
+func main() -> i32 {
+    let ch: SessionChan<Half> = session_open::<Half>()
+    session_send(ch, 9)
+    session_close(ch)
+    println("t03_session ok")
+    0
+}

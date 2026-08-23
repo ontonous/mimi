@@ -1,0 +1,17 @@
+// Task 02 — 线性种类（linear T + SystemToken 恰一次消费）
+// 要求：linear T 直通；make_token 后 token_id 恰一次消费（不消费则编译失败）。
+// 正例（canonical solution）：
+cap FileReadCap;
+
+func pass<linear T>(x: T) -> T { x }
+
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let d = pass(c)
+    drop(d)
+    let t = make_token()
+    let id = token_id(t)
+    drop(id)
+    println("t02_linear ok")
+    0
+}

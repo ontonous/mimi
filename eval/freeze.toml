@@ -1,0 +1,27 @@
+# Phase F — AI 评测冻结清单（0.39.111 起）
+# 每次正式评测前确认本文件；改动任何一项视为评测失效，需重跑并注明。
+
+[freeze]
+compiler_version = "0.1.9-dev (0.39.1xx)"
+compiler_commit = "TBD at run time"
+kernel_card = "devdocs/kernel-card.md"
+kernel_card_sha = "5379819a1f0a4ff3"
+small_step_appendix = "docs/spec/small-step-semantics.md"
+# 触发失败路径（fail-closed）的构造一律记为逃生舱滥用
+escape_hatch_patterns = ["mms{}", "thread_local cap"]
+
+[eval]
+tasks_dir = "eval/tasks"
+task_set = ["t01_flow", "t02_linear", "t03_session", "t04_actor_flow", "t05_failure", "t06_crud"]
+
+[model]
+# 评测对象（模型名/版本、采样参数、温度）在每次评测报告中如实填写。
+name = "TBD"
+sampling = { temperature = "TBD", top_p = "TBD" }
+max_fix_rounds = 5
+
+[metrics]
+first_check_rate = "round-1 check pass / total tasks"
+semantic_test_rate = "semantic pass / total tasks"
+avg_fix_rounds = "mean rounds to first semantic pass (failed tasks = max_fix_rounds)"
+escape_abuse_rate = "tasks using an out-of-kernel construct / total tasks"

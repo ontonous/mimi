@@ -8,6 +8,79 @@
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 
+### 0.39.115 — Phase F 评测 SOP + 失败聚类 + 修复钩子接口
+- **修复钩子接口**（eval/repair_hook.example.sh）：retry_loop 的修复槽——
+  `--task --candidate --diagnostic --round --next` 契约；默认 no-op 拷贝，真实
+  模型替换该脚本即可接入（本环境 ollama 可用但无本地模型、离线拉不到 → 接口
+  就绪、模型留待可拉取环境）。
+- **失败模式聚类**（eval/cluster_failures.py）：对失败任务按 round-1 候选跑
+  `mimi check` 提取错误码，聚类为 check/parse、check/E0256、escape、semantic
+  等；escape 源码级优先。对抗集 4 题正确归类。
+- **评测 SOP**（eval/README.md）：冻结 → 生成候选（只发任务描述）→ 跑 harness
+  /retry → 聚类 → 填报告；指标口径与任务折叠说明；已知边界（离线无模型、
+  token_id 计数器依赖规避）。
+- Phase F 工具链完备：单题门禁/批量/自动重试/修复钩子/聚类/报告，全部入版本库
+  eval/；`src/tests/phase_f.rs` 参考解守卫保持绿。
+- 纯工具/文档切片（无 Rust 行为变更）。
+
+### 0.39.114 — Phase F 自动重试 driver + 工具链入版本库
+- **retry_loop.sh**：逐轮自动重试 driver——round 1 跑初始候选；semantic 未过且
+  未达 max_rounds 时读预置 round_N+1 修复（或接真实 LLM 修复钩子）继续；达上限
+  干净停止。t02 泄漏轨迹 round1（E0256）→ round2（token_id 消费）PASS 复现。
+- **首份正式报告**：`devdocs/v0.39/phase-f-report.md`（基建验证 001）——冻结清单
+  + 四场景 CSV（基线/对抗/修复轨迹/自动重试）+ 聚合表 + 失败模式 + 结论。
+- **工具链入版本库**：评测 harness/任务集/冻结从 gitignored `devdocs/mimi-eval/`
+  迁至 **tracked `eval/`**（scripts/ 风格，25+ 文件已 tracked；gitignore 仅盖
+  devdocs/）——聚合逻辑已修 3 次 bug，必须受版本控制。报告仍按路线落 devdocs/。
+- 聚合场景指标：基线 6/6 全过、对抗正确捕获、修复轨迹 avg_fix_rounds=2.00、
+  自动重试 round2 PASS。
+
+### 0.39.113 — Phase F 修复轮迭代 + 轨迹指标校准
+- **聚合修复**（run_eval.sh）：任务按 `tXX.N.mimi` 剥离 round 后缀折叠为单一任务；
+  `first_check` 取各任务 **round-1** 行（此前误取最后一轮 → 修复轨迹下 first_check
+  错归零）；`semantic`/`escape` 取最后一轮行；未通过计 max_fix_rounds。
+- **修复轨迹演示**（devdocs/mimi-eval/repair-trajectory-demo.md）：hand-authored
+  bad→good 证明 avg_fix_rounds 可测量——
+  - 轨迹 1（t02 线性泄漏）：round1 E0256（help 直接给出修复方向）→ round2 用
+    `token_id(t)` 消费 → 全绿；
+  - 轨迹 2（t05 错误输出 4≠5）：round1 check 过 semantic 不过 → round2 改回 → 全绿；
+  - 集合指标：tasks=2, first_check=0.50, semantic=1.00, avg_fix_rounds=2.00。
+- **三场景回归**：基线（参考解）全 1.00；对抗集（语法/泄漏/mms{}/错输出）正确捕获；
+  修复轨迹（2 轮）正确聚合。harness 具备可复跑、可判别、可测修复轮的完整能力。
+- 纯基建/文档切片。
+
+### 0.39.112 — Phase F 任务集质量自检 + harness 修复
+- **harness 修复**：逃生舱检测移到 check 之前——escape-abuse 是**源码级**判定
+  （用了 mms{}/thread_local 即记滥用），不受 check 成败影响（t03 用 mms{} 即使
+  parse 失败也记 escape=1）。
+- **对抗自检**：4 道典型失败候选验证 harness 分门别类正确捕获——t01 语法
+  （check=0）、t02 线性泄漏（check=0）、t03 mms{}（escape=1）、t05 错误输出
+  （check=1 semantic=0 dual=1）。基线保持 6/6 全过。
+- **参考解守卫**（`src/tests/phase_f.rs`，tracked）：6 道参考解嵌入断言
+  check + 双后端等价 + 无逃生舱构造——编译器回归使评测基线失效必红。
+- **t02 反脆弱**：token_id 输出依赖进程级计数器（并行测试下非 1）→ 参考解改为
+  token 消费后打印固定 marker `t02_linear ok`（线性纪律仍由 check 强制：
+  泄漏 E0256）。修复 phase_f 在全量并行下的偶发失败。
+- lib **5661/0/7** 全绿（含 phase_f 2 例）。
+
+### 0.39.111 — Phase F 评测基建（任务集 + harness + 冻结 + 基线）
+- **任务集**（devdocs/mimi-eval/tasks/，6 题，覆盖内核卡 §1 全类别）：
+  t01 Flow / t02 线性种类 / t03 Session / t04 actor runs Flow / t05 失败分层 /
+  t06 对照 CRUD——每题配规范正例（VM≡native 双后端验证过）与期望输出。
+- **评测 harness**（devdocs/mimi-eval/eval_harness.sh + run_eval.sh）：对单个候选跑
+  check / semantic（输出比对）/ dual（VM≡native）/ escape-hatch（mms{}、
+  thread_local cap），输出可复跑 CSV 行（task,round,check,semantic,dual,
+  escape_abuse,first_check_ok）。
+- **聚合脚本**：首次 check 率、语义测试率、平均修复轮数、逃生舱滥用率。
+- **冻结清单**（freeze.toml）：编译器版本、内核卡 SHA、模型/采样、最大修复轮次
+  （默认 5）；escape-hatch 定义与内核卡同步（cap 是内核线性值，不记滥用）。
+- **基线冒烟**：参考解当候选 → tasks=6，first_check=1.00，semantic=1.00，
+  avg_fix_rounds=1.00，escape_abuse=0.00——harness 产出可复跑数字。
+- **内核卡修正**：`cap` 声明式能力厘清为「内核线性值 / linear T 载体（I/O 权限
+  走 SystemToken）」，非出核。
+- 报告模板：devdocs/v0.39/phase-f-report-template.md。
+- 纯基建/文档切片；lib 门禁不受影响。
+
 ### 0.39.84 — Phase E 收尾回归 + 文档同步
 - **回归**：四项交付全门禁复跑——E0439（verifier 201/0）、MutexGuard（phase_e
   5/0 + 全部 mutex 11/0）、小步语义/内核卡（docs 门禁绿）、**lib 5659/0/7 全绿**。
