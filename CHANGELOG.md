@@ -1,12 +1,15 @@
 # Changelog
 
-## [Unreleased] — 0.1.8-dev
+## [0.1.8] — 2026-08-22
 
-> 0.1.8 开发进行中：语义诚实 + 身份纯度（L1 spawn、生产 dual、Narrow、
-> 值 ABI、Flow S、Actor A、Session K、move-rest、拆 mimispec）。
+> **语义诚实 + 身份纯度**：VM≡native spawn 等价、生产 dual、Narrow、
+> 值 ABI、Flow TransitionEpoch、废止业务 mut、Session 方法化、move-rest、
+> 拆 mimispec。
 > 裁决 `devdocs/kernel-final-verdict-2026-08-18.md`；
 > 执行 `devdocs/v0.38/README.md`。
-> 0.1.7 已发布（2026-08-19，tag `0.1.7`）。
+> 门禁（0.38.122 收官）：lib 5559/0/7、real_world 31/0、stress 62/0、
+> dogfood ok、dispatch 核语料 0 fallback、fmt/docs 绿；十大锁名实相符复核通过。
+> 上一版本：0.1.7（2026-08-19，tag `0.1.7`）。
 
 ### 0.38.115 — codegen_mod F1：逃逸 List<string> claim 跨嵌套 scope 持久化 (L3)
 - 修复 `codegen/mod.rs` 堆 scope 释放中 `claimed_returned_string_lists` /
