@@ -1104,12 +1104,30 @@ impl ActorHandle {
                     }
 
                     // Determine if this is a flow actor or regular actor.
-                    let (runs_flow, flow_state) = {
+                    let (runs_flow, flow_state, actor_name_for_dispatch) = {
                         let actor = worker_inner.read().unwrap_or_else(|e| e.into_inner());
-                        (actor.runs_flow.clone(), actor.flow_state.clone())
+                        (
+                            actor.runs_flow.clone(),
+                            actor.flow_state.clone(),
+                            actor.actor_name.clone(),
+                        )
                     };
 
-                    let result = if let Some(flow_name) = runs_flow {
+                    // 0.39.135 (L1 parity): a runs-flow actor may ALSO declare
+                    // plain methods (`func ping()`); codegen resolves those to
+                    // direct method calls at compile time. The mailbox worker
+                    // previously routed EVERY message through transition
+                    // dispatch for flow actors, so `w.ping()` died with
+                    // "no transition ping from state …" while native returned
+                    // the method result. Methods take precedence; unmatched
+                    // names fall through to transition dispatch.
+                    let has_matching_method = worker_bc
+                        .actor_method_funcs
+                        .contains_key(&(actor_name_for_dispatch, msg.method.clone()));
+
+                    let result = if let Some(flow_name) =
+                        runs_flow.filter(|_| !has_matching_method)
+                    {
                         // Flow actor: dispatch through transition functions.
                         let from_state = match &flow_state {
                             Some(Value::Record(Some(name), _)) => name.clone(),

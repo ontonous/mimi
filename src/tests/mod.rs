@@ -132,6 +132,9 @@ pub(crate) mod phase_e;
 pub(crate) mod phase_f;
 pub(crate) mod phase_g;
 
+// === 0.39.135 可用性修复回归（L1 双后端 + E0444 fail-closed） ===
+pub(crate) mod usability_fixes;
+
 // === Audit regression tests ===
 pub(crate) mod audit_regression;
 pub(crate) mod audit_round2;

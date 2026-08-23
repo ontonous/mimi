@@ -3409,18 +3409,17 @@ impl BytecodeCompiler {
 
             // Newtype constructors: UserId(42), etc.
             if self.newtype_names.contains(name.as_str()) {
-                let rd = fc.proto.alloc_reg();
-                let r_inner = self.compile_expr(fc, &args[0])?;
-                // Newtype is represented as Variant(name, [inner]).
-                let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
-                fc.emit(Op::NewVariant {
-                    rd,
-                    type_name: type_name_idx,
-                    variant: 0,
-                    base: r_inner,
-                    arity: 1,
-                });
-                return Ok(rd);
+                // 0.39.135 (L1 parity): newtypes are transparent in codegen —
+                // registry/types.rs registers the ctor as an identity function
+                // and expr/access.rs treats `.0` as identity. The VM previously
+                // wrapped in Variant(name, [inner]), which diverged at three
+                // observable sites: annotated-let CheckI32 crashed on the
+                // wrapper (E0800), scalar call params received wrapped values,
+                // and println displayed `UserId(42)` where codegen prints `42`.
+                // Compile as identity instead; destructuring
+                // (`let UserId(v) = u`) is special-cased in compile_pattern_test,
+                // mirroring the resolved lowering's direct-scrutinee binding.
+                return self.compile_expr(fc, &args[0]);
             }
 
             // 条款 11 escape hatch: unsafe_cast_protocol(x) is an identity —
@@ -4234,6 +4233,37 @@ impl BytecodeCompiler {
             }
 
             PatternKind::Constructor(name, pats) => {
+                // 0.39.135 (L1 parity): newtype patterns bind transparently —
+                // no tag test, no field extraction. The ctor compiles to
+                // identity (see the newtype ctor path), so the subject IS the
+                // payload. Mirrors the resolved lowering's direct-scrutinee
+                // binding for newtype constructor bindings.
+                if self.newtype_names.contains(name.as_str()) {
+                    let mut binding_map = std::collections::HashMap::new();
+                    let mut combined_test: Option<Reg> = None;
+                    for (_field_name, sub_pat) in pats.iter() {
+                        let (sub_test, sub_bindings) =
+                            self.compile_pattern_test(fc, sub_pat, r_subject)?;
+                        if let Some(r_sub) = sub_test {
+                            match combined_test {
+                                None => combined_test = Some(r_sub),
+                                Some(prev) => {
+                                    let rd_and = fc.proto.alloc_reg();
+                                    fc.emit(Op::And {
+                                        rd: rd_and,
+                                        ra: prev,
+                                        rb: r_sub,
+                                    });
+                                    combined_test = Some(rd_and);
+                                }
+                            }
+                        }
+                        for (n, r) in sub_bindings {
+                            binding_map.insert(n, r);
+                        }
+                    }
+                    return Ok((combined_test, binding_map.into_iter().collect()));
+                }
                 // Check variant tag.
                 let r_test = fc.proto.alloc_reg();
                 let tag_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
@@ -5828,6 +5858,17 @@ impl BytecodeCompiler {
                 }
             }
             PatternKind::Constructor(_name, pats) => {
+                // 0.39.135 (L1 parity): with transparent newtype ctor
+                // compilation the scrutinee IS the inner value — bind
+                // sub-patterns to it directly. (TupleGet previously
+                // unwrapped the Variant wrapper; that wrapper no longer
+                // exists at runtime.)
+                if self.newtype_names.contains(_name.as_str()) {
+                    if pats.len() == 1 {
+                        self.bind_pattern(fc, &pats[0].1, reg);
+                    }
+                    return;
+                }
                 // Newtype pattern: UserId(v) unwraps the inner value.
                 // TupleGet already unwraps Value::Newtype at idx 0.
                 if pats.len() == 1 {

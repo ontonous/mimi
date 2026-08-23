@@ -1321,6 +1321,13 @@ impl<'a> Checker<'a> {
                 } else {
                     self.session_types.insert(s.name.clone(), s.body.clone());
                 }
+                // 0.39.135 (fail-closed, E0444): session payloads travel as
+                // i64 handle slots across the endpoint runtime. Integer
+                // scalars (i32/i64) round-trip on both backends; wider or
+                // heap-shaped payloads (f64/string/bool/records) either hit a
+                // bytecode E0800 at runtime or silently mispack natively.
+                // Reject at the declaration instead of leaking a runtime trap.
+                Self::check_session_payload_types(self, &s.body);
                 // Also expose SessionChan marker type so SessionChan<S> is well-formed.
                 if !self.types.contains_key("SessionChan") {
                     let session_marker_meta = AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
@@ -1345,6 +1352,65 @@ impl<'a> Checker<'a> {
             }
         }
     }
+    /// 0.39.135 (E0444): walk a session protocol body and reject non-integer
+    /// payload types. Only `i32` / `i64` payloads are supported by the
+    /// endpoint runtime (handle-slot transport); everything else must be
+    /// rejected at declaration time rather than trapping at the first
+    /// send/recv. Dual wrappers descend (payloads belong to the wrapped
+    /// protocol); named references resolve through `session_types` when
+    /// available so aliased protocols are validated too.
+    fn check_session_payload_types(&mut self, body: &crate::ast::SessionType) {
+        Self::check_session_payload_types_inner(self, body, &mut std::collections::HashSet::new());
+    }
+
+    fn check_session_payload_types_inner(
+        &mut self,
+        body: &crate::ast::SessionType,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        use crate::ast::SessionType as ST;
+        match body {
+            ST::Located { session, .. } => {
+                Self::check_session_payload_types_inner(self, session, visited)
+            }
+            ST::Send(ty, cont) | ST::Recv(ty, cont) => {
+                let is_integer = matches!(
+                    ty.unlocated(),
+                    crate::ast::Type::Name(n, _) if n == "i32" || n == "i64"
+                );
+                if !is_integer {
+                    let span = match ty {
+                        crate::ast::Type::Located { meta, .. } => meta.span.clone(),
+                        _ => self.diagnostic_span(),
+                    };
+                    self.errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0444,
+                        format!(
+                            "session payload type '{}' is not supported: protocol payloads \
+                             must be integer scalars (i32 or i64); the endpoint runtime \
+                             transports values in i64 handle slots",
+                            fmt_type(ty)
+                        ),
+                        span,
+                    ));
+                }
+                Self::check_session_payload_types_inner(self, cont, visited);
+            }
+            ST::Dual(inner) => Self::check_session_payload_types_inner(self, inner, visited),
+            ST::Name(n) => {
+                // Cycle guard: `session A = B; session B = A` must not recurse
+                // forever here (the dedicated cycle detector reports it
+                // elsewhere). Each named reference is expanded at most once.
+                if visited.insert(n.clone()) {
+                    if let Some(resolved) = self.session_types.get(n).cloned() {
+                        Self::check_session_payload_types_inner(self, &resolved, visited);
+                    }
+                }
+            }
+            ST::End => {}
+        }
+    }
+
     pub(crate) fn check_item(&mut self, item: &Item) {
         self.set_span(Self::item_span(item));
         match item {

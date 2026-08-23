@@ -179,6 +179,7 @@
 | E0441 | Fault is a state, not a value — forbidden as a function return type |
 | E0442 | view/mutate/ref cannot cross a task boundary (spawn, Channel element, Future capture, or actor mailbox) |
 | E0443 | bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch with `flow_pack` |
+| E0444 | session protocol payload must be an integer scalar (i32/i64) — endpoint runtime transports values in i64 handle slots |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |

@@ -2075,6 +2075,17 @@ impl BytecodeVM {
                         Value::Variant(_, payload) if idx == 0 && payload.len() == 1 => {
                             self.set_reg(rd, payload[0].clone());
                         }
+                        // 0.39.135 (L1 parity): with transparent newtype ctor
+                        // compilation the scrutinee IS the inner scalar, and
+                        // `.0` is identity (codegen expr/access.rs D4). The
+                        // checker only admits `.0` on tuple/newtype receivers,
+                        // so an Int/Float/Bool/String reaching here under
+                        // idx 0 is exactly a transparent-newtype projection.
+                        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_)
+                            if idx == 0 =>
+                        {
+                            self.set_reg(rd, v);
+                        }
                         other => {
                             return Err(InterpError::new(format!(
                                 "tuple get: expected Tuple, got {}",

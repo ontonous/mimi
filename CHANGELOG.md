@@ -15,6 +15,42 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.135 — 可用性修复：全特性真实可用性探针驱动的四项 P0 双后端分歧 + E0444
+
+AI 全特性评测（17 正向探针 + 6 负例 + 合约验证面，双后端对拍）发现并修复：
+
+- **P0-1/2 newtype 透明化（VM 侧）**：构造器恒等化（对齐 codegen
+  `registry/types.rs` identity 注册）+ 解构模式直绑 scrutinee + `.0` 标量投影
+  恒等。修复三处分歧：注解解包 `let v: i32 = u` VM E0800 崩溃、
+  `println(u)` 印 `UserId(42)` vs native `42`、newtype 实参进标量形参崩溃。
+- **P0-3 actor 方法返回 string（native）**：mailbox 结果打包在
+  `emit_actor_method_epilogue` 缺失 `claim_string_return_value`——隐式尾表达式
+  的 concat 缓冲在作用域清理解放后才返回（悬垂 {ptr,len}），mailbox 调用方
+  观察到空串而 VM 打印真值；**内核卡 e18 正例本身即此形状**，dispatch 门禁
+  只验编译成功未查输出等价的盲区由此暴露。
+- **P0-4 泛型单态化记录按值 ABI（native）**：mono 实例签名按值收
+  `{fields}`，调用点却传 alloca 指针——LLVM 把地址位重解释为字段数据，
+  `pass<Plain>(p); println(q.v)` 输出垃圾/段错误。泛型调用点对具名聚合
+  参数补加载（字符串除外，仍走 C 指针包装路径）。
+- **语义对齐 runs-Flow actor 方法分发（VM）**：mailbox worker 此前把
+  runs-flow actor 的全部消息路由进转移分发，普通方法
+  （`func ping()`）死于 "no transition" 而 native 直呼方法。改为方法名
+  匹配优先、未匹配回落转移分发（与 codegen 编译期解析一致）。
+- **E0444（新错误码）：session 协议载荷必须整数标量（i32/i64）**。
+  f64/string 载荷此前通过检查但在 VM 运行期 E0800 / native 静默错包；
+  现于声明处 fail-closed。带环引用守卫（A=B;B=A 不再爆栈）。
+- **回归收编**：`src/tests/usability_fixes.rs` 七项 L1 双后端测试 +
+  E0444 负例锁。
+
+裁决记录：Free 类型实例化 `linear T` 泛型是**合法单态化**
+（`linear_kind_monomorphization_multi_instantiation` 锁定 cap+i32 双实例），
+内核卡 §2 的 "Free→线性位置 → E0432" 指具体线性签名位置而非泛型实例化——
+反向 kind 检查已实现并撤销。已知边界维持：trap 双后端退出码语义
+（VM rc=1 vs native SIGABRT）、裸 `write_file` 内建 resolved 委托硬错
+（stdlib 包装可用）、VM FFI 需 MIMI_FFI_LIB。
+
+门禁：lib **5671/0/7**（含 7 项新回归）、fmt 绿。
+
 ### 0.39.131 — 语义 F4 修复：小步语义补齐锁清单覆盖
 - `docs/spec/small-step-semantics.md` 新增四节（253→330 行，仍 ≤20 页）：
   - §8 消耗/构造（线性值由构造器产生、被恰一个合法消费者消解，L 账本镜像）；

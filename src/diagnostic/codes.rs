@@ -142,6 +142,7 @@ pub const E0440: &str = "E0440"; // Fault is not a legal transition source (only
 pub const E0441: &str = "E0441"; // Fault is a state, not a value — forbidden as a function return type (裁决 3, 0.36.7)
 pub const E0442: &str = "E0442"; // view/mutate/ref cannot cross a task boundary (spawn / Channel / Future / mailbox)
 pub const E0443: &str = "E0443"; // bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch
+pub const E0444: &str = "E0444"; // session protocol payload must be an integer scalar (i32/i64)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -400,6 +401,7 @@ pub fn describe(code: &str) -> &'static str {
         E0441 => "Fault is a state, not a value: a function may not return the Fault sink (phase A verdict 3). Fault is entered by unexpected control-flow breakage (undeclared event / trap / panic / FFI crash) and may only be left via `recover`/`reset`; expected failures travel as `Result<T, E>` values instead",
         E0442 => "view/mutate/ref cannot cross a task boundary (spawn, Channel element, Future capture, or actor mailbox). Synchronous func parameters (including DSP mutate) are not a task boundary",
         E0443 => "bare Flow record cannot cross Channel, FFI, or an actor mailbox: pack a TransitionEpoch with flow_pack. Local self-loops strip the epoch (clause 5.1 silent stay)",
+        E0444 => "session protocol payload must be an integer scalar (i32 or i64): the endpoint runtime transports values in i64 handle slots. Wider or heap-shaped payloads (f64/string/bool/records) cannot cross a send/recv; pack them out-of-band (e.g. via Channel) or encode as integers",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -628,6 +630,7 @@ mod tests {
             super::E0441,
             super::E0442,
             super::E0443,
+            super::E0444,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,

@@ -7076,6 +7076,60 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Some(function) = self.module.get_function(&mangled) {
+            // 0.39.135 (L1 parity): monomorphized instances take user records
+            // and newtypes BY VALUE, while record expressions compile to
+            // alloca pointers. Passing the bare pointer where the callee
+            // expects {fields} made LLVM reinterpret address bits as field
+            // data — `let q = pass(p); println(q.v)` printed garbage (and
+            // could segfault). Load the struct through the pointer when the
+            // substituted param is a named user aggregate. Strings are
+            // excluded: their raw-C-pointer arg form is wrapped later by
+            // coerce_args_to_function.
+            if !callee_map.is_empty() {
+                if let Some(generic_def) = self.func_defs.get(name).cloned() {
+                    for (i, gp) in generic_def.params.iter().enumerate() {
+                        if i >= compiled_args.len() {
+                            break;
+                        }
+                        let substituted = self.resolve_type(&gp.ty);
+                        let is_named_aggregate = match substituted.unlocated() {
+                            Type::Name(n, args_) if args_.is_empty() => !matches!(
+                                n.as_str(),
+                                "string"
+                                    | "i8"
+                                    | "i16"
+                                    | "i32"
+                                    | "i64"
+                                    | "u8"
+                                    | "u16"
+                                    | "u32"
+                                    | "u64"
+                                    | "usize"
+                                    | "isize"
+                                    | "f32"
+                                    | "f64"
+                                    | "bool"
+                                    | "char"
+                            ),
+                            _ => false,
+                        };
+                        if is_named_aggregate
+                            && matches!(compiled_args[i], BasicValueEnum::PointerValue(_))
+                        {
+                            if let Some(pt) = function.get_nth_param(i as u32) {
+                                if let BasicTypeEnum::StructType(_) = pt.get_type() {
+                                    let pv = match compiled_args[i] {
+                                        BasicValueEnum::PointerValue(pv) => pv,
+                                        _ => continue,
+                                    };
+                                    compiled_args[i] =
+                                        self.build_load(pt.get_type(), pv, "mono_byval_arg")?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Generic functions were skipped during pre-call coercion; the
             // monomorphized function has concrete parameter types, so coerce
             // the already-compiled args against them now (int width, int↔float).

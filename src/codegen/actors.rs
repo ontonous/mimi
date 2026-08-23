@@ -1497,6 +1497,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => self.load_return_value_if_needed(last_val)?,
         };
+        // 0.39.135 (L1 parity): claim heap-backed scalar-string returns
+        // *before* free_heap_scopes — mirrors func.rs emit_implicit_return.
+        // Without this, an implicit tail expression like `"hi " + name`
+        // left the concat buffer in the scope's heap-alloc registry; the
+        // epilogue freed it at the boundary and returned a dangling
+        // {ptr,len} — mailbox callers observed an empty/garbage string
+        // while the VM printed the real value (kernel-card e18 divergence).
+        let last_val = self.claim_string_return_value(last_val, ret_type, last_expr, vars)?;
         // Claim returned List variables' data buffers & literals before flushing heap scopes.
         self.claim_returned_lists(last_expr, vars);
         let last_val = self.claim_returned_list_literals(last_val, last_expr)?;
