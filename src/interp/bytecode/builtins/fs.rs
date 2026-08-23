@@ -20,6 +20,13 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_write_file,
     });
+    // Phase D (0.39.75): 收 cap 的 fs API（SystemToken 能力门禁，运行时忽略）。
+    reg.register(BuiltinDesc {
+        name: "read_file_guarded",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_read_file_guarded,
+    });
     reg.register(BuiltinDesc {
         name: "append_file",
         arity: 2,
@@ -105,6 +112,13 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_getenv,
     });
+    // Phase D (0.39.75): 收 cap 的 env API（SystemToken 能力门禁，运行时忽略）。
+    reg.register(BuiltinDesc {
+        name: "get_env_guarded",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_get_env_guarded,
+    });
     reg.register(BuiltinDesc {
         name: "set_env",
         arity: 2,
@@ -180,6 +194,12 @@ fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
             vec![Value::String(Arc::new(e.to_string()))],
         )),
     }
+}
+
+/// Phase D (0.39.75): 收 cap 的 fs API——path 为 args[0]，SystemToken 能力门禁
+/// 在 args[1]（运行时忽略：能力由 checker/CFG 线性消费保证）。语义同 read_file。
+fn builtin_read_file_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    builtin_read_file(_vm, &args[0..1])
 }
 
 fn builtin_write_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -344,6 +364,12 @@ fn builtin_args(vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpErr
         .map(|s| Value::String(Arc::new(s.clone())))
         .collect();
     Ok(Value::List(Arc::new(args)))
+}
+
+/// Phase D (0.39.75): 收 cap 的 env API——name 为 args[0]，SystemToken 能力
+/// 门禁在 args[1]（运行时忽略）。语义同 getenv。
+fn builtin_get_env_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    builtin_getenv(_vm, &args[0..1])
 }
 
 fn builtin_getenv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {

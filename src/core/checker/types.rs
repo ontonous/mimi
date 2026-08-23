@@ -189,6 +189,11 @@ impl<'a> Checker<'a> {
             "Channel".into(),
             "Mutex".into(),
             "MutexGuard".into(),
+            // 0.1.9 Phase D (0.39.72): 线性 token 能力（move-only，i64 运行时柄）。
+            // 名 SystemToken 避开用户 `cap Token` 声明。
+            "SystemToken".into(),
+            // 0.1.9 Phase D (0.39.73): 线性 token 通道（跨任务 move，i64 运行时柄）。
+            "TokenChannel".into(),
         ]
     }
 

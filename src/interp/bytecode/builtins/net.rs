@@ -67,6 +67,13 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_http_get,
     });
+    // Phase D (0.39.76): 收 cap 的 net API（SystemToken 能力门禁，运行时忽略）。
+    reg.register(BuiltinDesc {
+        name: "http_get_guarded",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_http_get_guarded,
+    });
     reg.register(BuiltinDesc {
         name: "http_post",
         arity: 2,
@@ -754,6 +761,12 @@ fn is_private_ipv4(v4: u32) -> bool {
     // exactly 0xac1 when >> 20 (16 contiguous /16 blocks; a <= upper bound
     // would wrongly admit 172.32+).
     (v4 >> 20) == 0xac1
+}
+
+/// Phase D (0.39.76): 收 cap 的 net API——url 为 args[0]，SystemToken 能力
+/// 门禁在 args[1]（运行时忽略）。语义同 http_get。
+fn builtin_http_get_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    builtin_http_get(_vm, &args[0..1])
 }
 
 fn builtin_http_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {

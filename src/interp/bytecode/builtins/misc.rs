@@ -6,6 +6,28 @@ use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 use std::sync::Arc;
 
+/// Phase D (0.39.71): global unique token id. Monotonic counter shared across
+/// the whole interpreter process; every `make_token()` returns a distinct id.
+static TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// `make_token() -> i64` — globally unique token id (Phase D foundation).
+fn builtin_make_token(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
+    let id = TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(Value::Int(id as i64))
+}
+
+/// `token_id(t: Token) -> i64` — 消费 token、取其唯一 id（Phase D 0.39.72）。
+fn builtin_token_id(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    match args.first() {
+        Some(Value::Int(id)) => Ok(Value::Int(*id)),
+        Some(other) => Err(InterpError::new(format!(
+            "token_id expects a SystemToken (i64 handle), found {}",
+            crate::interp::value::type_name(other)
+        ))),
+        None => Err(InterpError::new("token_id expects 1 argument".to_string())),
+    }
+}
+
 pub fn register(reg: &mut BuiltinRegistry) {
     // JSON
     reg.register(BuiltinDesc {
@@ -100,6 +122,18 @@ pub fn register(reg: &mut BuiltinRegistry) {
         arity: 0,
         category: BuiltinCategory::Io,
         func: builtin_input,
+    });
+    reg.register(BuiltinDesc {
+        name: "make_token",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_make_token,
+    });
+    reg.register(BuiltinDesc {
+        name: "token_id",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_token_id,
     });
     reg.register(BuiltinDesc {
         name: "input_float",

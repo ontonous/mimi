@@ -362,6 +362,50 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.expect_basic_value(&call, "mimi_random")
     }
 
+    /// Phase D (0.39.71): `make_token() -> i64` — globally unique token id.
+    /// Native calls the shared runtime export (same monotonic counter family as
+    /// the bytecode VM's TOKEN_COUNTER, per-process).
+    pub(super) fn compile_make_token(
+        &self,
+        _args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let make_token_fn = self
+            .module
+            .get_function("mimi_make_token")
+            .unwrap_or_else(|| {
+                let ty = i64_ty.fn_type(&[], false);
+                self.module.add_function(
+                    "mimi_make_token",
+                    ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let call = self
+            .builder
+            .build_call(make_token_fn, &[], "make_token_call")
+            .map_err(|e| format!("make_token error: {e}"))?;
+        self.expect_basic_value(&call, "mimi_make_token")
+    }
+
+    /// Phase D (0.39.72): `token_id(t: Token) -> i64` — 消费 token、取其唯一 id。
+    /// SystemToken 在运行时是 i64 柄，直接透传第一个实参。
+    pub(super) fn compile_token_id(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let value = args
+            .first()
+            .copied()
+            .ok_or_else(|| format!("token_id expects 1 argument (a SystemToken)"))?;
+        match value {
+            BasicMetadataValueEnum::IntValue(iv) => Ok(iv.into()),
+            _ => Err(crate::error::CompileError::LlvmError(
+                "token_id expects a SystemToken (i64 handle)".to_string(),
+            )),
+        }
+    }
+
     pub(super) fn compile_pi(
         &self,
         _args: &[BasicMetadataValueEnum<'ctx>],

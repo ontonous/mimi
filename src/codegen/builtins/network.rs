@@ -605,6 +605,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(call_try_basic_value(&result).ok_or("mimi_close returned void")?)
     }
 
+    /// Phase D (0.39.76): 收 cap 的 net API——SystemToken 门禁在 args[1]
+    /// （运行时忽略），url 在 args[0]。复用 http_get 核心。
+    pub(super) fn compile_http_get_guarded(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "http_get_guarded expects 2 arguments (url, a SystemToken capability)".to_string(),
+            ));
+        }
+        self.compile_http_get(&args[0..1])
+    }
+
     pub(super) fn compile_http_get(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

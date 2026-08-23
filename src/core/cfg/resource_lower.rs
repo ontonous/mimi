@@ -1483,6 +1483,9 @@ impl<'a> ActionEmitter<'a> {
                             "len" | "is_empty" | "map_size" | "keys"
                         )
                 );
+                // Phase D (0.39.73): TokenChannel 是可 Copy 通道（非线性）——
+                // 只有 SystemToken 载荷线性，跨任务 move 由 token 承担；通道
+                // 共享无需借用特殊处理。
                 let receiver_borrowed =
                     matches!(call.permission, Some(Permission::View | Permission::Mutate));
                 let transform_handled = matches!(call.permission, Some(Permission::Mutate))

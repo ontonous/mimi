@@ -8516,6 +8516,8 @@ fn build_canonical_function_signatures(
             "Set",
             "StatResult",
             "SystemTrace",
+            "SystemToken",
+            "TokenChannel",
             "Tuple",
             "Type",
             "TypeInfo",

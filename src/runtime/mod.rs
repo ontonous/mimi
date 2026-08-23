@@ -1939,6 +1939,15 @@ pub unsafe extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     handle::with_map(handle, 0, |m| m.inner.len() as i64)
 }
 
+/// Phase D (0.39.71): global unique token id for the native backend. Each call
+/// returns a distinct monotonic id shared across the process.
+static MIMI_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_make_token() -> i64 {
+    MIMI_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64
+}
+
 ///
 /// # Safety
 /// `handle` must be a live map handle and `key` must be a valid

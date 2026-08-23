@@ -8,6 +8,108 @@
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 
+### 0.39.77 — Phase D 阶段收尾：迁移标记 + 交接文档
+- **迁移标记**（`phase-d-plan.md` §6）：fs/net/env 推荐收 cap 路径
+  （read_file_guarded / http_get_guarded / get_env_guarded）vs 既有不收 cap
+  面（标迁移方向，0.1.9 内保持兼容不删）。
+- **交接状态**（§7）：Phase D 0.39.71-76 全部完成（token 唯一 id → 线性
+  SystemToken → TokenChannel 跨任务 move → 泛型/容器集成 → fs/net/env 收 cap
+  API 各一条）；lib 5646/0/7；phase_d 19 例。待续：0.39.77 起迁移收尾、
+  mailbox token 面、thread-local 废止、Phase E/F/G。
+- **技术债/已知限制**：token 唯一性进程内；收 cap 现为调用消费语义（借用变体
+  后续）；网络 I/O 受 SSRF 保护（cap 面以类型/线性面为证）。
+- 纯文档切片，无行为变更。
+
+### 0.39.76 — 收 cap 的 net API：http_get_guarded（fs/net/env 各一条达成）
+- **实现**：`http_get_guarded(url, t: SystemToken) -> string`（net 域收 cap）。
+  t 为 SystemToken 能力门禁，被调用消费；运行时忽略（线性由 checker/CFG 保证）；
+  复用 http_get 核心（interp wrapper + codegen compile_http_get_guarded 复用）。
+- **至此 Phase D「fs/net/env 至少各一条 API 收 cap」达成**：
+  fs `read_file_guarded` / net `http_get_guarded` / env `get_env_guarded`。
+- **语义**：无 token → E0242；调用后旧 token 复用 → E0304；check 通过。
+  网络 I/O 在本环境被 SSRF 保护阻断，运行时接线以 native 可编译为证。
+- **测试**：`src/tests/phase_d.rs` 19 例（+3：check 通过、缺 token E0242、
+  消费后复用 E0304）。
+- lib 5646/0/7 全绿。
+
+### 0.39.75 — 收 cap 的 fs/env API（SystemToken 能力门禁）
+- **实现**（fs + env 两域各一条收 cap API）：
+  - `read_file_guarded(path, t: SystemToken) -> Result<string,string>`（fs）
+  - `get_env_guarded(name, t: SystemToken) -> Result<string,string>`（env）
+  - t 为 SystemToken 能力门禁，被调用**消费**（每次授权一次受保护操作）；
+    运行时忽略（能力由 checker/CFG 线性保证）；复用 read_file/getenv 核心。
+- **接线**：checker（builtins 列表/arity + infer 双臂）+ interp（wrapper + 注册）
+  + codegen（compile_*_guarded 复用核心 + 分发 + 可调用列表）。
+- **语义**：无 token → E0242；调用后旧 token 绑定再使用 → E0304（已消费）；
+  双后端一致。
+- **迁移**：既有不收 cap 的 `read_file`/`getenv` 保持；guarded 变体为收 cap
+  推荐路径（文档标注迁移方向）。
+- **测试**：`src/tests/phase_d.rs` 16 例（+4：read_file_guarded 双后端、
+  get_env_guarded 双后端、缺 token E0242、消费后复用 E0304）。
+- lib 5643/0/7 全绿。
+
+### 0.39.74 — SystemToken × 线性泛型 + 容器组合集成（token 基础收口）
+- **集成验证**：SystemToken 与 Phase C 线性泛型面无缝协作——
+  - `linear T` 泛型直通（transfer-only）双后端；
+  - `List<SystemToken>` 构建 + 定向头提取（`v[0]`）+ 整体 drop 双后端；
+  - `List<SystemToken>` 整体经 `linear T` 直通后仍可提取元素；
+  - Free-T 泛型 → E0432（种类不匹配，token 线性面正确）。
+- token 成为首个真实线性能力消费者，Phase C `linear T` 面 + Phase D token 面
+  交汇闭环。
+- **测试**：`src/tests/phase_d.rs` 12 例（+4 集成）。纯测试切片，无生产代码变更。
+- lib 5639/0/7 全绿（首轮 parallel flake：loader_std_strings_plus_fs_merge 单测
+  通过、重跑全绿，确认非本轮回归）。
+
+### 0.39.73 — TokenChannel：SystemToken 跨通道转移（跨任务 move）
+- **实现**：`token_channel_new() -> TokenChannel`、`token_channel_send(ch, t)`、
+  `token_channel_recv(ch) -> SystemToken`——SystemToken 经通道整体转移：
+  - checker：TokenChannel 进 builtin_type_names；infer 三臂（new 返 TokenChannel、
+    send 检 TokenChannel+SystemToken、recv 返 SystemToken）；
+  - resolved：TokenChannel 进 BUILTIN_NOMINALS（builtin:type:TokenChannel）；
+  - interp/codegen：透传 channel i64 柄（token_channel_* 复用 channel_* 运行时）。
+- **语义裁决**：TokenChannel **可 Copy 共享**（同 Channel）——只有 SystemToken
+  线性。跨任务 move + 旧端失效由 SystemToken 承担：send 消费 t（move 入通道，
+  旧绑定死 → E0304），recv 返回全新 SystemToken 义务（须消费）。同一通道可多
+  token 往返。
+- **CFG 实证**：初版把 TokenChannel 当线性 → `let ch2 = ch` 移动 + 借用通道
+  的 liveness 检查缺口（tch6 假通过）；改可 Copy 后语义自洽（通道共享合法，
+  token 线性独立）。
+- **测试**：`src/tests/phase_d.rs` 8 例（新增 send/recv 双后端、use-after-send
+  E0304、通道共享 Copy）。
+- lib 5635/0/7 全绿。
+
+### 0.39.72 — 线性 SystemToken 能力类型（move-only，旧端失效）
+- **实现**：`make_token()` 现返回 **线性 `SystemToken`**（非 Copy、move-only），
+  `token_id(t: SystemToken) -> i64` 消费 t 取唯一 id：
+  - checker：`SystemToken` 进 `builtin_type_names`；`is_linear_surface_type` 识别；
+  - infer：make_token → `Type::Name("SystemToken")`；token_id 臂（消费 t、返 i64）；
+  - resolved：`SystemToken` 进 BUILTIN_NOMINALS（`builtin:type:SystemToken`）；
+  - ir：`nominal_is_linear()` 认 `builtin:type:SystemToken` → CFG 作为线性资源追踪；
+  - interp/codegen：token_id 透传 i64 柄；make_token 双后端仍返唯一 id。
+- **语义（旧端失效）**：move 后旧绑定再使用 → E0304；弃置不消费 → E0304/E0256；
+  显式 drop → 消费；跨函数整体转移 → 直通。均双后端验证。
+- **命名裁决**：内置 token 型命名 **SystemToken**，避开用户 `cap Token` 声明
+  （audit r4 别名 fail-closed 回归完好，E0407 保持）。
+- **测试**：`src/tests/phase_d.rs` 5 例（唯一性双后端、drop、use-after-move E0304、
+  弃置拒、跨函数 move 双后端）。
+- lib 5632/0/7 全绿。
+
+### 0.39.71 — Phase D 启动：`make_token()` 全局唯一 token id（cap/std 首切片）
+- **规划**：`devdocs/v0.39/phase-d-plan.md`（0.39.71-90 切片清单、语义决策、
+  爆炸半径、风险护栏）。
+- **实现**：`make_token() -> i64` 全局唯一 token id——每次调用返回进程内单调
+  计数器的不同 id：
+  - checker `builtins.rs` 注册（is_builtin_callable + arity 0）；
+  - infer `simple.rs` 零参工厂臂（返回 i64，与 channel_new 同款）；
+  - interp `misc.rs` `builtin_make_token`（`TOKEN_COUNTER` AtomicU64）；
+  - codegen `compile_make_token` + native runtime `mimi_make_token`
+    （`MIMI_TOKEN_COUNTER` AtomicU64）。
+- **语义决策**：唯一性 ≠ 线性——`i64` 是 Copy 型。线性 token 能力类型
+  （move-only、跨任务 move、旧端失效）为 0.39.72-73 切片。
+- **测试**：`src/tests/phase_d.rs` 2 例——唯一性（VM+native 双后端 `1,2,3,distinct`）、
+  普通 i64 可用性。
+- lib 5629/0/7 全绿。
+
 ### 0.39.64 — Phase C 收尾：文档/注释终态化 + L 合同定稿
 - `dual_backend.rs` 旧 0.36.39「线性黑盒直通」注释块替换为 **Phase C 终态语义**
   （显式种类 `linear T`/`linear drop T`、Free T+线性一律 E0432、E0841 保留 +

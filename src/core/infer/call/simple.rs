@@ -541,6 +541,32 @@ impl<'a> Checker<'a> {
                         Box::new(Type::Name("string".into(), vec![])),
                     );
                 }
+                // Phase D (0.39.75): 收 cap 的 env API——get_env_guarded(name, t)。
+                // t: SystemToken 能力门禁，被调用消费。
+                "get_env_guarded" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "get_env_guarded expects 2 arguments (name, a SystemToken capability)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        let cap_ty = self.infer_expr(&args[1], scopes);
+                        if cap_ty != Type::Name("SystemToken".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "get_env_guarded capability slot expects SystemToken, found {}",
+                                    fmt_type(&cap_ty)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("string".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
                 "to_json" => {
                     if args.len() != 1 {
                         self.emit_code(
@@ -1174,7 +1200,10 @@ impl<'a> Checker<'a> {
                 // fresh channel, actor_spawn_count()/actor_max_children()
                 // query runtime-wide counters — none take a tracked handle,
                 // so the 1-arg guard above must not apply to them.
-                "channel_new" | "actor_spawn_count" | "actor_max_children" => {
+                // Phase D (0.39.71): make_token() returns a globally unique
+                // token id (i64).
+                "channel_new" | "actor_spawn_count" | "actor_max_children" | "make_token"
+                | "token_channel_new" => {
                     if args.len() != 0 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
@@ -1185,8 +1214,24 @@ impl<'a> Checker<'a> {
                         "channel_new" => {
                             Type::Name("Channel".into(), vec![Type::Name("i64".into(), vec![])])
                         }
+                        // Phase D (0.39.72): make_token 返回线性 SystemToken（运行时 i64 柄）。
+                        "make_token" => Type::Name("SystemToken".into(), vec![]),
+                        // Phase D (0.39.73): 线性 token 通道（跨任务 move，运行时 i64 柄）。
+                        "token_channel_new" => Type::Name("TokenChannel".into(), vec![]),
                         _ => Type::Name("i64".into(), vec![]),
                     };
+                }
+                // Phase D (0.39.72): token_id(t: SystemToken) -> i64 — 消费 t、取唯一 id。
+                "token_id" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "token_id expects 1 argument (a SystemToken)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i64".into(), vec![]);
                 }
                 "broadcast" => {
                     // broadcast(list, method_name) -> List (Vec of Result / values)
@@ -1509,6 +1554,63 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("i64".into(), vec![]);
                 }
+                // Phase D (0.39.73): token_channel_recv(ch: TokenChannel) -> SystemToken —
+                // 返回一个全新 SystemToken 义务（须消费，CFG 追踪线性结果）。
+                "token_channel_recv" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "token_channel_recv expects 1 argument (a TokenChannel)",
+                        );
+                    } else {
+                        let handle = self.infer_expr(&args[0], scopes);
+                        let ch_ty = Type::Name("TokenChannel".into(), vec![]);
+                        if handle != ch_ty {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "token_channel_recv expects TokenChannel, found {}",
+                                    fmt_type(&handle)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Name("SystemToken".into(), vec![]);
+                }
+                // Phase D (0.39.73): token_channel_send(ch: TokenChannel, t: SystemToken) —
+                // 通道被使用（不消费），t 被整体转移（move）进通道。
+                "token_channel_send" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "token_channel_send expects 2 arguments (a TokenChannel, a SystemToken)",
+                        );
+                    } else {
+                        let ch = self.infer_expr(&args[0], scopes);
+                        let ch_ty = Type::Name("TokenChannel".into(), vec![]);
+                        if ch != ch_ty {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "token_channel_send expects TokenChannel, found {}",
+                                    fmt_type(&ch)
+                                ),
+                            );
+                        }
+                        let payload = self.infer_expr(&args[1], scopes);
+                        let tok_ty = Type::Name("SystemToken".into(), vec![]);
+                        if payload != tok_ty {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "token_channel_send value slot expects SystemToken, found {}",
+                                    fmt_type(&payload)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Name("unit".into(), vec![]);
+                }
                 "atomic_i32_store"
                 | "atomic_i64_store"
                 | "atomic_bool_store"
@@ -1680,6 +1782,32 @@ impl<'a> Checker<'a> {
                         );
                     } else {
                         self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("string".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+                // Phase D (0.39.75): 收 cap 的 fs API——read_file_guarded(path, t)。
+                // t: SystemToken 作为能力门禁，被调用消费（每次授权一次受保护操作）。
+                "read_file_guarded" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "read_file_guarded expects 2 arguments (path, a SystemToken capability)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        let cap_ty = self.infer_expr(&args[1], scopes);
+                        if cap_ty != Type::Name("SystemToken".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "read_file_guarded capability slot expects SystemToken, found {}",
+                                    fmt_type(&cap_ty)
+                                ),
+                            );
+                        }
                     }
                     return Type::Result(
                         Box::new(Type::Name("string".into(), vec![])),
@@ -2436,6 +2564,29 @@ impl<'a> Checker<'a> {
                         );
                     } else {
                         self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                // Phase D (0.39.76): 收 cap 的 net API——http_get_guarded(url, t)。
+                // t: SystemToken 能力门禁，被调用消费。
+                "http_get_guarded" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "http_get_guarded expects 2 arguments (url, a SystemToken capability)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        let cap_ty = self.infer_expr(&args[1], scopes);
+                        if cap_ty != Type::Name("SystemToken".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "http_get_guarded capability slot expects SystemToken, found {}",
+                                    fmt_type(&cap_ty)
+                                ),
+                            );
+                        }
                     }
                     return Type::Name("string".into(), vec![]);
                 }

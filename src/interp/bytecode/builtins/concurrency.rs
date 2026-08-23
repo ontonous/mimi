@@ -169,6 +169,25 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_channel_recv,
     });
+    // Phase D (0.39.73): 线性 token 通道（跨任务 move）——i64 柄透传 channel 机制。
+    reg.register(BuiltinDesc {
+        name: "token_channel_new",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_channel_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "token_channel_send",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_channel_send,
+    });
+    reg.register(BuiltinDesc {
+        name: "token_channel_recv",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_channel_recv,
+    });
     reg.register(BuiltinDesc {
         name: "channel_try_recv",
         arity: 1,

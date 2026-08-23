@@ -93,6 +93,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
+    /// Phase D (0.39.75): 收 cap 的 env API——SystemToken 门禁在 args[1]
+    /// （运行时忽略），name 在 args[0]。复用 getenv 核心。
+    pub(super) fn compile_get_env_guarded(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(
+                "get_env_guarded expects 2 arguments (name, a SystemToken capability)".into(),
+            );
+        }
+        self.compile_getenv(&args[0..1])
+    }
+
     pub(super) fn compile_getenv(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

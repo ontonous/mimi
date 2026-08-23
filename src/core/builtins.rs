@@ -55,6 +55,11 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "listdir"
             | "is_dir"
             | "is_file"
+            | "make_token"
+            | "token_id"
+            | "token_channel_new"
+            | "token_channel_send"
+            | "token_channel_recv"
             | "path_join"
             | "path_ext"
             | "path_basename"
@@ -70,6 +75,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "exec_pipe"
             | "read_file_partial"
             | "read_file_bytes"
+            | "read_file_guarded"
             | "write_file_bytes"
             | "read_lines_json"
             | "read_lines_json_builtin"
@@ -158,6 +164,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "now_ms"
             | "timestamp_ms"
             | "sleep"
+            | "get_env_guarded"
             | "getenv"
             | "args"
             | "atomic_i32_new"
@@ -235,6 +242,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "recv"
             | "close_fd"
             | "http_get"
+            | "http_get_guarded"
             | "http_post"
             | "from_int"
             | "regex_match"
@@ -377,9 +385,11 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "from_int" => Some(1),
         "from_json" => Some(1),
         "from_json_typed" => Some(2),
+        "get_env_guarded" => Some(2),
         "getenv" => Some(1),
         "has_key" => Some(2),
         "http_get" => Some(1),
+        "http_get_guarded" => Some(2),
         "http_post" => Some(2),
         "index_of" => Some(2),
         "inject_fault" => Some(1),
@@ -449,10 +459,16 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "print_err" => Some(usize::MAX),
         "println" => Some(usize::MAX),
         "push" => Some(2),
+        "make_token" => Some(0),
+        "token_channel_new" => Some(0),
+        "token_channel_recv" => Some(1),
+        "token_channel_send" => Some(2),
+        "token_id" => Some(1),
         "random" => Some(0),
         "range" => Some(2),
         "read_file" => Some(1),
         "read_file_bytes" => Some(1),
+        "read_file_guarded" => Some(2),
         "read_file_partial" => Some(2),
         "read_lines_each" => Some(2),
         "read_lines_json" => Some(1),

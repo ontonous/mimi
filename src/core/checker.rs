@@ -549,6 +549,7 @@ impl<'a> Checker<'a> {
             crate::ast::Type::Name(name, args) => {
                 self.flow_state_type_names.contains(name)
                     || self.declared_caps.contains(name)
+                    || name == "SystemToken"
                     || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())
                     || args.iter().any(|arg| self.is_linear_surface_type(arg))
             }

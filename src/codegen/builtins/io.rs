@@ -9426,7 +9426,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "read_file expects 1 argument".to_string(),
             ));
         }
-        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        self.compile_read_file_inner(&args[0])
+    }
+
+    /// Phase D (0.39.75): 收 cap 的 fs API——SystemToken 能力门禁在 args[1]
+    /// （运行时忽略：线性消费由 checker/CFG 保证），path 在 args[0]。复用
+    /// read_file 核心（Result<string,string> 布局一致）。
+    pub(super) fn compile_read_file_guarded(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "read_file_guarded expects 2 arguments (path, a SystemToken capability)"
+                    .to_string(),
+            ));
+        }
+        self.compile_read_file_inner(&args[0])
+    }
+
+    fn compile_read_file_inner(
+        &self,
+        path_arg: &BasicMetadataValueEnum<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let path_ptr = self.extract_raw_str_ptr(path_arg)?;
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let bool_ty = self.context.bool_type();

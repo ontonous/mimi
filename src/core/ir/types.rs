@@ -54,9 +54,15 @@ impl NominalTypeId {
     /// Linear nominal types:
     /// - Flow state types: `"state:<flow>::<state>"` prefix
     /// - Session channels: `"SessionChan"` / `"session_chan"` suffix
+    /// - `"SystemToken"` (0.1.9 Phase D 0.39.72): 线性 token 能力（move-only，i64 柄）
+    /// - `"TokenChannel"`（0.1.9 Phase D 0.39.73）：可 Copy 通道——只有 token 线性，
+    ///   通道本身共享（同 Channel），跨任务 move 语义落在 SystemToken 上
     pub fn nominal_is_linear(&self) -> bool {
         let s = self.0.as_str();
-        s.starts_with("state:") || s.ends_with("SessionChan") || s.ends_with("session_chan")
+        s.starts_with("state:")
+            || s.ends_with("SessionChan")
+            || s.ends_with("session_chan")
+            || s == "builtin:type:SystemToken"
     }
 
     /// v0.34.8 (SD-1 tail): whether the nominal identity is a Flow state
