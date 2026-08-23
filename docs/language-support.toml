@@ -30,7 +30,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
-evidence = "0.31.8: E0421 state unforgeability (non-root construction rejected), E0422 nominal distinctness warning, E0423 linear generation (use-after-transition rejected). 0.31.13 追加 A: alias tracking (let b = s0 consumes s0, E0423), shared/ref wrapping rejected (E0427), shadowing does not reset consumption. 0.31.16: CFG-level is_linear() for FlowStateSet + state: Nominal, auto-droppable at scope exit, transition self implicitly consumed. 0.31.17: closure capture rejected (E0427), list/map collection rejected (E0427). Remaining: generation counter is static (not runtime-tracked), consumed_flow_vars name tracking retained as diagnostic layer (CFG dataflow is enforcement layer)."
+evidence = "0.31.8: E0421 state unforgeability (non-root construction rejected), E0422 nominal distinctness warning, E0423 linear generation (use-after-transition rejected). 0.31.13 追加 A: alias tracking (let b = s0 consumes s0, E0423), shared/ref wrapping rejected (E0427), shadowing does not reset consumption. 0.31.16: CFG-level is_linear() for FlowStateSet + state: Nominal, auto-droppable at scope exit, transition self implicitly consumed. 0.31.17: closure capture rejected (E0427), list/map collection rejected (E0427). Remaining (pre-0.38): generation counter was static (not runtime-tracked). Since 0.38.46 a runtime `TransitionEpoch` is tracked per Flow value (`src/runtime/epoch.rs`: `flow_pack` at escape, `bump_epoch` on recover, stale detection on cross-boundary use); local silent-stay lowering strips the epoch. consumed_flow_vars name tracking retained as diagnostic layer (CFG dataflow is enforcement layer)."
 
 [[support]]
 requirement = "FLOW-TURN-001"
@@ -240,7 +240,7 @@ verify = "unsupported"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test capability -- --test-threads=1"
-evidence = "Raw string effects and capability flags do not implement the experimental target model."
+evidence = "Raw string effects and the old `cap` keyword still use a thread-local registry with cross-thread re-registration (src/runtime/capability.rs) — not the experimental target model. Since 0.1.9 phase-d (0.39.71–90, src/tests/phase_d.rs) `SystemToken` (make_token / token_id / TokenChannel) implements process-wide unique identity and cross-task move with old-end invalidation (E0304), superseding the re-register protocol (devdocs/v0.39/phase-d-plan.md §2). The `cap` keyword remains the legacy path pending deprecation."
 
 [[support]]
 requirement = "VERIFY-CORE-001"

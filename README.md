@@ -418,59 +418,39 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ---
 
-## Status & Key References
+## Status
 
-**Current**: 0.1.8-dev. 0.1.7 shipped (2026-08-19): Wave-3 基建诚实收口. 0.1.8 is semantic honesty + identity purity (L1 spawn, production dual, Narrow, value ABI, Flow S / Actor A / Session K). Does not yet claim VM≡native.
+**Current**: 0.1.9-dev. 0.1.7 shipped (2026-08-19): Wave-3 honest infrastructure closeout; 0.1.8 gates green (semantic honesty + identity purity: L1 spawn, production dual, Narrow, value ABI, Flow S / Actor A / Session K); 0.1.9 in progress (linear kinds + capabilities). Does not yet claim VM≡native.
 
-### Key References
 
-| Document | Role |
-|----------|------|
-| [`devdocs/v0.35/README.md`](devdocs/v0.35/README.md) | 0.1.5 roadmap: performance mainline + DX quality secondary (authoritative for 0.1.5) |
-| [`devdocs/v0.36/README.md`](devdocs/v0.36/README.md) | 0.1.6 roadmap: core deep closure, pillar-by-pillar "redesign → anchor → earn green" |
-| [`devdocs/v0.36/quad-final-0.36.114.md`](devdocs/v0.36/quad-final-0.36.114.md) | 0.1.6 quad-final report: full gates + dispatch baseline + doc re-anchor |
-| [`devdocs/v0.36/known-boundaries-0.1.6.md`](devdocs/v0.36/known-boundaries-0.1.6.md) | 0.1.6 known/deferred boundaries (Wave-3 / 0.2 / 1.x) |
-| [`devdocs/v0.37/README.md`](devdocs/v0.37/README.md) | 0.1.7 roadmap: honest Wave-3 infrastructure closeout |
-| [`devdocs/v0.37/quad-final-0.37.135.md`](devdocs/v0.37/quad-final-0.37.135.md) | 0.1.7 Phase F closeout: Wave-3 基建诚实收口 + §4 不宣称 |
-| [`devdocs/kernel-card.md`](devdocs/kernel-card.md) | **Kernel card — the single AI contract** (kernel, linear kinds, exactly-once, error codes, dual-backend) |
-| [`devdocs/kernel-roadmap-0.1.7-0.1.9.md`](devdocs/kernel-roadmap-0.1.7-0.1.9.md) | Macro map for 0.1.7–0.1.9 |
-| [`devdocs/v0.38/README.md`](devdocs/v0.38/README.md) | 0.1.8: semantic honesty + identity purity |
-| [`devdocs/v0.39/README.md`](devdocs/v0.39/README.md) | 0.1.9: linear kinds + capabilities + writability eval |
-| [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 golden document: semantic rulings + sprint plan (authoritative for 0.1.4) |
-| [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | Authoritative roadmap (31 requirements, exit conditions) |
-| [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | Architecture Amendment: 13 clauses + 10 invariants (supersedes white paper) |
-| [`devdocs/pre-0.1/`](devdocs/pre-0.1/) | Pre-0.1 design contract: core goals, Flow-first model, error algebra, Verified Core, Component Boundary |
-| [`devdocs/debt-report-2026-07-25.md`](devdocs/debt-report-2026-07-25.md) | Debt panorama: 9 architecture + 10 engineering debts + 9-round blind review corrections |
-| [`docs/language-spec.md`](docs/language-spec.md) | Normative language specification (single entry point) |
+### References & External Reviews
 
-### External Blind Reviews (2026-07-25)
+Curated key references and the nine-round external blind-review index are maintained in
+[`devdocs/key-references.md`](devdocs/key-references.md). The full active-document index is
+[`devdocs/README.md`](devdocs/README.md).
 
-Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurrency, Flow semantics, type system, runtime, interpreter/comptime, stdlib/error handling, and codegen. Results drove the Architecture Amendment and the debt report. Review files: `devdocs/blind-review-*-2026-07-25.md`.
 
 ---
 
+
 ## Version History
 
-| Version | Highlight |
-|---------|-----------|
-| **0.1.5** | **Shipped (2026-08-13)**. Performance mainline: trap-cost reduction (SD-9 chain-end convergence + cold weights, dsp O1 3.97×→1.04× at C -O2 parity), resolved dispatch coverage extension (fallback 0.3027→0.2735), VM perf R1/R3/R4/R5 (RUN dsp 8.9s→4.7s), external-review closeout (4C+13H+10M), zombie-keyword removal (80→67), dual-backend unification U1/U2/U3/U5, perf gate in CI. Quality secondary: resolve→zonk migration (31 sites), parser panic audit, LSP Span/Origin migration, trivia-ization of `desc:`/`rule:`/`mms{}`, actor runs_flow three-layer integration, flow_order fails-transition SIGSEGV fix, error message CO-H2 precise span. Known out-of-scope (native dsp ≤1.15×, RUN dsp ≤1s) registered 0.2/1.x. See `devdocs/v0.35/README.md`. |
-| **0.1.6** | **Shipped (2026-08-16)**. Core deep closure (Deep over Broad): pillar-by-pillar "redesign → anchor → earn green" — failure attribution (Fault nominalization), state semantics (Actor mut), abstraction (Protocol/Session), linear system (generics×linear + Session lowering), syntax redesign. Edge capabilities decoupled. As of 0.36.114 the four core pillars/syntax redesign have reached **定案 + 挣绿**; Phase E/F reinforcement and final re-verification are complete. See `devdocs/v0.36/README.md`, `devdocs/v0.36/quad-final-0.36.114.md`, and `devdocs/v0.36/known-boundaries-0.1.6.md`. |
-| **0.1.8-dev** | **Current**. Semantic honesty + identity purity: VM≡native spawn, production dual, Narrow borrows, `List<string>` fat + Map/Set lease, Flow `TransitionEpoch`, ban business `mut`, Session methods, move-rest, remove mimispec. See `devdocs/v0.38/README.md`. |
-| **0.1.7** | **Shipped (2026-08-19)**. Wave-3 基建诚实收口 (zero-fallback dispatch gate, drop-glue, native threads, edge-feature removal, Wire/ABI CLI). Does not claim VM≡native or implemented Flow generations. |
-| **0.1.4** | **Shipped (2026-08-08)**. Syntax freeze + semantic rulings + language self-consistency (golden document): become/stay removal (ADR-001, sole terminal `return State {}`), multi-target stable tagged-union ABI (ADR-002), `'a` removal (ADR-004), `do` wrapper removal (keywords 81→80), and/or/not soft keywords, if-let/for-destructuring, `ieee_float {}`, single-direction numeric coercion, View/Mutate closure. Doc-sync campaign closed the four verdicts across spec/pre-0.1/support/syntax-reference; trivia-ization of `desc:`/`rule:`/`mms{}` registered for 0.1.5. Phase G (architecture freeze): ADR-005~008, dispatch gate (fallback 0.3027, eligible 3783), contracts + stdlib module bodies on resolved slice, view/mutate borrow ABI, verifier engine isolation (E0439), ABI layout freeze (native-abi-1 §7/§8), pre-0.1 rename, 0.minor=major strategy, O1 default optimization. RC gates green (5287 lib). |
-| **0.1.3** | Bytecode VM becomes the sole interpreter: tree-walker (24,976 LOC) + ResolvedInterpreter (4,375 lines) deleted, `--legacy` removed, FFI/Actor/quote fully on bytecode. |
-| **0.1.2** | Codegen full migration: `raw_ast()` privatized (3 permanent consumers), gap filling, performance baseline. |
-| **0.1.1** | 51-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. Codegen per-function dispatch active. |
-| **0.1.0** | Baseline stability: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership analysis, runtime/resolved split, semver switch, 4063 tests green |
-| **v0.30.0** | Hemostasis: zero new features — 15 architecture debts cleared (sprintf→snprintf, path safety, malloc checks, fmt tokenization) |
-| **v0.29.0–41** | Flow paradigm: compiler internal Flow replacement (7 modules) + language-level Flow semantics + 38 white paper capabilities |
-| **v0.28.0–37** | Use-driven: 7-lang FFI, profiler, bindgen, package manager; Feature Bugs zero |
-| **v0.27** | Safety audit: P0–P3 (arena, FFI, JSON, runtime) |
-| **v0.20–24** | Structured concurrency, Future/Waker/Executor codegen |
-| **v0.15** | C runtime → Rust runtime rewrite |
-| **v0.7** | Z3 verification + FFI codegen |
+### 1. Current Version
+- **0.1.9-dev** (current): continues the semantic-honesty + identity-purity line (0.1.8) into
+  linear kinds + capabilities (0.1.9). See `devdocs/v0.38/README.md`, `devdocs/v0.39/README.md`.
 
-> Full changelog: [CHANGELOG.md](CHANGELOG.md). Pre-0.1.0 history: 1863 commits, 66 `mimi-v*` tags, archived in `devdocs/archive/`.
+### 2. Current Major Line (0.1.x)
+- **0.1.0 → 0.1.8**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,
+  Bytecode VM as sole interpreter, full codegen migration, golden document + syntax freeze (0.1.4),
+  Deep core closure (0.1.6), Wave-3 honest infrastructure closeout (0.1.7). Per-minor detail in
+  `devdocs/v0.34/`–`v0.39/`.
+
+### 3. Pre-0.1 (v0.7 – v0.30)
+- v0.7 (Z3 + FFI codegen) → v0.30 (hemostasis, 15 architecture debts cleared). 1863 commits,
+  66 `mimi-v*` tags. Detailed history archived in `devdocs/archive/`.
+
+> Full changelog: [CHANGELOG.md](CHANGELOG.md).
+
 
 ---
 

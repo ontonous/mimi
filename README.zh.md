@@ -417,58 +417,33 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ---
 
-## 状态与关键文档
+## 状态
 
-**当前版本**：0.1.8-dev。0.1.7 已发布（2026-08-19）：Wave-3 基建诚实收口。0.1.8 做语义诚实 + 身份纯度（L1 spawn、生产 dual、Narrow、值 ABI、Flow S / Actor A / Session K）。尚未宣称 VM≡native。
+**当前版本**：0.1.9-dev。0.1.7 已发布（2026-08-19）：Wave-3 基建诚实收口；0.1.8 门禁全绿（语义诚实 + 身份纯度：L1 spawn、生产 dual、Narrow、值 ABI、Flow S / Actor A / Session K）；0.1.9 进行中（linear T + 权限闭环）。尚未宣称 VM≡native。
 
-### 关键文档
 
-| 文档 | 角色 |
-|------|------|
-| [`devdocs/v0.35/README.md`](devdocs/v0.35/README.md) | 0.1.5 路线图：性能主线 + DX 质量次线（0.1.5 权威） |
-| [`devdocs/v0.36/README.md`](devdocs/v0.36/README.md) | 0.1.6 路线图：核心深度闭环，逐支柱"重设计 → 锚定 → 挣绿" |
-| [`devdocs/v0.36/quad-final-0.36.114.md`](devdocs/v0.36/quad-final-0.36.114.md) | 0.1.6 终测报告：全量门禁 + dispatch 基线 + 文档重锚 |
-| [`devdocs/v0.36/known-boundaries-0.1.6.md`](devdocs/v0.36/known-boundaries-0.1.6.md) | 0.1.6 已知边界/已知延后（Wave-3 / 0.2 / 1.x 固化） |
-| [`devdocs/v0.37/README.md`](devdocs/v0.37/README.md) | 0.1.7 路线图：Wave-3 基建诚实收口 |
-| [`devdocs/v0.37/quad-final-0.37.135.md`](devdocs/v0.37/quad-final-0.37.135.md) | 0.1.7 Phase F 终测：Wave-3 基建诚实收口 + §4 不宣称 |
-| [`devdocs/kernel-roadmap-0.1.7-0.1.9.md`](devdocs/kernel-roadmap-0.1.7-0.1.9.md) | 0.1.7–0.1.9 宏观战役地图 |
-| [`devdocs/v0.38/README.md`](devdocs/v0.38/README.md) | 0.1.8：语义诚实 + 身份纯度 |
-| [`devdocs/v0.39/README.md`](devdocs/v0.39/README.md) | 0.1.9：linear T + 权限闭环 + 可写验收 |
-| [`devdocs/v0.34/golden-document.md`](devdocs/v0.34/golden-document.md) | 0.1.4 黄金文档：语义裁决 + sprint 规划（0.1.4 权威） |
-| [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | 权威路线图（31 项 requirement，退出条件） |
-| [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | 架构修正案：13 条款 + 10 不变量（优先于白皮书） |
-| [`devdocs/pre-0.1/`](devdocs/pre-0.1/) | Pre-0.1 设计合同：核心目标、Flow-first 模型、失败代数、Verified Core、Component Boundary |
-| [`devdocs/debt-report-2026-07-25.md`](devdocs/debt-report-2026-07-25.md) | 债务全景：9 项架构债务 + 10 项工程债务 + 九轮盲审修正 |
-| [`docs/language-spec.md`](docs/language-spec.md) | 规范性语言规范（唯一入口） |
+### 文档索引与外部盲审
 
-### 外部盲审（2026-07-25）
+精选关键文档与九轮外部盲审索引已下沉至 [`devdocs/key-references.md`](devdocs/key-references.md)；
+完整活跃文档索引见 [`devdocs/README.md`](devdocs/README.md)。
 
-九轮外部盲审覆盖：Z3 验证、FFI/ABI、并发、Flow 语义、类型系统、Runtime、解释器/Comptime、标准库/错误处理、Codegen。审查结果驱动了架构修正案和债务报告。审查文件：`devdocs/blind-review-*-2026-07-25.md`。
 
 ---
 
+
 ## 版本历史
 
-| 版本 | 里程碑 |
-|------|--------|
-| **0.1.5** | **已发布（2026-08-13）**。性能主线：trap 成本消减（SD-9 链式末端收敛 + cold 权重，dsp O1 3.97×→1.04×）、resolved 覆盖扩展（fallback 0.3027→0.2735）、VM perf R1/R3/R4/R5、外审收口（4C+13H+10M）、僵尸关键字裁撤（80→67）、双后端统一 U1/U2/U3/U5、性能门禁。质量次线：resolve→zonk 迁移（31 处）、parser panic 审计、LSP Span/Origin 迁移、`desc:`/`rule:`/`mms{}` trivia 化、actor runs_flow 三层集成、flow_order fails transition SIGSEGV 修复、错误消息 CO-H2 精确 span。详见 `devdocs/v0.35/README.md`。 |
-| **0.1.6** | **已发布（2026-08-16）**。核心深度闭环（Deep over Broad）：逐支柱"重设计 → 锚定 → 挣绿"——失败归属（Fault nominal 化）、状态语义（Actor mut）、抽象（Protocol/Session）、线性系统（泛型×线性 + Session lowering）、语法重设计。边缘能力解耦隔离。截至 0.36.114，四支柱均已“定案 + 挣绿”，终测报告与已知边界清单已落 `devdocs/v0.36/`。详见 `devdocs/v0.36/README.md`。 |
-| **0.1.8-dev** | **当前**。语义诚实 + 身份纯度：VM≡native spawn、生产 dual、Narrow、值 ABI、Flow 世代、禁业务 mut、Session 方法化、move-rest、拆 mimispec。见 `devdocs/v0.38/README.md`。 |
-| **0.1.7** | **已发布（2026-08-19）**。Wave-3 基建诚实收口（Resolved 零回退门禁、Drop、native 真线程、边缘判死、Wire/ABI CLI）。不宣称 VM≡native 或 Flow 世代已实现。 |
-| **0.1.4** | **已发布（2026-08-08）**。语法冻结 + 语义裁决落地 + 语言自洽性战役（黄金文档）：become/stay 删除（ADR-001，唯一终止符 `return State {}`）、multi-target stable tagged-union ABI（ADR-002）、`'a` 删除（ADR-004）、`do` wrapper 删除（关键字 81→80）、and/or/not 软关键字化、if let / for 解构、`ieee_float {}`、单向数值强制、View/Mutate 闭合。文档同步战役已闭环 spec/pre-0.1/support/syntax-reference 四组裁决；`desc:`/`rule:`/`mms{}` trivia 化登记 0.1.5。Phase G（架构冻结）：ADR-005~008、dispatch 门禁（fallback 0.3027，eligible 3783）、contracts + stdlib 模块函数体进 resolved slice、view/mutate 借用 ABI、verifier 引擎隔离（E0439）、ABI 布局冻结（native-abi-1 §7/§8）、pre-0.1 更名、0.minor=大版本战略、O1 默认优化。RC 门禁全绿（5287 lib）。 |
-| **0.1.3** | Bytecode VM 成为唯一解释器：tree-walker（24,976 LOC）+ ResolvedInterpreter（4,375 行）删除，`--legacy` 移除，FFI/Actor/quote 全量迁移到 bytecode。 |
-| **0.1.2** | Codegen 全量迁移：`raw_ast()` 私有化（3 个永久 consumer）、缺口填补、性能基线。 |
-| **0.1.1** | 51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |
-| **0.1.0** | 基线稳定：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership 分析、runtime/resolved 拆分、semver 切换、4063 测试绿 |
-| **v0.30.0** | 止血：零新特性——15 项架构债务清零（sprintf→snprintf、路径安全、malloc 检查、fmt 分词） |
-| **v0.29.0–41** | Flow 范式：编译器内部 Flow 替换（7 个模块）+ 语言级 Flow 语义 + 白皮书 38 项能力 |
-| **v0.28.0–37** | 使用驱动：7 语言 FFI、profiler、bindgen、包管理器；Feature Bugs 清零 |
-| **v0.27** | 安全审计：P0–P3（arena、FFI、JSON、runtime） |
-| **v0.20–24** | 结构化并发、Future/Waker/Executor codegen |
-| **v0.15** | C 运行时 → Rust 运行时重写 |
-| **v0.7** | Z3 验证 + FFI codegen |
+### 1. 当前版本
+- **0.1.9-dev**（当前）：在 0.1.8 语义诚实 + 身份纯度基础上，延续至 linear T + 权限闭环（0.1.9）。见 `devdocs/v0.38/README.md`、`devdocs/v0.39/README.md`。
 
-> 完整变更日志：[CHANGELOG.md](CHANGELOG.md)。Pre-0.1.0 历史：1863 commits，66 个 `mimi-v*` tag，归档于 `devdocs/archive/`。
+### 2. 当前大版本（0.1.x）
+- **0.1.0 → 0.1.8**：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership、Bytecode VM 唯一解释器、Codegen 全量迁移、黄金文档 + 语法冻结（0.1.4）、核心深度闭环（0.1.6）、Wave-3 基建诚实收口（0.1.7）。逐 minor 细节见 `devdocs/v0.34/`–`v0.39/`。
+
+### 3. PRE0.1（v0.7 – v0.30）
+- v0.7（Z3 + FFI codegen）→ v0.30（止血，清零 15 项架构债务）。1863 commits、66 个 `mimi-v*` tag。详细历史归档于 `devdocs/archive/`。
+
+> 完整变更日志：[CHANGELOG.md](CHANGELOG.md)。
+
 
 ---
 

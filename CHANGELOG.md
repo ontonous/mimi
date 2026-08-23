@@ -2,9 +2,9 @@
 
 ## [Unreleased] — 0.1.9-dev
 
-> 0.1.8 功能门禁已全绿（0.38.122：lib 5559/0/7、real_world 31/0、stress 62/0、
-> dogfood ok、dispatch 核语料 0 fallback、fmt/docs 绿；十大锁名实相符复核通过），
-> 待用户授权切 release tag。0.1.9-dev 已启动：线性种类 + 权限闭环 + 可写验收。
+> 0.1.8 已发布（2026-08-22，tag `0.1.8`；0.38.122 收官：lib 5559/0/7、
+> real_world 31/0、stress 62/0、dispatch 核语料 0 fallback）。
+> 0.1.9-dev 进行中：线性种类 + 权限闭环 + 可写验收。
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 >

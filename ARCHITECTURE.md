@@ -52,14 +52,14 @@ Strings are C-style null-terminated (`*mut c_char`):
 ```
 - `mimi_list_new()` / `mimi_list_free()`
 - `mimi_list_push/pop/get/set`
-- **Typed storage (de-stringification)**: Not implemented (deferred)
+- **Typed storage (de-stringification)**: Not implemented (deferred). **Updated 0.38.26 (B-STR-001)**: `List<string>` elements are now length-bearing fat slots (`{ptr, len}` + `MIMI_STR_MAGIC`, `src/runtime/list_string.rs`); the old NUL-terminated `char*` layout is rejected, not silently truncated. General arbitrary-typed payload storage remains deferred.
 
 ### Map/Set
 
 Global handle registry with integer handles:
 - `mimi_map_new()` → handle (i64)
 - `mimi_map_get/set/remove`
-- **Fat pointer (de-global-lock)**: Not implemented (handle registry persists)
+- **Fat pointer (de-global-lock)**: Not implemented (handle registry persists). **Updated 0.38.x**: Map/Set now use nominal **generational handles with concurrent leases** (`src/component/handle.rs`): a generation counter is bumped on release so stale handles error instead of aliasing; `mimi_map_lease_acquire/release` enforce single-owner borrow. The global handle registry (`Mutex`) still persists — full de-global-lock remains deferred.
 
 ## Concurrency
 
@@ -68,7 +68,7 @@ Built-in functions (not std::sync):
 - `channel_new()` / `channel_send()` / `channel_recv()`
 - `atomic_i32_new()` / `atomic_i32_load()` / `atomic_i32_store()`
 
-**Opaque pointer + Generation (thread-safety enforcement)**: Not implemented (deferred)
+**Opaque pointer + Generation (thread-safety enforcement)**: Not implemented (deferred). **Updated 0.38.x**: runtime **generation tracking is now implemented** — Flow values carry a `TransitionEpoch` (`src/runtime/epoch.rs`, 0.38.46) packed at Channel/FFI/mailbox escape and checked on the peer side; Map/Set use generational handles (`src/component/handle.rs`). The remaining deferred item is the opaque-pointer *ownership* envelope for raw C interop, not generation per se.
 
 ## Networking
 
