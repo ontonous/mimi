@@ -530,12 +530,6 @@ impl BytecodeCompiler {
                     .map(|(i, _)| i as u16)
                     .collect();
             }
-            // Module functions are registered under their qualified path
-            // (Module::sub::name) so `M::f(...)` calls resolve like top-level
-            // functions (tree-walker `build_qualified_path` parity).
-            if let Item::Module(m) = item {
-                self.collect_module_funcs(m, "");
-            }
             // Collect enum variant names and newtype names for constructor resolution.
             if let Item::Type(td) = item {
                 self.type_defs.insert(td.name.clone(), td.kind.clone());
@@ -682,9 +676,6 @@ impl BytecodeCompiler {
                 let idx = self.func_table[&f.name];
                 let proto = self.compile_func(f)?;
                 self.functions[idx as usize] = proto;
-            }
-            if let Item::Module(m) = item {
-                self.compile_module_funcs(m, "")?;
             }
         }
 
@@ -993,89 +984,6 @@ impl BytecodeCompiler {
         let idx = self.builtin_names.len() as BuiltinIdx;
         self.builtin_table.insert(name.to_string(), idx);
         self.builtin_names.push(name.to_string());
-    }
-
-    /// Build a qualified path from nested Field(Ident(...), ...) expressions
-    /// (e.g. `Outer::Inner::f` → "Outer::Inner::f"). Mirrors the tree-walker
-    /// `Interpreter::build_qualified_path`.
-    fn build_qualified_path(obj: &Expr, field: &str) -> Option<String> {
-        match obj.unlocated() {
-            Expr::Ident(name) => Some(format!("{}::{}", name, field)),
-            Expr::Field(inner_obj, inner_field) => {
-                Self::build_qualified_path(inner_obj, inner_field)
-                    .map(|base| format!("{}::{}", base, field))
-            }
-            _ => None,
-        }
-    }
-
-    /// Register module functions under their qualified path (recursive).
-    fn collect_module_funcs(&mut self, module: &crate::ast::ModuleDef, prefix: &str) {
-        let current = if prefix.is_empty() {
-            module.name.clone()
-        } else {
-            format!("{}::{}", prefix, module.name)
-        };
-        for inner in &module.items {
-            match inner {
-                crate::ast::Item::Func(f) => {
-                    let qualified = format!("{}::{}", current, f.name);
-                    let idx = self.functions.len() as FuncIdx;
-                    self.func_table.insert(qualified.clone(), idx);
-                    // Register the declared return type (C-3 return-type directory).
-                    self.func_ret_types
-                        .insert(qualified.clone(), ret_type_to_var_type(&f.ret));
-                    let defaults: Vec<Option<Expr>> =
-                        f.params.iter().map(|p| p.default_value.clone()).collect();
-                    if defaults.iter().any(|d| d.is_some()) {
-                        self.func_defaults.insert(qualified.clone(), defaults);
-                    }
-                    let param_names: Vec<String> =
-                        f.params.iter().map(|p| p.name.clone()).collect();
-                    self.func_param_names.insert(qualified.clone(), param_names);
-                    self.functions
-                        .push(FunctionProto::new(qualified.clone(), f.params.len() as u16));
-                    let proto = &mut self.functions[idx as usize];
-                    proto.has_mut_params = f.params.iter().any(|p| p.mut_);
-                    proto.mut_param_indices = f
-                        .params
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, p)| p.mut_)
-                        .map(|(i, _)| i as u16)
-                        .collect();
-                }
-                crate::ast::Item::Module(m) => self.collect_module_funcs(m, &current),
-                _ => {}
-            }
-        }
-    }
-
-    /// Compile module function bodies (recursive), replacing placeholders.
-    fn compile_module_funcs(
-        &mut self,
-        module: &crate::ast::ModuleDef,
-        prefix: &str,
-    ) -> Result<(), InterpError> {
-        let current = if prefix.is_empty() {
-            module.name.clone()
-        } else {
-            format!("{}::{}", prefix, module.name)
-        };
-        for inner in &module.items {
-            match inner {
-                crate::ast::Item::Func(f) => {
-                    let qualified = format!("{}::{}", current, f.name);
-                    if let Some(&idx) = self.func_table.get(&qualified) {
-                        let proto = self.compile_func(f)?;
-                        self.functions[idx as usize] = proto;
-                    }
-                }
-                crate::ast::Item::Module(m) => self.compile_module_funcs(m, &current)?,
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     /// Compile a single function definition.
@@ -3727,50 +3635,17 @@ impl BytecodeCompiler {
                     return Ok(rd);
                 }
             }
-            // ── Module-qualified function call: Module::func(args) ──
-            // `M::f` (and `Outer::Inner::f`) parses as a Field chain; if it
-            // names a registered module function, call it like a top-level
-            // function (tree-walker `build_qualified_path` parity).
-            if let Some(qualified) = Self::build_qualified_path(obj, method) {
-                if let Some(&fidx) = self.func_table.get(&qualified) {
-                    let proto = &self.functions[fidx as usize];
-                    let mut targets: Vec<Reg> = Vec::new();
-                    for &pi in &proto.mut_param_indices {
-                        if let Some(Expr::Ident(var_name)) =
-                            args.get(pi as usize).map(|a| a.unlocated())
-                        {
-                            if let Some(reg) = fc.lookup_var(var_name) {
-                                targets.push(reg);
-                            }
-                        }
-                    }
-                    if !targets.is_empty() {
-                        let base = fc.proto.alloc_reg();
-                        for _ in 1..targets.len() {
-                            fc.proto.alloc_reg();
-                        }
-                        for (i, t) in targets.iter().enumerate() {
-                            let target = base + i as Reg;
-                            let cidx = fc.proto.add_const(ConstValue::Int(*t as i64));
-                            fc.emit(Op::LoadConst {
-                                rd: target,
-                                idx: cidx,
-                            });
-                        }
-                        fc.emit(Op::MutateSetup {
-                            regs_base: base,
-                            count: targets.len() as u16,
-                        });
-                    }
-                    fc.emit(Op::Call {
-                        rd,
-                        func: fidx,
-                        args_base,
-                        argc: args.len() as u16,
-                    });
-                    return Ok(rd);
-                }
-            }
+            // 0.39.137: the old "Module-qualified function call" branch
+            // (`M::f` → func_table["M::f"], tree-walker parity) is removed.
+            // It was unreachable through any checked program: the checker
+            // rejects module-prefix calls (E0400/E0221 for inline modules,
+            // TOOL-RESOLUTION-001 for file modules), and bare calls into
+            // inline `module` blocks fail E0401 — file modules merge their
+            // pub functions under bare names via `use` instead. The matching
+            // registration plumbing (collect_module_funcs /
+            // compile_module_funcs / build_qualified_path) was deleted with
+            // it; native codegen never compiled inline modules in the first
+            // place, so both backends are now consistent.
 
             // Allocate shifted arg block BEFORE compiling receiver,
             // so receiver compilation cannot accidentally alias the block.

@@ -49,8 +49,11 @@ pub func serialize(rows: List<List<string>>) -> string {
     str_join(lines, "\n")
 }
 
-// get: Gets cell at (row, col). Returns "" if out of bounds.
-pub func get(rows: List<List<string>>, row: i32, col: i32) -> string {
+// cell: Gets cell at (row, col). Returns "" if out of bounds.
+// 0.39.137: renamed from `get` — the bare name collided with maps::get
+// (fail-loud duplicate item when both modules are imported) and the
+// semantics differ entirely (positional cell lookup vs keyed map access).
+pub func cell(rows: List<List<string>>, row: i32, col: i32) -> string {
     if row < 0 || row >= len(rows) { return "" }
     let r: List<string> = rows[row]
     if col < 0 || col >= len(r) { return "" }

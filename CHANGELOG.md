@@ -15,6 +15,31 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.137 — 模块系统裁决落地（spec §6.14）+ VM 僵尸管道删除 + csv::get 改名
+
+**评估结论**：模块系统"文档 vs 实现"之争复核后实为伪命题——AGENTS §5.2
+记载的 merge 语义与实现一致，真正缺口是 spec 零覆盖。三项落地：
+
+- **spec §6.14 `[stable]`**：文件级 merge 模型成文——`use` 裸名合并、
+  duplicate fail-loud、`M::f(...)` 前缀调用不支持、`::` 保留给 Flow 转移边、
+  命名自描述约定（stdlib 既有实践）、内联 `module` 为非契约死面。
+- **VM 僵尸管道删除**：compiler.rs 的 module-qualified 分发分支 +
+  `build_qualified_path`/`collect_module_funcs`/`compile_module_funcs`
+  全部移除。该路径对任何通过 checker 的程序不可达（CLI 全路径拒绝：
+  内联 E0400/E0221、文件 TOOL-RESOLUTION-001），系 tree-walker 时代化石；
+  native codegen 从未编译内联模块，删除后两后端一致。
+- **csv::get → csv::cell**：消除与 maps::get 的异语义同名陷阱
+  （csv+maps 共导入此前必然撞 duplicate 错误）；stdlib 碰撞矩阵全扫登记
+  （其余 13 对为同语义互斥导入对，spec §6.14 记录处理约定）。
+
+测试重述：v1_2 四个 T303/T304 时代用例绕过 checker 直达 VM、锁定僵尸行为
+（其一注释自认"type checker may not fully support qualified calls yet"），
+按真实合同重写为 fail-closed 断言（E0400/E0401/E0220 拒绝面 + merge 主路径
++ duplicate loader 层错误）；std_csv 夹具同步 cell 改名。
+
+门禁：lib **5677/0/7**、real_world_cli + trap_semantics 绿、探针 16/17、
+fmt/check_language_docs/gen_stdlib_docs 干净。
+
 ### 0.39.136 — trap 语义双后端对齐 + unit 载荷容器 ABI 修复
 
 **Trap 有序退出（0.39.135 遗留 #1）**：native 的全部用户可见 trap 出口

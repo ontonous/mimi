@@ -55,6 +55,10 @@ func main() -> i32 {
 
 #[test]
 fn module_nested_types() {
+    // 0.39.137 (spec §6.14): inline modules are a non-contract dead surface.
+    // `Math.origin()` must be rejected by the checker (E0220 field access on
+    // unknown type) — the old assertion here locked a VM-only path that no
+    // checked program could ever reach.
     let src = r#"
 module Math {
     type Point {
@@ -72,10 +76,9 @@ func main() -> i32 {
     p.x
 }
 "#;
-    let result = run_source_bytecode_result(src);
+    let diags = check_source(src).expect_err("inline-module member access must be rejected");
     assert!(
-        result.is_ok(),
-        "module with type and method should work: {:?}",
-        result.err()
+        diags.iter().any(|d| d.code.as_deref() == Some("E0220")),
+        "expected E0220 for inline-module member access, got: {diags:?}"
     );
 }

@@ -441,8 +441,8 @@ fn real_world_csv_module() {
         func main() -> i32 {
             let rows = parse("a,b\nc,d")
             println(rows)
-            println(get(rows, 0, 1))
-            println(get(rows, 1, 0))
+            println(cell(rows, 0, 1))
+            println(cell(rows, 1, 0))
             0
         }
     "#,

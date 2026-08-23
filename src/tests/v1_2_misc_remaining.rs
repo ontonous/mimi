@@ -410,10 +410,15 @@ func main() -> i32 {
     assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
 }
 
-// ===== T303: 模块命名空间隔离测试 =====
+// ===== T303: 模块命名空间（0.39.137 重述为 spec §6.14 合同）=====
+// 裁决：Mimi 模块系统是文件级 merge 模型——`use` 把 pub 导出以裸名合并进
+// 作用域；`::` 保留给 Flow 转移边。旧 T303 用例绕过 checker 直达 VM，锁定的
+// "module 前缀调用可行"是任何 CLI 路径都不可达的僵尸行为（checker 一律拒绝），
+// 已按真实合同重写为 fail-closed 断言。
 
 #[test]
-fn module_qualified_function_call() {
+fn module_prefix_call_rejected_fail_closed() {
+    // 内联 module 的前缀调用：checker 拒绝（E0400 未定义变量 + E0221 非方法）。
     let src = r#"
 module Math {
     func add(a: i32, b: i32) -> i32 {
@@ -425,63 +430,81 @@ func main() -> i32 {
     Math::add(1, 2)
 }
 "#;
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
+    let diags = check_source(src).expect_err("module-prefix calls must be rejected");
+    assert!(
+        diags.iter().any(|d| d.code.as_deref() == Some("E0400")),
+        "expected E0400 for module-prefix call, got: {diags:?}"
+    );
 }
 
 #[test]
-fn module_multiple_functions() {
+fn module_bare_call_rejected_fail_closed() {
+    // 内联 module 函数不能以裸名调用（未 use 合并）：E0401。
     let src = r#"
 module Utils {
-    func add(a: i32, b: i32) -> i32 {
-        a + b
-    }
-    func mul(a: i32, b: i32) -> i32 {
+    func mul(a: i64, b: i64) -> i64 {
         a * b
     }
 }
 
 func main() -> i32 {
-    let a = Utils::add(1, 2)
-    let b = Utils::mul(3, 4)
-    a + b
+    let _ = mul(3, 4)
+    0
 }
 "#;
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(15)));
+    let diags = check_source(src).expect_err("bare calls into inline modules must be rejected");
+    assert!(
+        diags.iter().any(|d| d.code.as_deref() == Some("E0401")),
+        "expected E0401 for bare inline-module call, got: {diags:?}"
+    );
 }
 
 #[test]
-fn module_nested_runtime() {
+fn module_file_merge_bare_call_works() {
+    // 文件模块 merge 主路径：use 后裸名调用（spec §6.14）。
+    // 单测环境无 loader 多文件合并，用文本拼接 std/csv.mimi 模拟 use 合并。
+    let csv_src = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/csv.mimi"),
+    )
+    .expect("read std/csv.mimi");
     let src = r#"
-module Outer {
-    module Inner {
-        func hello() -> i32 {
-            42
-        }
-    }
-}
-
 func main() -> i32 {
-    Outer::Inner::hello()
+    let rows = parse("a,b\nc,d")
+    println(cell(rows, 1, 0))
+    0
 }
 "#;
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(42)));
+    let merged = format!("{}\n{}", csv_src, src);
+    check_source(&merged).expect("merged csv program must check");
+    let (_val, out) = run_source_with_stdout(&merged);
+    assert_eq!(out.trim(), "c", "merged bare-name call must work");
 }
 
 #[test]
-fn module_qualified_type_check() {
-    let src = r#"
-module Math {
-    func add(a: i32, b: i32) -> i32 {
-        a + b
-    }
-}
-
-func main() -> i32 {
-    Math::add(1, 2)
-}
-"#;
-    // Runtime works; type checker may not fully support qualified calls yet
-    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(3)));
+fn module_duplicate_export_fails_loud() {
+    // maps 与 set 都导出 size：同时导入必须 fail-loud，不静默遮蔽。
+    // duplicate 错误产生于 loader 合并层——经 ModuleLoader 走真实多文件路径。
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = root.join("target/tmp/dup_export_probe");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create tmp project");
+    let entry = dir.join("main.mimi");
+    std::fs::write(
+        &entry,
+        "use std::maps\nuse std::set\nfunc main() -> i32 { println(size(map_new())) }\n",
+    )
+    .expect("write main.mimi");
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    let err = loader
+        .load_main(&entry)
+        .err()
+        .or_else(|| loader.merge_all().err())
+        .expect("duplicate export must fail loud at load/merge time");
+    assert!(
+        err.contains("duplicate item 'size'"),
+        "expected duplicate-item error, got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ===== T304: extern FFI 测试 =====

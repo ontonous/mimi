@@ -1367,6 +1367,39 @@ Mimi 数值隐式转换**只允许单向 widening**：
 4. 语义确定性：状态机数据必须数学自洽（架构修正案），隐式窄化可能静默截断，
    因此禁止。Z3 合约可证明无溢出时消除运行时检查。
 
+### 6.14 Module System: `use` Merge, Naming Self-Description, and `::` Reservation `[stable]`（0.39.137 裁决）
+
+Mimi 的模块系统是**文件级 merge 模型**，不是路径限定调用模型：
+
+| 面 | 规则 |
+|----|------|
+| `use std::fs;` | 加载 `std/fs.mimi`，其 `pub` 导出（函数/类型/trait 实现）**以裸名合并**进当前作用域 |
+| 裸名调用 | 合并后的函数直接 `write(...)` 调用（AGENTS §5.2 记载的主路径） |
+| 重复导出 | 两个已导入模块导出同名项 → **fail-loud duplicate item 错误**（不静默遮蔽） |
+| `M::f(...)` 前缀调用 | **不支持**——checker 以 E0400/E0221（内联 module）/TOOL-RESOLUTION-001（文件模块）拒绝 |
+| 内联 `module X { ... }` | 解析器接受、声明可注册，但其函数**不可被任何语法调用**（死面，见下） |
+
+裁决理由：
+1. **命名自描述替代限定符**：stdlib 以领域前缀承担出处职责
+   （`write_file`/`str_split`/`map_new`），调用点可读性由命名约定保证，
+   无需第二套解析规则。collections 内联成员判断规避 strings::contains、
+   `remove_at/remove_value` 避开 set/maps 是此约定的既有实践。
+2. **确定性解析**：单一解析规则 + duplicate fail-loud = 零静默遮蔽。
+   双轨（merge+prefix）要求 checker/VM/codegen/LSP/fmt 五面同步两套路由，
+   违背最小心智模型。
+3. **`::` 的语义身份留给业务状态机**：`FlowName::transition(state, ...)`
+   是 Mimi 的核心差异化——显式的状态转移边。工具函数不承载状态语义，
+   不占用该符号。
+4. **同语义重复对是允许的**（text↔strings、time↔datetime、env↔json 的
+   `get_int` 等）：它们互斥导入即可，duplicate 错误本身就是提示。
+
+已知边界（0.39.137 登记）：
+- 内联 `module` 块是**非契约死面**：声明进入目录但不可调用（native codegen
+  从未编译；VM 侧的 qualified 分发管道已于 0.39.137 删除以对齐）。1.0 前
+  要么删除该语法面，要么赋予语义；两者都是 breaking（pre-1.0 允许）。
+- 异语义同名陷阱须改名消解：`csv::get` → `csv::cell`（0.39.137，
+  与 maps::get 冲突且语义完全不同）。
+
 ---
 
 ## 7. Component Boundary, Native ABI, and Wire Schema

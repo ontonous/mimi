@@ -9,9 +9,7 @@
 //! 4. runs-Flow actor 的普通方法调用：方法优先于转移分发；
 //! 5. E0444：session 载荷必须为整数标量（fail-closed）。
 
-use crate::tests::{
-    can_link, check_source, checked_run_source_with_stdout, run_source_with_stdout,
-};
+use crate::tests::{can_link, check_source, run_source_with_stdout};
 
 /// 双后端对拍 helper：check → interp stdout → native stdout 三方一致。
 fn assert_dual(src: &str, expected: &str) {

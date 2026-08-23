@@ -3,7 +3,7 @@
 > Auto-generated from `mimi/std/*.mimi`. Do not edit manually.
 
 
-> **383 public functions + constants across 23 modules.**
+> **384 public functions + constants across 23 modules.**
 
 
 ## `array` (16)
@@ -84,7 +84,7 @@
 - `pub func serialize_field(field: string) -> string` — serialize_field: Escapes a single CSV field (quotes commas, quotes, newlines).
 - `pub func serialize_row(row: List<string>) -> string` — serialize_row: Serializes fields into CSV line.
 - `pub func serialize(rows: List<List<string>>) -> string` — serialize: Serializes rows into CSV string.
-- `pub func get(rows: List<List<string>>, row: i32, col: i32) -> string` — get: Gets cell at (row, col). Returns "" if out of bounds.
+- `pub func cell(rows: List<List<string>>, row: i32, col: i32) -> string` — cell: Gets cell at (row, col). Returns "" if out of bounds. 0.39.137: renamed from `get` — the bare name collided with maps::get (fail-loud duplicate item when both modules are imported) and the semantics differ entirely (positional cell lookup vs keyed map access).
 
 ## `datetime` (26)
 
@@ -142,14 +142,14 @@
 - `pub func read(path: string) -> Result<string, string>` — read: Reads the entire file at path into a string. Returns Err if the file cannot be read.
 - `pub func write(path: string, content: string) -> Result<(), string>` — write: Writes content to path, overwriting if it exists. Returns Err if the write fails.
 - `pub func read_lines(path: string) -> Result<List<string>, string>` — read_lines: Reads file at path and splits by newline. Returns Err with original I/O error message if the file cannot be read.
-- `pub func file_size(path: string) -> Result<i32, string>` — file_size: Returns the size of the file at path in bytes, or Err if it cannot be stat'ed.
+- `pub func file_size(path: string) -> Result<i64, string>` — file_size: Returns the size of the file at path in bytes, or Err if it cannot be stat'ed. The size is an i64 so files larger than 2 GiB are not truncated.
 - `pub func write_lines(path: string, xs: List<string>) -> Result<(), string>` — write_lines: Writes each string in xs as a line to path. Returns Err if the write fails.
 - `pub func stat(path: string) -> StatResult` — stat: Returns file metadata (size, modified timestamp, is_file, is_dir). Returns size=-1 if the file does not exist.
 - `pub func append(path: string, content: string) -> bool` — append: Appends content to a file. Creates the file if it does not exist. Returns true on success, false on failure.
-- `pub func read_partial(path: string, max_bytes: i32) -> string` — read_partial: Reads up to max_bytes from a file into a string. Useful for large files to avoid loading everything into memory.
-- `pub func read_bytes(path: string) -> string` — read_bytes: Reads an entire file as raw bytes (lossy UTF-8 conversion). For binary data, prefer read_partial for large files.
-- `pub func write_bytes(path: string, data: string) -> bool` — write_bytes: Writes raw byte data to a file. Returns true on success, false on failure.
-- `pub func read_lines_json(path: string) -> string` — read_lines_json: Reads file line-by-line and returns a JSON array of lines. More memory-efficient than read_file + split for very large files.
+- `pub func read_partial(path: string, max_bytes: i32) -> string` — read_partial: Reads up to max_bytes from a file into a string. Useful for large files to avoid loading everything into memory. NOTE (batch5-04 P2-6): the underlying builtin currently returns "" on read/stat failure; this API intentionally keeps that behavior for compatibility. New code should prefer `read_file`/`read` when error visibility is required.
+- `pub func read_bytes(path: string) -> string` — read_bytes: Reads an entire file as raw bytes (lossy UTF-8 conversion). For binary data, prefer read_partial for large files. NOTE (batch5-04 P2-6): the underlying builtin currently returns "" on read/stat failure; this API intentionally keeps that behavior for compatibility. New code should prefer `read_file`/`read` when error visibility is required.
+- `pub func write_bytes(path: string, data: string) -> bool` — write_bytes: Writes raw byte data to a file. Returns true on success, false on failure. NOTE (batch5-04 P2-6): false currently gives no diagnostic string; use `write_file` when you need the underlying error message.
+- `pub func read_lines_json(path: string) -> string` — read_lines_json: Reads file line-by-line and returns a JSON array of lines. More memory-efficient than read_file + split for very large files. NOTE (batch5-04 P2-6): the underlying builtin currently returns "[]" on read failure; this API intentionally keeps that behavior for compatibility.
 
 ## `io` (13)
 
@@ -162,7 +162,7 @@
 - `pub func print_int(n: i32)` — print_int: Prints n to stdout.
 - `pub func print_float(f: f64)` — print_float: Prints f to stdout.
 - `pub func print_list<T>(xs: List<T>)` — print_list: Prints xs to stdout using its Show representation.
-- `pub func input_line() -> Result<string, string>` — input_line: Reads a line from stdin. Returns Err on empty input.
+- `pub func input_line() -> Result<string, string>` — input_line: Reads a line from stdin. Returns Err on EOF/read error; a successfully read empty line is Ok("").
 - `pub func input_int() -> Result<i32, string>` — input_int: Reads a line from stdin and parses it as an integer.
 - `pub func input_float() -> Result<f64, string>` — input_float: Reads a line from stdin and parses it as a float.
 - `pub func input_bool() -> Result<bool, string>` — input_bool: Reads a line from stdin; accepts true/false/yes/no/1/0 (case-insensitive).
@@ -190,7 +190,7 @@
 - `pub func get_float(json: string, key: string) -> Result<f64, string>` — get_float: Gets a float field from a JSON object by key. SD-12 (0.31.51b): returns Result — RFC 8259 rejects NaN/Inf.
 - `pub func has_key(json: string, key: string) -> bool` — has_key: Returns true if the JSON object contains the given key.
 - `pub func is_valid_json(s: string) -> bool` — is_valid_json: Returns true if s is syntactically valid JSON.
-- `pub func to_string_pretty(json: string) -> string` — to_string_pretty: Pretty-prints a JSON string with indentation. Currently a placeholder — returns input unchanged.
+- `pub func to_string_pretty(json: string) -> string` — to_string_pretty: Pretty-prints a JSON string with indentation. NOTE (batch5-04 P3): this is still a compatibility placeholder and does NOT actually reformat the JSON yet — it returns the input unchanged. Do not rely on it for pretty output; prefer `to_string` until a real pretty-printer is implemented.
 - `pub func get_object(json: string, key: string) -> string` — get_object: Gets a nested JSON object by key as a string.
 - `pub func get_array(json: string, key: string) -> string` — get_array: Gets a nested JSON array by key as a string.
 - `pub func array_length(json: string) -> i32` — array_length: Returns the number of elements in a JSON array.
@@ -199,9 +199,9 @@
 
 - `pub func new() -> Record` — new: Creates an empty Record (map).
 - `pub func get(m: Record, key: string) -> (bool, Any)` — get: Looks up key in map m. Returns (found, value).
-- `pub func set(m: Record, key: string, value: Any) -> Record` — set: Sets key to value in map m, returns updated map.
+- `pub func set(m: Record, key: string, value: Any) -> Record` — set: Sets key to value in map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
 - `pub func has_key(m: Record, key: string) -> bool` — has_key: Returns true if key exists in m.
-- `pub func remove(m: Record, key: string) -> Record` — remove: Removes key from map m, returns updated map.
+- `pub func remove(m: Record, key: string) -> Record` — remove: Removes key from map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
 - `pub func size(m: Record) -> i32` — size: Returns the number of entries in map m.
 - `pub func from_list(pairs: List<(string, Any)>) -> Record` — from_list: Creates a map from a list of (key, value) pairs.
 - `pub func is_empty(m: Record) -> bool` — is_empty: Returns true if map m has 0 entries.
@@ -233,7 +233,7 @@
 - `pub func count_digits(n: i32) -> i32` — count_digits: Returns the number of decimal digits in n.
 - `pub func digit_at(n: i32, pos: i32) -> i32` — digit_at: Returns the digit at position pos (0 = units) in n.
 - `pub func sum_digits(n: i32) -> i32` — sum_digits: Returns the sum of decimal digits of n.
-- `pub func reverse_number(n: i32) -> i32` — reverse_number: Returns n with decimal digits reversed.
+- `pub func reverse_number(n: i32) -> i32` — reverse_number: Returns n with decimal digits reversed. Uses i64 arithmetic to avoid overflow; returns -1 if the reversed value cannot be represented as i32.
 - `pub func is_palindrome_number(n: i32) -> bool` — is_palindrome_number: Returns true if n is a palindrome (e.g. 121).
 - `pub func collatz_steps(n: i32) -> i32` — collatz_steps: Returns steps to reach 1 via Collatz sequence.
 - `pub func power(base: f64, exp: f64) -> f64` — power: Returns base^exp (floating-point).
@@ -341,11 +341,12 @@
 - `pub func to_int_safe(s: string, default: i32) -> i32` — to_int_safe: Parses s as integer, returns default on failure.
 - `pub func to_float_safe(s: string, default: f64) -> f64` — to_float_safe: Parses s as float, returns default on failure.
 
-## `random` (6)
+## `random` (7)
 
 - `pub func random_float(lo: f64, hi: f64) -> f64` — random_float: Returns random float in [lo, hi).
 - `pub func random_int(lo: i32, hi: i32) -> i32` — random_int: Returns random integer in [lo, hi). Duplicate of mymath::random_int — kept for compatibility.
 - `pub func random_bool() -> bool` — random_bool: Returns true with 50% probability.
+- `pub func random_remove_ith<T>(xs: List<T>, i: i32) -> List<T>` — random_remove_ith: Returns a new list with the i-th element removed. It is a pub free helper so it survives the std module loader's pub-only merge (private helpers are invisible to consumers). Keeping the remove-at loop in a free generic function also avoids the codegen stack-alloca aliasing bug seen when the loop is inlined directly inside generic impl methods (shuffle/random_sample previously corrupted sh_rest by reusing the same list alloca for the next sh_kept).
 - `pub func random_choice<T>(xs: List<T>) -> Result<T, string>` — random_choice: Returns a random element from xs, or Err if xs is empty.
 - `pub func random_sample<T>(xs: List<T>, n: i32) -> List<T>` — random_sample: Returns n random elements from xs without replacement.
 - `pub func shuffle<T>(xs: List<T>) -> List<T>` — shuffle: Returns xs with elements randomly permuted (Fisher-Yates).
@@ -382,7 +383,7 @@
 - `pub func replace(s: string, from: string, to: string) -> string` — replace: Replaces all occurrences of from with to in s.
 - `pub func split(s: string, delimiter: string) -> List<string>` — split: Splits s by delimiter into a list of substrings.
 - `pub func join(parts: List<string>, separator: string) -> string` — join: Combines parts with separator between each element.
-- `pub func repeat(s: string, n: i32) -> string` — repeat: Returns s repeated n times.
+- `pub func repeat(s: string, n: i32) -> string` — repeat: Returns s repeated n times. Non-positive n is defined as an empty string, never passed to the builtin.
 - `pub func index_of(s: string, sub: string) -> Option<i32>` — index_of: Returns Some(pos) if sub is found in s, else None.
 - `pub func parse_int(s: string) -> (bool, i64)` — parse_int: Parses s as integer. Returns (true, val) on success.
 - `pub func parse_float(s: string) -> (bool, f64)` — parse_float: Parses s as float. Returns (true, val) on success.
@@ -400,7 +401,7 @@
 - `pub func capitalize(s: string) -> string` — capitalize: Returns s with first character uppercased.
 - `pub func title(s: string) -> string` — title: Returns s with each word capitalized.
 - `pub func reverse_string(s: string) -> string` — reverse_string: Returns s with characters in reverse order.
-- `pub func truncate(s: string, max_len: i32) -> string` — truncate: Returns s shortened to max_len with "..." suffix if needed.
+- `pub func truncate(s: string, max_len: i32) -> string` — truncate: Returns s shortened to max_len with "..." suffix if needed. Non-positive max_len has no room for any characters, so return an empty string instead of relying on str_substring's negative/zero wrapping.
 - `pub func remove_prefix(s: string, prefix: string) -> string` — remove_prefix: Strips prefix from s if present.
 - `pub func remove_suffix(s: string, suffix: string) -> string` — remove_suffix: Strips suffix from s if present.
 - `pub func count_lines(s: string) -> i32` — count_lines: Returns the number of lines in s.
@@ -414,7 +415,7 @@
 - `pub func paren(s: string) -> string` — paren: Wraps s in parentheses.
 - `pub func bracket(s: string) -> string` — bracket: Wraps s in square brackets.
 - `pub func brace(s: string) -> string` — brace: Wraps s in curly braces.
-- `pub func indent(s: string, n: i32) -> string` — indent: Prepends n spaces to each line of s.
+- `pub func indent(s: string, n: i32) -> string` — indent: Prepends n spaces to each line of s. Non-positive n returns s unchanged (no negative repeat sent to builtin).
 - `pub func ellipsis(s: string, max_len: i32) -> string` — ellipsis: Alias for truncate.
 - `pub func count_substring(s: string, sub: string) -> i32` — count_substring: Counts non-overlapping occurrences of sub in s.
 - `pub func is_blank(s: string) -> bool` — is_blank: Returns true if s is empty or whitespace-only.
