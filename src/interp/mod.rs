@@ -484,7 +484,6 @@ impl<'a> Interpreter<'a> {
                 crate::core::ResolvedItemKind::Trait => "trait",
                 crate::core::ResolvedItemKind::Impl => "impl",
                 crate::core::ResolvedItemKind::ExternBlock => "extern",
-                crate::core::ResolvedItemKind::Module => "module",
                 crate::core::ResolvedItemKind::Actor => "actor",
                 crate::core::ResolvedItemKind::Flow => "flow",
                 crate::core::ResolvedItemKind::Session => "session",

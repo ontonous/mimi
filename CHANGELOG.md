@@ -15,6 +15,29 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.139 — `module` 关键字退役 + 内联 module AST 管道全删（选项 C 收官）
+
+0.39.137 §6.14 裁决 → 0.39.138 检查期硬拒绝 → 本版完成完全退役：
+
+- **关键字退役**：`module` 从关键字表删除（62 词 / 59 硬），重新成为
+  普通标识符（`let module = 42` 合法；正向回归锁在位）。
+- **解析期定向拒绝**：item 位形 `module Ident {` 由解析器给出 E0445
+  （ParseError 增加可选 code 字段），诊断含模块名 + 迁移指引；拒绝臂
+  消费整个块 + 恢复循环尊重子解析器消费进度——单条报错零级联噪声。
+- **AST 管道全删**：`Item::Module`/`ModuleDef` 变体、parser parse_module
+  管道与 DEPTH_MAX_MODULE 深度预算、checker `module_path` 字段与全部
+  下降臂、resolved 的 `module: &str` 参数穿线 / `qualify()` /
+  `ResolvedItemKind::Module`、cfg/ir/lower/verifier(5 文件)/LSP(5 文件)/
+  loader/lint/doc_core/progressive/flow_matrix/codegen/interp/stats 的
+  全部 descent 臂。净删 ~1000 行。
+- **测试台账**：11 个 0.39.138 墓碑测试正式删除（被测机制不复存在）；
+  3 个内联 module codegen/mms 测试删除；E0445 测试迁移到解析层合同；
+  LSP hover/definition/symbols 的 module 测试改锁现存声明面；关键字
+  计数锁更名 60/57。ignored 回落 18→7。
+
+门禁：lib **5659/0/7**、real_world_cli + trap_semantics 绿、探针 16/17、
+fmt/check_language_docs 干净；CLI 实证 E0445 单条 + `module` 标识符正例。
+
 ### 0.39.138 — 内联 module 硬拒绝（E0445，选项 B 落地）
 
 0.39.137 §6.14 评估的"内联 `module` 死面"按裁决收紧为检查期硬拒绝：

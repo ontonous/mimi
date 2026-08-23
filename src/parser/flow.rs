@@ -306,7 +306,6 @@ fn recover_to_sync_slice(tokens: &[Token], mut pos: usize) -> usize {
     const SYNC: &[TokenKind] = &[
         TokenKind::Func,
         TokenKind::Type,
-        TokenKind::Module,
         TokenKind::Actor,
         TokenKind::Cap,
         TokenKind::Trait,
@@ -441,8 +440,20 @@ impl FlowState {
                         Err(e) => {
                             if recovery {
                                 acc.errors.push(e);
-                                let new_pos = recover_to_sync_slice(tokens, pos);
-                                let new_pos = if new_pos == pos { pos + 1 } else { new_pos };
+                                // Respect sub-parser consumption first (e.g.
+                                // the E0445 module rejection consumes its whole
+                                // block); only fall back to sync-token scan
+                                // when the sub-parser made no progress.
+                                let new_pos = if new_pos > pos {
+                                    new_pos
+                                } else {
+                                    let synced = recover_to_sync_slice(tokens, pos);
+                                    if synced == pos {
+                                        pos + 1
+                                    } else {
+                                        synced
+                                    }
+                                };
                                 state_yield!(
                                     Items { pos: new_pos },
                                     acc,

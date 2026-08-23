@@ -46,7 +46,6 @@ pub fn apply_progressive_typestate(file: &mut File) -> bool {
 fn file_has_user_flow(file: &File) -> bool {
     file.items.iter().any(|item| match item {
         Item::Flow(_) => true,
-        Item::Module(m) => m.items.iter().any(|i| matches!(i, Item::Flow(_))),
         _ => false,
     })
 }

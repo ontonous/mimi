@@ -15,7 +15,6 @@ pub enum TokenKind {
     Ident(String),
 
     // Keywords
-    Module,
     Type,
     Func,
     Fn,
@@ -158,7 +157,6 @@ impl fmt::Display for TokenKind {
             TokenKind::True => "true",
             TokenKind::False => "false",
             TokenKind::Unit => "()",
-            TokenKind::Module => "module",
             TokenKind::Type => "type",
             TokenKind::Func => "func",
             TokenKind::Fn => "fn",
@@ -293,7 +291,6 @@ impl TokenKind {
             TokenKind::True => "true",
             TokenKind::False => "false",
             TokenKind::Unit => "()",
-            TokenKind::Module => "module",
             TokenKind::Type => "type",
             TokenKind::Func => "func",
             TokenKind::Fn => "fn",

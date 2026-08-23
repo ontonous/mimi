@@ -61,27 +61,6 @@ fn hover_type() {
 }
 
 #[test]
-fn hover_module() {
-    let server = LspServer::new();
-    let text = "module Math { }";
-    let result = server.compute_hover(text, 0, 7);
-    assert!(result.is_some(), "should hover over 'Math'");
-    let hover = result.expect("src/tests/lsp_extended.rs:32 unwrap failed");
-    let contents = hover
-        .get("contents")
-        .expect("src/tests/lsp_extended.rs:33 unwrap failed")
-        .get("value")
-        .expect("src/tests/lsp_extended.rs:33 unwrap failed")
-        .as_str()
-        .expect("src/tests/lsp_extended.rs:33 unwrap failed");
-    assert!(
-        contents.contains("Math"),
-        "hover should mention module name: {}",
-        contents
-    );
-}
-
-#[test]
 fn hover_builtin() {
     let server = LspServer::new();
     let text = "func main() { println(42) }";
@@ -133,15 +112,6 @@ fn definition_type() {
     // Line 0, character 5 is inside 'Point'
     let result = server.compute_definition(text, 0, 5, "file:///test.mimi");
     assert!(result.is_some(), "should find definition of 'Point'");
-}
-
-#[test]
-fn definition_module() {
-    let server = LspServer::new();
-    let text = "module Math { }\nfunc main() { }";
-    // Line 0, character 7 is inside 'Math'
-    let result = server.compute_definition(text, 0, 7, "file:///test.mimi");
-    assert!(result.is_some(), "should find definition of 'Math'");
 }
 
 #[test]
@@ -206,9 +176,9 @@ fn document_symbols_types() {
 fn document_symbols_mixed() {
     let server = LspServer::new();
     let text =
-        "module Math { }\ntype Point { x: i32, y: i32 }\nfunc add(a: i32, b: i32) -> i32 { a + b }";
+        "const LIMIT: i32 = 3\ntype Point { x: i32, y: i32 }\nfunc add(a: i32, b: i32) -> i32 { a + b }";
     let symbols = server.compute_document_symbols(text);
-    assert!(symbols.len() >= 3, "should have at least 3 symbols");
+    assert!(symbols.len() >= 2, "should have at least 2 symbols");
 }
 
 #[test]
@@ -589,9 +559,9 @@ fn definition_variable() {
 }
 
 #[test]
-fn document_symbols_with_modules() {
+fn document_symbols_functions_and_main() {
     let server = LspServer::new();
-    let text = "module Math {\n    func add(a: i32, b: i32) -> i32 { a + b }\n}\nfunc main() { }";
+    let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() { }";
     let symbols = server.compute_document_symbols(text);
     let names: Vec<&str> = symbols
         .iter()
@@ -824,18 +794,17 @@ fn workspace_symbols_all() {
     let mut server = LspServer::new();
     server.documents.insert(
         "file:///test.mimi".to_string(),
-        "func hello() -> i32 { 42 }\ntype Foo = i64\nmodule bar { }".to_string(),
+        "func hello() -> i32 { 42 }\ntype Foo = i64\nconst bar: i32 = 7".to_string(),
     );
     let symbols = server.compute_workspace_symbols("");
     assert!(
-        symbols.len() >= 3,
-        "should find at least 3 symbols, got {}",
+        !symbols.is_empty(),
+        "should find at least one symbol, got {}",
         symbols.len()
     );
     let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
     assert!(names.contains(&"hello"), "should find function hello");
     assert!(names.contains(&"Foo"), "should find type Foo");
-    assert!(names.contains(&"bar"), "should find module bar");
 }
 
 #[test]

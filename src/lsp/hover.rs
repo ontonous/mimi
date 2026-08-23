@@ -198,15 +198,6 @@ impl LspServer {
                             }
                         }));
                     }
-                    Item::Module(m) if m.name == word => {
-                        let item_count = m.items.len();
-                        return Some(serde_json::json!({
-                            "contents": {
-                                "kind": "markdown",
-                                "value": format!("**module** `{}` ({} items)", word, item_count)
-                            }
-                        }));
-                    }
                     Item::Actor(a) if a.name == word => {
                         let method_names: Vec<&str> =
                             a.methods.iter().map(|m| m.name.as_str()).collect();

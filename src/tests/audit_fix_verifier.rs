@@ -704,40 +704,10 @@ func n(x: i64) -> i64 {
     );
 }
 
-/// Wave-2 item 7 (wave1-review §5.8): ffi.rs call-site discovery must
-/// descend into Item::Module inner functions — modules were a blind spot for
+/// Wave-2 item 7 (wave1-review §5.8): ffi.rs call-site discovery must cover
+/// every top-level function — some declaration forms were a blind spot for
 /// `--verify-ffi` even after Wave-1 exhausted the statement/expr positions.
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn audit2_vera_ffi_walker_descends_into_modules() {
-    if !z3_or_skip() {
-        return;
-    }
-    let src = r#"
-extern "C" {
-    func danger(p: i64) -> i64
-        requires: p > 0;
-}
-module inner {
-    func caller(x: i64) -> i64 {
-        danger(x)
-    }
-}
-"#;
-    let results = crate::verifier::verify_ffi_source(src).expect("verify_ffi_source");
-    assert!(
-        results.iter().any(|r| r.func_name.contains("calls danger")),
-        "extern call inside a module function must be discovered: {:?}",
-        results
-    );
-    assert!(
-        results.iter().any(|r| r.func_name.contains("calls danger")
-            && r.status == crate::verifier::VerifStatus::Failed),
-        "unguarded danger(x) inside the module should be Disproven: {:?}",
-        results
-    );
-}
-
+/// (0.39.139: inline `module` nesting no longer exists; the walker is flat.)
 /// §11-#46/V-6 (audit 2026-08-05, closed 2026-08-07): i64 add/sub/mul 现与
 /// i32 同等携带溢出义务（SD-7 trap 对齐）。无界操作数且前置条件不约束
 /// 范围 → fail-closed Disproven（此前静默 Proven，披露语掩盖假设）。

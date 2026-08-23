@@ -107,7 +107,6 @@ fn collect_record_shapes_items(items: &[Item], shapes: &mut HashMap<String, Vec<
                         .or_insert_with(|| state.payload.clone().unwrap_or_default());
                 }
             }
-            Item::Module(m) => collect_record_shapes_items(&m.items, shapes),
             Item::Type(td) => {
                 if let TypeDefKind::Record(fields) = &td.kind {
                     shapes
@@ -131,14 +130,6 @@ fn expand_items(items: &mut Vec<Item>, shapes: &HashMap<String, Vec<Field>>, mod
                 // AST — the checker's self.types is NOT a backend input
                 // (from_checked_file_base derives type_defs from the file AST).
                 injected.extend(fault_nominal_type_defs(flow, module));
-            }
-            Item::Module(m) => {
-                let child_module = if module.is_empty() {
-                    m.name.clone()
-                } else {
-                    format!("{}::{}", module, m.name)
-                };
-                expand_items(&mut m.items, shapes, &child_module);
             }
             _ => {}
         }

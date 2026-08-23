@@ -450,23 +450,6 @@ func f3(x: i32) -> i32 {
 }
 
 #[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn verify_module_nested() {
-    let src = r#"
-module Math {
-    func identity(x: i32) -> i32 {
-        requires: x >= 0
-        ensures: x >= 0
-        x
-    }
-}
-"#;
-    let results = verify_source(src);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].status, crate::verifier::VerifStatus::Verified);
-}
-
-#[test]
 fn verify_le_operator() {
     let src = r#"
 func capped(x: i32) -> i32 {

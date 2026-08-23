@@ -401,49 +401,6 @@ func main() -> i32 {
 // the module path, so `module { func m }` + `actor { m }` collided into one
 // NodeId and aborted a VALID program with TOOL-RESOLUTION-001.
 
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn audit41_module_func_actor_method_same_name_no_node_id_collision() {
-    // Top-level module function `util::m` and top-level actor method
-    // `Counter::m` must coexist: qualified keys keep their NodeIds apart.
-    check_source(
-        r#"
-module util {
-    func m(x: i32) -> i32 { x + 1 }
-}
-actor Counter {
-    count: i32 = 0;
-    func m(v: i32) -> i32 { v + 2 }
-}
-func main() -> i32 { 0 }
-"#,
-    )
-    .expect("module func and actor method with the same name must not collide");
-}
-
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn audit41_module_nested_actor_same_name_no_node_id_collision() {
-    // The actor lives INSIDE the module: both `util::m` (function) and
-    // `util::Counter::m` (method) must resolve — the method key must carry
-    // the full module path, and the checker signature lookup for the
-    // module-wrapped actor must still find its finalized signature.
-    check_source(
-        r#"
-module util {
-    func m(x: i32) -> i32 { x + 1 }
-    actor Counter {
-        count: i32 = 0;
-        func m(v: i32) -> i32 { v + 2 }
-        func go(n: i32) -> i32 { n * 2 }
-    }
-}
-func main() -> i32 { 0 }
-"#,
-    )
-    .expect("module-nested actor method must not collide with the module function");
-}
-
 // ─── Fix 9: guarded match arms are not full coverage ─────────────
 // [HIGH] infer/match_.rs — guards can fail at runtime, leaving the variant
 // unmatched; guarded arms must not count toward exhaustiveness.

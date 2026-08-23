@@ -296,14 +296,16 @@ fn deeply_nested_pattern_hits_recursion_limit_not_stack_overflow() {
 }
 
 #[test]
-fn deeply_nested_module_hits_recursion_limit_not_stack_overflow() {
+fn deeply_nested_module_rejected_not_stack_overflow() {
+    // 0.39.139: inline modules are rejected at parse (E0445); the crafted
+    // input must fail fast instead of recursing to stack overflow.
     let depth: usize = 400;
     let src = format!("{}{}", "module m { ".repeat(depth), "}".repeat(depth));
     let res = run_source_result(&src);
     let err = res.expect_err("deeply nested modules must be rejected");
     assert!(
-        err.contains("recursion limit"),
-        "expected recursion-limit error, got: {}",
+        err.contains("module"),
+        "expected module rejection error, got: {}",
         err
     );
 }
@@ -628,39 +630,28 @@ fn audit2_pm_probe_depth_budget() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Wave-2 agent PM — red line: module-path depth cap (wave1-review §1.2)
+// Wave-2 agent PM — retired with the inline-module syntax (0.39.139):
+// the module-path depth cap (DEPTH_MAX_MODULE) existed solely for
+// parse_module recursion, which no longer exists. The two probes below
+// lock the replacement contract: item-position `module` gets the coded
+// E0445 rejection instead of unbounded recursion.
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
-fn audit2_pm_module_cap_fires_below_default_cap() {
-    // The module path recurses through 5 frames per nesting level
-    // (parse_module → parse_module_inner → parse_item_block → parse_item →
-    // parse_item_kind), so it gets its own cap (helpers.rs
-    // DEPTH_MAX_MODULE = 32), well below the default 128. Depths between
-    // the two caps must be rejected by the MODULE cap — proving the
-    // module-specific budget is wired, not just the shared one.
-    let depth: usize = 40; // > 32 (module cap), < 128 (default cap)
-    let src = format!("{}{}", "module m { ".repeat(depth), "}".repeat(depth));
-    let msgs = parse_diag_messages(&src);
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("recursion limit") && m.contains("> 32 nested")),
-        "module nesting beyond the module cap must mention the module cap, got: {:?}",
-        msgs
-    );
+fn audit2_pm_module_block_is_coded_parse_rejection() {
+    let src = "module m { func f() -> i32 { 1 } }";
+    let diags = parse_error(src);
+    assert_eq!(diags.code.as_deref(), Some("E0445"), "got: {diags:?}");
 }
 
 #[test]
-fn audit2_pm_shallow_module_nesting_still_parses() {
-    // 16 nested modules (half the module cap) must parse cleanly so real
-    // code keeps headroom; also validates the cap is not accidentally 0.
-    let depth: usize = 16;
+fn audit2_pm_deeply_nested_module_shape_still_fails_fast() {
+    let depth: usize = 40; // former cap was 32; default expr cap is 128
     let src = format!("{}{}", "module m { ".repeat(depth), "}".repeat(depth));
     let msgs = parse_diag_messages(&src);
     assert!(
-        msgs.is_empty(),
-        "16 nested modules must parse, got: {:?}",
-        msgs
+        !msgs.is_empty(),
+        "deeply nested module shape must be rejected"
     );
 }
 
@@ -1058,7 +1049,9 @@ fn audit2_pm_hard_keyword_at_expr_position_is_parse_error() {
     for bad in [
         "func main() -> i32 { let x = return\n x }",
         "func main() -> i32 { let x = else\n x }",
-        "func main() -> i32 { let x = module\n x }",
+        // (`module` retired from the keyword table in 0.39.139 — it is a
+        // valid identifier at expression position now; see
+        // module_is_an_ordinary_identifier_after_retirement.)
     ] {
         let msgs = parse_diag_messages(bad);
         assert!(

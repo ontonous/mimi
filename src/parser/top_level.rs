@@ -13,6 +13,7 @@ impl Parser {
                 Span::new(token.line, token.col, token.end_line, token.end_col)
                     .with_source(self.source_id),
             ),
+            code: None,
         }
     }
 
@@ -44,7 +45,6 @@ impl Parser {
         let meta = self.consumed_meta(start_pos, AstOrigin::User);
         match &mut item {
             Item::Func(def) => def.meta = meta,
-            Item::Module(def) => def.meta = meta,
             Item::Type(def) => def.meta = meta,
             Item::Actor(def) => def.meta = meta,
             Item::Cap(def) => def.meta = meta,
@@ -211,7 +211,6 @@ impl Parser {
                 f.pub_ = pub_;
                 Ok(Item::Func(f))
             }
-            TokenKind::Module => Ok(Item::Module(self.parse_module()?)),
             TokenKind::Type => {
                 let mut t = self.parse_type_def(derives, attributes)?;
                 t.pub_ = pub_;
@@ -312,6 +311,56 @@ impl Parser {
                 )?))
             }
             _ => {
+                // 0.39.139 (spec §6.14 option C): inline `module` blocks are
+                // retired. The word tokenizes as an ordinary identifier; the
+                // item-position shape gets a targeted coded rejection instead
+                // of a generic "unexpected token".
+                if self.at_ident_name("module") {
+                    let (tok_line, tok_col) = {
+                        let t = self.peek();
+                        (t.line, t.col)
+                    };
+                    let name = self
+                        .tokens
+                        .get(self.pos + 1)
+                        .and_then(|t| match &t.kind {
+                            TokenKind::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    // Consume the whole block so recovery mode does not emit
+                    // cascading "unexpected token" noise after the primary
+                    // diagnostic (fail-fast, spec §4.10).
+                    let mut depth = 0usize;
+                    let mut saw_brace = false;
+                    while !self.at(&TokenKind::Eof) {
+                        let kind = self.tokens[self.pos].kind.clone();
+                        self.advance();
+                        match kind {
+                            TokenKind::LBrace => {
+                                depth += 1;
+                                saw_brace = true;
+                            }
+                            TokenKind::RBrace => {
+                                depth -= 1;
+                                if saw_brace && depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Err(ParseError::new(
+                        format!(
+                            "inline `module {name}` block is not supported: move its pub items \
+                             into their own .mimi file and add `use {name};` (file modules merge \
+                             pub functions under bare names)"
+                        ),
+                        tok_line,
+                        tok_col,
+                    )
+                    .with_code(crate::diagnostic::codes::E0445));
+                }
                 if self.at_ident_name("protocol") {
                     let tok = self.peek();
                     return Err(ParseError::new(
@@ -702,51 +751,6 @@ impl Parser {
             runs_flow,
             fields,
             methods,
-        })
-    }
-
-    fn parse_module(&mut self) -> Result<ModuleDef, ParseError> {
-        // Full-audit 2026-08-05: module nesting recurses via
-        // parse_item_block → parse_item → parse_module with no depth guard
-        // (stack overflow DoS on crafted input). Mirror the parse_expr guard.
-        //
-        // Wave-2 red line (wave1-review §1.2): the shared MAX=128 cap was
-        // sized for session/expr frames; the module path recurses through
-        // five mutually-recursive frames per nesting level (parse_module →
-        // parse_module_inner → parse_item_block → parse_item →
-        // parse_item_kind) and still overflowed the 2 MB libtest thread
-        // stack at depth 128 inside the guard. Use the module-specific cap
-        // measured for that frame budget (helpers.rs DEPTH_MAX_MODULE).
-        self.check_depth_with(super::helpers::DEPTH_MAX_MODULE)?;
-        self.inc_depth();
-        let result = self.parse_module_inner();
-        self.dec_depth();
-        result
-    }
-
-    fn parse_module_inner(&mut self) -> Result<ModuleDef, ParseError> {
-        let start_pos = self.pos;
-        self.expect_keyword(TokenKind::Module)?;
-        let name = self.expect_ident()?;
-        self.skip_newlines();
-        if self.is_sketch() {
-            self.expect(TokenKind::Colon, "`:`")?;
-            self.skip_newlines();
-        }
-        self.expect_block_start("module body")?;
-        // Module bodies may start with their own `use` imports.
-        let mut imports = Vec::new();
-        self.skip_newlines();
-        while self.at(&TokenKind::Use) {
-            imports.push(self.parse_import()?);
-            self.skip_newlines();
-        }
-        let items = self.parse_item_block()?;
-        Ok(ModuleDef {
-            meta: self.consumed_meta(start_pos, AstOrigin::User),
-            name,
-            imports,
-            items,
         })
     }
 
@@ -1867,23 +1871,6 @@ mod attribute_tests {
         assert_user_meta(
             actor.fields[0].meta,
             span_for(actor_source, "mut count: i32 = 0;", source_id),
-        );
-
-        let module_source = "module nested { const LIMIT: i32 = 3; }";
-        let modules = parse_with_source(module_source, source_id).expect("parse module");
-        let Item::Module(module) = &modules.items[0] else {
-            panic!("expected module");
-        };
-        assert_user_meta(
-            module.meta,
-            span_for(module_source, module_source, source_id),
-        );
-        let Item::Const { meta, .. } = &module.items[0] else {
-            panic!("expected nested const");
-        };
-        assert_user_meta(
-            *meta,
-            span_for(module_source, "const LIMIT: i32 = 3;", source_id),
         );
 
         let cap_source = "cap Read;";

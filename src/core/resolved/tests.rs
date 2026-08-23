@@ -384,29 +384,6 @@ func main() -> i32 { 0 }
     assert!(program.transition("Counter", "dec", "Zero").is_none());
 }
 
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn resolved_function_signatures_are_indexed_by_qualified_name() {
-    let file = parse(
-        r#"
-module util {
-    func twice(x: i32) -> i32 { x + x }
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    let twice = program
-        .function("util::twice")
-        .expect("util::twice signature");
-    assert_eq!(twice.params.len(), 1);
-    assert_eq!(twice.params[0].0, "x");
-    assert!(matches!(twice.params[0].1.unlocated(), Type::Name(n, _) if n == "i32"));
-    assert!(matches!(twice.ret.unlocated(), Type::Name(n, _) if n == "i32"));
-    assert!(program.function("twice").is_none());
-    assert!(program.function("main").is_some());
-}
-
 // 0.34.18c (§4.2): resolved_function_records_effect_clause removed — the `with`
 // effect clause is abolished (parser rejects it).
 
@@ -975,28 +952,6 @@ func main() -> i32 { 0 }
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert_eq!(interp.resolved_mailbox_depth("Worker"), Some(64));
     assert_eq!(program.flow("Worker").unwrap().mailbox_depth, Some(64));
-}
-
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn resolved_mailbox_depth_matches_module_qualified_flow() {
-    let file = parse(
-        r#"
-module net {
-    flow Conn {
-        @mailbox(depth = 32)
-        state Idle
-        transition tick(Idle) -> Idle { return Idle {} }
-    }
-}
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    assert_eq!(program.flow("net::Conn").unwrap().mailbox_depth, Some(32));
-    let interp = crate::interp::Interpreter::from_checked(&program);
-    assert_eq!(interp.resolved_mailbox_depth("Conn"), Some(32));
-    assert_eq!(interp.resolved_mailbox_depth("net::Conn"), Some(32));
 }
 
 #[test]
@@ -2010,57 +1965,6 @@ func main() -> i32 { abs(1) }
 }
 
 #[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn canonical_flow_ids_include_module_path() {
-    let file = parse(
-        r#"
-module alpha {
-    flow Worker {
-        state Idle
-        state Busy
-        transition start(Idle) -> Busy { return Busy {} }
-    }
-}
-module beta {
-    flow Worker {
-        state Idle
-        state Busy
-        transition start(Idle) -> Busy { return Busy {} }
-    }
-}
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check");
-    assert!(program
-        .transition("alpha::Worker", "start", "Idle")
-        .is_some());
-    assert!(program
-        .transition("beta::Worker", "start", "Idle")
-        .is_some());
-    assert_eq!(
-        program
-            .transitions()
-            .keys()
-            .filter(|id| id.event == "start" && id.source.name == "Idle")
-            .count(),
-        2
-    );
-    let alpha = program.flow("alpha::Worker").expect("alpha flow");
-    let idle = alpha.states.get("Idle").expect("Idle state");
-    assert_eq!(idle.id.flow.0, "alpha::Worker");
-    assert_eq!(idle.node_id.0, "state:alpha::Worker::Idle");
-    assert_eq!(idle.origin.user_span().start_line, 4);
-    assert!(idle.payload.is_empty());
-    assert!(program.flow("Worker").is_none());
-    assert!(program
-        .items()
-        .contains_key(&NodeId("module:alpha".to_string())));
-    assert!(program
-        .items()
-        .contains_key(&NodeId("flow:alpha::Worker".to_string())));
-}
-
-#[test]
 fn resolved_item_directory_records_declaration_spans() {
     let file = parse(
         r#"
@@ -3045,100 +2949,6 @@ fn generated_siblings_with_the_same_inherited_span_use_rule_and_semantic_discrim
 }
 
 #[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn callable_catalog_uses_the_same_impl_and_nested_ids_as_ownership_ledgers() {
-    let source = r#"
-module api {
-    trait Close {
-        func close(value: i32) -> i32;
-        func flush(value: i32) -> i32;
-    }
-    type Handle { value: i32 }
-    impl Close for Handle {
-        func close(value: i32) -> i32 { value }
-        func flush(value: i32) -> i32 { value }
-    }
-    func outer() -> i32 { func inner(value: i32) -> i32 { value }; inner(1) }
-}
-func main() -> i32 { 0 }
-"#;
-    let file = parse(source);
-    let program = crate::core::check_program(&file).expect("callable catalog");
-    let module = file
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Module(module) if module.name == "api" => Some(module),
-            _ => None,
-        })
-        .expect("api module");
-    let impl_def = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Impl(impl_def) => Some(impl_def),
-            _ => None,
-        })
-        .expect("impl");
-    let impl_owner = impl_method_owner("api::Close:for:Handle", &impl_def.methods[0]);
-    assert!(program.node_meta().contains_key(&impl_owner));
-    assert!(program.resource_analysis(&impl_owner).is_some());
-
-    let outer = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Func(function) if function.name == "outer" => Some(function),
-            _ => None,
-        })
-        .expect("outer");
-    let nested = outer
-        .body
-        .iter()
-        .find_map(|stmt| match stmt.unlocated() {
-            Stmt::Func(function) => Some(function),
-            _ => None,
-        })
-        .expect("nested function");
-    let nested_owner = nested_function_owner(&NodeId("function:api::outer".into()), nested);
-    assert!(program.node_meta().contains_key(&nested_owner));
-    assert!(program.resource_analysis(&nested_owner).is_some());
-
-    let expected_owners = program
-        .resource_analyses()
-        .keys()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    let mut reordered = file.clone();
-    let reordered_module = reordered
-        .items
-        .iter_mut()
-        .find_map(|item| match item {
-            Item::Module(module) if module.name == "api" => Some(module),
-            _ => None,
-        })
-        .expect("reordered api");
-    for item in &mut reordered_module.items {
-        match item {
-            Item::Trait(trait_def) => trait_def.methods.reverse(),
-            Item::Impl(impl_def) => impl_def.methods.reverse(),
-            _ => {}
-        }
-    }
-    reordered_module.items.reverse();
-    let reordered_program =
-        crate::core::check_program(&reordered).expect("reordered callable catalog");
-    assert_eq!(
-        expected_owners,
-        reordered_program
-            .resource_analyses()
-            .keys()
-            .cloned()
-            .collect()
-    );
-}
-
-#[test]
 fn production_node_ids_do_not_encode_vec_indexes() {
     let file = parse(
         r#"
@@ -3781,29 +3591,6 @@ func main() -> i32 { 0 }
 "#,
     );
     crate::core::check_program(&file).expect("implicit return transfers f");
-}
-
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn ownership_ledgers_use_module_qualified_owner_ids() {
-    let file = parse(
-        r#"
-cap File
-module A { func close(f: cap File) -> i32 { drop(f); 0 } }
-module B { func close(f: cap File) -> i32 { drop(f); 0 } }
-func main() -> i32 { 0 }
-"#,
-    );
-    let program = crate::core::check_program(&file).expect("check modules");
-    assert!(program
-        .resource_analysis(&NodeId("function:A::close".to_string()))
-        .is_some());
-    assert!(program
-        .resource_analysis(&NodeId("function:B::close".to_string()))
-        .is_some());
-    assert!(program
-        .resource_analysis(&NodeId("function:close".to_string()))
-        .is_none());
 }
 
 #[test]

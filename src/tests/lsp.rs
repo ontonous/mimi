@@ -828,9 +828,7 @@ fn lsp_verification_cache_persistent_roundtrip_preserves_span_and_origin() {
 fn lsp_span_anchors_for_lsp_queries() {
     use crate::ast::{Item, PatternKind, Stmt};
     let src = "type Point { x: i32 }\n\
-               module util {\n\
-               \x20   func id(a: i32) -> i32 { a }\n\
-               }\n\
+               const ID: i32 = 1\n\
                impl Clone for Point {\n\
                \x20   func clone() -> Point { self }\n\
                }\n\
@@ -853,21 +851,7 @@ fn lsp_span_anchors_for_lsp_queries() {
         (1, 1),
         "TypeDef span must anchor at the `type` keyword"
     );
-    // ModuleDef span anchors at the `module` keyword (line 2).
-    let m = file
-        .items
-        .iter()
-        .find_map(|i| match i {
-            Item::Module(m) => Some(m),
-            _ => None,
-        })
-        .expect("module item");
-    assert_eq!(
-        (m.meta.span.start_line, m.meta.span.start_col),
-        (2, 1),
-        "ModuleDef span must anchor at the `module` keyword"
-    );
-    // ImplDef span anchors at the `impl` keyword (line 5).
+    // ImplDef span anchors at the `impl` keyword (line 3).
     let imp = file
         .items
         .iter()
@@ -878,7 +862,7 @@ fn lsp_span_anchors_for_lsp_queries() {
         .expect("impl item");
     assert_eq!(
         (imp.meta.span.start_line, imp.meta.span.start_col),
-        (5, 1),
+        (3, 1),
         "ImplDef span must anchor at the `impl` keyword"
     );
     // The let-binding pattern span anchors at the binding name.
@@ -901,7 +885,7 @@ fn lsp_span_anchors_for_lsp_queries() {
             "expected binding `n`"
         );
         assert_eq!(
-            pat.meta.span.start_line, 9,
+            pat.meta.span.start_line, 7,
             "let pattern span must carry the binding line"
         );
         // `    let n = 1` — 4 spaces + `let ` → `n` at col 9 (1-indexed).

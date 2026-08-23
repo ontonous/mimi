@@ -58,19 +58,6 @@ fn mms_block_multiple_rejected() {
 }
 
 #[test]
-fn mms_block_in_module_rejected() {
-    let src = r#"
-        module Math {
-            func add(a: i32, b: i32) -> i32 {
-                mms { some content }
-                a + b
-            }
-        }
-    "#;
-    assert_mms_rejected(src);
-}
-
-#[test]
 fn mms_block_contract_shaped_content_rejected() {
     // Contract-shaped mms content was always inert; now the container itself
     // is rejected so no one mistakes it for a runnable contract surface.

@@ -408,7 +408,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 crate::core::ResolvedItemKind::Trait => "trait",
                 crate::core::ResolvedItemKind::Impl => "impl",
                 crate::core::ResolvedItemKind::ExternBlock => "extern",
-                crate::core::ResolvedItemKind::Module => "module",
                 crate::core::ResolvedItemKind::Actor => "actor",
                 crate::core::ResolvedItemKind::Flow => "flow",
                 crate::core::ResolvedItemKind::Session => "session",
@@ -524,19 +523,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         crate::core::subst_type_params(ty, &generics, &self.type_map)
     }
 
-    /// Apply a handler to every item in `items`, recursing into modules.
+    /// Apply a handler to every top-level item.
     fn process_items<F>(items: &[Item], f: &mut F) -> MimiResult<()>
     where
         F: FnMut(&Item) -> MimiResult<()>,
     {
         for item in items {
-            if let Item::Module(m) = item {
-                for inner in &m.items {
-                    f(inner)?;
-                }
-            } else {
-                f(item)?;
-            }
+            f(item)?;
         }
         Ok(())
     }

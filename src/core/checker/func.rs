@@ -16,11 +16,7 @@ impl<'a> Checker<'a> {
         let generic_scope_len = self.generic_scope.len();
         self.generic_scope
             .extend(func.generics.iter().map(|generic| generic.name.clone()));
-        let owner_name = if self.module_path.is_empty() {
-            func.name.clone()
-        } else {
-            format!("{}::{}", self.module_path.join("::"), func.name)
-        };
+        let owner_name = func.name.clone();
         let owner = crate::core::NodeId(format!("function:{}", owner_name));
         self.current_callable_owner = Some(owner.clone());
         self.begin_expression_type_capture(owner.clone());

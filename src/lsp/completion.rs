@@ -243,19 +243,8 @@ impl LspServer {
                 return items;
             }
             "module" => {
-                // Module name completions after `use`
-                if let Some(file) = file.as_ref() {
-                    for item in &file.items {
-                        if let Item::Module(m) = item {
-                            items.push(serde_json::json!({
-                                "label": m.name.clone(),
-                                "kind": 1, // Module
-                                "detail": format!("module {}", m.name),
-                            }));
-                        }
-                    }
-                }
-                // Add stdlib module names
+                // Stdlib module name completions after `use` (inline modules
+                // no longer exist — spec §6.14 file-merge model only).
                 let mut std_modules: Vec<&str> =
                     self.stdlib_funcs.keys().map(|s| s.as_str()).collect();
                 std_modules.sort();
@@ -416,13 +405,6 @@ impl LspServer {
                             "label": t.name.clone(),
                             "kind": 22, // TypeParameter
                             "detail": format!("type {}", t.name),
-                        }));
-                    }
-                    Item::Module(m) => {
-                        items.push(serde_json::json!({
-                            "label": m.name.clone(),
-                            "kind": 1, // Module
-                            "detail": format!("module {}", m.name),
                         }));
                     }
                     Item::Trait(t) => {

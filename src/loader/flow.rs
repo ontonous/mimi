@@ -308,14 +308,6 @@ fn remap_span_source(span: &mut crate::span::Span, remap: &SourceIdRemap) -> Res
 fn remap_item_spans(item: &mut Item, remap: &SourceIdRemap) -> Result<(), String> {
     match item {
         Item::Func(function) => remap_func_spans(function, remap),
-        Item::Module(module) => {
-            remap_meta(&mut module.meta, remap)?;
-            remap_imports_spans(&mut module.imports, remap)?;
-            for item in &mut module.items {
-                remap_item_spans(item, remap)?;
-            }
-            Ok(())
-        }
         Item::Type(type_def) => remap_type_def_spans(type_def, remap),
         Item::Cap(cap) => remap_meta(&mut cap.meta, remap),
         Item::Session(session) => {
@@ -1338,23 +1330,20 @@ fn item_is_pub(item: &Item) -> bool {
         Item::Const { pub_, .. } => *pub_,
         Item::Flow(f) => f.pub_,
         Item::Session(s) => s.pub_,
-        // Traits/impls/modules/extern/cap: treat as public API surface.
-        Item::Module(_) | Item::Trait(_) | Item::Impl(_) | Item::ExternBlock(_) | Item::Cap(_) => {
-            true
-        }
+        // Traits/impls/extern/cap: treat as public API surface.
+        Item::Trait(_) | Item::Impl(_) | Item::ExternBlock(_) | Item::Cap(_) => true,
     }
 }
 
 fn item_name(item: &Item) -> Option<String> {
     match item {
         Item::Func(f) => Some(f.name.clone()),
-        Item::Module(m) => Some(m.name.clone()),
         Item::Type(t) => Some(t.name.clone()),
         Item::Actor(a) => Some(a.name.clone()),
         Item::Cap(c) => Some(c.name.clone()),
         Item::Trait(t) => Some(t.name.clone()),
         // 0.35.21 (#3): dedup key = (trait, type) pair — type_name alone
-        // collided for modules that impl traits on the SAME type (e.g.
+        // collided for files that impl traits on the SAME type (e.g.
         // std/strings `impl Str for string` + std/fs `impl FsOps for string`),
         // so `use std::strings` + `use std::fs` failed with "duplicate item
         // 'string'".

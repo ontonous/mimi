@@ -113,7 +113,6 @@ pub(crate) struct Checker<'a> {
     /// Track imported module names (from `use` statements)
     pub(crate) use_imports: Vec<String>,
     /// Track current module path for qualified names
-    pub(crate) module_path: Vec<String>,
     /// Track loop nesting depth for break/continue validation
     pub(crate) loop_depth: usize,
     /// Track generic parameters in scope while checking signatures
@@ -323,7 +322,6 @@ impl<'a> Checker<'a> {
             trait_method_sigs: HashMap::new(),
             trait_method_generics: HashMap::new(),
             use_imports: Vec::new(),
-            module_path: Vec::new(),
             loop_depth: 0,
             generic_scope: Vec::new(),
             arena_depth: 0,
@@ -675,7 +673,6 @@ impl<'a> Checker<'a> {
                             out.push(format!("{}::{}", qualified, state.name));
                         }
                     }
-                    Item::Module(m) => walk(&m.items, out),
                     _ => {}
                 }
             }
@@ -946,16 +943,6 @@ impl<'a> Checker<'a> {
                         };
                         if qualified == target {
                             return Some(function.meta.span);
-                        }
-                    }
-                    Item::Module(module) => {
-                        let nested = if prefix.is_empty() {
-                            module.name.clone()
-                        } else {
-                            format!("{prefix}::{}", module.name)
-                        };
-                        if let Some(span) = function_span(&module.items, &nested, target) {
-                            return Some(span);
                         }
                     }
                     _ => {}

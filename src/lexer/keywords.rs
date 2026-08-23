@@ -9,8 +9,7 @@ use crate::lexer::token::TokenKind;
 pub fn is_keyword_kind(kind: &TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Module
-            | TokenKind::Type
+        TokenKind::Type
             | TokenKind::Func
             | TokenKind::Fn
             | TokenKind::Fails
@@ -72,7 +71,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
 
 pub fn keyword_or_ident(name: &str) -> TokenKind {
     match name {
-        "module" => TokenKind::Module,
         "type" => TokenKind::Type,
         "func" => TokenKind::Func,
         "fn" => TokenKind::Fn,
@@ -165,13 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn keyword_table_count_is_63_hard_is_60() {
+    fn keyword_table_count_is_60_hard_is_57() {
         // 0.36.51+ (Phase D soft-keyword policy lock): the keyword table is
         // deliberately small. This test keeps the count and the hard/soft split
         // from drifting silently. `parasteps`, `fault`, `reset`, and
         // `recover` are no longer in the table.
+        // 0.39.139 (spec §6.14 option C): `module` retired — inline module
+        // blocks are rejected at parse level (E0445) and the word is an
+        // ordinary identifier again.
         let all = [
-            "module",
             "type",
             "func",
             "fn",
@@ -233,7 +233,7 @@ mod tests {
             "false",
             "unit",
         ];
-        assert_eq!(all.len(), 61, "keyword table must be exactly 61 entries");
+        assert_eq!(all.len(), 60, "keyword table must be exactly 60 entries");
         let soft_operators = ["and", "or", "not"];
         for name in all {
             let kind = keyword_or_ident(name);
@@ -290,6 +290,10 @@ mod tests {
         assert!(matches!(keyword_or_ident("desc"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("rule"), TokenKind::Ident(_)));
         assert!(matches!(keyword_or_ident("mms"), TokenKind::Ident(_)));
+        // 0.39.139: `module` demoted to an ordinary identifier (inline
+        // modules rejected at parse level, spec §6.14).
+        assert!(matches!(keyword_or_ident("module"), TokenKind::Ident(_)));
+        assert!(!is_keyword_kind(&TokenKind::Ident("module".into())));
         assert!(matches!(keyword_or_ident("c_borrow"), TokenKind::Ident(_)));
         assert!(matches!(
             keyword_or_ident("c_borrow_mut"),

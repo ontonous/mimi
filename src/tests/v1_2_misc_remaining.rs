@@ -417,10 +417,9 @@ func main() -> i32 {
 // 已按真实合同重写为 fail-closed 断言。
 
 #[test]
-fn module_inline_block_rejected_e0445() {
-    // 0.39.138（spec §6.14）：内联 module 块在检查期被 E0445 硬拒绝——
-    // 其中的项任何语法都调不到，旧"静默放行声明 + 调用点误导性报错"
-    // 违反 §4.10 fail-fast。诊断必须给迁移指引（文件模块 + use）。
+fn module_inline_block_rejected_e0445_at_parse() {
+    // 0.39.139（spec §6.14 选项 C）：`module` 关键字退役，内联 module 块在
+    // 解析期以 E0445 定向拒绝（迁移指引：文件模块 + `use` 裸名合并）。
     let src = r#"
 module Math {
     func add(a: i32, b: i32) -> i32 {
@@ -429,20 +428,21 @@ module Math {
 }
 
 func main() -> i32 {
-    let _ = Math::add(1, 2)
     0
 }
 "#;
-    let diags = check_source(src).expect_err("inline module blocks must be rejected");
+    let err = parse_error(src);
+    assert_eq!(err.code.as_deref(), Some("E0445"), "got: {err:?}");
     assert!(
-        diags.iter().any(|d| d.code.as_deref() == Some("E0445")),
-        "expected E0445 for inline module block, got: {diags:?}"
+        err.message.contains("own .mimi file"),
+        "diagnostic must carry the migration note: {}",
+        err.message
     );
 }
 
 #[test]
-fn module_nested_inline_block_rejected_e0445() {
-    // 嵌套内联 module 同样整体拒绝（每个 module 项各一条 E0445）。
+fn module_nested_inline_block_rejected_e0445_at_parse() {
+    // 嵌套内联 module：解析器首个错误即终止（fail-fast 单条）。
     let src = r#"
 module Outer {
     module Inner {
@@ -451,21 +451,26 @@ module Outer {
 }
 func main() -> i32 { 0 }
 "#;
-    let diags = check_source(src).expect_err("nested inline modules must be rejected");
-    // 不下降收集 → 只报最外层一条（fail-fast 无级联噪声）。
-    let e0445: Vec<_> = diags
-        .iter()
-        .filter(|d| d.code.as_deref() == Some("E0445"))
-        .collect();
-    assert_eq!(
-        e0445.len(),
-        1,
-        "exactly one E0445 for the outer block: {diags:?}"
-    );
+    let err = parse_error(src);
+    assert_eq!(err.code.as_deref(), Some("E0445"), "got: {err:?}");
     assert!(
-        e0445[0].message.contains("Outer"),
-        "diagnostic must name the outermost module: {diags:?}"
+        err.message.contains("Outer"),
+        "diagnostic must name the outermost block: {}",
+        err.message
     );
+}
+
+#[test]
+fn module_is_an_ordinary_identifier_after_retirement() {
+    // 关键字退役的正向锁：`module` 可以再次作为普通标识符使用。
+    let src = r#"
+func main() -> i32 {
+    let module = 40;
+    let fn_ref = 2;
+    module + fn_ref
+}
+"#;
+    assert_eq!(run_source(src).as_int().unwrap_or(-1), 42);
 }
 
 #[test]

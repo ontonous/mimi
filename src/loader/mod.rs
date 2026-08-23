@@ -338,13 +338,12 @@ pub fn merge_prelude_into(dest: &mut File) {
 fn item_name(item: &Item) -> Option<String> {
     match item {
         Item::Func(f) => Some(f.name.clone()),
-        Item::Module(m) => Some(m.name.clone()),
         Item::Type(t) => Some(t.name.clone()),
         Item::Actor(a) => Some(a.name.clone()),
         Item::Cap(c) => Some(c.name.clone()),
         Item::Trait(t) => Some(t.name.clone()),
         // 0.35.21 (#3): dedup key = (trait, type) pair. Using type_name alone
-        // collided across modules that impl traits on the SAME type (e.g.
+        // collided across files that impl traits on the SAME type (e.g.
         // std/strings + std/fs both impl on `string`) — `use std::strings` +
         // `use std::fs` failed with "duplicate item 'string'".
         Item::Impl(i) => {

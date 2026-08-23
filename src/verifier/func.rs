@@ -295,7 +295,6 @@ impl VerifierCtx {
                         results.push(result);
                     }
                 }
-                Item::Module(m) => self.verify_items_collect(session, &m.items, results),
                 Item::ExternBlock(block) => {
                     for func in &block.funcs {
                         if func.requires.is_some() || func.ensures.is_some() {

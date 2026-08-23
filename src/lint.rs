@@ -1069,11 +1069,6 @@ fn collect_names_in_item(item: &Item, names: &mut std::collections::HashSet<Stri
             names.insert(f.name.clone());
             collect_names_in_block(&f.body, names);
         }
-        Item::Module(m) => {
-            for item in &m.items {
-                collect_names_in_item(item, names);
-            }
-        }
         Item::Type(t) => {
             names.insert(t.name.clone());
         }

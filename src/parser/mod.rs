@@ -21,6 +21,9 @@ pub struct ParseError {
     pub col: usize,
     pub source_id: SourceId,
     pub span: Option<Span>,
+    /// Stable diagnostic code (e.g. `codes::E0445`), surfaced on the
+    /// converted Diagnostic. Parse errors are uncoded by default.
+    pub code: Option<&'static str>,
 }
 
 impl ParseError {
@@ -31,7 +34,14 @@ impl ParseError {
             col,
             source_id: SourceId::UNKNOWN,
             span: None,
+            code: None,
         }
+    }
+
+    /// Attach a stable diagnostic code to this parse error.
+    fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
     }
 
     fn with_source(mut self, source_id: SourceId) -> Self {
@@ -45,7 +55,9 @@ impl ParseError {
         let span = self
             .span
             .unwrap_or_else(|| Span::single(self.line, self.col).with_source(self.source_id));
-        Diagnostic::error(&self.message, span)
+        let mut diag = Diagnostic::error(&self.message, span);
+        diag.code = self.code.map(|c| c.to_string());
+        diag
     }
 }
 
@@ -266,7 +278,6 @@ impl Parser {
                     self.recover_to_sync(&[
                         TokenKind::Func,
                         TokenKind::Type,
-                        TokenKind::Module,
                         TokenKind::Actor,
                         TokenKind::Cap,
                         TokenKind::Trait,
@@ -301,7 +312,6 @@ impl Parser {
                     self.recover_to_sync(&[
                         TokenKind::Func,
                         TokenKind::Type,
-                        TokenKind::Module,
                         TokenKind::Actor,
                         TokenKind::Cap,
                         TokenKind::Trait,

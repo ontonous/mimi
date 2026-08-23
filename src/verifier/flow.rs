@@ -312,10 +312,6 @@ fn flatten_items_prefixed(items: &[Item], prefix: &str, queue: &mut Vec<StepKind
                 func.name = qualify(prefix, &func.name);
                 queue.push(StepKind::Func(func));
             }
-            Item::Module(m) => {
-                let qualified = qualify(prefix, &m.name);
-                flatten_items_prefixed(&m.items, &qualified, queue);
-            }
             // Extern symbols keep their ABI name (no module qualification).
             Item::ExternBlock(block) => {
                 for func in &block.funcs {

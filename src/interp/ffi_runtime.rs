@@ -140,11 +140,6 @@ impl FfiRuntime {
                 };
                 out.insert(cap.name.clone(), components);
             }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_caps(inner, out);
-                }
-            }
             _ => {}
         }
     }
@@ -188,11 +183,6 @@ impl FfiRuntime {
                 };
                 out.insert(actor.name.clone(), actor_type_def);
             }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_type_defs(inner, out);
-                }
-            }
             _ => {}
         }
     }
@@ -235,11 +225,6 @@ impl FfiRuntime {
                             &repr_c_record_names,
                         ),
                     );
-                }
-            }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_extern_funcs(inner, out, contracts, cap_defs, type_defs);
                 }
             }
             _ => {}

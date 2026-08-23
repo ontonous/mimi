@@ -214,7 +214,7 @@ pub fn lower_checked_function_bodies(
     program: &CheckedProgram,
 ) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
     let mut syntax = BTreeMap::new();
-    collect_function_syntax(&file.items, "", &mut syntax);
+    collect_function_syntax(&file.items, &mut syntax);
     let mut bodies = BTreeMap::new();
     let mut environments = BTreeMap::<NodeId, BTreeMap<String, ResolvedLocal>>::new();
     let mut errors = Vec::new();
@@ -319,7 +319,7 @@ pub fn lower_checked_transition_bodies(
     program: &CheckedProgram,
 ) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
     let mut syntax = BTreeMap::new();
-    collect_transition_syntax(&file.items, "", &mut syntax);
+    collect_transition_syntax(&file.items, &mut syntax);
     let mut bodies = BTreeMap::new();
     let mut errors = Vec::new();
     for (owner, transition) in syntax {
@@ -413,59 +413,27 @@ pub fn lower_checked_callable_bodies(
     }
 }
 
-fn collect_function_syntax<'a>(
-    items: &'a [Item],
-    module: &str,
-    out: &mut BTreeMap<NodeId, &'a FuncDef>,
-) {
+fn collect_function_syntax<'a>(items: &'a [Item], out: &mut BTreeMap<NodeId, &'a FuncDef>) {
     for item in items {
         match item {
-            Item::Module(module_def) => {
-                let qualified = if module.is_empty() {
-                    module_def.name.clone()
-                } else {
-                    format!("{module}::{}", module_def.name)
-                };
-                collect_function_syntax(&module_def.items, &qualified, out);
-            }
             Item::Func(function) => {
-                let qualified = if module.is_empty() {
-                    function.name.clone()
-                } else {
-                    format!("{module}::{}", function.name)
-                };
-                let owner = NodeId(format!("function:{qualified}"));
+                let owner = NodeId(format!("function:{}", function.name));
                 out.insert(owner.clone(), function);
                 collect_nested_function_syntax(&function.body, &owner, out);
             }
             Item::Actor(actor) => {
-                let qualified = if module.is_empty() {
-                    actor.name.clone()
-                } else {
-                    format!("{module}::{}", actor.name)
-                };
                 for method in &actor.methods {
-                    let owner = NodeId(format!("function:{qualified}::{}", method.name));
+                    let owner = NodeId(format!("function:{}::{}", actor.name, method.name));
                     out.insert(owner.clone(), method);
                     collect_nested_function_syntax(&method.body, &owner, out);
                 }
             }
             Item::Impl(impl_def) => {
-                let qualified = if module.is_empty() {
-                    impl_qualified_name(
-                        module,
-                        &impl_def.trait_name,
-                        &impl_def.trait_args,
-                        &impl_def.type_name,
-                    )
-                } else {
-                    impl_qualified_name(
-                        module,
-                        &impl_def.trait_name,
-                        &impl_def.trait_args,
-                        &impl_def.type_name,
-                    )
-                };
+                let qualified = impl_qualified_name(
+                    &impl_def.trait_name,
+                    &impl_def.trait_args,
+                    &impl_def.type_name,
+                );
                 for method in &impl_def.methods {
                     let owner = impl_method_owner(&qualified, method);
                     out.insert(owner.clone(), method);
@@ -478,11 +446,6 @@ fn collect_function_syntax<'a>(
                 // (resolved/mod.rs); the syntax map must pair with them. The
                 // User-origin restriction mirrors collect_transition_syntax,
                 // which is the slice lower_checked_transition_bodies lowers.
-                let qualified = if module.is_empty() {
-                    flow.name.clone()
-                } else {
-                    format!("{module}::{}", flow.name)
-                };
                 for transition in &flow.transitions {
                     if !matches!(transition.meta.origin, AstOrigin::User) {
                         continue;
@@ -491,8 +454,8 @@ fn collect_function_syntax<'a>(
                         continue;
                     };
                     let owner = NodeId(format!(
-                        "transition:{qualified}::{}::{}",
-                        transition.name, transition.from_state
+                        "transition:{}::{}::{}",
+                        flow.name, transition.name, transition.from_state
                     ));
                     collect_nested_function_syntax(body, &owner, out);
                 }
@@ -699,33 +662,19 @@ fn collect_nested_function_syntax_in_expr<'a>(
 
 fn collect_transition_syntax<'a>(
     items: &'a [Item],
-    module: &str,
     out: &mut BTreeMap<NodeId, &'a crate::ast::TransitionDef>,
 ) {
     for item in items {
         match item {
-            Item::Module(module_def) => {
-                let qualified = if module.is_empty() {
-                    module_def.name.clone()
-                } else {
-                    format!("{module}::{}", module_def.name)
-                };
-                collect_transition_syntax(&module_def.items, &qualified, out);
-            }
             Item::Flow(flow) => {
-                let qualified = if module.is_empty() {
-                    flow.name.clone()
-                } else {
-                    format!("{module}::{}", flow.name)
-                };
                 for transition in &flow.transitions {
                     if !matches!(transition.meta.origin, AstOrigin::User) {
                         continue;
                     }
                     out.insert(
                         NodeId(format!(
-                            "transition:{qualified}::{}::{}",
-                            transition.name, transition.from_state
+                            "transition:{}::{}::{}",
+                            flow.name, transition.name, transition.from_state
                         )),
                         transition,
                     );

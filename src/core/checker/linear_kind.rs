@@ -203,10 +203,6 @@ impl<'a> Checker<'a> {
     pub(crate) fn find_func_def_ast(&self, name: &str) -> Option<&'a FuncDef> {
         self.file.items.iter().find_map(|item| match item {
             Item::Func(f) if f.name == name => Some(f),
-            Item::Module(m) => m.items.iter().find_map(|inner| match inner {
-                Item::Func(f) if f.name == name => Some(f),
-                _ => None,
-            }),
             _ => None,
         })
     }

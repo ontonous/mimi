@@ -39,7 +39,6 @@ impl LspServer {
                     _ => {
                         // For keywords/operators, calculate from token kind
                         match tok.kind {
-                            lexer::TokenKind::Module => 6,
                             lexer::TokenKind::Type => 4,
                             lexer::TokenKind::Func => 4,
                             lexer::TokenKind::Fn => 2,
@@ -68,7 +67,6 @@ impl LspServer {
                 let (token_type, modifiers) = match &tok.kind {
                     lexer::TokenKind::Func
                     | lexer::TokenKind::Type
-                    | lexer::TokenKind::Module
                     | lexer::TokenKind::Actor
                     | lexer::TokenKind::Trait
                     | lexer::TokenKind::Impl

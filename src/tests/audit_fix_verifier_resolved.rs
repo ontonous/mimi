@@ -450,61 +450,6 @@ func main() -> i32 { 0 }
 // same-named functions polluted each other. Fixed: qualified-name keys.
 // =========================================================================
 
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn audit2_verb_v3_module_same_name_isolation() {
-    if !z3_or_skip() {
-        return;
-    }
-    // Top-level `get` returns 0. `A::get` returns x + 1 and is verified.
-    // Before the fix: func_defs["get"] was overwritten by A::get, so the
-    // caller's `get(x)` picked up `result == x + 1` axioms → fake Proven.
-    // After the fix the caller sees the top-level definition and its
-    // contract (`result == x + 1`) is correctly refuted.
-    let source = r#"
-func get(x: i32) -> i32 {
-    ensures: result == 0
-    0
-}
-module A {
-    pub func get(x: i32) -> i32 {
-        requires: x >= 0
-        requires: x <= 100
-        ensures: result == x + 1
-        x + 1
-    }
-}
-func caller(x: i32) -> i32 {
-    requires: x >= 0
-    requires: x <= 100
-    ensures: result == x + 1
-    get(x)
-}
-func main() -> i32 { 0 }
-"#;
-    let results =
-        crate::verifier::verify_source(source).expect("audit_fix_verifier_resolved: verify");
-    let caller = results
-        .iter()
-        .find(|r| r.func_name == "caller")
-        .expect("caller result");
-    assert_eq!(
-        caller.status,
-        crate::verifier::VerifStatus::Disproven,
-        "caller must not inherit A::get's axioms (fake Proven), got {:?}",
-        caller.status
-    );
-    // The module function now reports under its qualified identity.
-    assert!(
-        results.iter().any(|r| r.func_name == "A::get"),
-        "module function must be queued under its qualified name; got {:?}",
-        results
-            .iter()
-            .map(|r| r.func_name.clone())
-            .collect::<Vec<_>>()
-    );
-}
-
 // =========================================================================
 // V-4 (MED): preseed + single pass made verdicts depend on SOURCE ORDER —
 // chain C→B→A declared [C,B,A] permanently lost C's axioms (fake failure).

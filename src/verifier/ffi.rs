@@ -38,11 +38,12 @@ impl VerifierCtx {
         results
     }
 
-    /// Wave-2 (wave1-review §5.8): call-site discovery descends into
-    /// `Item::Module` — the Wave-1 walker made If/While/For conditions,
-    /// Match, Defer, etc. exhaustive INSIDE a function body, but functions
-    /// nested in modules were never visited at all, so `--verify-ffi` stayed
-    /// blind to every extern call they contain.
+    /// Wave-2 (wave1-review §5.8): call-site discovery covers every
+    /// top-level function — the Wave-1 walker made If/While/For conditions,
+    /// Match, Defer, etc. exhaustive INSIDE a function body, but some
+    /// declaration forms were never visited at all, so `--verify-ffi` stayed
+    /// blind to extern calls they contain. (0.39.139: inline `module`
+    /// nesting no longer exists; the walker is flat over `file.items`.)
     fn verify_ffi_items_with_externs(
         &mut self,
         session: &mut SolverSession,
@@ -93,15 +94,6 @@ impl VerifierCtx {
                     }
                     session.pop();
                 }
-                Item::Module(m) => {
-                    self.verify_ffi_items_with_externs(
-                        session,
-                        &m.items,
-                        externs,
-                        extern_names,
-                        results,
-                    );
-                }
                 _ => {}
             }
         }
@@ -115,7 +107,6 @@ impl VerifierCtx {
                         externs.insert(func.name.clone(), func.clone());
                     }
                 }
-                Item::Module(m) => Self::collect_externs(&m.items, externs),
                 _ => {}
             }
         }

@@ -1251,7 +1251,6 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Const
             | TokenKind::Func
             | TokenKind::Type
-            | TokenKind::Module
             | TokenKind::Extern
             | TokenKind::Use
     )
@@ -1533,7 +1532,6 @@ mod tests {
             TokenKind::Const,
             TokenKind::Func,
             TokenKind::Type,
-            TokenKind::Module,
             TokenKind::Extern,
             TokenKind::Use,
             TokenKind::Arena,

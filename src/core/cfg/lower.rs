@@ -860,14 +860,6 @@ fn lower_callable(
     lowerer.finish(entry, current)
 }
 
-fn qualify(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_string()
-    } else {
-        format!("{module}::{name}")
-    }
-}
-
 fn collect_nested(
     body: &Block,
     owner: &NodeId,
@@ -911,19 +903,14 @@ fn collect_nested(
 
 fn collect_items(
     items: &[Item],
-    module: &str,
     sources: &SourceRegistry,
     out: &mut BTreeMap<NodeId, CallableCfg>,
     errors: &mut Vec<Diagnostic>,
 ) {
     for item in items {
         match item {
-            Item::Module(module_def) => {
-                let nested = qualify(module, &module_def.name);
-                collect_items(&module_def.items, &nested, sources, out, errors);
-            }
             Item::Func(function) => {
-                let owner = NodeId(format!("function:{}", qualify(module, &function.name)));
+                let owner = NodeId(format!("function:{}", function.name));
                 match lower_callable(owner.clone(), &function.body, function.meta, sources) {
                     Ok(cfg) => {
                         out.insert(owner.clone(), cfg);
@@ -933,9 +920,8 @@ fn collect_items(
                 collect_nested(&function.body, &owner, sources, out, errors);
             }
             Item::Actor(actor) => {
-                let actor_name = qualify(module, &actor.name);
                 for method in &actor.methods {
-                    let owner = NodeId(format!("function:{actor_name}::{}", method.name));
+                    let owner = NodeId(format!("function:{}::{}", actor.name, method.name));
                     match lower_callable(owner.clone(), &method.body, method.meta, sources) {
                         Ok(cfg) => {
                             out.insert(owner.clone(), cfg);
@@ -947,7 +933,6 @@ fn collect_items(
             }
             Item::Impl(impl_def) => {
                 let qualified = impl_qualified_name(
-                    module,
                     &impl_def.trait_name,
                     &impl_def.trait_args,
                     &impl_def.type_name,
@@ -964,14 +949,13 @@ fn collect_items(
                 }
             }
             Item::Flow(flow) => {
-                let flow_name = qualify(module, &flow.name);
                 for transition in &flow.transitions {
                     let Some(body) = &transition.body else {
                         continue;
                     };
                     let owner = NodeId(format!(
-                        "transition:{flow_name}::{}::{}",
-                        transition.name, transition.from_state
+                        "transition:{}::{}::{}",
+                        flow.name, transition.name, transition.from_state
                     ));
                     match lower_callable(owner.clone(), body, transition.meta, sources) {
                         Ok(cfg) => {
@@ -995,7 +979,7 @@ fn collect_items(
 pub fn lower_file(file: &File) -> Result<BTreeMap<NodeId, CallableCfg>, Vec<Diagnostic>> {
     let mut cfgs = BTreeMap::new();
     let mut errors = Vec::new();
-    collect_items(&file.items, "", &file.sources, &mut cfgs, &mut errors);
+    collect_items(&file.items, &file.sources, &mut cfgs, &mut errors);
     if errors.is_empty() {
         Ok(cfgs)
     } else {

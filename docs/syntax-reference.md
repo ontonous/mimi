@@ -39,7 +39,7 @@
 ### 1.3 关键字（61 个 `=> TokenKind` 映射：58 硬关键字 + and/or/not 软关键字，keywords.rs:80-149；0.37.109 实测）
 
 ```
-module type func fn actor newtype let const mut ref
+type func fn actor newtype let const mut ref
 shared weak arena cap trait impl dyn where extern
 if else for fails in while return break continue
 match use pub drop defer await unsafe spawn

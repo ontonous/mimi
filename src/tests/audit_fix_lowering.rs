@@ -640,48 +640,6 @@ func main() -> i32 {
 
 // ─── #9 — module-wrapped actors get checker-finalized signatures ─────────────
 
-#[test]
-#[ignore = "inline `module` rejected at check since 0.39.138 (E0445, spec §6.14); the module machinery under test retires with pre-1.0 option-C syntax removal"]
-fn audit9_module_wrapped_actor_methods_get_finalized_signatures() {
-    // HIGH: the checker registers actor methods WITHOUT the module path
-    // (`A::run`) while the catalog is module-qualified (`m::A::run`); the
-    // zonked-signature lookup missed and compilation aborted with "no
-    // checker-finalized signature". The lookup now tries suffix keys
-    // (longest first) before failing. Nested modules exercise multiple
-    // stripping steps.
-    let src = r#"
-module m {
-    actor A {
-        func run(x: i32) -> i32 { x }
-    }
-}
-
-module outer {
-    module inner {
-        actor B {
-            func get(x: i32) -> i32 { x + 2 }
-        }
-    }
-}
-
-func main() -> i32 {
-    println(42)
-    0
-}
-"#;
-    // Before the fix this aborted with "no checker-finalized signature" for
-    // `function:m::A::run`; check_source drives the whole pipeline, including
-    // lowering and codegen-adjacent validation of every catalog entry.
-    check_source(src).expect("module-wrapped actors finalize");
-    let (_, vm_out) = run_source_with_stdout(src);
-    assert_eq!(vm_out.trim(), "42");
-    if !can_link() {
-        return;
-    }
-    let native = compile_and_run(src).expect("codegen module-wrapped actors");
-    assert_eq!(native.trim(), "42");
-}
-
 // ─── #10 — nested funcs in transition bodies and expression positions ────────
 
 #[test]

@@ -11,7 +11,6 @@ impl<'a> Checker<'a> {
     fn item_span(item: &Item) -> Span {
         match item {
             Item::Func(value) => value.meta.span,
-            Item::Module(value) => value.meta.span,
             Item::Type(value) => value.meta.span,
             Item::Actor(value) => value.meta.span,
             Item::Cap(value) => value.meta.span,
@@ -333,11 +332,7 @@ impl<'a> Checker<'a> {
         match item {
             Item::Func(f) => {
                 self.set_span(f.meta.span);
-                let qualified_name = if self.module_path.is_empty() {
-                    f.name.clone()
-                } else {
-                    format!("{}::{}", self.module_path.join("::"), f.name)
-                };
+                let qualified_name = f.name.clone();
                 if self.funcs.contains_key(&qualified_name) {
                     self.emit_code(
                         crate::diagnostic::codes::E0402,
@@ -613,26 +608,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Item::Module(m) => {
-                // 0.39.138 (spec §6.14, E0445): inline `module` blocks are a
-                // dead surface — their items are unreachable by ANY syntax
-                // (bare calls E0401, qualified calls E0400/E0221, intra-module
-                // calls E0207) and native codegen never compiled them. The old
-                // behavior silently accepted declarations and failed at call
-                // sites with misleading diagnostics, violating §4.10
-                // fail-fast. Reject here; do NOT descend (no qualified
-                // registration → no cascading noise from inner items).
-                self.set_span(m.meta.span);
-                self.emit_code(
-                    crate::diagnostic::codes::E0445,
-                    format!(
-                        "inline `module {}` block is not supported: move its pub items \
-                         into their own .mimi file and add `use {};` (file modules merge \
-                         pub functions under bare names)",
-                        m.name, m.name
-                    ),
-                );
-            }
             Item::Actor(actor) => {
                 // v0.31.11: validate `runs FlowName` references an existing flow.
                 if let Some(flow_name) = &actor.runs_flow {
@@ -717,15 +692,11 @@ impl<'a> Checker<'a> {
                 self.types.insert(actor.name.clone(), actor_type_def);
 
                 // Collect actor methods as functions
-                // §4-#41 (audit 2026-08-05): actor method keys must include the
-                // module path to avoid NodeId collision with module-level functions
-                // (check_item at line 1373 already does this; collect_item_decls must
-                // match so the funcs catalog agrees with the resolved/lowering paths).
-                let actor_qualified = if self.module_path.is_empty() {
-                    actor.name.clone()
-                } else {
-                    format!("{}::{}", self.module_path.join("::"), actor.name)
-                };
+                // §4-#41 (audit 2026-08-05): actor method keys are qualified by
+                // the actor name to avoid NodeId collision with top-level
+                // functions (check_item mirrors this; collect_item_decls must
+                // match so the funcs catalog agrees with resolved/lowering).
+                let actor_qualified = actor.name.clone();
                 for method in &actor.methods {
                     self.set_span(method.meta.span);
                     let qualified = format!("{}::{}", actor_qualified, method.name);
@@ -1076,11 +1047,7 @@ impl<'a> Checker<'a> {
                 // double-registered state types and flooded the resolved layer
                 // with opaque TOOL-RESOLUTION-001 duplicate-node errors. Reject
                 // at the checker with E0402, mirroring Item::Type.
-                let flow_key = if self.module_path.is_empty() {
-                    f.name.clone()
-                } else {
-                    format!("{}::{}", self.module_path.join("::"), f.name)
-                };
+                let flow_key = f.name.clone();
                 if !self.declared_flows.insert(flow_key) {
                     self.emit_code(
                         crate::diagnostic::codes::E0402,
@@ -1431,14 +1398,6 @@ impl<'a> Checker<'a> {
                 self.set_span(f.meta.span);
                 self.check_func(f)
             }
-            Item::Module(m) => {
-                // 0.39.138: already rejected with E0445 during decl collection
-                // (fail-fast, spec §6.14). Skip descent — inner items were not
-                // registered, so checking them would only produce cascading
-                // noise after the primary diagnostic.
-                self.set_span(m.meta.span);
-                let _ = m;
-            }
             Item::Actor(actor) => {
                 self.set_span(actor.meta.span);
                 // Check actor fields
@@ -1568,11 +1527,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                     self.var_scopes.push(HashMap::new());
-                    let actor_name = if self.module_path.is_empty() {
-                        actor.name.clone()
-                    } else {
-                        format!("{}::{}", self.module_path.join("::"), actor.name)
-                    };
+                    let actor_name = actor.name.clone();
                     let method_owner =
                         crate::core::NodeId(format!("function:{}::{}", actor_name, method.name));
                     let previous_owner = self.begin_callable(method_owner.clone());
@@ -1802,21 +1757,11 @@ impl<'a> Checker<'a> {
                     impl_def.generics.iter().map(|g| g.name.clone()).collect();
                 self.generic_scope
                     .extend(impl_generic_names.iter().cloned());
-                let impl_qualified_name = if self.module_path.is_empty() {
-                    crate::core::resolved::impl_qualified_name(
-                        "",
-                        &impl_def.trait_name,
-                        &impl_def.trait_args,
-                        &impl_def.type_name,
-                    )
-                } else {
-                    crate::core::resolved::impl_qualified_name(
-                        &self.module_path.join("::"),
-                        &impl_def.trait_name,
-                        &impl_def.trait_args,
-                        &impl_def.type_name,
-                    )
-                };
+                let impl_qualified_name = crate::core::resolved::impl_qualified_name(
+                    &impl_def.trait_name,
+                    &impl_def.trait_args,
+                    &impl_def.type_name,
+                );
                 for method in &impl_def.methods {
                     self.set_span(method.meta.span);
                     let method_generic_names: Vec<String> =
@@ -2190,11 +2135,7 @@ impl<'a> Checker<'a> {
                         };
                         self.current_ret = Some(ret_type.clone());
                         self.var_scopes.push(std::collections::HashMap::new());
-                        let flow_name = if self.module_path.is_empty() {
-                            f.name.clone()
-                        } else {
-                            format!("{}::{}", self.module_path.join("::"), f.name)
-                        };
+                        let flow_name = f.name.clone();
                         let transition_owner = crate::core::NodeId(format!(
                             "transition:{}::{}::{}",
                             flow_name, t.name, t.from_state

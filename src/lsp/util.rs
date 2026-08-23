@@ -124,11 +124,6 @@ pub(crate) fn find_enclosing_func_in_items(items: &[Item], cursor_line: usize) -
                     return Some(f);
                 }
             }
-            Item::Module(m) => {
-                if let Some(f) = find_enclosing_func_in_items(&m.items, cursor_line) {
-                    return Some(f);
-                }
-            }
             _ => {}
         }
     }

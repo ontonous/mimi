@@ -425,7 +425,6 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                     });
                 }
             }
-            crate::ast::Item::Module(m) => mock_verify_items(&m.items, results),
             crate::ast::Item::ExternBlock(block) => {
                 for func in &block.funcs {
                     if func.requires.is_some() || func.ensures.is_some() {

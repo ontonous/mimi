@@ -69,24 +69,6 @@ impl LspServer {
                             }
                         }));
                     }
-                    Item::Module(m) => {
-                        // 0.35.15 (DX backlog #3): AST span replaces the
-                        // `module {name}` substring scan.
-                        let def_line = m.meta.span.start_line.saturating_sub(1);
-                        let keyword_len = "module ".len();
-                        symbols.push(serde_json::json!({
-                            "name": m.name,
-                            "kind": 1, // Module
-                            "range": {
-                                "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": keyword_len + m.name.len() }
-                            },
-                            "selectionRange": {
-                                "start": { "line": def_line, "character": keyword_len },
-                                "end": { "line": def_line, "character": keyword_len + m.name.len() }
-                            }
-                        }));
-                    }
                     _ => {}
                 }
             }
@@ -220,16 +202,6 @@ impl LspServer {
                         // `actor {name}` substring scan.
                         let def_line = a.meta.span.start_line.saturating_sub(1);
                         symbols.push(ws_symbol(&a.name, 23, uri, def_line, ""));
-                    }
-                    Item::Module(m) => {
-                        if !query_lower.is_empty() && !m.name.to_lowercase().contains(&query_lower)
-                        {
-                            continue;
-                        }
-                        // 0.35.15 (DX backlog #3): AST span replaces the
-                        // `module {name}` substring scan.
-                        let def_line = m.meta.span.start_line.saturating_sub(1);
-                        symbols.push(ws_symbol(&m.name, 2, uri, def_line, ""));
                     }
                     _ => {}
                 }
@@ -683,11 +655,6 @@ fn visit_func_for_refs(func: &crate::ast::FuncDef, name: &str, count: &mut usize
 fn visit_item_for_refs(item: &Item, name: &str, count: &mut usize) {
     match item {
         Item::Func(func) => visit_func_for_refs(func, name, count),
-        Item::Module(module) => {
-            for item in &module.items {
-                visit_item_for_refs(item, name, count);
-            }
-        }
         Item::Type(ty) => match &ty.kind {
             TypeDefKind::Alias(t) | TypeDefKind::Newtype(t) => visit_type_for_refs(t, name, count),
             TypeDefKind::Record(fields) | TypeDefKind::Union(fields) => {

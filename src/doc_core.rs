@@ -190,47 +190,6 @@ pub fn generate_markdown(source: &str) -> Result<String, String> {
                     }
                 }
             }
-            Item::Module(m) => {
-                out.push_str(&format!("## `module {}`\n\n", m.name));
-                for sub_item in &m.items {
-                    // Render nested items inline
-                    match sub_item {
-                        Item::Func(f) => {
-                            let params: Vec<String> = f
-                                .params
-                                .iter()
-                                .map(|p| format!("{}: {}", p.name, type_to_string(&p.ty)))
-                                .collect();
-                            let ret = f
-                                .ret
-                                .as_ref()
-                                .map(|t| format!(" -> {}", type_to_string(t)))
-                                .unwrap_or_default();
-                            out.push_str(&format!(
-                                "### `func {}({}){}`\n\n",
-                                f.name,
-                                params.join(", "),
-                                ret
-                            ));
-                            // 0.35.13 trivia-ization: desc:/rule: are trivia.
-                        }
-                        Item::Type(t) => {
-                            out.push_str(&format!("### `type {}`\n\n", t.name));
-                            if let TypeDefKind::Record(fields) = &t.kind {
-                                for field in fields {
-                                    out.push_str(&format!(
-                                        "- `{}`: {}\n",
-                                        field.name,
-                                        type_to_string(&field.ty)
-                                    ));
-                                }
-                                out.push('\n');
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
             _ => {}
         }
     }

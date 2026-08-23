@@ -228,16 +228,6 @@ fn adv_type_alias_in_codegen() {
 
 // ===================== Extern in Module =====================
 
-#[test]
-fn adv_extern_in_module() {
-    assert_compiles(
-        r#"
-        module mylib { extern "C" { func lib_fn(x: i32) -> i32; } }
-        func main() -> i32 { 42 }
-    "#,
-    );
-}
-
 // ===================== F-strings =====================
 
 #[test]

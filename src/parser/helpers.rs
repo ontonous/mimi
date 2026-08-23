@@ -9,18 +9,6 @@ use super::*;
 /// so 128 levels stay inside ~1 MB of the 2 MB libtest thread stacks.
 pub(crate) const DEPTH_MAX_DEFAULT: usize = 128;
 
-/// Depth budget for MODULE nesting (parser/top_level.rs `parse_module`).
-/// Measured 2026-08-05 (wave-2 agent PM) on a 2 MB libtest thread stack:
-/// module nesting overflows the stack at depth ≈ <MEASURED> — see the cap
-/// comment history in `audit_fix_parser.rs` probes. The module path recurses
-/// through FIVE mutually-recursive frames per nesting level (parse_module →
-/// parse_module_inner → parse_item_block → parse_item → parse_item_kind),
-/// each carrying large locals in debug builds, so one module level costs
-/// several times what one expression/session level costs. The cap below
-/// keeps the deepest module recursion inside the 2 MB budget with ≥2×
-/// margin; legitimate code rarely nests modules beyond 3–4 levels.
-pub(crate) const DEPTH_MAX_MODULE: usize = 32;
-
 /// Depth budget for f-string interpolation nesting
 /// (parse_stmt.rs `parse_fstring_parts` sub-parser).
 /// Measured 2026-08-10 (0.35.25, audit-triage C2) on a 2 MB libtest thread
@@ -71,8 +59,7 @@ impl Parser {
     /// threads before the guard fired (SIGSEGV). 128 keeps the deepest
     /// guarded recursion inside a 1 MB budget. Session chains were measured
     /// to overflow the 2 MB libtest stack somewhere above depth ~150, so 128
-    /// carries margin there. Module nesting is heavier per level and gets
-    /// its own lower cap — see `check_depth_with` / `DEPTH_MAX_MODULE`.
+    /// carries margin there.
     pub(crate) fn check_depth(&self) -> Result<(), ParseError> {
         self.check_depth_with(DEPTH_MAX_DEFAULT)
     }

@@ -147,7 +147,6 @@ pub enum ResolvedItemKind {
     Trait,
     Impl,
     ExternBlock,
-    Module,
     Actor,
     Flow,
     Session,
@@ -1102,7 +1101,6 @@ impl CheckedProgram {
         }
         collect_items(
             &file.items,
-            "",
             &file.sources,
             &mut items,
             &mut node_meta,
@@ -1982,7 +1980,6 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
 
 fn collect_items(
     items: &[Item],
-    module: &str,
     sources: &SourceRegistry,
     resolved_items: &mut HashMap<NodeId, ResolvedItem>,
     node_meta: &mut HashMap<NodeId, NodeMeta>,
@@ -2002,42 +1999,10 @@ fn collect_items(
 ) {
     let ids = NodeIdBuilder::new(sources);
     for item in items {
-        collect_item_meta(item, module, &ids, node_meta, errors);
+        collect_item_meta(item, &ids, node_meta, errors);
         match item {
-            Item::Module(def) => {
-                let qualified = qualify(module, &def.name);
-                let span = declaration_span(def.meta, def.meta.span);
-                insert_item(
-                    resolved_items,
-                    ResolvedItemKind::Module,
-                    &qualified,
-                    def.meta,
-                    span,
-                    errors,
-                );
-                collect_items(
-                    &def.items,
-                    &qualified,
-                    sources,
-                    resolved_items,
-                    node_meta,
-                    functions,
-                    sessions,
-                    actors,
-                    capabilities,
-                    constants,
-                    traits,
-                    impls,
-                    type_defs,
-                    extern_blocks,
-                    flows,
-                    transitions,
-                    backend_requirements,
-                    errors,
-                );
-            }
             Item::Flow(flow) => {
-                let qualified = qualify(module, &flow.name);
+                let qualified = flow.name.clone();
                 let span = declaration_span(flow.meta, flow.meta.span);
                 insert_item(
                     resolved_items,
@@ -2087,7 +2052,7 @@ fn collect_items(
                 }
             }
             Item::Func(function) => {
-                let qualified = qualify(module, &function.name);
+                let qualified = function.name.clone();
                 let span = declaration_span(function.meta, function.meta.span);
                 insert_item(
                     resolved_items,
@@ -2170,7 +2135,7 @@ fn collect_items(
                 );
             }
             Item::Type(type_def) => {
-                let qualified = qualify(module, &type_def.name);
+                let qualified = type_def.name.clone();
                 let node_id = NodeId(format!("type:{}", qualified));
                 let fallback = type_def.meta.span;
                 let span = declaration_span(type_def.meta, fallback);
@@ -2330,7 +2295,7 @@ fn collect_items(
                 value,
                 ..
             } => {
-                let qualified = qualify(module, name);
+                let qualified = name.clone();
                 let span = declaration_span(*meta, meta.span);
                 insert_item(
                     resolved_items,
@@ -2370,7 +2335,7 @@ fn collect_items(
                 );
             }
             Item::Cap(cap) => {
-                let qualified = qualify(module, &cap.name);
+                let qualified = cap.name.clone();
                 let span = declaration_span(cap.meta, cap.meta.span);
                 insert_item(
                     resolved_items,
@@ -2423,7 +2388,7 @@ fn collect_items(
                 );
             }
             Item::Trait(trait_def) => {
-                let qualified = qualify(module, &trait_def.name);
+                let qualified = trait_def.name.clone();
                 let span = declaration_span(trait_def.meta, trait_def.meta.span);
                 insert_item(
                     resolved_items,
@@ -2500,7 +2465,6 @@ fn collect_items(
             }
             Item::Impl(impl_def) => {
                 let qualified = impl_qualified_name(
-                    module,
                     &impl_def.trait_name,
                     &impl_def.trait_args,
                     &impl_def.type_name,
@@ -2664,7 +2628,7 @@ fn collect_items(
                 );
             }
             Item::ExternBlock(block) => {
-                let qualified = qualify(module, &extern_block_key(block));
+                let qualified = extern_block_key(block).clone();
                 let span = declaration_span(block.meta, block.meta.span);
                 insert_item(
                     resolved_items,
@@ -2768,7 +2732,7 @@ fn collect_items(
             }
 
             Item::Actor(actor) => {
-                let qualified = qualify(module, &actor.name);
+                let qualified = actor.name.clone();
                 let span = declaration_span(actor.meta, actor.meta.span);
                 insert_item(
                     resolved_items,
@@ -3049,7 +3013,7 @@ fn collect_items(
                 );
             }
             Item::Session(session) => {
-                let qualified = qualify(module, &session.name);
+                let qualified = session.name.clone();
                 let span = declaration_span(session.meta, session.meta.span);
                 insert_item(
                     resolved_items,
@@ -3746,7 +3710,6 @@ fn insert_item(
         ResolvedItemKind::Trait => "trait",
         ResolvedItemKind::Impl => "impl",
         ResolvedItemKind::ExternBlock => "extern",
-        ResolvedItemKind::Module => "module",
         ResolvedItemKind::Actor => "actor",
         ResolvedItemKind::Flow => "flow",
         ResolvedItemKind::Session => "session",
@@ -4711,19 +4674,13 @@ pub(crate) fn impl_qualified_key(
     }
 }
 
-/// Format the fully qualified impl name with an optional module prefix.
+/// Format the fully qualified impl name.
 pub(crate) fn impl_qualified_name(
-    module: &str,
     trait_name: &str,
     trait_args: &[crate::ast::Type],
     type_name: &str,
 ) -> String {
-    let key = impl_qualified_key(trait_name, trait_args, type_name);
-    if module.is_empty() {
-        key
-    } else {
-        format!("{module}::{key}")
-    }
+    impl_qualified_key(trait_name, trait_args, type_name)
 }
 
 pub(crate) fn impl_method_owner(impl_qualified_name: &str, method: &crate::ast::FuncDef) -> NodeId {
@@ -4772,52 +4729,20 @@ pub(crate) fn nested_function_owner(owner: &NodeId, function: &crate::ast::FuncD
 
 fn collect_item_meta(
     item: &Item,
-    module: &str,
     ids: &NodeIdBuilder<'_>,
     out: &mut HashMap<NodeId, NodeMeta>,
     errors: &mut Vec<Diagnostic>,
 ) {
     match item {
-        Item::Module(def) => {
-            let qualified = qualify(module, &def.name);
-            let node_id = NodeId(format!("module:{qualified}"));
-            let fallback = def.meta.span;
-            insert_canonical_meta(
-                node_id.clone(),
-                ResolvedItemKind::Module,
-                &qualified,
-                def.meta,
-                fallback,
-                out,
-                errors,
-            );
-            for import in &def.imports {
-                let key = format!(
-                    "{}:as:{}",
-                    import.path.join("::"),
-                    import.alias.as_deref().unwrap_or("_")
-                );
-                insert_child_meta(
-                    import.meta,
-                    &node_id,
-                    "decl.import",
-                    &format!("import.{}", stable_id_fragment(&key)),
-                    declaration_span(import.meta, fallback),
-                    ids,
-                    out,
-                    errors,
-                );
-            }
-        }
         Item::Func(function) => {
-            let qualified = qualify(module, &function.name);
+            let qualified = function.name.clone();
             let node_id = NodeId(format!("function:{qualified}"));
             let fallback = function.meta.span;
             let parent = top_level_enclosing_parent(&qualified);
             collect_func_meta(function, node_id, &parent, fallback, ids, out, errors);
         }
         Item::Type(type_def) => {
-            let qualified = qualify(module, &type_def.name);
+            let qualified = type_def.name.clone();
             let node_id = NodeId(format!("type:{qualified}"));
             let fallback = type_def.meta.span;
             insert_canonical_meta(
@@ -4892,7 +4817,7 @@ fn collect_item_meta(
             }
         }
         Item::Actor(actor) => {
-            let qualified = qualify(module, &actor.name);
+            let qualified = actor.name.clone();
             let node_id = NodeId(format!("actor:{qualified}"));
             let fallback = actor.meta.span;
             insert_canonical_meta(
@@ -4936,7 +4861,7 @@ fn collect_item_meta(
             }
         }
         Item::Cap(cap) => {
-            let qualified = qualify(module, &cap.name);
+            let qualified = cap.name.clone();
             insert_canonical_meta(
                 NodeId(format!("capability:{qualified}")),
                 ResolvedItemKind::Capability,
@@ -4948,7 +4873,7 @@ fn collect_item_meta(
             );
         }
         Item::Trait(trait_def) => {
-            let qualified = qualify(module, &trait_def.name);
+            let qualified = trait_def.name.clone();
             let node_id = NodeId(format!("trait:{qualified}"));
             let fallback = trait_def.meta.span;
             insert_canonical_meta(
@@ -4999,7 +4924,6 @@ fn collect_item_meta(
         }
         Item::Impl(impl_def) => {
             let qualified = impl_qualified_name(
-                module,
                 &impl_def.trait_name,
                 &impl_def.trait_args,
                 &impl_def.type_name,
@@ -5056,7 +4980,7 @@ fn collect_item_meta(
             }
         }
         Item::ExternBlock(block) => {
-            let qualified = qualify(module, &extern_block_key(block));
+            let qualified = extern_block_key(block).clone();
             let node_id = NodeId(format!("extern:{qualified}"));
             let fallback = block.meta.span;
             insert_canonical_meta(
@@ -5114,7 +5038,7 @@ fn collect_item_meta(
             value,
             ..
         } => {
-            let qualified = qualify(module, name);
+            let qualified = name.clone();
             let node_id = NodeId(format!("constant:{qualified}"));
             let fallback = meta.span;
             insert_canonical_meta(
@@ -5133,7 +5057,7 @@ fn collect_item_meta(
             collect_expr_meta(value, &node_id, "value", span, ids, out, errors);
         }
         Item::Flow(flow) => {
-            let qualified = qualify(module, &flow.name);
+            let qualified = flow.name.clone();
             let node_id = NodeId(format!("flow:{qualified}"));
             let fallback = flow.meta.span;
             insert_canonical_meta(
@@ -5242,7 +5166,7 @@ fn collect_item_meta(
             }
         }
         Item::Session(session) => {
-            let qualified = qualify(module, &session.name);
+            let qualified = session.name.clone();
             let node_id = NodeId(format!("session:{qualified}"));
             let fallback = session.meta.span;
             insert_canonical_meta(
@@ -6904,7 +6828,6 @@ fn collect_program_call_sites(
     for item in &file.items {
         collect_item_call_sites(
             item,
-            "",
             &ids,
             &function_info,
             &extern_info,
@@ -6987,7 +6910,6 @@ fn collect_func_call_sites(
 
 fn collect_item_call_sites(
     item: &Item,
-    module: &str,
     ids: &NodeIdBuilder<'_>,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
@@ -6996,24 +6918,8 @@ fn collect_item_call_sites(
     errors: &mut Vec<Diagnostic>,
 ) {
     match item {
-        Item::Module(module_def) => {
-            let next = if module.is_empty() {
-                module_def.name.clone()
-            } else {
-                format!("{module}::{}", module_def.name)
-            };
-            for inner in &module_def.items {
-                collect_item_call_sites(
-                    inner, &next, ids, functions, externs, methods, out, errors,
-                );
-            }
-        }
         Item::Func(function) => {
-            let owner = NodeId(if module.is_empty() {
-                format!("function:{}", function.name)
-            } else {
-                format!("function:{module}::{}", function.name)
-            });
+            let owner = NodeId(format!("function:{}", function.name));
             collect_func_call_sites(
                 function,
                 &owner,
@@ -7027,7 +6933,7 @@ fn collect_item_call_sites(
             );
         }
         Item::Actor(actor) => {
-            let qualified = qualify(module, &actor.name);
+            let qualified = actor.name.clone();
             let actor_owner = NodeId(format!("actor:{qualified}"));
             let actor_span = declaration_span(actor.meta, actor.meta.span);
             for field in &actor.fields {
@@ -7056,7 +6962,7 @@ fn collect_item_call_sites(
             }
         }
         Item::Trait(trait_def) => {
-            let qualified = qualify(module, &trait_def.name);
+            let qualified = trait_def.name.clone();
             let trait_owner = NodeId(format!("trait:{qualified}"));
             let trait_span = declaration_span(trait_def.meta, trait_def.meta.span);
             for method in &trait_def.methods {
@@ -7084,7 +6990,6 @@ fn collect_item_call_sites(
         }
         Item::Impl(impl_def) => {
             let qualified = impl_qualified_name(
-                module,
                 &impl_def.trait_name,
                 &impl_def.trait_args,
                 &impl_def.type_name,
@@ -7098,7 +7003,7 @@ fn collect_item_call_sites(
             }
         }
         Item::ExternBlock(block) => {
-            let qualified = qualify(module, &extern_block_key(block));
+            let qualified = extern_block_key(block).clone();
             let block_owner = NodeId(format!("extern:{qualified}"));
             let block_span = declaration_span(block.meta, block.meta.span);
             for function in &block.funcs {
@@ -7136,7 +7041,7 @@ fn collect_item_call_sites(
         Item::Const {
             meta, name, value, ..
         } => {
-            let owner = NodeId(format!("constant:{}", qualify(module, name)));
+            let owner = NodeId(format!("constant:{}", name.clone()));
             collect_expr_call_sites(
                 value,
                 &owner,
@@ -7151,7 +7056,7 @@ fn collect_item_call_sites(
             );
         }
         Item::Flow(flow) => {
-            let qualified = qualify(module, &flow.name);
+            let qualified = flow.name.clone();
             let flow_span = declaration_span(flow.meta, flow.meta.span);
             for transition in &flow.transitions {
                 let owner = NodeId(format!(
@@ -9978,14 +9883,6 @@ fn contains_unresolved_type(ty: &Type) -> bool {
         Type::Name(name, _) => name == "_" || name == "unknown",
         _ => false,
     })
-}
-
-fn qualify(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_string()
-    } else {
-        format!("{}::{}", module, name)
-    }
 }
 
 #[cfg(test)]

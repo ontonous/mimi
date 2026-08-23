@@ -114,7 +114,6 @@ pub struct Import {
 #[derive(Debug, Clone)]
 pub enum Item {
     Func(FuncDef),
-    Module(ModuleDef),
     Type(TypeDef),
     Actor(ActorDef),
     Cap(CapDef),
@@ -327,14 +326,6 @@ pub enum ParamBorrow {
     View,
     /// `mutate T` — exclusive in-place borrow; no free / no reallocate / no move-out.
     Mutate,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModuleDef {
-    pub meta: AstNodeMeta,
-    pub name: String,
-    pub imports: Vec<Import>,
-    pub items: Vec<Item>,
 }
 
 #[derive(Debug, Clone)]

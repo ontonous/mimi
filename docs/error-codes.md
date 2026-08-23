@@ -180,7 +180,7 @@
 | E0442 | view/mutate/ref cannot cross a task boundary (spawn, Channel element, Future capture, or actor mailbox) |
 | E0443 | bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch with `flow_pack` |
 | E0444 | session protocol payload must be an integer scalar (i32/i64) — endpoint runtime transports values in i64 handle slots |
-| E0445 | inline `module` blocks are not supported — the only module form is a file merged by `use` (spec language-spec.md §6.14); retire `module` keyword before 1.0 |
+| E0445 | inline `module` blocks are not supported (rejected at parse level since 0.39.139; `module` is an ordinary identifier) — the only module form is a file merged by `use` (spec language-spec.md §6.14) |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |

@@ -415,6 +415,17 @@ pub(crate) fn build_interp_ffi_so() -> Result<std::path::PathBuf, String> {
     Ok(so_path)
 }
 
+/// Parse expecting failure; returns the converted Diagnostic (with code).
+pub(crate) fn parse_error(src: &str) -> crate::diagnostic::Diagnostic {
+    let tokens = lexer::Lexer::new(src)
+        .tokenize()
+        .expect("parse_error: tokenize");
+    parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("parse_error: expected parse failure")
+        .to_diagnostic()
+}
+
 pub(crate) fn parse(src: &str) -> crate::ast::File {
     let tokens = lexer::Lexer::new(src)
         .tokenize()

@@ -1037,22 +1037,6 @@ fn codegen_extern_block_with_user_func() {
 }
 
 #[test]
-fn codegen_extern_in_module() {
-    assert_compiles(
-        r#"
-        module mylib {
-            extern "C" {
-                func lib_func(x: i32) -> i32;
-            }
-        }
-        func main() -> i32 {
-            42
-        }
-    "#,
-    );
-}
-
-#[test]
 fn codegen_extern_block_cap() {
     let ir = compile_to_ir(
         r#"
@@ -1183,43 +1167,6 @@ fn codegen_callback_tls_cleared_after_call() {
 }
 
 // ===================== Phase B: Stdlib Module Tests =====================
-
-#[test]
-fn codegen_stdlib_module_parse() {
-    assert_compiles(
-        r#"
-        module mymath {
-            pub func add(a: i32, b: i32) -> i32 {
-                a + b
-            }
-            pub func mul(a: i32, b: i32) -> i32 {
-                a * b
-            }
-        }
-        func main() -> i32 {
-            42
-        }
-    "#,
-    );
-}
-
-#[test]
-fn codegen_nested_module() {
-    assert_compiles(
-        r#"
-        module utils {
-            module myhelpers {
-                pub func square(x: i32) -> i32 {
-                    x * x
-                }
-            }
-        }
-        func main() -> i32 {
-            42
-        }
-    "#,
-    );
-}
 
 // ===================== Phase 1: Actor Codegen Tests =====================
 

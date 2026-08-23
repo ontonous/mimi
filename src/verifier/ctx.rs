@@ -1273,7 +1273,6 @@ impl Verifier {
                 crate::core::ResolvedItemKind::Trait => "trait",
                 crate::core::ResolvedItemKind::Impl => "impl",
                 crate::core::ResolvedItemKind::ExternBlock => "extern",
-                crate::core::ResolvedItemKind::Module => "module",
                 crate::core::ResolvedItemKind::Actor => "actor",
                 crate::core::ResolvedItemKind::Flow => "flow",
                 crate::core::ResolvedItemKind::Session => "session",
@@ -1891,26 +1890,21 @@ impl VerifierCtx {
     /// bare identifiers anyway; qualified keys keep their axioms inert until
     /// a qualified call mechanism exists.
     fn collect_func_defs_prefixed(&mut self, items: &[Item], prefix: &str) {
+        let _ = prefix;
         for item in items {
             match item {
                 Item::Func(f) => {
-                    let qualified = qualified_item_name(prefix, &f.name);
-                    self.func_defs.insert(qualified, f.clone());
-                }
-                Item::Module(m) => {
-                    let qualified = qualified_item_name(prefix, &m.name);
-                    self.collect_func_defs_prefixed(&m.items, &qualified);
+                    self.func_defs.insert(f.name.clone(), f.clone());
                 }
                 // V-H6: register actor/impl/flow methods for call-site ensures
                 // lookup. V-3: qualified keys only — the previous bare-name
                 // insertion let same-named methods across actors pollute each
-                // other identically to the module case.
+                // other identically to the old module case.
                 Item::Actor(a) => {
                     for m in &a.methods {
                         let mut f = m.clone();
                         f.name = format!("{}::{}", a.name, m.name);
-                        let qualified = qualified_item_name(prefix, &f.name);
-                        self.func_defs.insert(qualified, f);
+                        self.func_defs.insert(f.name.clone(), f);
                     }
                 }
                 Item::Impl(i) => {

@@ -103,24 +103,6 @@ impl LspServer {
                             }
                         }));
                     }
-                    Item::Module(m) if m.name == word => {
-                        // 0.35.15 (DX backlog #3): AST span replaces the
-                        // `module {word}` substring scan.
-                        let def_line = m.meta.span.start_line.saturating_sub(1);
-                        let def_line_text = text.lines().nth(def_line).unwrap_or("");
-                        let start_byte = crate::lsp::util::char_col_to_byte(
-                            def_line_text,
-                            m.meta.span.start_col.saturating_sub(1),
-                        );
-                        let name_byte = start_byte + "module ".len();
-                        return Some(serde_json::json!({
-                            "uri": uri,
-                            "range": {
-                                "start": { "line": def_line, "character": byte_col_to_utf16(def_line_text, name_byte) },
-                                "end": { "line": def_line, "character": byte_col_to_utf16(def_line_text, name_byte + m.name.len()) }
-                            }
-                        }));
-                    }
                     _ => {}
                 }
             }
@@ -297,18 +279,6 @@ impl LspServer {
                                     line,
                                     t.meta.span.start_col.saturating_sub(1),
                                 ) + "type ".len()
-                            })
-                        });
-                        break;
-                    }
-                    Item::Module(m) if m.name == word => {
-                        def_line = Some(m.meta.span.start_line.saturating_sub(1));
-                        def_col = def_line.and_then(|l| {
-                            lines.get(l).map(|line| {
-                                crate::lsp::util::char_col_to_byte(
-                                    line,
-                                    m.meta.span.start_col.saturating_sub(1),
-                                ) + "module ".len()
                             })
                         });
                         break;
@@ -703,18 +673,6 @@ impl LspServer {
                                     line,
                                     t.meta.span.start_col.saturating_sub(1),
                                 ) + "type ".len()
-                            })
-                        });
-                        break;
-                    }
-                    Item::Module(m) if m.name == word => {
-                        def_line = Some(m.meta.span.start_line.saturating_sub(1));
-                        def_col = def_line.and_then(|l| {
-                            lines.get(l).map(|line| {
-                                crate::lsp::util::char_col_to_byte(
-                                    line,
-                                    m.meta.span.start_col.saturating_sub(1),
-                                ) + "module ".len()
                             })
                         });
                         break;
