@@ -1,15 +1,26 @@
 # Changelog
 
-## [0.1.8] — 2026-08-22
+## [Unreleased] — 0.1.9-dev
 
-> **语义诚实 + 身份纯度**：VM≡native spawn 等价、生产 dual、Narrow、
-> 值 ABI、Flow TransitionEpoch、废止业务 mut、Session 方法化、move-rest、
-> 拆 mimispec。
-> 裁决 `devdocs/kernel-final-verdict-2026-08-18.md`；
-> 执行 `devdocs/v0.38/README.md`。
-> 门禁（0.38.122 收官）：lib 5559/0/7、real_world 31/0、stress 62/0、
-> dogfood ok、dispatch 核语料 0 fallback、fmt/docs 绿；十大锁名实相符复核通过。
-> 上一版本：0.1.7（2026-08-19，tag `0.1.7`）。
+> 0.1.8 功能门禁已全绿（0.38.122：lib 5559/0/7、real_world 31/0、stress 62/0、
+> dogfood ok、dispatch 核语料 0 fallback、fmt/docs 绿；十大锁名实相符复核通过），
+> 待用户授权切 release tag。0.1.9-dev 已启动：线性种类 + 权限闭环 + 可写验收。
+> 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
+> Q2-L/Q6/Q10。
+
+### 0.39.0 — P 合同冻结：整体转移合同规范正负例（0.1.9 Phase 0）
+- 把最终裁决 Q2 的整体转移句子钉成规范测试（`src/tests/contract_p.rs`）：
+  **整体转移才允许未标 kind 的 `T` 接线性实参**。
+  - 正例 `identity(cap)`：check 过 + 双后端（VM + compile_checked native）同跑
+    （`p_contract_identity_cap_passes_check` / `..._dual_backend_runs`）。
+  - 反例 `first(xs[0])`（元素提取）、`discard`（泛型体弃置线性实参）：
+    必须 E0432 拒（`p_contract_first_element_extraction_rejected` /
+    `p_contract_discard_rejected`）。
+- 现状：当前 `linear_blackbox` 已满足本合同（identity 过、first/discard 拒）。
+  换实现（上 `linear T` 种类、删特判网、单态化、drop glue）时本组必须仍绿。
+- 本地合同记录：`devdocs/v0.39/contract-p.md`。
+
+### 0.38.122 — 23 项历史失败基线清零 + 门禁修复（0.1.8 收官）
 
 ### 0.38.115 — codegen_mod F1：逃逸 List<string> claim 跨嵌套 scope 持久化 (L3)
 - 修复 `codegen/mod.rs` 堆 scope 释放中 `claimed_returned_string_lists` /

@@ -121,6 +121,9 @@ pub(crate) mod trap_tests;
 pub(crate) mod benchmarks;
 pub(crate) mod lsp_e2e;
 
+// === 0.1.9 Phase 0 — P 合同（整体转移合同）规范正负例 ===
+pub(crate) mod contract_p;
+
 // === Audit regression tests ===
 pub(crate) mod audit_regression;
 pub(crate) mod audit_round2;
