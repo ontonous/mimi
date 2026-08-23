@@ -697,10 +697,17 @@ fn require_scalar_type(
                         // Actor handles are opaque i64 endpoints at the LLVM
                         // level (mirroring SessionChan). The runtime actor
                         // dispatch remains in the call/expression layer.
+                        // 0.1.9 Phase D (0.39.123): SystemToken is an opaque
+                        // i64 capability handle — its typed residual surface is
+                        // compile-time only (linear move, consumed by
+                        // token_id/token_channel_send/*_guarded). Same opaque
+                        // admission as SessionChan/actor/Future so SystemToken
+                        // functions stay on the resolved slice (dispatch gate).
                         if item_str.ends_with("SessionChan")
                             || item_str.starts_with("state:")
                             || item_str.starts_with("actor:")
                             || item_str == "builtin:type:Future"
+                            || item_str == "builtin:type:SystemToken"
                         {
                             Ok(())
                         } else {
@@ -1186,26 +1193,10 @@ fn require_expr(
                     // through the resolved emitter.
                 }
             }
-            // 0.1.8 Phase D/E hardening: `unwrap` uses VM-style control
-            // flow that the resolved emitter has not implemented yet
-            // (unwrap_or is supported). Keep these functions on the legacy
-            // slice so core-kernel shapes (spawn/await + Result unwrap) do
-            // not hard-error the resolved subset.
-            if let ResolvedCallee::Builtin(ref id) = call.callee {
-                if matches!(
-                    id.as_str(),
-                    "builtin.method.result.unwrap" | "builtin.method.option.unwrap"
-                ) {
-                    return Err(UnsupportedResolvedNode::new(
-                        owner,
-                        &expression.node_id,
-                        format!(
-                            "builtin '{}' is not in the resolved native slice",
-                            id.as_str()
-                        ),
-                    ));
-                }
-            }
+            // 0.1.9 Phase G (0.39.126): `result.unwrap` / `option.unwrap` are
+            // now emitted by the resolved native slice (mirroring legacy
+            // compile_unwrap_expect: payload on Some/Ok, mimi_try_exit on
+            // None/Err). The 0.1.8 hardening rejection is retired.
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
                 require_expr(program, owner, &argument.value, entry_source, locals)?;

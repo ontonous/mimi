@@ -60,6 +60,8 @@ func main() -> i32 {
     session_close(auditor)
     session_close(ledger)
     println("audit total: " + to_string(total))
+
+    test_linear_kinds()
     0
 }
 
@@ -97,4 +99,31 @@ func test_contracts() {
         return
     }
     println("contract-ok")
+}
+
+// 0.1.9 Phase G (0.39.122): linear kinds in production dogfood.
+//
+// - custody<linear T>: 线性直通——账户 id 经线性泛型管线整体转移（Phase A-C
+//   种类系统；删除 blackbox 后由种类系统表达）。
+// - audit_ledger: SystemToken 能力门禁——每次审计恰一次消费一枚 token，返回
+//   确定性审计摘要（不打印进程级 token 计数器，保证可复跑）。
+func custody<linear T>(x: T) -> T { x }
+
+func audit_ledger(acct: string, t: SystemToken) -> string {
+    let id = token_id(t)
+    drop(id)
+    "audited:" + acct
+}
+
+func test_linear_kinds() {
+    // linear T 应承载真正的线性值（SystemToken），而非 Free 字符串。
+    // SystemToken 经泛型管线整体转移后仍线性，再交给能力门禁审计消费。
+    let tok0 = make_token()
+    let tok1 = custody(tok0)
+    let stamp = audit_ledger("ledger:linear", tok1)
+    if stamp != "audited:ledger:linear" {
+        println("linear-kinds failed")
+        return
+    }
+    println("linear-kinds-ok")
 }

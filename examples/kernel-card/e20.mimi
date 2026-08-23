@@ -1,0 +1,7 @@
+// 20. contracts requires/ensures（有界算术 Proven）
+func double(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1000
+    ensures: result == x * 2
+    x * 2
+}
+func main() -> i32 { println(double(4)); 0 }

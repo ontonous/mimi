@@ -1,0 +1,7 @@
+// 14. SystemToken make_token/token_id 恰一次
+func main() -> i32 {
+    let t = make_token()
+    let id = token_id(t)
+    drop(id)
+    0
+}

@@ -1,0 +1,10 @@
+// 16. MutexGuard 恰一次 unlock
+func main() -> i32 {
+    let m = mutex_new(0)
+    let g = mutex_lock(m)
+    let n = mutex_get(g)
+    mutex_unlock(g)
+    drop(m)
+    println(n)
+    0
+}

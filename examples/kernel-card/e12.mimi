@@ -1,0 +1,9 @@
+// 12. linear T 泛型直通（SystemToken）
+func pass<linear T>(x: T) -> T { x }
+func main() -> i32 {
+    let t = make_token()
+    let d = pass(t)
+    let id = token_id(d)
+    drop(id)
+    0
+}

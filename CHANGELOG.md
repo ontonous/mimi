@@ -7,6 +7,171 @@
 > 待用户授权切 release tag。0.1.9-dev 已启动：线性种类 + 权限闭环 + 可写验收。
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
+>
+> **0.1.9 发布就绪（0.39.128，草稿）**：八项交付锁达成 + Q10 基建就绪（Q2 P/L、Q6、语义、
+> E0439、教核、Q10 基建、MutexGuard、dogfood）；lib **5663/0/7**、verifier 201/0、
+> dispatch check + `--zero` 全语料 0 fallback、Valgrind 18/0、ASan 55/0、TSan 34/0、
+> stress 62/0、real_world 31/0、dogfood 全绿。已知延后债：clippy/unsafe-safety
+> （0.38 同策略）。**待用户授权切 release tag**。终测记录
+> `devdocs/v0.39/quad-final-0.39.md`。
+
+### 0.39.131 — 语义 F4 修复：小步语义补齐锁清单覆盖
+- `docs/spec/small-step-semantics.md` 新增四节（253→330 行，仍 ≤20 页）：
+  - §8 消耗/构造（线性值由构造器产生、被恰一个合法消费者消解，L 账本镜像）；
+  - §9 纪元在逃逸点（本地 self-loop 剥 epoch 无税；Channel/FFI/mailbox 必须显式
+    打包，裸 Flow 被 check 拒；旧句柄 typed stale）；
+  - §10 Flow `fails E` 与 Fault（回滚归还 source generation；Fault 是独立系统态，
+    非第二个 Err；`?` 走回滚道）；
+  - §11 view/mutate 作用域（同步调用动态作用域只读/排他，不消耗线性值，
+    跨边界不可借）。
+- 原 §8（Determinism）重编号为 §12。语义锁覆盖清单由缺四项→全达成。
+- docs-check 绿；verifier 201/0 保持。
+
+### 0.39.134 — 三版本深度自查（0.1.7 / 0.1.8 / 0.1.9）
+- **0.1.7**：7/7 DoD 锁逐项实证——dispatch 0 fallback、soak（stress 62/0+28/0）、
+  native 并发+TSan 34/0、**10M native event storm 实跑 1 passed（0.20s）**、
+  边缘出清（quote! 两负测试 + protocol "removed in 0.1.7 Phase E"）、dogfood、
+  文档诚实。**无缺口**。
+- **0.1.8**：10/10 锁逐项实证——L1 spawn（deadlock parity：VM/native 都必须
+  hang 禁顺序假成功）、Narrow 4 边界 E0442、Q8（B-STR-001 embedded_nul +
+  B-HANDLE-001 handle_lease 5 测试绿）、Q1 S（flow_epoch 9 + bare-flow-across-
+  channel 拒绝）、Q4 A（E0402 实测）、Q5 K（session 方法化 VM+native）、Q3 M
+  （move-rest + Free 读不耗 self）、Q9（kernel-card 分层）、mms 拒绝。**无缺口**。
+- 结论：0.1.7/0.1.8 扎实（真实测试背书）；0.1.9 为本轮草率 sprint（6 缺口已修）。
+- 报告：`devdocs/v0.39/self-review-0.1.7-8-9.md`（54 行）。
+
+### 0.39.133 — 自查 F2/F3 收尾 + cap resolved 缺口实证（诚实记录）
+- **F2**：`src/core/checker/linear_blackbox.rs` → **`linear_kind.rs`**（名实相符：
+  模块是 linear 种类检查实现，非旧「调用点黑盒」；`mod linear_kind`）。README
+  Q2 L 措辞修正（「删除主体」→「调用点黑盒退役 + 体分析引擎重构为
+  linear_kind_body_sound」）。
+- **F3 补强（.gitignore 修复）**：`examples/kernel-card/` 此前被 `examples/*`
+  忽略从未真正入仓（F3 提交声称 tracked 实为未跟踪——自查暴露）。已加
+  `!examples/kernel-card/` 使 20 例真入仓。
+- **cap resolved 缺口实证**：尝试把 `cap C`（Capability）准入 resolved slice
+  （opaque i64，镜像 SystemToken）——裸 cap 直通（e12/e13）与 `List<cap>` 非泛型
+  组合（e19）可 resolved，但 `identity<linear T>(List<cap>/Option<cap>)`
+  （容器经泛型直通）在 resolved 的 i64 擦除槽硬 E0722（0.39.124 类缺口）→
+  6 个 P 合同/dual 测试回归。**决策：回退 cap 准入**；组合锁由 contract_p 双后端
+  （legacy，VM/native 一致）满足。正例集改用已入 resolved 的 SystemToken/
+  MutexGuard 演示线性种类（e12/e13/e19 全 resolved）。
+- **结果**：lib **5664/0/7**、dispatch --zero 全绿（20 例 kernel-card 全 resolved）、
+  dogfood 全绿；cap 容器经泛型直通留已知缺口跟踪（0.39.124 类）。
+
+### 0.39.130 — 教核 F3 修复：内核卡补 20 个手写正例
+- **`devdocs/kernel-card.md` §7**：新增「手写正例集（20 例）」表——覆盖
+  func/while/for/记录/枚举+match/newtype/Flow+transition/Flow fails/Result+`?`/
+  Option/view+mutate/`linear T` 直通/`linear drop T`/SystemToken 恰一次/能力门禁
+  I/O/MutexGuard/Session/actor runs Flow/List 线性感染/contracts 有界。
+- **`examples/kernel-card/`**（新增，tracked）：e01-e20 完整可运行源码，每例
+  独立 `mimi check` 全过；代表性 7 例（07/12/13/16/17/18/20）native 编译通过。
+- 教核锁「20 个手写正例」由缺失→达成；自查 F3 关闭。
+
+### 0.39.128 — Phase G：全门禁收口记录
+- **功能门禁全绿补跑**：`cargo check` rc=0；stress **62/0**（28 ignored）+ heavy
+  **28/0**；real_world **31/0**；real_world_cli **2/0**——与 0.38 基线一致。
+- **已知延后债（不影响功能门禁，与 0.38 同策略）**：
+  - clippy -D warnings：~258 missing_safety_doc（既有 unsafe 债，不 mass-edit）；
+  - unsafe-safety gate：168 unsafe 无 SAFETY 注释（基线 37，非新债）。
+- quad-final-0.39.md 补全：stress/heavy/real_world/real_world_cli 数字 + 已知债
+  说明。纯门禁/文档切片。
+
+### 0.39.127 — Phase G：发布前安全套件补跑（Valgrind/ASan/TSan）
+- **Valgrind**：`e2e_valgrind_ --include-ignored` **18/0**（与 0.38 同基线）。
+- **ASan**（nightly build-std）：lexer 1 + parser fuzz 10 + property 44 =
+  **55 passed / 0 failed**（detect_leaks=1 halt_on_error=1）。
+- **TSan**（nightly build-std）：future 6 + FFI 17 + channel 11 =
+  **34 passed / 0 failed**。
+- quad-final-0.39.md 更新：dispatch `--zero` 全绿 + valgrind + sanitizer 数字。
+- 纯门禁/文档切片（无行为变更）；lib 5663/0/7 保持。
+
+### 0.39.126 — Phase G：Result/Option `unwrap` 进入 resolved slice → dispatch --zero 全绿
+- **实现**：`result.unwrap` / `option.unwrap` 加入 resolved native emitter
+  （镜像 legacy `compile_unwrap_expect`）：Some/Ok → payload；None/Err →
+  `mimi_try_exit(0)`（noreturn）→ unreachable。退役 0.1.8 的 eligibility 硬化
+  拒绝（该拒绝曾把含 unwrap 的函数整体降级 legacy）。
+- **效果**：
+  - std_env 从 3 resolved-skips → **0**（result.unwrap 根因闭合）；
+  - `dispatch_stat check --zero` **全语料 0 fallback、rc=0**（此前 std_env/std_net
+    登记已知回退）——152 个 .mimi 全部 emitter=resolved；
+  - unwrap Ok → 值（VM/native 同 `7`）；unwrap Err → 双后端均 trap（非零退出，
+    message 文本可异、退出码一致，dual 语义等价）。
+- **测试**：phase_g 新增 `phase_g_result_unwrap_resolved_slice`（Ok 双后端 +
+  Err 双后端 trap）。
+- **门禁**：lib **5663/0/7**、make test-dogfood 全绿、dispatch check 与 --zero
+  均 rc=0。
+
+### 0.39.125 — Phase G：quad-final-0.39 终测框架（草稿）
+- **`devdocs/v0.39/quad-final-0.39.md`**（68 行，镜像 0.38 结构）：0.1.9 终测记录
+  草稿——九项交付锁（Q2 P/L、Q6、语义、E0439、教核、Q10、MutexGuard、dogfood）
+  + 测试结果表 + 生产 dual/静默回退 + 已知限制 + 发布建议。
+- **当前数字**：lib 5662/0/7、verifier 201/0、phase_d 25/0、phase_e 5/0、
+  phase_f 2/0、phase_g 1/0、bin CLI 30/0、dogfood 全绿、dispatch-core 全 resolved。
+- **发布建议**：功能门禁全绿 → 可进入发布流程，但 tag/冻结动作待用户授权；
+  发布前补跑 ASan/TSan/Valgrind + make ci-full。
+- 纯文档切片（草稿，非发布）。
+
+### 0.39.124 — 已知缺口调查：resolved `linear T`+Free 实例化（跨发射器泛型 ABI）
+- **触发**：core 函数（含线性类型）+ 以 **Free 类型**（如 string）实例化
+  `linear T` 泛型调用 → resolved 侧按 legacy 泛型前向声明的类型擦除 i64 槽做
+  参数强制转换（string→i64）→ E0722 硬错（fail-closed，非静默）。
+- **根因**：跨发射器泛型 ABI——legacy 泛型前向声明对类型参数用 i64 槽，resolved
+  main 调用时参数类型不匹配且不可强制。属 monomorphization 类型擦除缺口。
+- **已排除**：`linear T` 单独以 string 实例化（无 SystemToken）可 resolved 编译
+  （iso4 过）；SystemToken 单独用（无 linear T）可 resolved（iso2/iso3 过）；
+  仅 **core 函数内**二者组合触发。
+- **正确形态（已采用）**：`linear T` 承载真正线性值（SystemToken/cap）——mimi-ledger
+  custody 已改为 token 经管线整体转移，resolved 全绿（fallback 0.000）。
+- **处置**：记录为已知限制（loud E0722，非静默错误），留独立切片修跨发射器泛型
+  类型擦除；不阻塞 0.1.9。
+- 工作树干净；lib 5662/0/7 保持。
+
+### 0.39.123 — Phase G：SystemToken 进入 resolved native slice（权限闭环）
+- **缺口**：dispatch 门禁显示 dogfood/ledger 的 SystemToken 函数走 legacy 回退——
+  根因 `nominal type 'builtin:type:SystemToken' is not a record or enum in the
+  resolved native slice`（函数级整体回退）。
+- **修复**：
+  - `src/codegen/resolved/eligibility.rs`：SystemToken 加入不透明句柄放行
+    （同 SessionChan/actor/Future）；
+  - `src/codegen/resolved/types.rs`：`builtin:type:SystemToken` 降为 opaque i64
+    句柄（同 Mutex/Channel/MutexGuard）；
+  - 内置函数（make_token/token_id/read_file_guarded/get_env_guarded/http_get_guarded/
+    token_channel_*）codegen 分发早已就绪 → 补上类型降级后完整走 resolved。
+- **结果**：examples/dogfood 46/46、mimi-ledger 52/52 **fallback 0.000**（原
+  0.065/0.038）；phase_d 25/0 全绿；lib **5662/0/7**；make test-dogfood 全绿。
+- **顺带修正**：mimi-ledger `custody<linear T>` 原以 Free 字符串实例化——语义上
+  linear T 应承载真正线性值，改为 SystemToken 经管线整体转移（也规避 resolved
+  `linear T`+Free 实例化的已知缺口，见下）。
+- **已知后续**（不阻塞）：resolved `linear T` 以 Free 类型（如 string）实例化仍
+  E0722（数值转换串位）——真实缺口，留独立切片修 monomorphization 类型擦除。
+
+### 0.39.122 — Phase G：生产 dogfood 接入线性种类（mimi-ledger）
+- **mimi-ledger**（projects/mimi-ledger/src/main.mimi，生产 dogfood）接入
+  线性种类，非玩具：
+  - `custody<linear T>`：账户 id 经线性泛型管线**整体转移**（Phase A-C 种类
+    系统，替代 blackbox）；
+  - `audit_ledger(acct, t)`：SystemToken **能力门禁审计**——每次审计恰一次
+    消费一枚 token（token_id + drop），返回确定性摘要（不打印进程级计数器，
+    保证可复跑）；
+  - `test_linear_kinds()`：`mimi test` 新增用例，4/4 passed。
+- **门禁**：`make test-dogfood`（mimi-taskq + mimi-ledger + mimichat +
+  mimichat-modern check/test/build/run）全绿；lib **5662/0/7** 全绿。
+- 生产 dogfood 现含 linear T + SystemToken 真实用法，满足 Phase G「须用
+  linear T 或 cap 至少一处非玩具」于**生产项目**层面达成。
+
+### 0.39.121 — Phase G 首切片：dogfood 线性能力管线（非玩具）
+- **dogfood**（examples/dogfood/linear_guarded_backup.mimi，tracked）：带
+  SystemToken 能力门禁的"受保护备份"流水线——非玩具真实逻辑：
+  - `linear T` 泛型直通 `transfer<linear T>`：token 经泛型管线整体转移
+    （Phase A-C 种类系统教科书用例，删除 blackbox 后由种类系统表达）；
+  - `stage(t)` 保持 token 线性原样返回；`read_guarded` 以 SystemToken 为门禁
+    恰一次消费 read_file_guarded（Err 分支）；get_env_guarded("PATH") 成功分支；
+  - MutexGuard 恰一次 unlock（共享备份计数）。
+  - VM≡native 同输出：`mutex-guard-ok / guarded-read-rejected / guarded-env-ok`。
+- **守卫**（src/tests/phase_g.rs，tracked）：dogfood check + 双后端等价断言——
+  线性/能力/guard 组合回归必红。
+- 满足 Phase G「须用 linear T 或 cap 至少一处非玩具」交付项。
+- lib **5662/0/7** 全绿（含 phase_g 1 例）。
 
 ### 0.39.115 — Phase F 评测 SOP + 失败聚类 + 修复钩子接口
 - **修复钩子接口**（eval/repair_hook.example.sh）：retry_loop 的修复槽——

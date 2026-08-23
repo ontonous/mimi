@@ -1,0 +1,12 @@
+// 18b. actor（无 runs Flow）spawn + 消息
+actor Greeter {
+    func greet(name: string) -> string {
+        "hi " + name
+    }
+}
+func main() -> i32 {
+    let a = Greeter.spawn()
+    let r = a.greet("mimi")
+    println(r)
+    0
+}

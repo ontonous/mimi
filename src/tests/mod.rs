@@ -130,6 +130,7 @@ pub(crate) mod linear_kind;
 pub(crate) mod phase_d;
 pub(crate) mod phase_e;
 pub(crate) mod phase_f;
+pub(crate) mod phase_g;
 
 // === Audit regression tests ===
 pub(crate) mod audit_regression;

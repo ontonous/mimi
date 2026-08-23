@@ -1,0 +1,14 @@
+// 11. view/mutate 借用
+type Counter { n: i32 }
+func bump(c: mutate Counter) {
+    c.n = c.n + 1
+}
+func read(c: view Counter) -> i32 {
+    c.n
+}
+func main() -> i32 {
+    let mut c = Counter { n: 0 }
+    bump(c)
+    println(read(c))
+    0
+}

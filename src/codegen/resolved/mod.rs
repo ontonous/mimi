@@ -2878,6 +2878,86 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 })?;
                             return Ok(result);
                         }
+                        // 0.1.9 Phase G (0.39.126): panicking `unwrap` on
+                        // Result/Option — mirror legacy compile_unwrap_expect:
+                        // Some/Ok → payload; None/Err → mimi_try_exit(0)
+                        // (noreturn) → unreachable.
+                        if matches!(
+                            name,
+                            "builtin.method.result.unwrap" | "builtin.method.option.unwrap"
+                        ) {
+                            let recv = self.emit_expr(&call.arguments[0].value, frame)?;
+                            let sv = match recv {
+                                BasicValueEnum::StructValue(sv) => sv,
+                                BasicValueEnum::PointerValue(pv) => {
+                                    let sty = self.lower_type(&call.arguments[0].value.ty)?;
+                                    self.generator
+                                        .build_load(sty, pv, "unwrap_recv")?
+                                        .into_struct_value()
+                                }
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "unwrap on non-struct receiver".into(),
+                                    ))
+                                }
+                            };
+                            let disc = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 0, "unwrap_disc")
+                                .map_err(|e| CompileError::LlvmError(format!("unwrap disc: {e}")))?
+                                .into_int_value();
+                            let payload = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 1, "unwrap_payload")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("unwrap payload: {e}"))
+                                })?;
+                            let zero = disc.get_type().const_int(0, false);
+                            let has_val = self
+                                .generator
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc,
+                                    zero,
+                                    "unwrap_has",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("unwrap cmp: {e}")))?;
+                            let function = self.current_function()?;
+                            let ok_bb = self
+                                .generator
+                                .context
+                                .append_basic_block(function, "unwrap_ok");
+                            let trap_bb = self
+                                .generator
+                                .context
+                                .append_basic_block(function, "unwrap_trap");
+                            self.generator.build_cond_br(has_val, ok_bb, trap_bb)?;
+                            // None/Err path: mimi_try_exit(0) → unreachable.
+                            self.generator.builder.position_at_end(trap_bb);
+                            let try_exit_fn = self.generator.get_runtime_fn("mimi_try_exit")?;
+                            self.generator
+                                .builder
+                                .build_call(
+                                    try_exit_fn,
+                                    &[inkwell::values::BasicMetadataValueEnum::IntValue(
+                                        self.generator.context.i64_type().const_zero(),
+                                    )],
+                                    "unwrap_trap",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("unwrap trap call: {e}"))
+                                })?;
+                            self.generator.builder.build_unreachable().map_err(|e| {
+                                CompileError::LlvmError(format!("unwrap unreachable: {e}"))
+                            })?;
+                            // Some/Ok path: recover payload.
+                            self.generator.builder.position_at_end(ok_bb);
+                            let target_ty = self.lower_type(&expression.ty)?;
+                            return Ok(self.coerce_to(payload, target_ty)?);
+                        }
                         // Print-family builtins need arg type hints for formatting dispatch.
                         if matches!(name, "println" | "print" | "eprintln" | "format") {
                             self.generator.pending_print_arg_types = call

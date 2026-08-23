@@ -1,0 +1,5 @@
+// 1. func/let/if：同步计算
+func max2(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
+}
+func main() -> i32 { println(max2(3, 9)); 0 }

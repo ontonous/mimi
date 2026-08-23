@@ -23,6 +23,8 @@ build/
 examples/*
 demos/*
 !examples/*.mimi
+!examples/kernel-card/
+!examples/kernel-card/*.mimi
 !demos/*.mimi
 projects/*/src/main
 projects/*/main

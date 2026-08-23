@@ -1,0 +1,11 @@
+// 13. linear drop T（MutexGuard 教科书）
+func dropit<linear drop T>(x: T) {
+    drop(x)
+}
+func main() -> i32 {
+    let m = mutex_new(0)
+    let g = mutex_lock(m)
+    dropit(g)
+    drop(m)
+    0
+}

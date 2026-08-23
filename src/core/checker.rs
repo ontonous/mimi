@@ -72,7 +72,7 @@ pub(crate) struct Checker<'a> {
     pub(crate) linear_blackbox_cache: HashMap<String, Vec<bool>>,
     /// 0.36.42: if-let 穷举消解只在 scrutinee 为 Option 时开放（None 零负载
     /// = 具体面 0.36.36 义务消解镜像）；由 generic_linear_blackbox_sound 按参数
-    /// 表面类型设置/恢复，供 linear_blackbox.rs 的 Stmt::IfLet 臂读取。
+    /// 表面类型设置/恢复，供 linear_kind.rs 的 Stmt::IfLet 臂读取。
     pub(crate) blackbox_param_scrutinee_option: bool,
     /// 0.36.45: 遍历入参 List<...> 的元素 Option-ness 链——`for x in xs` 的
     /// 元素绑定作为 if-let scrutinee 时经此开 Option 中介面（List<Option<T>>
@@ -1115,7 +1115,7 @@ pub(crate) mod flow;
 mod func;
 mod generics;
 mod items;
-mod linear_blackbox;
+mod linear_kind;
 mod narrow;
 mod pattern;
 mod types;

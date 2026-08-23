@@ -1,0 +1,6 @@
+// 19. List<linear> 整表移交（SystemToken）
+func main() -> i32 {
+    let xs: List<SystemToken> = [make_token(), make_token()]
+    drop(xs)
+    0
+}

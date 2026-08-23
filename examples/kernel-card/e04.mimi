@@ -1,0 +1,7 @@
+// 4. type 记录
+type Point { x: i32, y: i32 }
+func main() -> i32 {
+    let p = Point { x: 3, y: 4 }
+    println(p.x + p.y)
+    0
+}

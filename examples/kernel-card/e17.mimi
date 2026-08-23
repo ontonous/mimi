@@ -1,0 +1,9 @@
+// 17. Session typed endpoint
+session Half = !i32 . end
+func main() -> i32 {
+    let ch: SessionChan<Half> = session_open::<Half>()
+    session_send(ch, 9)
+    session_close(ch)
+    println("t17")
+    0
+}

@@ -208,7 +208,13 @@ fn lower_resolved_type<'ctx>(
                 | "builtin:type:AtomicBool"
                 | "builtin:type:Channel"
                 | "builtin:type:Mutex"
-                | "builtin:type:MutexGuard" => Ok(BasicTypeEnum::IntType(context.i64_type())),
+                | "builtin:type:MutexGuard"
+                // 0.1.9 Phase D (0.39.123): SystemToken is an opaque i64
+                // capability handle at the LLVM level (process-wide unique id,
+                // consumed by token_id/token_channel_send/*_guarded). Mirrors
+                // the other opaque handles; the typed residual surface is
+                // compile-time only (linear move + builtin consumption).
+                | "builtin:type:SystemToken" => Ok(BasicTypeEnum::IntType(context.i64_type())),
                 // Future<T> is an opaque i8* handle in both legacy and
                 // resolved ABIs; keeping it i64 broke resolved `spawn`/`await`
                 // main functions when binding the future to a local.

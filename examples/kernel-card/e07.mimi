@@ -1,0 +1,9 @@
+// 7. Flow + state + transition（return S{}）
+flow Order {
+    state Pending { item: string }
+    state Shipped { item: string }
+    transition ship(Pending) -> Shipped {
+        { return Shipped { item: self.item } }
+    }
+}
+func main() -> i32 { println("t07"); 0 }

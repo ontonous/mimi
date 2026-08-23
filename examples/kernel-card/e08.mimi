@@ -1,0 +1,9 @@
+// 8. Flow fails E（回滚归还 source）
+flow F {
+    state A { n: i32 }
+    state B { n: i32 }
+    transition go(A) -> B fails string {
+        { return B { n: self.n + 1 } }
+    }
+}
+func main() -> i32 { println("t08"); 0 }

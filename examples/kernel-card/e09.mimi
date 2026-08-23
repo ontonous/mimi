@@ -1,0 +1,15 @@
+// 9. Result + ?（函数边界失败）
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { Err("div by zero") } else { Ok(a / b) }
+}
+func use_it() -> Result<i32, string> {
+    let v = safe_div(10, 2)?
+    Ok(v + 1)
+}
+func main() -> i32 {
+    match use_it() {
+        Ok(x) => println(x)
+        Err(_) => println("no")
+    }
+    0
+}

@@ -1,0 +1,8 @@
+// 6. newtype
+newtype UserId = i32
+func main() -> i32 {
+    let u = UserId(7)
+    let v: i32 = u
+    println(v)
+    0
+}

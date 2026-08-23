@@ -1,0 +1,7 @@
+// 15. SystemToken 能力门禁 read_file_guarded
+func main() -> i32 {
+    let t = make_token()
+    let r = read_file_guarded("/nonexistent/x", t)
+    drop(r)
+    0
+}

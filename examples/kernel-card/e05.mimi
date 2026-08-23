@@ -1,0 +1,16 @@
+// 5. type 枚举 + match
+type Shape {
+    Circle(f64)
+    Rectangle(f64, f64)
+}
+func area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.14159 * r * r,
+        Rectangle(w, h) => w * h,
+    }
+}
+func main() -> i32 {
+    let s = Circle(2.0)
+    println(area(s))
+    0
+}

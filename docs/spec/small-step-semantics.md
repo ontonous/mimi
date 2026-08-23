@@ -234,7 +234,84 @@ A configuration that reaches `⟨v⟩` (or `return`) with `L ≠ ∅` violates t
 exactly-once invariant; the compiler rejects it statically (E0256) and the
 resource analysis enforces it on the CFG.
 
-## 8. Determinism and Agreement
+## 8. Construction and Consumption (linear values)
+
+Kernel rule: every linear value is **produced by a constructor** and **discharged
+by exactly one sanctioned consumer** along any path (see ledger, §7).
+
+```text
+cap C; C           : constructs a fresh cap       (L ∪ {x})
+make_token()       : constructs a SystemToken      (L ∪ {x})
+mutex_lock(m)      : constructs a MutexGuard       (L ∪ {x})
+session_open::<S>() : constructs a SessionChan<S>  (L ∪ {x})
+List<linear> [..]  : constructs a linear container (L ∪ {x}, whole-list move)
+
+token_id(t)        : consumes t, yields i64        (L∖{t})
+read_file_guarded(path, t) : consumes t, yields Result
+mutex_unlock(g)    : consumes g, releases guard
+session_close(ch)  : consumes ch
+drop(x) (drop-tolerant) : consumes x
+return x           : transfers x out
+f(arg: linear T)   : transfers x into callee
+```
+
+No constructor has a "deeper" linear payload hidden from the ledger: a linear
+value is exactly one ledger entry, moved whole (no partial move, E0304 on a
+second use). Non-linear (Free) values never appear in L.
+
+## 9. Epoch at Escape Points
+
+A Flow record carries an internal **transition epoch**. Locally (same turn /
+actor self-loop) the epoch is invisible and is **stripped with no packing tax**
+(`return SourceState { ... }`). When a Flow crosses an **escape point** —
+Channel send, FFI boundary, or actor mailbox — the epoch must be **explicitly
+packaged**; a bare Flow record crossing such a boundary is rejected at check
+time (`裸 Flow 不得跨 Channel/FFI/mailbox`).
+
+```text
+local turn / actor self-loop : epoch stripped, no tax (FlowTransitionEpoch local)
+Channel / FFI / actor mailbox: must package epoch; bare Flow rejected (check)
+stale peer handle            : flow_check_epoch → EPOCH_ERR_STALE (typed, no silent)
+recover after escape         : flow_bump_epoch consumes old handle, publishes new
+```
+
+The escape-point rule is what makes a **stale capability observable**: a peer
+holding an older epoch receives a typed stale error rather than silent reuse,
+which is the observable basis for the "cap cross-task = same-token move" lock.
+
+## 10. Flow `fails E` and Fault
+
+Each transition turn ends with exactly one of: `return Target { ... }`,
+rollback failure, or typed `fault`.
+
+```text
+return Target { .. }     : source consumed, target produced, L unchanged
+fails E rollback         : source generation returned to caller with typed E
+                           (caller's variable is restored; no partial effect)
+Flow Fault               : separate system state (recoverable failure state),
+                           NOT a second Result::Err; diagnostics must keep the
+                           two channels distinct
+? on transition call     : takes the rollback path, not the Fault path
+```
+
+Irreversible external effects must not be hidden inside a rollback turn; they
+must be recorded before the turn so a rollback is truly effect-free.
+
+## 11. View and Mutate Scoping
+
+```text
+view  T : read-only borrow; valid for the synchronous call dynamic scope only
+mutate T: exclusive read-write borrow; same dynamic scope; caller's value is
+          restored when the borrow ends (no persistent aliasing across turns)
+```
+
+A borrow of a linear value does **not** consume it (the ledger entry stays with
+the caller); the borrowed access is a scoped window. Across an actor boundary or
+a Channel, borrows do not persist (values are moved, not borrowed). The static
+checker rejects a second overlapping borrow (E0442-style cross-boundary view/
+mutate) and requires the caller's copy to be intact on borrow return.
+
+## 12. Determinism and Agreement
 
 - Each reducible kernel term has exactly one redex decomposition (§6), so the
   small-step relation is **deterministic** up to the unique context split.

@@ -1,0 +1,9 @@
+// 10. Option
+func main() -> i32 {
+    let a: Option<i32> = Some(5)
+    match a {
+        Some(v) => println(v)
+        None => println("none")
+    }
+    0
+}
