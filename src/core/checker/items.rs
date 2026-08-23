@@ -955,7 +955,14 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     } else {
-                        self.funcs.insert(key, (params, ret));
+                        self.funcs.insert(key.clone(), (params, ret));
+                        // 0.1.9 Phase C (0.39.61): 方法级泛型同注册入 func_generics
+                        // （含 kind：`linear T`/`linear drop T`）。此前只有顶层函数注册，
+                        // 方法完全绕过 E0841 定义时体校验与 E0432 调用点种类检查——
+                        // 泄漏 `linear T` 方法体静默弃值（0.39.61 实证修复）。
+                        if !method.generics.is_empty() {
+                            self.func_generics.insert(key, method.generics.clone());
+                        }
                     }
                 }
                 self.generic_scope
@@ -1777,6 +1784,17 @@ impl<'a> Checker<'a> {
                     let method_owner =
                         crate::core::resolved::impl_method_owner(&impl_qualified_name, method);
                     let previous_owner = self.begin_callable(method_owner.clone());
+                    // 0.39.61: 方法级 `linear T`/`linear drop T` 定义时体校验（E0841）——
+                    // 与顶层函数同款。此前方法完全绕过（func_generics 未注册方法泛型 +
+                    // check_func 只处理顶层），泄漏 `linear T` 方法体静默弃值。
+                    let method_key = crate::core::resolved::impl_method_key(
+                        &impl_def.type_name,
+                        &method.name,
+                        &impl_def.trait_name,
+                        &impl_def.trait_args,
+                        &impl_generic_names,
+                    );
+                    self.check_linear_kind_param_bodies(&method_key, &method.params, &method.body);
                     self.unification.reset();
                     self.begin_expression_type_capture(method_owner);
                     let implicit_return =

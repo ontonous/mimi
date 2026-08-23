@@ -125,6 +125,7 @@ pub(crate) mod lsp_e2e;
 pub(crate) mod contract_p;
 
 // === 0.1.9 Phase A — `linear T` 种类（slice 0.39.2 基础） ===
+pub(crate) mod drop_face;
 pub(crate) mod linear_kind;
 
 // === Audit regression tests ===

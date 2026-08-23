@@ -239,16 +239,64 @@ impl<'a> Checker<'a> {
             .get(name)
             .map(|gps| {
                 gps.iter()
-                    .filter(|g| g.kind == crate::ast::GenericKind::Linear)
+                    .filter(|g| {
+                        matches!(
+                            g.kind,
+                            crate::ast::GenericKind::Linear | crate::ast::GenericKind::LinearDrop
+                        )
+                    })
                     .map(|g| g.name.clone())
                     .collect()
             })
             .unwrap_or_default()
     }
 
+    /// 0.39.58 (Phase C): 函数 `name` 第 `param_index` 个参数是否引用某
+    /// `linear drop T`（drop-tolerant）种类泛型。`linear drop T` 允许体 drop T，
+    /// 但实例化必须可 drop（SessionChan 除外）。
+    pub(crate) fn param_uses_linear_drop_kind(&self, name: &str, param_index: usize) -> bool {
+        let linear_drop = self
+            .func_generics
+            .get(name)
+            .map(|gps| {
+                gps.iter()
+                    .filter(|g| g.kind == crate::ast::GenericKind::LinearDrop)
+                    .map(|g| g.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if linear_drop.is_empty() {
+            return false;
+        }
+        let Some(param_ty) = self.funcs.get(name).and_then(|(ps, _)| ps.get(param_index)) else {
+            return false;
+        };
+        Self::param_type_refs_linear_kind(param_ty, &linear_drop)
+    }
+
+    /// 0.39.59: 参数表面类型是否引用给定线性种类泛型名。与 `type_any` 不同，
+    /// **不深入函数类型**（`Type::Func` / `Type::ExternFunc`）：可调用值是
+    /// 普通值而非线性资源——`func(T) -> i32` 参数只是签名里提到 T，并不携带
+    /// 线性负载，定义时 E0841 不应把这类参数当线性值校验（0.39.59 实证：
+    /// `foldT<T>(xs, f: func(T)->i32)` 的 f 被误检）。
+    fn param_type_refs_linear_kind(ty: &crate::ast::Type, linear: &[String]) -> bool {
+        if matches!(
+            ty.unlocated(),
+            crate::ast::Type::Func(_, _) | crate::ast::Type::ExternFunc(_, _)
+        ) {
+            return false;
+        }
+        crate::core::type_folder::type_any(ty, &|cand| {
+            matches!(
+                cand.unlocated(),
+                crate::ast::Type::Name(n, _) if linear.iter().any(|l| l == n)
+            )
+        })
+    }
+
     /// 0.1.9 Phase A: 函数 `name` 第 `param_index` 个参数是否引用某 `linear T`
-    /// 种类泛型（可经容器 / 元组 / Option 等嵌套）。调用点据此对线性实参放行
-    /// （kind 兼容），定义时据此做 transfer-only 体校验。
+    /// 种类泛型（可经容器 / 元组 / Option 等嵌套，但不深入函数类型）。调用点
+    /// 据此对线性实参放行（kind 兼容），定义时据此做 transfer-only 体校验。
     pub(crate) fn param_uses_linear_kind(&self, name: &str, param_index: usize) -> bool {
         let linear = self.linear_kind_generic_names(name);
         if linear.is_empty() {
@@ -257,12 +305,8 @@ impl<'a> Checker<'a> {
         let Some(param_ty) = self.funcs.get(name).and_then(|(ps, _)| ps.get(param_index)) else {
             return false;
         };
-        crate::core::type_folder::type_any(param_ty, &|cand| {
-            matches!(
-                cand.unlocated(),
-                crate::ast::Type::Name(n, _) if linear.iter().any(|l| l == n)
-            )
-        })
+        let r = Self::param_type_refs_linear_kind(param_ty, &linear);
+        r
     }
 
     /// 泛型函数 `name` 的第 `param_index` 个参数是否线性黑盒健全（见模块头）。
@@ -341,6 +385,33 @@ impl<'a> Checker<'a> {
             entry.push(false);
         }
         entry[param_index] = ok;
+        ok
+    }
+
+    /// 0.39.61: 定义时对给定 AST 参数 + 体直接做线性黑盒 body 分析（E0841 用）。
+    /// 与 `generic_linear_blackbox_sound` 不同：不经过 `find_func_def_ast`
+    /// （仅命中顶层函数），因此顶层函数与 impl/actor 方法共用。自递归信任
+    /// （BLACKBOX-REC-001）在 `call_transfer` 内，不依赖此处。
+    pub(crate) fn linear_kind_body_sound(
+        &mut self,
+        param: &crate::ast::Param,
+        body: &[crate::ast::Stmt],
+        allow_drop: bool,
+    ) -> bool {
+        let saved_scrutinee_option = self.blackbox_param_scrutinee_option;
+        let is_option_scrutinee = match param.ty.unlocated() {
+            crate::ast::Type::Name(n, _) => n == "Option",
+            crate::ast::Type::Option(_) => true,
+            _ => false,
+        };
+        self.blackbox_param_scrutinee_option = is_option_scrutinee;
+        let saved_chain = std::mem::take(&mut self.blackbox_element_option_chain);
+        let saved_element = self.blackbox_current_element_option;
+        self.blackbox_element_option_chain = option_element_chain(param.ty.unlocated());
+        let ok = linear_blackbox_body(body, std::slice::from_ref(&param.name), allow_drop, self);
+        self.blackbox_param_scrutinee_option = saved_scrutinee_option;
+        self.blackbox_element_option_chain = saved_chain;
+        self.blackbox_current_element_option = saved_element;
         ok
     }
 
@@ -1144,13 +1215,27 @@ fn call_transfer(
             return Err(());
         }
         let transfer_out = if checker.param_is_generic_position(callee_name, arg_index) {
-            if !checker.generic_linear_blackbox_sound(callee_name, arg_index, allow_drop) {
+            // BLACKBOX-REC-001（0.39.60 关闭）：自递归——若当前正在分析
+            // `callee_name` 自身（visiting 守卫含其前缀），则递归调用把 T
+            // 委托给同一函数。基例（非递归路径）仍由外层分析强制消费，故
+            // 按归纳健全：递归分支不再 fail-closed，且视为 transfer-out。
+            let self_recursive = checker
+                .linear_blackbox_visiting
+                .iter()
+                .any(|g| g.starts_with(&format!("{callee_name}#")));
+            if !self_recursive
+                && !checker.generic_linear_blackbox_sound(callee_name, arg_index, allow_drop)
+            {
                 return Err(());
             }
-            // transfer-模式（return-only）独立判定：调体每条路径 return 该参数
-            // → 返回值携带该值；否则（drop 路径）返回值不视为携带（保守，
-            // 调用方按 concrete 类型照常追踪 y 的线性义务）。
-            checker.generic_linear_blackbox_sound(callee_name, arg_index, false)
+            if self_recursive {
+                true
+            } else {
+                // transfer-模式（return-only）独立判定：调体每条路径 return 该参数
+                // → 返回值携带该值；否则（drop 路径）返回值不视为携带（保守，
+                // 调用方按 concrete 类型照常追踪 y 的线性义务）。
+                checker.generic_linear_blackbox_sound(callee_name, arg_index, false)
+            }
         } else {
             false // 具体位置：无法确证返回值携带 → 保守
         };

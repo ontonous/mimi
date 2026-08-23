@@ -259,8 +259,14 @@ pub struct ActorField {
 pub enum GenericKind {
     /// Default: the parameter may not bind linear resources.
     Free,
-    /// Explicit `linear T`: may bind linear resources (whole-value transfer only).
+    /// Explicit `linear T`: may bind linear resources (whole-value transfer only;
+    /// T may instantiate to Session, so the body must not drop T).
     Linear,
+    /// Explicit `linear drop T` (0.39.58, Phase C drop-face decision): may bind
+    /// linear resources AND drop them (transfer or drop on every path). T is
+    /// constrained to drop-tolerant instantiations (SessionChan excluded) at
+    /// the call site.
+    LinearDrop,
 }
 
 #[derive(Debug, Clone)]

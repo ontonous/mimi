@@ -855,7 +855,15 @@ impl Parser {
                 // everywhere else; we only special-case it right here.
                 let kind = if self.at_ident_name("linear") {
                     self.advance();
-                    crate::ast::GenericKind::Linear
+                    // 0.39.58 (Phase C): `linear drop T` — drop-tolerant linear
+                    // kind. After `linear`, a following `drop` keyword marks the
+                    // parameter drop-capable (SessionChan excluded at call site).
+                    if self.at(&TokenKind::Drop) {
+                        self.advance();
+                        crate::ast::GenericKind::LinearDrop
+                    } else {
+                        crate::ast::GenericKind::Linear
+                    }
                 } else {
                     crate::ast::GenericKind::Free
                 };

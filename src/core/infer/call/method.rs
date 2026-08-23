@@ -262,6 +262,9 @@ impl<'a> Checker<'a> {
         }
 
         let obj_ty = self.infer_expr(obj, scopes);
+        if std::env::var("MIMI_DBG_LK").is_ok() {
+            eprintln!("DBG obj_ty={}", crate::core::fmt_type(&obj_ty));
+        }
         // Capability method dispatch: Type::Cap(name) with split/drop.
         // Interp: Value::Cap(components); split() → Tuple of single-component
         // caps, drop() → unit. Checker mirrors the component count from the
@@ -792,6 +795,19 @@ impl<'a> Checker<'a> {
                                 user_args.iter().zip(method_params.iter()).enumerate()
                             {
                                 let at = self.infer_expr(arg, scopes);
+                                // 0.39.62 (Phase C): trait 方法 dispatch 必须与
+                                // simple.rs / impl 方法同款执行线性实参种类检查。
+                                // 此前此路径完全绕过——Free-T 泄漏方法体 + 线性实参
+                                // 静默弃值（pre-existing soundness 洞）。
+                                if self.is_linear_surface_type(&at) {
+                                    self.check_method_linear_arg_kind(
+                                        type_name,
+                                        method_name,
+                                        i,
+                                        method_params.len(),
+                                        &at,
+                                    );
+                                }
                                 // IF-C1/C5: strict unify rejects escape hatches at call sites.
                                 if self.unification.unify(&at, param).is_err() {
                                     self.emit_code(
@@ -1319,14 +1335,29 @@ impl<'a> Checker<'a> {
                 let bb_reject = if !generics.is_empty() && self.is_linear_surface_type(&at) {
                     // 0.1.9 Phase A: `linear T` 参数 kind 兼容，定义时已体校验，放行。
                     if self.param_uses_linear_kind(name, i) {
-                        false
-                    } else {
-                        let bb_sound = if self.surface_type_contains_session(&at) {
-                            self.generic_linear_blackbox_sound(name, i, false)
+                        // 0.39.58: `linear drop T` 实例化必须可 drop——SessionChan 拒。
+                        if self.param_uses_linear_drop_kind(name, i)
+                            && self.surface_type_contains_session(&at)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0432,
+                                format!(
+                                    "linear type '{}' cannot instantiate `linear drop T` (argument {} of function '{}'): \
+                                     `linear drop T` requires a drop-tolerant type, but SessionChan cannot be \
+                                     dropped (only transferred/closed). Use `linear T` for transfer-only",
+                                    fmt_type(&at),
+                                    i + 1,
+                                    name
+                                ),
+                            );
+                            true
                         } else {
-                            self.generic_linear_blackbox_sound(name, i, true)
-                        };
-                        !bb_sound
+                            false
+                        }
+                    } else {
+                        // 0.39.59 (Phase C): Free `T` + 线性实参 → 一律 E0432
+                        // （种类不匹配），退役调用点体分析。
+                        true
                     }
                 } else {
                     false
@@ -1336,11 +1367,10 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0432,
                         format!(
                             "linear type '{}' cannot be passed as generic argument {} of function '{}': \
-                             the generic body is not whole-transfer (the linear value would be \
-                             leaked/discarded inside the callee). Migration: declare the parameter \
-                             kind `linear T` with a transfer-only body (pass T through), or use a \
-                             concrete function signature taking the linear type directly, or keep a \
-                             pass-through/drop-only generic body",
+                             Free generic parameter `T` may only instantiate to non-linear types \
+                             (kind mismatch). Declare the parameter kind `linear T` (transfer-only body) \
+                             or `linear drop T` (drop-tolerant body), or use a concrete function \
+                             signature taking the linear type directly",
                             fmt_type(&at),
                             i + 1,
                             name
@@ -1395,6 +1425,67 @@ impl<'a> Checker<'a> {
     /// dispatches through when it declares `runs FlowName`. Explicit actor
     /// methods take precedence (mirrors the synthetic-method registration in
     /// checker/items.rs), so a colliding name returns `None` here.
+    /// 0.39.62 (Phase C): trait 方法调用点线性实参种类检查——与 simple.rs /
+    /// impl 方法同款。`type_name` 实现类型、`method_name` 方法名、`arg_index` 为
+    /// 调用侧实参下标（不含 self）、`decl_params_len` 为 trait 签名参数长度。
+    /// funcs 注册含隐式 self@0 → funcs_index = arg_index + (funcs.len - decl_len)。
+    fn check_method_linear_arg_kind(
+        &mut self,
+        type_name: &str,
+        method_name: &str,
+        arg_index: usize,
+        decl_params_len: usize,
+        at: &crate::ast::Type,
+    ) {
+        // 简单 key（trait_args 为空）；泛型 impl 的多义 key 取不到 → 保守
+        // fail-closed（param_uses_linear_kind false → E0432）。
+        let key = format!("{}_{}", type_name, method_name);
+        // 非泛型方法（func_generics 无条目）→ 具体线性位置由 concrete 追踪处理，
+        // E0432 种类规则不适用（`func take(x: cap FileReadCap)` 直接收 cap）。
+        if !self.func_generics.contains_key(&key) {
+            return;
+        }
+        let funcs_offset = self
+            .funcs
+            .get(&key)
+            .map(|(ps, _)| ps.len().saturating_sub(decl_params_len))
+            .unwrap_or(1);
+        let funcs_index = arg_index + funcs_offset;
+        if self.param_uses_linear_kind(&key, funcs_index) {
+            // 0.39.58: `linear drop T` 实例化必须可 drop——SessionChan 拒。
+            if self.param_uses_linear_drop_kind(&key, funcs_index)
+                && self.surface_type_contains_session(at)
+            {
+                self.emit_code(
+                    crate::diagnostic::codes::E0432,
+                    format!(
+                        "linear type '{}' cannot instantiate `linear drop T` (argument {} of method '{}'): \
+                         `linear drop T` requires a drop-tolerant type, but SessionChan cannot be \
+                         dropped (only transferred/closed). Use `linear T` for transfer-only",
+                        fmt_type(at),
+                        arg_index + 1,
+                        method_name
+                    ),
+                );
+            }
+        } else {
+            // Free T + 线性实参 → E0432（种类不匹配 + 迁移提示）。
+            self.emit_code(
+                crate::diagnostic::codes::E0432,
+                format!(
+                    "linear type '{}' cannot be passed as generic argument {} of method '{}': \
+                     Free generic parameter `T` may only instantiate to non-linear types \
+                     (kind mismatch). Declare the parameter kind `linear T` (transfer-only body) \
+                     or `linear drop T` (drop-tolerant body), or use a concrete function \
+                     signature taking the linear type directly",
+                    fmt_type(at),
+                    arg_index + 1,
+                    method_name
+                ),
+            );
+        }
+    }
+
     fn runs_flow_transition(&self, actor_name: &str, method_name: &str) -> Option<&TransitionDef> {
         let actor = self.file.items.iter().find_map(|item| match item {
             Item::Actor(a) if a.name == actor_name => Some(a),

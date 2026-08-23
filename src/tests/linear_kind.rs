@@ -62,11 +62,11 @@ func main() -> i32 {
 
 /// 当前迁移合同下，**未标 kind** 的 `T` 做整体转移（直通）也可接线性实参——
 /// 这是 P 合同的核心（`contract_p` 已钉死）。Free/Linear 的**种类不匹配**强制
-/// 属于后续 Phase A 切片（上 `linear T` 种类 + 感染时再收紧）；本切片只保证
-/// `linear T` 语法被接受且不改变既有 P 合同行为。
+/// 0.39.59（Phase C）：Free `T` + 线性实参一律 E0432（种类不匹配）——
+/// 退役调用点体分析；`identity<linear T>` 才是接线性实参的显式种类。
 #[test]
-fn linear_kind_unmarked_pass_through_contract_unchanged() {
-    check_source(
+fn linear_kind_free_t_linear_rejected_linear_t_passes() {
+    let errs = check_source(
         r#"
 cap FileReadCap;
 
@@ -79,7 +79,28 @@ func main() -> i32 {
 }
 "#,
     )
-    .expect("unmarked T whole-value pass-through with cap must stay legal (P 合同)");
+    .expect_err("Free T + cap must be rejected (kind mismatch)");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0432),
+        "Free T + cap must be E0432, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+    check_source(
+        r#"
+cap FileReadCap;
+
+func identity<linear T>(x: T) -> T { x }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let d = identity(c)
+    drop(d)
+    0
+}
+"#,
+    )
+    .expect("identity<linear T>(cap) must pass");
 }
 
 /// `linear T` 参数仍受整体转移约束：元素提取（投影）必须拒。
@@ -409,7 +430,7 @@ fn linear_container_read_len_then_drop() {
     let src = r#"
 cap FileReadCap;
 
-func pass_list<T>(xs: List<T>) -> List<T> { xs }
+func pass_list<linear T>(xs: List<T>) -> List<T> { xs }
 func main() -> i32 {
     let fs: List<cap FileReadCap> = [FileReadCap]
     let gs = pass_list(fs)
@@ -984,4 +1005,334 @@ func main() -> i32 {
     assert_eq!(interp.trim(), expected, "VM output");
     let native = checked_codegen_compile_and_run(src).expect("set method matrix must run natively");
     assert_eq!(native.trim(), expected, "native output");
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.58 `linear drop T` 种类（Phase C drop 面裁决：候选 (a)）
+// drop-tolerant 线性种类：可 drop 亦可转移，实例化必须可 drop（非 Session）。
+// 正集：dropit<linear drop T>{drop(x)} 接 cap；转移面同 linear T。
+// 负集：linear drop T 实例化 SessionChan → 拒（T 可 drop 约束被违反）。
+// ─────────────────────────────────────────────────────────────
+
+/// 正集：`linear drop T` 定义时允许整体 drop T，接 cap 双后端。
+#[test]
+fn linear_drop_kind_drop_cap_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func dropit<linear drop T>(x: T) -> i32 { drop(x); 1 }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    println(dropit(c))
+    0
+}
+"#;
+    check_source(src).expect("linear drop T + cap drop must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "1";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected, "VM");
+    let native = checked_codegen_compile_and_run(src).expect("native");
+    assert_eq!(native.trim(), expected, "native");
+}
+
+/// 正集：`linear drop T` 亦允许整体转移（drop 是转移的子集）。
+#[test]
+fn linear_drop_kind_transfer_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func pass<linear drop T>(x: T) -> T { x }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let d = pass(c)
+    drop(d)
+    println(2)
+    0
+}
+"#;
+    check_source(src).expect("linear drop T whole-transfer must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "2";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected, "VM");
+    let native = checked_codegen_compile_and_run(src).expect("native");
+    assert_eq!(native.trim(), expected, "native");
+}
+
+/// 负集：`linear drop T` 实例化 SessionChan → 拒（Session 不可 drop，违反
+/// T 可 drop 约束）。
+#[test]
+fn linear_drop_kind_sessionchan_instantiation_rejected() {
+    let errs = check_source(
+        r#"
+session S = !i32 . ?i32 . end
+func dropit<linear drop T>(x: T) -> i32 { drop(x); 1 }
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<S>()
+    let r = dropit(ch0)
+    let n = session_recv(ch1)
+    session_send(ch1, n + 1)
+    session_close(ch1)
+    println(r)
+    0
+}
+"#,
+    )
+    .expect_err("linear drop T instantiated with SessionChan must be rejected");
+    assert!(
+        errs.iter().any(|d| {
+            d.code.as_deref() == Some(crate::diagnostic::codes::E0432)
+                || d.code.as_deref() == Some(crate::diagnostic::codes::E0841)
+        }),
+        "linear drop T + SessionChan must be rejected (E0432/E0841), got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.60 BLACKBOX-REC-001 关闭：线性种类自递归（线性黑盒递归回归）
+// 自递归把 T 委托给自身；基例（非递归路径）仍强制消费 → 按归纳健全。
+// 正集：linear T 递归直通（双后端）、linear drop T 递归 drop 基例。
+// 负集：递归基例弃置 T → E0841。
+// ─────────────────────────────────────────────────────────────
+
+/// 正集：`count_down<linear T>` 自递归直通（BLACKBOX-REC-001 前 fail-closed）。
+#[test]
+fn linear_kind_self_recursion_transfer_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func count_down<linear T>(x: T, n: i32) -> T {
+    if n <= 0 { x } else { count_down(x, n - 1) }
+}
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let d = count_down(c, 3)
+    drop(d)
+    println(5)
+    0
+}
+"#;
+    check_source(src).expect("self-recursive linear T transfer must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "5";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected, "VM");
+    let native = checked_codegen_compile_and_run(src).expect("native");
+    assert_eq!(native.trim(), expected, "native");
+}
+
+/// 正集：`linear drop T` 自递归 + drop 基例。
+#[test]
+fn linear_kind_self_recursion_drop_base_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func consume<linear drop T>(x: T, n: i32) -> i32 {
+    if n <= 0 { drop(x); 7 } else { consume(x, n - 1) }
+}
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    println(consume(c, 3))
+    0
+}
+"#;
+    check_source(src).expect("self-recursive linear drop T must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "7";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected, "VM");
+    let native = checked_codegen_compile_and_run(src).expect("native");
+    assert_eq!(native.trim(), expected, "native");
+}
+
+/// 负集：递归基例弃置 T（不转移不 drop）→ E0841。
+#[test]
+fn linear_kind_self_recursion_leaky_base_rejected() {
+    let errs = check_source(
+        r#"
+cap FileReadCap;
+
+func count_down<linear T>(x: T, n: i32) -> i32 {
+    if n <= 0 { 0 } else { count_down(x, n - 1) }
+}
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    count_down(c, 3)
+    0
+}
+"#,
+    )
+    .expect_err("recursive leaky base case must be rejected");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0841),
+        "leaky recursive base must be E0841, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.61 方法级 `linear T` 定义时体校验（E0841）
+// 此前方法完全绕过 E0841/E0432（func_generics 未注册方法泛型 + check_func
+// 只处理顶层函数）：泄漏 `linear T` 方法体静默弃值。0.39.61 修复：
+//   - Item::Impl 方法泛型注册入 func_generics（含 kind）；
+//   - check_linear_kind_param_bodies 提取共享，impl 方法路径调用；
+//   - 隐式 self 偏移（funcs 签名 self@0，AST params 无 self）。
+// 正集：pass<linear T> 方法直通（双后端，已有 linear_kind_method_*）。
+// 负集：leak<linear T> 方法体弃值 → E0841；单路径弃值 → E0841。
+// ─────────────────────────────────────────────────────────────
+
+/// 负集：`linear T` 方法体静默弃值（不返回不 drop）→ E0841。
+#[test]
+fn linear_kind_method_leaky_body_rejected() {
+    let errs = check_source(
+        r#"
+cap FileReadCap;
+trait Wrap {
+    func leak<linear T>(x: T) -> i32;
+}
+type Rec { v: i32 }
+impl Wrap for Rec {
+    func leak<linear T>(x: T) -> i32 { 0 }
+}
+func main() -> i32 {
+    let r = Rec { v: 1 }
+    let c: cap FileReadCap = FileReadCap
+    r.leak(c)
+    0
+}
+"#,
+    )
+    .expect_err("leaky linear T method body must be rejected (E0841)");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0841),
+        "leaky linear T method must be E0841, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 负集：`linear T` 方法单路径弃值（另一路径 drop）→ E0841。
+#[test]
+fn linear_kind_method_partial_path_rejected() {
+    let errs = check_source(
+        r#"
+cap FileReadCap;
+trait Wrap {
+    func f<linear T>(b: bool, x: T) -> i32;
+}
+type Rec { v: i32 }
+impl Wrap for Rec {
+    func f<linear T>(b: bool, x: T) -> i32 { if b { drop(x); 0 } else { 0 } }
+}
+func main() -> i32 {
+    let r = Rec { v: 1 }
+    let c: cap FileReadCap = FileReadCap
+    r.f(true, c)
+    0
+}
+"#,
+    )
+    .expect_err("single-path method drop must be rejected (E0841)");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0841),
+        "single-path method drop must be E0841, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.62 trait 方法调用点线性实参种类检查（E0432 覆盖方法，收口 0.39.61 遗留）
+// 此前 trait 方法 dispatch（method.rs type_methods 路径）完全绕过 linear-arg
+// 检查：Free-T 方法 + 线性实参静默通过（泄漏方法体也漏）。0.39.62 修复——
+// 与 simple.rs / impl 方法同款：
+//   - Free-T 方法 + 线性实参 → E0432（种类不匹配）；
+//   - `linear T`/`linear drop T` 方法 kind 兼容放行（drop + Session 拒）；
+//   - 具体线性参数方法（`x: cap`）不受影响（concrete 追踪）。
+// ─────────────────────────────────────────────────────────────
+
+/// 负集：Free-T trait 方法 + cap 实参 → E0432（即使方法体直通）。
+#[test]
+fn linear_kind_trait_method_free_t_linear_rejected() {
+    let errs = check_source(
+        r#"
+cap FileReadCap;
+trait Keep {
+    func keep<T>(x: T) -> T;
+}
+type Rec { v: i32 }
+impl Keep for Rec {
+    func keep<T>(x: T) -> T { x }
+}
+func main() -> i32 {
+    let r = Rec { v: 1 }
+    let c: cap FileReadCap = FileReadCap
+    let d = r.keep(c)
+    drop(d)
+    0
+}
+"#,
+    )
+    .expect_err("Free-T trait method + cap must be rejected (E0432)");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0432),
+        "Free-T trait method + cap must be E0432, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 正集：`linear T` trait 方法 + cap → 通过（双后端，见
+/// `linear_kind_method_receiver_with_linear_arg_dual_backend`）。
+
+/// 负集：Free-T trait 方法 + SessionChan → E0432。
+#[test]
+fn linear_kind_trait_method_free_t_session_rejected() {
+    let errs = check_source(
+        r#"
+session S = !i32 . ?i32 . end
+trait Keep {
+    func keep<T>(x: T) -> T;
+}
+type Rec { v: i32 }
+impl Keep for Rec {
+    func keep<T>(x: T) -> T { x }
+}
+func main() -> i32 {
+    let r = Rec { v: 1 }
+    let (ch0, ch1) = session_pair::<S>()
+    let d = r.keep(ch0)
+    let n = session_recv(ch1)
+    session_send(ch1, n + 1)
+    session_close(ch1)
+    drop(d)
+    0
+}
+"#,
+    )
+    .expect_err("Free-T trait method + SessionChan must be rejected (E0432)");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0432),
+        "Free-T trait method + SessionChan must be E0432, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
 }

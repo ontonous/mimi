@@ -24,11 +24,12 @@ fn has_code(errors: &[crate::diagnostic::Diagnostic], code: &str) -> bool {
     errors.iter().any(|e| e.code.as_deref() == Some(code))
 }
 
-/// 正例：`identity<T>(x: T) -> T { x }` 以 `cap` 实参调用，整体转移直通。
+/// 0.39.59（Phase C）：正例用 `identity<linear T>` 以 `cap` 实参调用（种类语言）。
+/// Free `T` + 线性实参现在一律 E0432（见 `p_contract_free_t_linear_always_rejected`）。
 const IDENTITY_CAP_SRC: &str = r#"
 cap FileReadCap;
 
-func identity<T>(x: T) -> T { x }
+func identity<linear T>(x: T) -> T { x }
 func main() -> i32 {
     let c: cap FileReadCap = FileReadCap
     let d = identity(c)
@@ -40,7 +41,7 @@ func main() -> i32 {
 
 #[test]
 fn p_contract_identity_cap_passes_check() {
-    check_source(IDENTITY_CAP_SRC).expect("identity(cap) whole-value pass-through must check");
+    check_source(IDENTITY_CAP_SRC).expect("identity<linear T>(cap) must check");
 }
 
 #[test]
@@ -53,7 +54,7 @@ fn p_contract_identity_cap_dual_backend_runs() {
     assert_eq!(
         interp_stdout.trim(),
         "ok",
-        "VM must run identity(cap) whole-value pass-through"
+        "VM must run identity<linear T>(cap)"
     );
     // Production compile_checked native path.
     let native = checked_codegen_compile_and_run(IDENTITY_CAP_SRC)
@@ -61,7 +62,7 @@ fn p_contract_identity_cap_dual_backend_runs() {
     assert_eq!(
         native.trim(),
         "ok",
-        "native must run identity(cap) whole-value pass-through"
+        "native must run identity<linear T>(cap)"
     );
 }
 
@@ -119,11 +120,11 @@ fn p_contract_discard_rejected() {
     );
 }
 
-/// 正例：`identity` 直通 `List<cap>`（容器整体线性，整体转移）。
+/// 0.39.59（Phase C）：正例用 `identity<linear T>` 直通 `List<cap>`。
 const IDENTITY_LIST_CAP_SRC: &str = r#"
 cap FileReadCap;
 
-func identity<T>(x: T) -> T { x }
+func identity<linear T>(x: T) -> T { x }
 func main() -> i32 {
     let fs: List<cap FileReadCap> = [FileReadCap]
     let gs = identity(fs)
@@ -135,8 +136,7 @@ func main() -> i32 {
 
 #[test]
 fn p_contract_identity_list_cap_passes_check() {
-    check_source(IDENTITY_LIST_CAP_SRC)
-        .expect("identity(List<cap>) whole-value pass-through must check");
+    check_source(IDENTITY_LIST_CAP_SRC).expect("identity<linear T>(List<cap>) must check");
 }
 
 #[test]
@@ -151,11 +151,11 @@ fn p_contract_identity_list_cap_dual_backend_runs() {
     assert_eq!(native.trim(), "ok");
 }
 
-/// 正例：`identity` 直通 `Option<cap>`。
+/// 0.39.59（Phase C）：正例用 `identity<linear T>` 直通 `Option<cap>`。
 const IDENTITY_OPT_CAP_SRC: &str = r#"
 cap FileReadCap;
 
-func identity<T>(x: T) -> T { x }
+func identity<linear T>(x: T) -> T { x }
 func main() -> i32 {
     let o: Option<cap FileReadCap> = Some(FileReadCap)
     let p = identity(o)
@@ -167,8 +167,7 @@ func main() -> i32 {
 
 #[test]
 fn p_contract_identity_option_cap_passes_check() {
-    check_source(IDENTITY_OPT_CAP_SRC)
-        .expect("identity(Option<cap>) whole-value pass-through must check");
+    check_source(IDENTITY_OPT_CAP_SRC).expect("identity<linear T>(Option<cap>) must check");
 }
 
 #[test]
@@ -183,11 +182,11 @@ fn p_contract_identity_option_cap_dual_backend_runs() {
     assert_eq!(native.trim(), "ok");
 }
 
-/// 正例：`identity` 直通 `List<List<cap>>`（任意嵌套线性容器整体转移）。
+/// 0.39.59（Phase C）：正例用 `identity<linear T>` 直通 `List<List<cap>>`。
 const IDENTITY_NESTED_CAP_SRC: &str = r#"
 cap FileReadCap;
 
-func identity<T>(x: T) -> T { x }
+func identity<linear T>(x: T) -> T { x }
 func main() -> i32 {
     let f: List<List<cap FileReadCap>> = [[FileReadCap]]
     let g = identity(f)
@@ -199,11 +198,12 @@ func main() -> i32 {
 
 #[test]
 fn p_contract_identity_nested_cap_passes_check() {
-    check_source(IDENTITY_NESTED_CAP_SRC)
-        .expect("identity(List<List<cap>>) whole-value pass-through must check");
+    check_source(IDENTITY_NESTED_CAP_SRC).expect("identity<linear T>(List<List<cap>>) must check");
 }
 
-/// 正例：泛型体整体 `drop(x)` 线性实参（整体转移的 drop 面）。
+/// 0.39.59（Phase C）：`dropit<T>{ drop(x) }` 整体 drop 线性实参**升格 L 合同**。
+/// Free `T` + 线性实参一律 E0432；drop-tolerant 用 `linear drop T`（见
+/// `linear_kind::linear_drop_kind_drop_cap_dual`）。
 const DROPIT_SRC: &str = r#"
 cap FileReadCap;
 
@@ -216,8 +216,44 @@ func main() -> i32 {
 "#;
 
 #[test]
-fn p_contract_whole_value_drop_passes_check() {
-    check_source(DROPIT_SRC).expect("dropit<T>{ drop(x) } whole-value drop must check");
+fn p_contract_whole_value_drop_reclassified_ll_contract() {
+    let errs = check_source(DROPIT_SRC).expect_err(
+        "dropit<T>{ drop(x) } with a cap must be rejected (L contract, Free T + linear)",
+    );
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0432),
+        "whole-drop Free T + linear must be E0432 (kind mismatch), got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 0.39.59（Phase C）：Free `T` + 线性实参**一律 E0432**（种类不匹配），
+/// 即使泛型体整体直通也不再放行（退役调用点体分析）。
+const FREE_T_LINEAR_SRC: &str = r#"
+cap FileReadCap;
+
+func identity<T>(x: T) -> T { x }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let d = identity(c)
+    drop(d)
+    0
+}
+"#;
+
+#[test]
+fn p_contract_free_t_linear_always_rejected() {
+    let errs = check_source(FREE_T_LINEAR_SRC)
+        .expect_err("Free T + linear arg must be rejected even for whole-value pass-through");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0432),
+        "Free T + cap must be E0432 (kind mismatch), got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// 反例：元组投影 `snd<T>(t: (T, i32)) -> T { t.0 }` 非整体转移，必须拒。
@@ -292,7 +328,7 @@ fn p_contract_e0432_message_carries_migration_hint() {
         "E0432 message must carry the `linear T` migration hint, got:\n{rendered}"
     );
     assert!(
-        rendered.contains("not whole-transfer"),
-        "E0432 message must explain the whole-transfer reason, got:\n{rendered}"
+        rendered.contains("kind mismatch"),
+        "E0432 message must state the kind-mismatch reason, got:\n{rendered}"
     );
 }

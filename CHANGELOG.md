@@ -8,6 +8,131 @@
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 
+### 0.39.64 — Phase C 收尾：文档/注释终态化 + L 合同定稿
+- `dual_backend.rs` 旧 0.36.39「线性黑盒直通」注释块替换为 **Phase C 终态语义**
+  （显式种类 `linear T`/`linear drop T`、Free T+线性一律 E0432、E0841 保留 +
+  自递归支持、方法路径无洞）；测试内残留 "black-box" 措辞更新。
+- `phase-a-plan.md` §8 BLACKBOX-REC-001 → ✅ 0.39.60 已修（附自递归信任说明）。
+- `phase-c-plan.md` §6 **Phase C 结论**定稿：保留 E0841（P0-6 负结果）、终态语义
+  表、达到效果、删 blackbox 主体降级长期项。
+- lib 5627/0/7 全绿（本轮纯文档/注释，无行为变更）。
+
+### 0.39.63 — P0-6 实证为负：CFG 不可替换 E0841（删 blackbox 策略重定）
+- **实证**（0.39.63，测试先行）：修 `resource_lower::is_linear` 使 CFG 识别
+  `linear T`/`linear drop T` binder 为线性资源（P0-6），并写正负集（CFG 把
+  linear T 参数 Introduce 为资源 / Free T 不追踪）。立即被 **3 个承载性模式**
+  拦下：
+  1. match 通配消费（`match o { Some(x) => sink_g(x), _ => 0 }`）→ 假 E0256
+     （CFG 把 `Option<T>` 当单资源，match 消解元素不映射回 o）；
+  2. self-递归转移（`count_down<linear T>(x,n){ if n<=0 {x} else {count_down(x,n-1)} }`）
+     → 假 E0304（CFG 视递归调用重复消费 / 仅部分路径消费）。
+- **结论**：CFG 的线性追踪未覆盖 match 解构消费 + 递归直通——**不能**作为
+  blackbox E0841 的替换。已**回退 P0-6**（恢复保守 GenericParameter→false）。
+- **策略重定（0.39.63-70）**：保留 E0841 定义时体校验（sound + 已支持自递归，
+  0.39.60）；blackbox 调用点路径已退役（0.39.59）；"删 blackbox 主体"从 Phase C
+  路线图中**降级为长期项**（需 CFG match 解构 + 递归支持，超出 0.1.9 风险预算）。
+  Phase C 剩余 = 回归 + 文档 + L 合同定稿。
+- lib 5627/0/7 全绿（回退后）。
+
+### 0.39.62 — trait 方法调用点线性实参种类检查（E0432 覆盖方法，收口 0.39.61 遗留）
+- **实证**：trait 方法 dispatch（method.rs `type_methods` 路径）完全绕过 linear-arg
+  检查——Free-T 泄漏方法体 + 线性实参静默弃值（0.39.61 登记的 pre-existing 洞）。
+- **修复**：`check_method_linear_arg_kind`——trait 方法实参循环里对线性实参执行
+  与 simple.rs / impl 方法同款规则：
+  - Free-T 方法 + 线性实参 → E0432（种类不匹配 + 迁移提示）；
+  - `linear T`/`linear drop T` 方法 kind 兼容放行（drop + SessionChan → E0432）；
+  - 具体线性参数方法（`x: cap FileReadCap`）跳过（concrete 追踪处理）。
+  - 隐式 self 偏移 + 简单 key（trait_args 空）；泛型 impl 多义 key 取不到 →
+    保守 fail-closed。
+- **测试**：`linear_kind_trait_method_free_t_linear_rejected`、
+  `linear_kind_trait_method_free_t_session_rejected`（均 E0432）；既有 concrete
+  cap 方法、linear T 方法（双后端）不回归。
+- 至此方法路径 E0841（定义时）+ E0432（调用点）与顶层函数一致，方法线性安全
+  无洞。
+- lib 5627/0/7 全绿。
+
+### 0.39.61 — 方法级 `linear T` 定义时体校验（E0841 覆盖方法，修 soundness 洞）
+- **实证**：`linear T` 方法体（`impl Wrap for Rec { func leak<linear T>(x) -> i32 { 0 } }`）
+  静默弃值——方法完全绕过 E0841（func_generics 未注册方法泛型 + check_func 只处理
+  顶层函数）与调用点 E0432（方法调用 generics 空 → 检查跳过）。
+- **修复**：
+  - `Item::Impl` 方法泛型注册入 `func_generics`（含 kind：`linear T`/`linear drop T`）；
+  - `check_linear_kind_param_bodies` 提取共享（func.rs），impl 方法路径调用；
+  - 隐式 self 偏移：funcs 签名 self@0，AST params 无 self → funcs_index = index + offset
+    （顶层 0 / 隐式 self 方法 1）；
+  - 定义时分析改用 `linear_kind_body_sound`（直接给 AST 参数 + 体，不经
+    `find_func_def_ast`——它只命中顶层函数）。
+- **测试**：`linear_kind_method_leaky_body_rejected`、`linear_kind_method_partial_path_rejected`
+  （均 E0841）；既有 linear T 方法直通（双后端）不回归。
+- **遗留（已登记，非本切片引入）**：Free-T 方法调用点 E0432 仍被绕过（trait 方法
+  dispatch 早退，不经 generic 参数检查）——Free-T 泄漏方法体 + 线性实参仍可静默
+  弃值（pre-existing）。需专门切片修 trait 方法 dispatch 路径。
+- lib 5625/0/7 全绿。
+
+### 0.39.60 — BLACKBOX-REC-001 关闭：线性种类自递归 + P0-6 实证（Phase C 前置）
+- **自递归信任**（BLACKBOX-REC-001 关闭）：`call_transfer` 中若 visiting 守卫含
+  `{callee}#` 前缀（正在分析自身），则委托给自身的递归分支视为 transfer-out——
+  基例（非递归路径）仍由外层分析强制消费，按归纳健全。此前 fail-closed 误报
+  `count_down<linear T>(x,n){ if n<=0 {x} else {count_down(x,n-1)} }`。
+- **正负集**：`linear_kind_self_recursion_*` 3 例——transfer 自递归（双后端）、
+  `linear drop T` 自递归 + drop 基例（双后端）、递归基例弃置 → E0841。
+- **P0-6 实证（关键发现，塑造 0.39.62-65 删除策略）**：`resource_lower::is_linear`
+  对 `GenericParameter` 返回 **false（保守）**——CFG **不**把 `linear T` 参数当线性
+  资源追踪。故 blackbox 的 E0841 **非冗余**：删 blackbox 定义时路径前必须先修
+  P0-6（让 CFG 认识 linear 种类参数，E0256 兜底泄漏/弃置），否则无声漏检。
+- lib 5623/0/7 全绿。
+
+### 0.39.59 — Free `T` + 线性实参一律 E0432（退役调用点体分析，Phase C 切片）
+- **语义**：`linear T`（transfer-only）/ `linear drop T`（drop-tolerant）是接线性
+  实参的**唯二显式种类**。Free `T` + 线性实参 → 一律 E0432（种类不匹配 + 迁移
+  提示），不再做调用点 blackbox 体分析。P 合同不变（仍 E0432）。
+- **实现**：
+  - simple.rs / method.rs：Free T + 线性实参路径从 `generic_linear_blackbox_sound`
+    改为无条件 E0432「Free generic parameter `T` may only instantiate to non-linear
+    types (kind mismatch)…」。
+  - 定义时 E0841 修复：`param_type_refs_linear_kind` **不深入函数类型**——可调用值
+    非线性资源，`foldT<T>(xs, f: func(T)->i32)` 的 f 不再被误检 E0841（0.39.59
+    实证：22 例 dual_backend 迁移时 foldT/host 3 例因此失败）。
+- **测试迁移**（Free T + 线性 → 新种类）：
+  - contract_p：identity 系列 → `identity<linear T>`；dropit 升格 L 合同（E0432）；
+    新增 `p_contract_free_t_linear_always_rejected`。
+  - linear_kind：`linear_kind_free_t_linear_rejected_linear_t_passes` 取代旧
+    unmarked-pass-through；`pass_list<linear T>`。
+  - dual_backend：22 例 `dual_generic_linear_*` → `linear T`（转移）/ `linear drop T`
+    （drop-tolerant，foldT/host 3 例）。
+  - drop_face：6 正集迁 `linear drop T`/`linear T`；partial-path 负集改 E0841。
+- lib 5620/0/7 全绿。退役调用点体分析 = blackbox 仅剩定义时 E0841 一项职责。
+
+### 0.39.58 — `linear drop T` 种类（Phase C drop 面裁决 = 候选 (a) 落地）
+- **决策**（0.39.57 正负集完成后）：drop-tolerant 泛型面用**显式新种类**
+  `linear drop T` 表达（可 drop 亦可转移；实例化必须可 drop），非精简 blackbox。
+  完成 drop_face 负集（SessionChan drop → E0432；单路径 drop → E0432）——
+  原 `channel_new()` 返回可 drop 的 `Channel<i64>`（非 Session）系误报，已澄清。
+- **实现**：
+  - AST `GenericKind::LinearDrop` + parser `linear drop T`（`linear` 后接 `drop`
+    关键字；`drop` 是 TokenKind::Drop 非 Ident）。
+  - checker：`linear_kind_generic_names` 并入 LinearDrop（kind 兼容放行）；
+    `param_uses_linear_drop_kind` 区分 drop-tolerant；定义时 E0841 用
+    allow_drop=true（可 drop 但每路径必须消费）。
+  - 调用点：`linear drop T` 实例化 SessionChan（或任意嵌套）→ E0432（可 drop
+    约束违反，提示改用 `linear T` transfer-only）。
+- 正集：drop cap（双后端）、transfer（双后端）；负集：SessionChan 实例化拒。
+  linear_kind 现 39 例。
+- 意义：drop 面成为显式种类，为 0.39.59-61 Free-T 退役 + 0.39.62-65 blackbox
+  删除铺平（22 个 dual_generic_linear_* 的 `sink_g<T>{drop}` 可迁 `linear drop T`）。
+
+### 0.39.56 — Phase C 规划 + Drop 面正负集（阶段过渡切片）
+- **Phase C 规划**：`devdocs/v0.39/phase-c-plan.md`（0.39.56–70 切片清单、语义
+  决策、爆炸半径、风险护栏）。
+- **实证裁决（0.39.57 前）**：曾试推「Free T + 线性实参一律 E0432」切片，被
+  **22 个 `dual_generic_linear_*` 测试**拦下——`sink_g<T>{ drop(x) }` 在泛型
+  循环/if-let/match 内消费线性元素是承载性真实模式。**结论**：Phase C 首切片
+  不是 Free-T 退役，而是先裁决「整体 drop 可表达性」（(a) `linear drop T` vs
+  (b) 精简 drop-only 泛型面）。已回退代码改动、修订计划。
+- **Drop 面正集落地**（0.39.56）：`src/tests/drop_face.rs` 6 例固化 drop-tolerant
+  泛型面（简单 drop / 循环消费 / if-let / match 通配 / 容器整转 / let-sink），
+  双后端全绿——作为 0.39.57 裁决的基线。
+
 ### 0.39.37 — SET-REMOVE-CODEGEN-001 闭合：resolved codegen 全部 Set 方法（Phase B 切片 7）
 - **根因**：Set 方法（`s.size()`/`s.remove(v)`/`s.is_empty()`/`s.contains(v)`/
   `s.insert(v)`/`s.to_list()`）在 resolved lowering 以

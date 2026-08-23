@@ -110,29 +110,7 @@ impl<'a> Checker<'a> {
         // 禁止投影 / 弃置 / drop(T)（T 可能实例化为 Session，drop = E0425 弃置）。
         // 校验通过后，调用点对该位置的线性实参直接放行（kind 兼容），不再依赖
         // 调用点 blackbox（Free `T` 仍走迁移 blackbox，P 合同不变）。
-        {
-            let linear_names = self.linear_kind_generic_names(&func.name);
-            if !linear_names.is_empty() {
-                for (index, p) in func.params.iter().enumerate() {
-                    if !self.param_uses_linear_kind(&func.name, index) {
-                        continue;
-                    }
-                    // transfer-only（allow_drop=false）：T 可能 Session，禁止 drop(T)。
-                    let ok = self.generic_linear_blackbox_sound(&func.name, index, false);
-                    if !ok {
-                        self.emit_code(
-                            codes::E0841,
-                            format!(
-                                "`linear T` parameter '{}' of function '{}' is not whole-transfer: \
-                                 the body must pass T through (return / move into a linear-safe receiver), \
-                                 never project / discard / drop it (T may instantiate to Session)",
-                                p.name, func.name
-                            ),
-                        );
-                    }
-                }
-            }
-        }
+        self.check_linear_kind_param_bodies(&func.name, &func.params, &func.body);
 
         // Default expressions are declaration-owned typed artifacts. Capture
         // them under the callee while its parameters and generic binders are
@@ -258,6 +236,64 @@ impl<'a> Checker<'a> {
         self.generic_scope.truncate(generic_scope_len);
         // 0.31.24: Restore comptime context
         self.in_comptime = was_in_comptime;
+    }
+
+    /// 0.1.9 Phase A + 0.39.61: 定义时 `linear T` / `linear drop T` 参数体校验
+    /// （E0841）。顶层函数与 impl/actor 方法共用（方法此前完全绕过本检查——
+    /// 泄漏 `linear T` 方法体静默弃值，0.39.61 实证修复）。
+    pub(crate) fn check_linear_kind_param_bodies(
+        &mut self,
+        name: &str,
+        params: &[crate::ast::Param],
+        body: &[crate::ast::Stmt],
+    ) {
+        let linear_names = self.linear_kind_generic_names(name);
+        if linear_names.is_empty() {
+            return;
+        }
+        // 0.39.61: 方法隐式 self 偏移——funcs 签名把 self 放 index 0，而
+        // `params`（AST，无 self）从 0 起。funcs 长 - AST 长 = 偏移
+        // （顶层函数 0，隐式 self 方法 1，显式 self 0）。
+        let offset = self
+            .funcs
+            .get(name)
+            .map(|(ps, _)| ps.len().saturating_sub(params.len()))
+            .unwrap_or(0);
+        for (index, p) in params.iter().enumerate() {
+            let funcs_index = index + offset;
+            if !self.param_uses_linear_kind(name, funcs_index) {
+                continue;
+            }
+            // `linear T` → transfer-only（allow_drop=false，T 可能 Session）；
+            // `linear drop T` → drop-tolerant（allow_drop=true，T 可 drop 但
+            // 每路径必须消费；实例化由调用点排除 Session）。
+            let drop_tolerant = self.param_uses_linear_drop_kind(name, funcs_index);
+            // 0.39.61: 直接对给定 AST 参数 + 体做 blackbox 分析（方法无
+            // find_func_def_ast 命中；顶层/方法同路径）。
+            let ok = self.linear_kind_body_sound(&params[index], body, drop_tolerant);
+            if !ok {
+                let (kind, reason) = if drop_tolerant {
+                    (
+                        "`linear drop T`",
+                        "the body must consume T on every path (transfer or drop), \
+                         never project / discard / silently abandon it",
+                    )
+                } else {
+                    (
+                        "`linear T`",
+                        "the body must pass T through (return / move into a linear-safe receiver), \
+                         never project / discard / drop it (T may instantiate to Session)",
+                    )
+                };
+                self.emit_code(
+                    codes::E0841,
+                    format!(
+                        "{kind} parameter '{}' of function '{}' is not whole-transfer: {reason}",
+                        p.name, name
+                    ),
+                );
+            }
+        }
     }
 
     /// Check if a block returns on all paths

@@ -3239,33 +3239,24 @@ fn dual_generic_turbofish_explicit() {
     );
 }
 
-// ─── 0.36.39 — 泛型×线性单态化切片 1（线性黑盒直通）──────────────
-// Generic parameters keep `is_linear() = false` (GenericParameter), so a
-// bare linear arg flowing through a generic call can still escape exactly-
-// once — the blanket E0432 rejection (§2.3 / H2 audit) stays as the
-// fail-closed floor. 0.36.39 opens the one face that is provably sound
-// WITHOUT per-instantiation analysis: a **linear black-box** callee — its
-// body has ZERO dependence on T's linearity. Every path either transfers
-// the parameter out (returned as a whole value — bare ident/literal
-// containment — or moved into a trusted receiver that is itself black-box
-// sound) or explicitly drops it (drop-tolerant linear types only). It is
-// never silently abandoned, never projected (`xs[0]`), never destructured,
-// never read, never reused after transfer. Sound because the caller-side
-// analysis tracks the ARGUMENT and RETURN concrete types at the call site
-// (call-site instantiation — verified in 0.36.38): `let d = pass_through(c)`
-// still requires `drop(d)` (E0256), and the callee made no T-dependent
-// consumption decisions.
+// ─── 0.1.9 Phase C 终态语义（0.39.58-63，替代旧 0.36.39 黑盒面）─────────
+// 接线性实参的泛型参数必须是**显式种类**：
+//   - `linear T`（0.39.58）：transfer-only——定义时体校验（E0841）要求每路径
+//     把 T 整体转移（直通/整容器），禁投影 / 弃置 / drop(T)（T 可能 Session）；
+//   - `linear drop T`（0.39.58）：drop-tolerant——定义时允许每路径转移或 drop，
+//     但实例化必须可 drop（SessionChan 及其嵌套 → E0432）。
+// Free `T` + 线性实参 → 一律 E0432（0.39.59，种类不匹配 + 迁移提示），不再做
+// 调用点 blackbox 体分析。
 //
-// SessionChan — and any type nesting a SessionChan (List<SessionChan<S>>,
-// Result<.., SessionChan<S>>, …) — is **transfer-only**: drop inside the
-// generic body = E0425 protocol abandonment (same contract as the concrete
-// face, probe-verified 0.36.39), so `dropit<T>(x: T) { drop(x) }` accepts a
-// cap instantiation but must reject a SessionChan one.
+// SessionChan — 及任意嵌套 SessionChan 的类型 — 是 transfer-only：`linear T`
+// 的 drop = E0425 弃置，`linear drop T` 实例化 SessionChan 被调用点拒（E0432）。
 //
-// Everything outside the black-box face keeps E0432 fail-closed: discard
-// (`swallow`), container projection (`first<T>` = `xs[0]`), wildcard
-// discard (`let _ = y`), single-branch abandon, reuse-after-transfer.
-// Full per-instantiation element-level analysis (slice 2) is deferred.
+// 定义时 E0841 体校验保留（0.39.63 策略重定：P0-6 实证 CFG 不可替换——match
+// 解构消费 / 递归直通不在 CFG 线性追踪覆盖内）。BLACKBOX-REC-001 自递归已支持
+// （0.39.60）：递归分支委托给自身、基例仍强制消费。
+//
+// 本组测试按新种类迁移：transfer → `linear T`；drop-tolerant（sink_g/count/
+// foldT 等消费线性元素）→ `linear drop T`；Free T + 线性 = E0432 回归。
 
 #[test]
 fn dual_generic_linear_cap_pass_through_ok() {
@@ -3277,7 +3268,7 @@ fn dual_generic_linear_cap_pass_through_ok() {
     }
     let src = r#"
 cap FileReadCap
-func pass_through<T>(x: T) -> T { x }
+func pass_through<linear T> (x: T) -> T { x }
 func main() -> i32 {
     let c = FileReadCap
     let d = pass_through(c)
@@ -3304,7 +3295,7 @@ fn dual_generic_linear_cap_missing_drop_rejected() {
     // L2: the opened face does NOT relax caller-side exactly-once — the
     // instantiated return binding `d` is still linear and must be consumed.
     let diags = check_source(
-        "cap FileReadCap; func pass_through<T>(x: T) -> T { x }          func main() -> i32 { let c = FileReadCap; let d = pass_through(c); println(1); 0 }",
+        "cap FileReadCap; func pass_through<linear T> (x: T) -> T { x }          func main() -> i32 { let c = FileReadCap; let d = pass_through(c); println(1); 0 }",
     )
     .expect_err("pass-through return binding must still be consumed (E0256)");
     let rendered = diags
@@ -3354,7 +3345,7 @@ fn dual_generic_linear_container_whole_transfer_ok() {
     }
     let src = r#"
 cap FileReadCap
-func id_list<T>(v: List<T>) -> List<T> { v }
+func id_list<linear T> (v: List<T>) -> List<T> { v }
 func sink(c: cap FileReadCap) -> i32 { drop(c); 5 }
 func main() -> i32 {
     let l = [FileReadCap, FileReadCap]
@@ -3408,7 +3399,7 @@ fn dual_generic_linear_branch_transfer_ok() {
     }
     let src = r#"
 cap FileReadCap
-func f<T>(b: bool, x: T) -> T { if b { return x } else { return x } }
+func f<linear T> (b: bool, x: T) -> T { if b { return x } else { return x } }
 func main() -> i32 {
     let c = FileReadCap
     let d = f(true, c)
@@ -3471,15 +3462,14 @@ fn dual_generic_linear_reuse_after_transfer_rejected() {
 
 #[test]
 fn dual_generic_linear_session_transfer_ok() {
-    // L1+L2: SessionChan flows through a black-box generic transfer AND the
-    // protocol is completed on both endpoints — the previously-rejected
-    // (0.34.21 E0432) pattern is legal under the whole-value transfer face.
+    // L1+L2: SessionChan flows through a `linear T` transfer AND the protocol
+    // is completed on both endpoints — legal under the transfer-only kind.
     if !can_link() {
         return;
     }
     let src = r#"
 session Echo = !i32 . ?i32 . end
-func pass_through<T>(x: T) -> T { x }
+func pass_through<linear T> (x: T) -> T { x }
 func main() -> i32 {
     let (ch0, ch1) = session_pair::<Echo>()
     let d = pass_through(ch0)
@@ -3529,14 +3519,14 @@ fn dual_generic_linear_session_drop_rejected() {
 
 #[test]
 fn dual_generic_linear_cap_pass_through_turbofish_ok() {
-    // L1+L2: the explicit turbofish instantiation honors the same black-box
-    // exemption (the C2 audit site).
+    // L1+L2: the explicit turbofish instantiation honors the same `linear T`
+    // kind-compatible exemption (the C2 audit site).
     if !can_link() {
         return;
     }
     let src = r#"
 cap FileReadCap
-func pass_through<T>(x: T) -> T { x }
+func pass_through<linear T> (x: T) -> T { x }
 func main() -> i32 {
     let c = FileReadCap
     let d = pass_through::<cap FileReadCap>(c)
@@ -4166,8 +4156,8 @@ fn dual_generic_linear_for_iflet_option_accumulator_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func f<T>(xs: List<Option<T>>) -> i32 {
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func f<linear drop T> (xs: List<Option<T>>) -> i32 {
     let mut n = 0
     for x in xs {
         if let Some(y) = x { n = n + sink_g(y) }
@@ -4241,8 +4231,8 @@ fn dual_linear_for_match_option_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func f<T>(xs: List<Option<T>>) -> i32 {
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func f<linear drop T> (xs: List<Option<T>>) -> i32 {
     let mut n = 0
     for x in xs {
         n = n + match x { Some(y) => sink_g(y), None => 0 }
@@ -4361,10 +4351,10 @@ fn dual_generic_linear_iflet_non_option_element_rejected() {
 fn generic_closure_arm_inline_double_backend() {
     // L1: 内联 drop 闭包——元素经闭包参数直通 sink（fold 计数 = 2）。
     let src = "cap FileReadCap; \
-               func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
-               func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+               func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 } \
+               func foldT<linear drop T> (xs: List<T>, f: func(T) -> i32) -> i32 { \
                let mut n = 0; for x in xs { n = n + f(x) } n } \
-               func host<T>(xs: List<T>) -> i32 { \
+               func host<linear drop T> (xs: List<T>) -> i32 { \
                let r = foldT(xs, fn(x: T) -> i32 { sink_g(x) }); r } \
                func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
                println(r); 0 }";
@@ -4389,10 +4379,10 @@ fn generic_closure_arm_inline_double_backend() {
 fn generic_closure_arm_bound_double_backend() {
     // L1: 绑定闭包直通——`let c = fn(...)` 义务在定义点结算（体黑盒干净）。
     let src = "cap FileReadCap; \
-               func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
-               func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+               func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 } \
+               func foldT<linear drop T> (xs: List<T>, f: func(T) -> i32) -> i32 { \
                let mut n = 0; for x in xs { n = n + f(x) } n } \
-               func host<T>(xs: List<T>) -> i32 { \
+               func host<linear drop T> (xs: List<T>) -> i32 { \
                let c = fn(x: T) -> i32 { sink_g(x) }; \
                let r = foldT(xs, c); r } \
                func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
@@ -4489,10 +4479,10 @@ fn generic_closure_capture_rejected() {
 fn generic_callable_param_transfer_loop_double_backend() {
     // L1: callable-值调用（`f(x)`，f = func 参数）在 for 体内经转移-out 直通。
     let src = "cap FileReadCap; \
-               func sink_g<T>(x: T) -> i32 { drop(x); 1 } \
-               func foldT<T>(xs: List<T>, f: func(T) -> i32) -> i32 { \
+               func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 } \
+               func foldT<linear drop T> (xs: List<T>, f: func(T) -> i32) -> i32 { \
                for x in xs { f(x); } 0 } \
-               func host<T>(xs: List<T>) -> i32 { \
+               func host<linear drop T> (xs: List<T>) -> i32 { \
                let c = fn(x: T) -> i32 { sink_g(x) }; foldT(xs, c) } \
                func main() -> i32 { let l = [FileReadCap, FileReadCap]; let r = host(l); \
                println(r); 0 }";
@@ -4674,8 +4664,8 @@ fn dual_generic_linear_iflet_option_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func f<T>(o: Option<T>) -> i32 {
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func f<linear drop T> (o: Option<T>) -> i32 {
     let mut n = 0
     if let Some(x) = o { n = n + sink_g(x) } else { n = n + 0 }
     n
@@ -4708,8 +4698,8 @@ fn dual_generic_linear_iflet_option_no_else_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func f<T>(o: Option<T>) -> i32 {
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func f<linear drop T> (o: Option<T>) -> i32 {
     let mut n = 0
     if let Some(x) = o { n = n + sink_g(x) }
     n
@@ -4825,8 +4815,8 @@ fn dual_session_option_extract_roundtrip() {
     }
     let src = r#"
 session Echo = !i32 . ?i32 . end
-func attach<T>(x: T) -> T { x }
-func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } }
+func attach<linear T> (x: T) -> T { x }
+func flip<linear T> (o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } }
 func main() -> i32 {
     let (ch0, ch1) = session_pair::<Echo>()
     let o = Some(ch0)
@@ -4957,8 +4947,8 @@ fn dual_generic_linear_list_element_consumption_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func count<T>(v: List<T>) -> i32 { let mut n = 0; for x in v { n = n + sink_g(x) } n }
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func count<linear drop T> (v: List<T>) -> i32 { let mut n = 0; for x in v { n = n + sink_g(x) } n }
 func main() -> i32 {
     let l = [FileReadCap, FileReadCap]
     let c = count(l)
@@ -4993,8 +4983,8 @@ fn dual_generic_linear_option_destructure_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func consume<T>(o: Option<T>) -> i32 {
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func consume<linear drop T> (o: Option<T>) -> i32 {
     match o { Some(x) => sink_g(x), None => 0 }
 }
 func main() -> i32 {
@@ -5027,8 +5017,8 @@ fn dual_generic_linear_nested_option_list_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func nested<T>(v: List<Option<T>>) -> i32 {
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func nested<linear drop T> (v: List<Option<T>>) -> i32 {
     let mut n = 0
     for x in v { n = n + match x { Some(c) => sink_g(c), None => 0 } }
     n
@@ -5063,8 +5053,8 @@ fn dual_generic_linear_option_flip_cap_ok() {
     }
     let src = r#"
 cap FileReadCap
-func attach<T>(x: T) -> T { x }
-func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } }
+func attach<linear T> (x: T) -> T { x }
+func flip<linear T> (o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } }
 func main() -> i32 {
     let o = Some(FileReadCap)
     let o2 = flip(o)
@@ -5091,8 +5081,8 @@ fn dual_generic_linear_let_sink_ok() {
     }
     let src = r#"
 cap FileReadCap
-func take_g<T>(x: T) -> i32 { drop(x); 1 }
-func f<T>(v: List<T>) -> i32 { let mut n = 0; for x in v { let k = take_g(x); n = n + k } n }
+func take_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func f<linear drop T> (v: List<T>) -> i32 { let mut n = 0; for x in v { let k = take_g(x); n = n + k } n }
 func main() -> i32 {
     let l = [FileReadCap, FileReadCap]
     let r = f(l)
@@ -5117,8 +5107,8 @@ fn dual_generic_linear_match_wildcard_cap_ok() {
     }
     let src = r#"
 cap FileReadCap
-func sink_g<T>(x: T) -> i32 { drop(x); 1 }
-func f<T>(o: Option<T>) -> i32 { match o { Some(x) => sink_g(x), _ => 0 } }
+func sink_g<linear drop T> (x: T) -> i32 { drop(x); 1 }
+func f<linear drop T> (o: Option<T>) -> i32 { match o { Some(x) => sink_g(x), _ => 0 } }
 func main() -> i32 {
     let o = Some(FileReadCap)
     let r = f(o)
@@ -5205,8 +5195,8 @@ fn dual_generic_linear_option_flip_unconsumed_caller() {
     // L2: 调用方义务不因切片 2 放松——`let o2 = flip(o)` 后漏消费 o2 → E0256
     // （且不出现 E0432：flip 的构造包装面已放行）。
     let diags = check_source(
-        "cap FileReadCap; func attach<T>(x: T) -> T { x } \
-         func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } } \
+        "cap FileReadCap; func attach<linear T> (x: T) -> T { x } \
+         func flip<linear T> (o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } } \
          func main() -> i32 { let o = Some(FileReadCap); let o2 = flip(o); println(1); 0 }",
     )
     .expect_err("flip return binding must still be consumed (E0256)");
@@ -5231,7 +5221,7 @@ fn dual_generic_linear_option_flip_session_transfer_only() {
     // 协议/未按残差关闭 → 具体面 E0425（协议弃置）负责。
     let diags = check_source(
         "session Echo = !i32 . ?i32 . end; func attach<T>(x: T) -> T { x } \
-         func flip<T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } } \
+         func flip<linear T> (o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), None => None } } \
          func main() -> i32 { let (ch0, ch1) = session_pair::<Echo>(); let o = Some(ch0); \
          let o2 = flip(o); println(1); session_close(ch1); 0 }",
     )

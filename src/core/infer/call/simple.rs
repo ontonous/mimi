@@ -2953,29 +2953,42 @@ impl<'a> Checker<'a> {
                         // transfer-only 体校验；此处 kind 兼容，直接放行（不再依赖
                         // 调用点 blackbox）。
                         if self.param_uses_linear_kind(name, index) {
+                            // 0.39.58: `linear drop T` 实例化必须可 drop——
+                            // SessionChan（及其任意嵌套）不可 drop → 拒。
+                            if self.param_uses_linear_drop_kind(name, index)
+                                && self.surface_type_contains_session(argument_ty)
+                            {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0432,
+                                    format!(
+                                        "linear type '{}' cannot instantiate `linear drop T` (argument {} of function '{}'): \
+                                         `linear drop T` requires a drop-tolerant type, but SessionChan cannot be \
+                                         dropped (only transferred/closed). Use `linear T` for transfer-only",
+                                        fmt_type(argument_ty),
+                                        index + 1,
+                                        name
+                                    ),
+                                );
+                            }
                             continue;
                         }
-                        let bb_sound = if self.surface_type_contains_session(argument_ty) {
-                            self.generic_linear_blackbox_sound(name, index, false)
-                        } else {
-                            self.generic_linear_blackbox_sound(name, index, true)
-                        };
-                        if !bb_sound {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0432,
-                                format!(
-                                    "linear type '{}' cannot be passed as generic argument {} of function '{}': \
-                                     the generic body is not whole-transfer (the linear value would be \
-                                     leaked/discarded inside the callee). Migration: declare the parameter \
-                                     kind `linear T` with a transfer-only body (pass T through), or use a \
-                                     concrete function signature taking the linear type directly, or keep a \
-                                     pass-through/drop-only generic body",
-                                    fmt_type(argument_ty),
-                                    index + 1,
-                                    name
-                                ),
-                            );
-                        }
+                        // 0.39.59 (Phase C 0.39.59-61): Free `T` + 线性实参 →
+                        // 一律 E0432（种类不匹配 + 迁移提示），退役调用点体分析。
+                        // Free `T` 只可实例化为非线性型；接线性实参须声明
+                        // `linear T`（transfer-only）或 `linear drop T`（可 drop）。
+                        self.emit_code(
+                            crate::diagnostic::codes::E0432,
+                            format!(
+                                "linear type '{}' cannot be passed as generic argument {} of function '{}': \
+                                 Free generic parameter `T` may only instantiate to non-linear types \
+                                 (kind mismatch). Declare the parameter kind `linear T` (transfer-only body) \
+                                 or `linear drop T` (drop-tolerant body), or use a concrete function \
+                                 signature taking the linear type directly",
+                                fmt_type(argument_ty),
+                                index + 1,
+                                name
+                            ),
+                        );
                     }
                 }
 
