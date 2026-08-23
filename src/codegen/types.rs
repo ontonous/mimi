@@ -23,6 +23,26 @@ pub(super) fn widen_int_to_i64<'ctx>(
     }
 }
 
+/// 0.39.136: lower an Option/Result PAYLOAD slot type. A `unit` payload has no
+/// standalone LLVM type (`mimi_type_to_llvm(unit)` is None), which previously
+/// made the WHOLE `Result<(), E>` / `Option<()>` lowering fail — declare_func
+/// then fell back to an i64 signature while the body emitted a struct return
+/// (cross-emitter ABI mismatch → invalid IR → segfault in the caller).
+/// The resolved emitter's explicit ABI (`PrimitiveType::Unit → i64 0` sentinel)
+/// is mirrored here so both emitters agree on `{i1, i64, i64}` layouts.
+pub(super) fn container_payload_llvm<'ctx>(
+    ctx: &'ctx Context,
+    ty: &Type,
+) -> Option<BasicTypeEnum<'ctx>> {
+    match ty.unlocated() {
+        Type::Located { ty, .. } => container_payload_llvm(ctx, ty),
+        Type::Name(name, _) if name == "unit" || name == "nothing" => {
+            Some(BasicTypeEnum::IntType(ctx.i64_type()))
+        }
+        _ => mimi_type_to_llvm(ctx, ty),
+    }
+}
+
 pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
     match ty.unlocated() {
         Type::Located { ty, .. } => mimi_type_to_llvm(ctx, ty),
@@ -156,7 +176,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             // Integer payloads are widened to i64 so that constructor (Some(42))
             // and method (unwrap) agree on the slot width. Non-integer payloads
             // (strings, structs) use their natural LLVM type.
-            let inner_llvm = widen_int_to_i64(ctx, mimi_type_to_llvm(ctx, inner)?);
+            let inner_llvm = widen_int_to_i64(ctx, container_payload_llvm(ctx, inner)?);
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             Some(BasicTypeEnum::StructType(
                 ctx.struct_type(&[disc, inner_llvm], false),
@@ -168,7 +188,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             // is i64) and the type map agree on slot width. Non-integer payloads
             // (strings, structs) use their natural LLVM type. Error payload is
             // always i64 (see compile_err_constructor).
-            let ok_llvm = widen_int_to_i64(ctx, mimi_type_to_llvm(ctx, ok)?);
+            let ok_llvm = widen_int_to_i64(ctx, container_payload_llvm(ctx, ok)?);
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             let err_llvm = BasicTypeEnum::IntType(ctx.i64_type());
             Some(BasicTypeEnum::StructType(

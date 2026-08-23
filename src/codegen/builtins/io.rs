@@ -5199,6 +5199,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         let disc = self
             .build_extract_value(sv.into(), 0, "opt_disc")?
             .into_int_value();
+        // 0.39.136: `Option<()>` — the unit payload occupies an i64 sentinel
+        // slot (ABI parity with the resolved emitter), so the Int classifier
+        // below would render `Some(0)`. The interpreter prints `Some(())`;
+        // mirror it by selecting between the literal strings on the tag.
+        {
+            let inner_root = arg_type
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .map(|s| s.trim())
+                .unwrap_or("");
+            if inner_root == "()" || inner_root == "unit" {
+                let some_str = self
+                    .builder
+                    .build_global_string_ptr("Some(())", "opt_unit_some")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let none_str = self
+                    .builder
+                    .build_global_string_ptr("None()", "opt_unit_none")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let zero = disc.get_type().const_int(0, false);
+                let is_some = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, disc, zero, "opt_unit_is_some")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let sel = self
+                    .builder
+                    .build_select(
+                        is_some,
+                        some_str.as_pointer_value(),
+                        none_str.as_pointer_value(),
+                        "opt_unit_sel",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                return Ok(sel.into_pointer_value());
+            }
+        }
         let payload_bv = self.build_extract_value(sv.into(), 1, "opt_pay")?;
         // Classify payload for Some(...) formatting.
         enum OptPay<'a> {

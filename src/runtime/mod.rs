@@ -4265,11 +4265,11 @@ pub unsafe extern "C" fn mimi_str_count_substring(
 }
 
 /// CG-C1: Runtime trap for non-exhaustive match. Called by codegen when a match
-/// fails to cover all cases — prevents UB by printing a diagnostic and aborting.
+/// fails to cover all cases — prevents UB by printing a diagnostic and exiting (0.39.136: orderly trap_exit, rc=1).
 #[no_mangle]
 pub extern "C" fn mimi_match_panic() -> ! {
     eprintln!("panic: non-exhaustive match — all cases must be covered");
-    std::process::abort();
+    trap_exit();
 }
 
 // ---------------------------------------------------------------------------
@@ -21377,10 +21377,10 @@ pub unsafe extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
         let handler: ErrorHandler = unsafe { std::mem::transmute(handler_ptr as usize) };
         // SAFETY: calling the registered error handler with the validated message pointer.
         unsafe { handler(msg) };
-        std::process::abort();
+        trap_exit();
     }
 
-    std::process::abort();
+    trap_exit();
 }
 
 // ── SD-7/SD-8 (0.31.51a): Arithmetic trap functions ──────────────────
@@ -21433,6 +21433,28 @@ fn trap_write_code(code: &'static str) {
     trap_write_static(b"] ");
 }
 
+/// 0.39.136 (L1 parity): orderly trap shutdown — flush every open stdio
+/// output stream so output printed before the trap survives, then exit with
+/// status 1. Mirrors the bytecode VM's trap semantics (clean rc=1 +
+/// preserved stdout); replaces the old `std::process::abort()` which raised
+/// SIGABRT (rc=134) AND silently discarded buffered stdout.
+/// `fflush(NULL)` and `_exit` are async-signal-safe on POSIX, preserving the
+/// RT-C3 constraint for callers reached from signal-adjacent contexts.
+/// Allocation-failure paths keep plain `abort()` (no stream state to save,
+/// async-signal-safe by construction).
+fn trap_exit() -> ! {
+    extern "C" {
+        fn fflush(streams: *mut std::ffi::c_void) -> i32;
+        fn _exit(status: i32) -> !;
+    }
+    // SAFETY: flushing all streams (NULL) then immediate _exit are
+    // async-signal-safe POSIX operations; no allocation, no locks held.
+    unsafe {
+        fflush(std::ptr::null_mut());
+        _exit(1);
+    }
+}
+
 /// SD-7: Integer overflow trap. Called when checked arithmetic detects
 /// overflow in add/sub/mul. Prints diagnostic and aborts.
 ///
@@ -21466,7 +21488,7 @@ pub unsafe extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
         trap_write_raw(op as *const u8, len);
     }
     trap_write_static(SUFFIX);
-    std::process::abort();
+    trap_exit();
 }
 
 /// SD-8: Division by zero trap. Called when integer division or modulo
@@ -21477,7 +21499,7 @@ pub extern "C" fn mimi_trap_div_by_zero() -> ! {
     trap_write_code(E0801);
     trap_write_static(MSG);
     trap_write_static(b"\n");
-    std::process::abort();
+    trap_exit();
 }
 
 /// SD-8: MIN/-1 division trap. Called when i32::MIN / -1 or i64::MIN / -1
@@ -21489,7 +21511,7 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
     trap_write_code(E0802);
     trap_write_static(MSG);
     trap_write_static(b"\n");
-    std::process::abort();
+    trap_exit();
 }
 
 /// 0.36.10 (裁决 6 follow-up): `recover`/`reset` called on a transition result
@@ -21516,7 +21538,7 @@ pub unsafe extern "C" fn mimi_trap_no_flow_transition(
     trap_write_static(b" from state ");
     trap_write_cstr_bounded(from_state);
     trap_write_static(b"\n");
-    std::process::abort();
+    trap_exit();
 }
 
 /// Bounded C-string writer for the trap helpers (same MAX_MSG discipline as
@@ -21569,7 +21591,7 @@ pub unsafe extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char)
         trap_write_raw(op as *const u8, len);
     }
     trap_write_static(SUFFIX);
-    std::process::abort();
+    trap_exit();
 }
 
 /// 0.35.7-fix: literal pattern match assertion. The legacy pattern binder
@@ -21578,7 +21600,7 @@ pub unsafe extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char)
 /// `Bool(true) => ...`, `Some(0) => ...` — but the symbol was declared with
 /// no definition, so any program with such a pattern failed to link.
 /// Pattern-match failures are a language-level trap (E0801 family), so on
-/// failure we print the message and abort — never silently fall through.
+/// failure we print the message and trap-exit — never silently fall through.
 ///
 /// # Safety
 /// Pointer arguments must be valid for the documented C ABI
@@ -21607,18 +21629,18 @@ pub unsafe extern "C" fn mimi_runtime_assert(cond: bool, msg: *const std::ffi::c
         }
         let _ = write(2, b"\n".as_ptr() as *const std::ffi::c_void, 1);
     }
-    std::process::abort();
+    trap_exit();
 }
 
 /// v0.29.38-fix: inject_fault(state_name) — prints a message and aborts.
 /// In the interp path, inject_fault constructs a proper Fault record with
 /// SystemTrace. In codegen, we cannot easily construct the record at runtime,
-/// so we print a diagnostic and abort. This ensures test programs that rely
+/// so we print a diagnostic and trap-exit. This ensures test programs that rely
 /// on inject_fault do not silently continue with a bogus value.
 ///
 /// audit-wave1 (audit §10 LOW): the doc said "aborts" but the body returned a
-/// -1 sentinel. Callers (and this doc) expect abort semantics, so make it
-/// actually abort. Codegen rejects `inject_fault` at compile time
+/// -1 sentinel. Callers (and this doc) expect fail-loud termination, so make
+/// it actually terminate (abort then; orderly trap_exit since 0.39.136). Codegen rejects `inject_fault` at compile time
 /// (`builtins/mod.rs`: "cannot construct a Fault/SystemTrace value"), so no
 /// generated code depends on the old -1 return; the interp path constructs the
 /// Fault record itself and never calls this symbol.
@@ -21641,12 +21663,12 @@ pub unsafe extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) 
         "[mimi runtime] inject_fault: injecting Fault into state '{}' — aborting",
         state
     );
-    // Abort as documented (fail loud; never hand back a bogus sentinel).
-    std::process::abort();
+    // Terminate as documented (fail loud; never hand back a bogus sentinel).
+    trap_exit();
 }
 
 /// v0.29.38-fix: assert_state(actual_state_cstr, expected_state_cstr)
-/// Compares two C strings; if they differ, prints an error and aborts.
+/// Compares two C strings; if they differ, prints an error and trap-exits.
 /// If `actual_state` is null, the check is skipped (codegen cannot extract
 /// the state name at runtime — the interp path does the full check).
 ///
@@ -21680,7 +21702,7 @@ pub unsafe extern "C" fn mimi_assert_state(
             "[mimi runtime] assert_state failed: expected '{}', got '{}'",
             expected, actual
         );
-        std::process::abort();
+        trap_exit();
     }
     0
 }

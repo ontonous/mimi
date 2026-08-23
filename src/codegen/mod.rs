@@ -3726,7 +3726,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         false,
                     )));
                 }
-                let inner_llvm = self.llvm_type_for(inner)?;
+                // 0.39.136: unit payload → i64 sentinel slot (resolved-emitter
+                // ABI parity); a None here poisoned the whole Option<()>
+                // lowering and forced an i64 signature fallback.
+                // Priority: real lowering first (records/lists); unit
+                // sentinel only as fallback (llvm_type_for(unit) is None).
+                let inner_llvm = self.llvm_type_for(inner).or_else(|| {
+                    crate::codegen::types::container_payload_llvm(self.context, inner)
+                })?;
                 // Only widen scalar ints and product-tuple int fields — never
                 // named records (all-i32 records must keep i32 field layout).
                 let widened = match (inner.unlocated(), inner_llvm) {
@@ -3758,7 +3765,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )))
             }
             Type::Result(ok, _) => {
-                let ok_llvm = self.llvm_type_for(ok)?;
+                // 0.39.136: unit payload → i64 sentinel slot (same poisoning
+                // as Option<()> above — Result<(), E> previously failed the
+                // whole lowering and fell back to an i64 function signature
+                // while bodies emitted struct returns).
+                // Priority: real lowering first (records/tuples); unit
+                // sentinel only as fallback.
+                let ok_llvm = self
+                    .llvm_type_for(ok)
+                    .or_else(|| crate::codegen::types::container_payload_llvm(self.context, ok))?;
                 // Widen integer Ok slots and product-tuple i32 fields to i64
                 // so they match Ok((1,2)) literal ABI. Do not widen named records
                 // or i1 bool fields.

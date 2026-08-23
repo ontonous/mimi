@@ -167,3 +167,158 @@ fn usability_session_payload_non_integer_rejected() {
     let ok = "session Good = !i64 . ?i32 . end\nfunc main() -> i32 { 0 }\n";
     check_source(ok).expect("integer session payloads must check");
 }
+
+// ── 6. trap 双后端等价（0.39.136）：rc=1 + 保留 trap 前 stdout + E 码诊断 ──
+// 此前 native 走 abort()：SIGABRT rc=134 且丢弃缓冲 stdout，与 VM 干净退出
+// 分歧。现在两后端同为 rc=1、stdout 保留、stderr 带 [E08xx] 码。
+// （lib 面：VM stdout 保留 + 双后端 rc/stderr；二进制 stdout 保留面由
+// tests/trap_semantics.rs 集成测试锁定。）
+fn assert_trap_dual(src: &str, pre_trap_stdout: &str, ecode: &str, vm_frag: &str) {
+    // VM 面：错误（原始 InterpError 无码，CLI 层才加 [E08xx]）+ 保留输出。
+    // run_source_with_stdout 在 trap 时 panic，这里直接驱动 VM 以便错误路径
+    // 下仍能取回已捕获的 stdout。
+    let file = crate::tests::parse(src);
+    let prog = crate::interp::bytecode::BytecodeCompiler::new()
+        .compile_file(&file)
+        .expect("bytecode compile failed");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(prog);
+    vm.enable_stdout_capture();
+    let run = vm.run_value();
+    assert!(run.is_err(), "program must trap");
+    assert!(
+        format!("{}", run.unwrap_err()).contains(vm_frag),
+        "VM trap must mention '{vm_frag}'"
+    );
+    let vm_out = vm.take_stdout();
+    assert_eq!(
+        vm_out.trim(),
+        pre_trap_stdout,
+        "VM must preserve pre-trap stdout"
+    );
+    if !can_link() {
+        return;
+    }
+    // native 面：compile harness 对非零退出返回 "exit code …, stderr: …"。
+    // rc=1 + stderr E 码一次锁定。
+    let native_err =
+        crate::tests::checked_codegen_compile_and_run(src).expect_err("native program must trap");
+    assert!(
+        native_err.contains("exit code Some(1)"),
+        "native trap must exit cleanly (rc=1), got: {native_err}"
+    );
+    assert!(
+        native_err.contains(ecode),
+        "native trap diagnostic must carry {ecode}: {native_err}"
+    );
+}
+
+// ── 7. unit 载荷容器 ABI（0.39.136）：Result<(), E> / Option<()> ──
+// 根因：mimi_type_to_llvm(unit)=None 毒化整个容器 lowering → 声明回退 i64
+// 签名而函数体发射结构体返回（跨发射器 ABI 错位）→ 调用方 inttoptr 解引用
+// 垃圾段错误 / 显示 Some(0)。修复后双后端必须全形状等价。
+
+/// 跨函数返回 Result<(), string> + println（此前 native 段错误 rc=139）。
+#[test]
+fn usability_result_unit_payload_cross_func_dual() {
+    assert_dual(
+        r#"
+func mk() -> Result<(), string> { Ok(()) }
+func main() -> i32 {
+    let r = mk()
+    println(r)
+    0
+}
+"#,
+        "Ok(())",
+    );
+}
+
+/// match Result<(), string> 的 Ok(_)/Err 臂（此前 E0713 literal-pattern 错误）。
+#[test]
+fn usability_result_unit_match_arms_dual() {
+    assert_dual(
+        r#"
+func mk() -> Result<(), string> { Ok(()) }
+func main() -> i32 {
+    let r = mk()
+    match r {
+        Ok(_) => println("ok-arm")
+        Err(e) => println(e)
+    }
+    0
+}
+"#,
+        "ok-arm",
+    );
+}
+
+/// 直接调用 + 注解变量两种绑定形态（此前分别印 0 与正确值——分发依赖静态类型串）。
+#[test]
+fn usability_result_unit_direct_and_annotated_dual() {
+    assert_dual(
+        r#"
+func mk() -> Result<(), i32> { Ok(()) }
+func main() -> i32 {
+    println(mk())
+    let r: Result<(), i32> = Ok(())
+    println(r)
+    0
+}
+"#,
+        "Ok(())\nOk(())",
+    );
+}
+
+/// Option<()> 显示透明：Some(()) 不再印 Some(0)，None 正常。
+#[test]
+fn usability_option_unit_display_dual() {
+    assert_dual(
+        r#"
+func main() -> i32 {
+    let a: Option<()> = Some(())
+    let b: Option<()> = None
+    println(a)
+    println(b)
+    0
+}
+"#,
+        "Some(())\nNone()",
+    );
+}
+
+#[test]
+fn usability_trap_div_zero_dual_semantics() {
+    assert_trap_dual(
+        r#"
+func main() -> i32 {
+    let a = 10
+    let b = 0
+    println("before")
+    let x = a / b
+    println(x)
+    0
+}
+"#,
+        "before",
+        "E0801",
+        "division by zero",
+    );
+}
+
+#[test]
+fn usability_trap_overflow_dual_semantics() {
+    assert_trap_dual(
+        r#"
+func main() -> i32 {
+    println("before")
+    let big = 9223372036854775807
+    let x = big + 1
+    println(x)
+    0
+}
+"#,
+        "before",
+        "E0802",
+        "overflow",
+    );
+}

@@ -15,6 +15,37 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.136 — trap 语义双后端对齐 + unit 载荷容器 ABI 修复
+
+**Trap 有序退出（0.39.135 遗留 #1）**：native 的全部用户可见 trap 出口
+（`mimi_fail`、E0801/E0802 算术、E0800 转移 miss、E0813 float、pattern
+assert、inject_fault、assert_state、match_panic）从 `std::process::abort()`
+（SIGABRT rc=134 + 丢弃缓冲 stdout）改为共享 `trap_exit()`——`fflush(NULL)`
+冲刷所有流后 `_exit(1)`，镜像 VM 的干净退出。两个 POSIX 异步信号安全原语，
+保持 RT-C3 约束；OOM 分配路径保留 abort。探针 p15/p16 由 NO 转 YES
+（**矩阵 16/17**，唯一余项为 VM-FFI-lib 设计边界）。
+
+**unit 载荷容器 ABI（0.39.135 遗留 #2 深挖）**：`Result<(), E>` /
+`Option<()>` 全形状修复。根因链：`mimi_type_to_llvm(unit)=None` 毒化整个
+容器 lowering → legacy `declare_func` 回退 i64 签名 → resolved 发射器把
+结构体返回体装进 i64 函数（**无效 IR：签名与终止子类型不符**）→ 调用方按
+聚合=i64 指针约定 inttoptr 解引用垃圾（段错误 rc=139）。修复三处：
+- `container_payload_llvm` 哨兵（unit→i64，镜像 resolved 显式 ABI），同时
+  接入自由函数与 `CodeGenerator::llvm_type_for` 两套 lowering（后者优先真实
+  lowering、unit 兜底，防记录载荷被未知名→i64 兜底劫持）；
+- resolved `declare_callable` 复用已声明符号时校验签名兼容，不匹配 fail-loud
+  E0722 拒绝发射（堵住此类无效 IR 整类）；
+- `Option<()>` 显示特判：`Some(())`/`None()` 对齐 VM 与既有锁定约定。
+
+修复波及面顺带闭合：`match Result<(), E>` 的 `Ok(_)` 臂（此前 E0713）、
+跨函数调用、注解/推断两种绑定形态。附带发现并确认非缺陷：裸 `write_file`
+双后端正常（0.39.135 记录的 E0722 形态不复现）；`use std::fs` 后须用
+非限定名调用包装函数（模块前缀语法不支持，文档问题另案）。
+
+门禁：lib **5677/0/7**（含 unit 家族 4 项新回归 + trap 双测）、
+trap_semantics 集成测试 2 项（二进制级 stdout 保留锁）、real_world_cli 绿、
+fmt 干净。
+
 ### 0.39.135 — 可用性修复：全特性真实可用性探针驱动的四项 P0 双后端分歧 + E0444
 
 AI 全特性评测（17 正向探针 + 6 负例 + 合约验证面，双后端对拍）发现并修复：

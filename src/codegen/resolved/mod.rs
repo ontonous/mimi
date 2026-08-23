@@ -641,6 +641,32 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             self.generator
                 .module
                 .add_function(&symbol, function_type, None);
+        } else {
+            // 0.39.136: cross-emitter ABI guard. The symbol was pre-declared by
+            // the legacy pass; if its LLVM signature disagrees with the
+            // resolved lowering (historically: `Result<(), E>` lowered to None
+            // → legacy i64 fallback while the resolved body emitted a struct
+            // return), emitting the body would produce INVALID IR (signature
+            // says i64, terminator says struct) that segfaults callers.
+            // Fail loud here so the function is left to the legacy emitter.
+            let existing = self
+                .generator
+                .module
+                .get_function(&symbol)
+                .expect("checked above");
+            let existing_ty = existing.get_type();
+            let resolved_ty = function_type;
+            let ret_compatible = existing_ty.get_return_type() == resolved_ty.get_return_type();
+            let param_compatible = existing_ty.get_param_types() == resolved_ty.get_param_types()
+                && existing_ty.is_var_arg() == resolved_ty.is_var_arg();
+            if !ret_compatible || !param_compatible {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved callable '{symbol}' ABI mismatch with legacy declaration \
+                     (resolved ret {:?} vs declared {:?}) — refusing to emit mismatched body",
+                    resolved_ty.get_return_type(),
+                    existing_ty.get_return_type(),
+                )));
+            }
         }
         Ok(())
     }
