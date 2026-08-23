@@ -321,6 +321,11 @@ pub struct CodeGenerator<'ctx> {
     /// Flag: when true, the next `compile_len("len", ...)` call should use strlen (for strings).
     /// Set in compile_call before dispatching to builtins.
     pending_len_is_string: bool,
+    /// RECORD/LIN is_empty (0.1.9, Phase B): the current `is_empty(...)` arg's
+    /// Map-vs-Set classification ("map" | "set" | None). Maps and sets both
+    /// lower to bare i64 handles, so compile_is_empty cannot tell them apart
+    /// from the value alone — the call site's inferred type disambiguates.
+    pending_is_empty_kind: Option<&'static str>,
     /// Inferred Mimi type names for arguments of the current `print`/`println` call.
     /// Used to choose the correct runtime list-to-string helper (string vs i32 elements).
     pending_print_arg_types: Vec<String>,
@@ -698,6 +703,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             repr_c_record_names: std::collections::HashSet::new(),
             tuple_type_stack: Vec::new(),
             pending_len_is_string: false,
+            pending_is_empty_kind: None,
             pending_print_arg_types: Vec::new(),
             pending_scrutinee_result_ty: None,
             display_frees: std::cell::RefCell::new(Vec::new()),

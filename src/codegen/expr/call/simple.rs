@@ -7,6 +7,19 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
+/// is_empty (0.1.9): classify an arg's inferred type name into the Map-vs-Set
+/// codegen kind. Maps (map_new -> Record) and sets ({...}) are both bare i64
+/// handles at runtime; the call site's type is the only disambiguator.
+fn classify_is_empty_kind(type_name: &str) -> Option<&'static str> {
+    if type_name == "map" || type_name.starts_with("Map") || type_name == "Record" {
+        Some("map")
+    } else if type_name == "set" || type_name.starts_with("Set") {
+        Some("set")
+    } else {
+        None
+    }
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_call_expr(
         &mut self,
@@ -427,8 +440,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();
 
-        if name == "len" && args.len() == 1 {
+        if (name == "len" || name == "is_empty") && args.len() == 1 {
             self.pending_len_is_string = self.expr_is_string(&args[0]);
+            // is_empty: map and set both lower to bare i64 handles — the
+            // inferred type name disambiguates them for compile_is_empty.
+            self.pending_is_empty_kind = if name == "is_empty" {
+                classify_is_empty_kind(&self.infer_object_type(&args[0], vars))
+            } else {
+                None
+            };
         }
         if name == "to_string" && args.len() == 1 {
             let arg_type = self.infer_object_type(&args[0], vars);
@@ -7591,7 +7611,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut places = Vec::new();
             Self::collect_arg_cap_places(arg, vars, &mut places);
             for name in places {
-                if self.is_cap_var(&name) {
+                if self.is_cap_var(&name) && !self.is_cap_consumed(&name) {
                     self.consume_cap(&name)?;
                 }
             }
@@ -7605,7 +7625,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (Ident, and recursively through tuple/list/set/record literals and
     /// projections). Used to align call-argument consumption with the
     /// checker's Move semantics.
-    fn collect_arg_cap_places(
+    pub(in crate::codegen) fn collect_arg_cap_places(
         arg: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
         out: &mut Vec<String>,

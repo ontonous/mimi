@@ -1362,7 +1362,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut method_arg_caps = Vec::new();
             Self::collect_method_arg_cap_places(arg, vars, &mut method_arg_caps);
             for name in method_arg_caps {
-                if self.is_cap_var(&name) {
+                if self.is_cap_var(&name) && !self.is_cap_consumed(&name) {
                     self.consume_cap(&name)?;
                 }
             }

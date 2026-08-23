@@ -2539,6 +2539,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 name = mapped;
                             }
                         }
+                        // 0.39.37 (SET-REMOVE-CODEGEN-001 closed): resolved
+                        // SET METHOD calls (`s.size()`, `s.remove(v)`,
+                        // `s.contains(v)`, ...) arrive as
+                        // `builtin.method.set.X`. They used to E0709 (only the
+                        // ProtocolMethod callee form reached the set handler).
+                        // Route the Builtin form to the same handler.
+                        if let Some(method) = name.strip_prefix("builtin.method.set.") {
+                            if let Some(value) =
+                                self.emit_builtin_set_protocol_method(method, &arguments)?
+                            {
+                                return Ok(value);
+                            }
+                        }
                         // 2026-08-06 (audit 1g): str_contains List haystack →
                         // compile_contains (VM polymorphism parity); the guard
                         // below keeps rejecting Set/other receivers.
@@ -2877,11 +2890,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // the list-length helper. The legacy call-site setter
                         // (expr/call/simple.rs) does this via expr_is_string;
                         // the resolved emitter has the canonical type at hand.
-                        if name == "len" && call.arguments.len() == 1 {
-                            self.generator.pending_len_is_string = resolved_type_display_name(
+                        if (name == "len" || name == "is_empty") && call.arguments.len() == 1 {
+                            let arg_display = resolved_type_display_name(
                                 self.program,
                                 &call.arguments[0].value.ty,
-                            ) == "string";
+                            );
+                            self.generator.pending_len_is_string = arg_display == "string";
+                            // is_empty: map and set both lower to bare i64
+                            // handles — the canonical arg type disambiguates
+                            // them for compile_is_empty.
+                            self.generator.pending_is_empty_kind = if name == "is_empty" {
+                                classify_is_empty_kind(&arg_display)
+                            } else {
+                                None
+                            };
                         }
                         // 0.32.18: Builtin/module-function name shadowing.
                         // The checker may resolve a call to a module function
@@ -4034,7 +4056,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ));
                 }
                 let value = match arguments[1] {
-                    BasicMetadataValueEnum::IntValue(iv) => iv,
+                    BasicMetadataValueEnum::IntValue(iv) => {
+                        // mimi_set_* take i64 value handles; a narrow literal
+                        // (e.g. `s.remove(1)` → i32) must be widened to i64.
+                        if iv.get_type().get_bit_width() < 64 {
+                            self.generator
+                                .builder
+                                .build_int_s_extend(iv, i64_ty, "set_value_i64")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("set value sext: {e}"))
+                                })?
+                        } else {
+                            iv
+                        }
+                    }
                     BasicMetadataValueEnum::PointerValue(pv) => self
                         .generator
                         .builder
@@ -12220,6 +12255,18 @@ fn is_signed_integer_type(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool
                 | PrimitiveType::Isize
         ))
     )
+}
+
+/// is_empty (0.1.9): classify an arg's canonical type display into the
+/// Map-vs-Set codegen kind (both are bare i64 handles at runtime).
+fn classify_is_empty_kind(type_name: &str) -> Option<&'static str> {
+    if type_name == "map" || type_name.starts_with("Map") || type_name == "Record" {
+        Some("map")
+    } else if type_name == "set" || type_name.starts_with("Set") {
+        Some("set")
+    } else {
+        None
+    }
 }
 
 /// Map a canonical type identity to the display name expected by the

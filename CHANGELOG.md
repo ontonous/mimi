@@ -8,6 +8,104 @@
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 
+### 0.39.37 — SET-REMOVE-CODEGEN-001 闭合：resolved codegen 全部 Set 方法（Phase B 切片 7）
+- **根因**：Set 方法（`s.size()`/`s.remove(v)`/`s.is_empty()`/`s.contains(v)`/
+  `s.insert(v)`/`s.to_list()`）在 resolved lowering 以
+  `ResolvedCallee::Builtin("builtin.method.set.*")` 到达 codegen，但只有
+  `ProtocolMethod` 形式才走到 `emit_builtin_set_protocol_method` → Builtin 形式
+  全落 `compile_builtin_call` 兜底 → E0709（`s.size()`/`s.remove(1)` 皆然，
+  checker/VM/legacy 均正常）。
+- **修复**：
+  1. resolved `ResolvedCallee::Builtin` 臂增 `builtin.method.set.*` 分支，路由到
+     set 协议处理器（镜像 `builtin.method.string.*`/`session.*` 模式）。
+  2. set 值实参按 `mimi_set_*` 的 `(i64,i64)` 签名做位宽扩到 i64（`s.remove(1)`
+     的 i32 字面量曾致 LLVM 签名不匹配 E0713）。
+- 效果：resolved codegen 下 `s.size()`/`s.remove(1)`/inline `is_empty(s.remove(1))`
+  等全部原生通过；`mimi build`（resolved）与 VM 等价。
+- 锁定：`set_method_matrix_resolved_dual_backend`（linear_kind 现 36 例；to_list
+  无序显示按 `len` 断言，跨后端不锁元素序）。
+
+### 0.39.36 — `is_empty` Map/Set codegen（Phase B 切片 6, E0700 部分收口）
+- `is_empty(map)`/`is_empty(set)` 原生 codegen 收口：Map 与 Set 运行期都是裸 i64
+  handle，无法凭值区分 → 新增 `pending_is_empty_kind`（调用点按推断类型分类
+  map/set，legacy `infer_object_type` + resolved `resolved_type_display_name` 双路
+  设置），`compile_is_empty` 按 kind 调 `mimi_map_size`/`mimi_set_size` 判空。
+- 回归：`is_empty(map_new())`→empty、非空 map→nonempty、`is_empty({1,2})` set→
+  nonempty（修复前误走 mimi_map_size → 原生错报 empty）。
+- 锁：`is_empty_map_codegen_dual_backend` / `is_empty_set_codegen_dual_backend`
+  （linear_kind 现 35 例）。lib 全绿。
+- **登记 SET-REMOVE-CODEGEN-001（待修）**：resolved codegen 下 `s.remove(1)` 结果
+  再喂自由 builtin（is_empty/len）→ E0709（set.remove callee Builtin vs
+  ProtocolMethod 分叉；checker/VM/legacy 均正常），详见 phase-a-plan §9。
+
+### 0.39.35 — 深化单态化锁定 + BLACKBOX-REC-001 登记（Phase B 切片 5）
+- 锁定（全部双后端等价）：
+  - 跨函数链 `wrap<linear T>{id(x)}`（cap 直通）；
+  - trait 方法 + `linear T`（`r.keep(x)`，keep: T->T）；
+  - 容器过链 `wrap2<linear T>(List<T>) { id(x) }`（List<cap> 直通）；
+  - SessionChan 直通 `echo<linear T>`（transfer-only 通道转移）。
+  → linear_kind 现 33 例。
+- **登记 BLACKBOX-REC-001（Phase C 修）**：泛型线性递归被 blackbox fail-closed 误拒
+  （`count_down<linear T>(x,n){ if n<=0 {x} else {count_down(x,n-1)} }` 语义健全但
+  E0841/E0432）。名字级 blackbox 不追踪递归 → 属 Phase C「换黑盒」收口项，详见
+  phase-a-plan §8。
+
+### 0.39.34 — RECORD-LIN-001 修复：用户记录含 cap 字段按线性追踪（Phase B 切片 4, HIGH 闭合）
+- **根因**（上轮登记）：`is_linear` 对用户记录走 `Nominal.is_linear` 标志（由
+  `nominal_is_linear()` 决定，只认 `state:`/SessionChan）→ 含 cap 字段的记录
+  is_linear=false → `let r = Plain { data: c }; drop(r); drop(c)` 双消费被接受
+  （健全性缺口）；`drop(r)` 单独用又 E0256 泄漏。
+- **修复**：
+  1. `resolved/mod.rs`：`compute_linear_record_names` — 遍历 Record/Union type_def，
+     经 `field_ids` + `resolved_field_types` 递归判字段线性（cycle-guarded），得
+     线性记录 qualified_name 集。
+  2. `cfg/resource_lower.rs`：`analyze_resolved_bodies` / `ActionEmitter` 增
+     `linear_record_names`；`is_linear` Nominal 臂改为「线性记录名 ∪ 线性实参」，
+     用户记录（如 `Plain`）与 `List<cap>`/`Tuple<cap>` 同权追踪。
+  3. `codegen/expr/record.rs`：记录字面量构造移动 cap 字段（`consume_cap` +
+     `is_cap_consumed` 幂等守卫，与 0.39.32 列表字面量同款）→ 原生 E0303 关闭。
+- 效果：`drop(r); drop(c)` / `drop(c)`（移入后）→ E0304；`bind→consume` 双后端绿。
+- 回归：`record_lin_cap_field_double_drop_rejected` /
+  `record_lin_cap_field_use_after_move_rejected` /
+  `record_lin_cap_field_bind_then_consume_dual`（linear_kind 现 29 例）。
+
+### 0.39.33 — 双线性参数单态化锁定 + RECORD-LIN-001 登记（Phase B 切片 3）
+- 锁定：`swap2<linear T, U>`（T=cap, U=i32）整体转移双后端等价（42）——
+  `linear_kind_two_linear_params_dual_backend`（linear_kind 现 26 例）。
+- **登记 RECORD-LIN-001（HIGH，Phase C/D 修）**：用户记录含 cap 字段不被线性追踪
+  （`nominal_is_linear` 只认 state:/SessionChan）→ `let r = Plain { data: c }; drop(r);
+  drop(c)` 双消费被接受（健全性缺口）。根因 + 修复位置见 `devdocs/v0.39/phase-a-plan.md §7`。
+  对照：`List<cap>`/`Tuple<cap>` 正确（is_linear 显式处理）；`linear T` 记录在泛型面
+  由 0.39.9-14 覆盖，具体面 cap 记录逃逸在 is_linear 处。
+- 临时缓解：记录 cap 走 List/Tuple/Map，或具体化函数直收 cap 参数。
+
+### 0.39.32 — 列表字面量 cap 移动：绑定 `let fs = [c]` 后 drop 不再假 E0303（Phase B 切片 2）
+- **根因**：legacy codegen 的 cap 追踪器在 `compile_list_expr` 不标记元素消费
+  （仅调用实参可达收集处理内联 `sink([c])`）→ 绑定 `let fs = [c]; drop(fs)` 的
+  `c` 永不消费 → 原生 E0303；checker（CFG Move 在列表字面量处）与 VM 均正确。
+- **修复**：
+  - `store_list_elements`（record.rs）：列表字面量移动时消费元素可达 cap
+    （复用 `collect_arg_cap_places`）。
+  - 幂等守卫：`scope.rs` 新增 `is_cap_consumed`；调用实参 / 方法实参 / 返回
+    表达式的可达收集改为 `is_cap_var && !is_cap_consumed` 才消费——避免
+    `sink([c])` / `pass_list([c])` 在构造已消费后二次 `CapConsumed`。
+- 回归：`linear_kind_list_literal_cap_binding_drop_dual`、
+  `linear_kind_list_literal_inline_call_arg_no_double_consume`、
+  `linear_kind_list_literal_binding_through_generic_chain`（linear_kind 现 25 例）。
+
+### 0.39.31 — `is_empty` 自由 builtin codegen 补齐（E0700 关闭，Phase B 切片 1）
+- LEN-READ-001 的 checker 豁免开放了 `is_empty(线性容器)`，但 codegen 一直缺
+  （E0700「not yet implemented in codegen」，因 builtin 分发无 `is_empty` 分支）。
+- **落地**：
+  - `compile_is_empty`（list/access.rs）：List（指针/结构体读 len==0）、String
+    （C 串首字节 / {ptr,i64} 结构体 byte_len==0）；Map/Set 是裸 i64 handle 值层
+    无法区分 → 保持 Unsupported（无回归）。
+  - `builtins/mod.rs` 分发加 `is_empty`；legacy（simple.rs）与 resolved（mod.rs）
+    调用点对 `is_empty` 也设 `pending_len_is_string`（与 len 同款）。
+- 回归：`linear_container_read_is_empty_then_drop` 升级全双后端；
+  `is_empty_free_builtin_codegen_dual_backend`（线性 List/空 List/String 三态
+  VM/native 等价）。linear_kind 现 22 例。
+
 ### 0.39.21–30 — 单态化前置 + drop glue 对齐（Phase A 切片 6，收尾）
 - 验证 + 锁定（线性 kind 不改变单态化/drop 机制，机制本身类型驱动）：
   - **单态化**：`swap2<linear T>` 同一泛型双实例化（cap + i32）VM/Resolved 双后端

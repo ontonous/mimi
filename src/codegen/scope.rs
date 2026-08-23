@@ -339,6 +339,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         false
     }
 
+    /// 0.1.9 Phase B (0.39.32): whether a capability variable has already been
+    /// consumed. Used so reachable-place collection (call args / method args /
+    /// return / list-literal construction) is idempotent: once construction
+    /// consumes `[c]` elements, the call-arg path must not double-consume.
+    pub(super) fn is_cap_consumed(&self, name: &str) -> bool {
+        for scope in self.cap_vars.iter().rev() {
+            if let Some((_, consumed)) = scope.get(name) {
+                return *consumed;
+            }
+        }
+        false
+    }
+
     /// Push a new shared variable scope
     pub(super) fn push_shared_scope(&mut self) {
         self.shared_release_vars.push(Vec::new());

@@ -3744,7 +3744,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut returned_caps = Vec::new();
             Self::collect_expr_cap_places(expr, vars, &mut returned_caps);
             for name in returned_caps {
-                if self.is_cap_var(&name) {
+                if self.is_cap_var(&name) && !self.is_cap_consumed(&name) {
                     self.consume_cap(&name)?;
                 }
             }

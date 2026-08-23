@@ -6,7 +6,7 @@ use crate::core::checker::flow::FlowAcc;
 use crate::core::phase::{TypeScheme, ZonkedTy};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 
@@ -968,11 +968,16 @@ impl CheckedProgram {
             };
         validate_resolved_callable_bodies(&program)?;
         program.callable_cfgs = crate::core::cfg::lower_resolved_bodies(&program.resolved_bodies)?;
+        // RECORD-LIN-001 (0.1.9, Phase B): user records/unions with linear
+        // fields must be tracked as linear. Compute the set of such qualified
+        // names once and hand it to the CFG's is_linear.
+        let linear_record_names = compute_linear_record_names(&program);
         program.resource_analyses = crate::core::cfg::analyze_resolved_bodies(
             &program.callable_cfgs,
             &program.resolved_bodies,
             &program.resolved_signatures,
             &program.resolved_types,
+            &linear_record_names,
         )?;
         let mut callables = BTreeMap::new();
         for (owner, body) in &program.resolved_bodies {
@@ -8067,6 +8072,102 @@ fn resolve_call_callee(
             None,
         ),
     }
+}
+
+/// RECORD-LIN-001 (0.1.9, Phase B): whether a resolved type is linear, used
+/// to compute `linear_record_names`. Recurses through containers and nested
+/// user records/unions (cycle-guarded for self-referential record types).
+fn resolved_ty_is_linear(
+    program: &CheckedProgram,
+    types: &crate::core::ResolvedTypeTable,
+    ty: &crate::core::ResolvedTypeId,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    match types.get(ty) {
+        Some(crate::core::ResolvedType::Capability(_))
+        | Some(crate::core::ResolvedType::FlowStateSet { .. }) => true,
+        Some(crate::core::ResolvedType::Nominal { is_linear, .. }) if *is_linear => true,
+        Some(crate::core::ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
+            if let Some(td) = program.type_def(item.as_str()) {
+                if matches!(td.kind, ResolvedTypeKind::Record | ResolvedTypeKind::Union) {
+                    if !visiting.insert(item.as_str().to_string()) {
+                        // cycle: assume non-linear (self-reference is not
+                        // itself the carrier of the linear resource).
+                        return false;
+                    }
+                    let linear = td.fields.iter().any(|(field_name, _)| {
+                        td.field_ids
+                            .get(field_name)
+                            .and_then(|fid| program.resolved_field_types().get(fid))
+                            .is_some_and(|field_ty| {
+                                resolved_ty_is_linear(program, types, field_ty, visiting)
+                            })
+                    });
+                    visiting.remove(item.as_str());
+                    return linear;
+                }
+            }
+            // Builtin container (List/Map/Set), enum, or generic record:
+            // linear iff any type argument is linear.
+            arguments
+                .iter()
+                .any(|arg| resolved_ty_is_linear(program, types, arg, visiting))
+        }
+        Some(crate::core::ResolvedType::Newtype { inner, .. }) => {
+            resolved_ty_is_linear(program, types, inner, visiting)
+        }
+        Some(crate::core::ResolvedType::Tuple(elements)) => elements
+            .iter()
+            .any(|element| resolved_ty_is_linear(program, types, element, visiting)),
+        Some(crate::core::ResolvedType::Option(inner)) => {
+            resolved_ty_is_linear(program, types, inner, visiting)
+        }
+        Some(crate::core::ResolvedType::Result { ok, error }) => {
+            resolved_ty_is_linear(program, types, ok, visiting)
+                || resolved_ty_is_linear(program, types, error, visiting)
+        }
+        Some(crate::core::ResolvedType::Array { element, .. }) => {
+            resolved_ty_is_linear(program, types, element, visiting)
+        }
+        Some(crate::core::ResolvedType::Slice(inner)) => {
+            resolved_ty_is_linear(program, types, inner, visiting)
+        }
+        Some(crate::core::ResolvedType::CBuffer(inner)) => {
+            resolved_ty_is_linear(program, types, inner, visiting)
+        }
+        _ => false,
+    }
+}
+
+/// RECORD-LIN-001: collect qualified names of all user records/unions whose
+/// fields (transitively) contain a linear resource.
+fn compute_linear_record_names(program: &CheckedProgram) -> BTreeSet<String> {
+    let types = program.resolved_types();
+    let mut names = BTreeSet::new();
+    for type_def in program.type_defs().values() {
+        if !matches!(
+            type_def.kind,
+            ResolvedTypeKind::Record | ResolvedTypeKind::Union
+        ) {
+            continue;
+        }
+        let mut visiting = BTreeSet::new();
+        let linear = type_def.fields.iter().any(|(field_name, _)| {
+            type_def
+                .field_ids
+                .get(field_name)
+                .and_then(|fid| program.resolved_field_types().get(fid))
+                .is_some_and(|field_ty| {
+                    resolved_ty_is_linear(program, types, field_ty, &mut visiting)
+                })
+        });
+        if linear {
+            names.insert(type_def.qualified_name.clone());
+        }
+    }
+    names
 }
 
 fn resolve_named_call_callee(

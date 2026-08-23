@@ -80,6 +80,121 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// 0.1.9 Phase B (0.39.31): free builtin `is_empty(collection)`.
+    /// 与 VM `builtin_is_empty`（List/String/Map/Set）对齐，但 codegen 仅实现
+    /// List + String（LEN-READ-001 开放的核心场景）；Map/Set 是裸 i64 handle，
+    /// 值层无法区分 → 保持 Unsupported（与现状一致，无回归）。
+    pub(in crate::codegen) fn compile_is_empty(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount(
+                "is_empty expects 1 argument".to_string(),
+            ));
+        }
+        let zero_i64 = self.context.i64_type().const_zero();
+        let cmp = |builder: &inkwell::builder::Builder<'ctx>,
+                   len: inkwell::values::IntValue<'ctx>|
+         -> MimiResult<inkwell::values::IntValue<'ctx>> {
+            builder
+                .build_int_compare(inkwell::IntPredicate::EQ, len, zero_i64, "is_empty")
+                .map_err(|e| CompileError::LlvmError(format!("is_empty cmp: {e}")))
+        };
+        match args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                if self.pending_len_is_string {
+                    // C-string: empty iff first byte is NUL.
+                    let byte = self
+                        .builder
+                        .build_load(self.context.i8_type(), pv, "str_first_byte")
+                        .map_err(|e| CompileError::LlvmError(format!("str load: {e}")))?
+                        .into_int_value();
+                    let empty = cmp(&self.builder, byte)?;
+                    Ok(empty.into())
+                } else {
+                    // List struct {i64 len, i8* data}: empty iff field 0 == 0.
+                    let list_ty = self.list_struct_type();
+                    let len_gep = self
+                        .gep()
+                        .build_struct_gep(list_ty, pv, 0, "list.len")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {e}")))?;
+                    let len = self
+                        .builder
+                        .build_load(self.context.i64_type(), len_gep, "len")
+                        .map_err(|e| CompileError::LlvmError(format!("load: {e}")))?
+                        .into_int_value();
+                    let empty = cmp(&self.builder, len)?;
+                    Ok(empty.into())
+                }
+            }
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let fields = sv.get_type().get_field_types();
+                // String {i8*, i64} vs List {i64, i8*} discriminated by layout.
+                let is_string_struct = matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                        if t.get_bit_width() == 64
+                );
+                if is_string_struct {
+                    let byte_len = self
+                        .builder
+                        .build_extract_value(sv, 1, "str_byte_len")
+                        .map_err(|e| CompileError::LlvmError(format!("extract: {e}")))?
+                        .into_int_value();
+                    let empty = cmp(&self.builder, byte_len)?;
+                    Ok(empty.into())
+                } else {
+                    let len = self
+                        .builder
+                        .build_extract_value(sv, 0, "list_len")
+                        .map_err(|e| CompileError::LlvmError(format!("extract list len: {e}")))?
+                        .into_int_value();
+                    let empty = cmp(&self.builder, len)?;
+                    Ok(empty.into())
+                }
+            }
+            BasicMetadataValueEnum::IntValue(handle) => {
+                // Map and set values both lower to bare i64 handles. The call
+                // site set pending_is_empty_kind from the inferred type:
+                //   "map" -> mimi_map_size (map_new() -> Record handle)
+                //   "set" -> mimi_set_size ({...} set literal handle)
+                // Anything else is genuinely type-ambiguous → fail closed.
+                let runtime_name = match self.pending_is_empty_kind {
+                    Some("map") => "mimi_map_size",
+                    Some("set") => "mimi_set_size",
+                    _ => {
+                        return Err(CompileError::Unsupported(
+                            "is_empty: bare i64 handle with no Map/Set type hint                              (call-site type classification failed)"
+                                .into(),
+                        ))
+                    }
+                };
+                let func = self
+                    .module
+                    .get_function(runtime_name)
+                    .ok_or_else(|| format!("{runtime_name} not declared"))?;
+                let result = self
+                    .builder
+                    .build_call(
+                        func,
+                        &[BasicMetadataValueEnum::IntValue(handle)],
+                        "handle_size_call",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("handle_size call: {e}")))?;
+                let size = result
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("size helper returned void".into()))?
+                    .into_int_value();
+                let empty = cmp(&self.builder, size)?;
+                Ok(empty.into())
+            }
+            _ => Err(CompileError::TypeMismatch(
+                "is_empty expects a list or string".to_string(),
+            )),
+        }
+    }
+
     pub(in crate::codegen) fn compile_contains(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

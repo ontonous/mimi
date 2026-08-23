@@ -3646,6 +3646,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "json_has_key" => self.compile_json_has_key(args),
             "range" => self.compile_range(args),
             "len" => self.compile_len(args),
+            "is_empty" => self.compile_is_empty(args),
             "push" => self.compile_push(args),
             "pop" => self.compile_pop(args),
             "contains" => self.compile_contains(args),

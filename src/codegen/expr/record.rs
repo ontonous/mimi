@@ -110,6 +110,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             let store_val =
                 self.wrap_fn_ref_as_closure_if_needed(field, store_val, field_ty, declared_ty)?;
             self.build_store(gep, store_val)?;
+            // RECORD-LIN-001 (0.1.9, Phase B): a record literal MOVES its
+            // capability fields into the record (mirroring the CFG, which now
+            // tracks user records with linear fields). Mark every capability
+            // reachable from the field as consumed so `let r = Plain { data: c };
+            // consume(r)` does not demand an extra `drop(c)` (E0303). Guarded by
+            // is_cap_consumed so call-arg/return collection stays idempotent.
+            let mut cap_places = Vec::new();
+            Self::collect_arg_cap_places(&field.value, vars, &mut cap_places);
+            for name in cap_places {
+                if self.is_cap_var(&name) && !self.is_cap_consumed(&name) {
+                    self.consume_cap(&name)?;
+                }
+            }
         }
         Ok(alloca.into())
     }
@@ -403,6 +416,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             let elem_ptr =
                 self.build_in_bounds_gep(self.context.i64_type(), data_ptr_i64, &[idx], "elem")?;
             self.build_store(elem_ptr, iv)?;
+            // 0.1.9 Phase B (0.39.32): a list literal MOVES its elements into
+            // the list (mirroring resource_lower's capability_places on List
+            // literals). Mark every capability reachable from the element as
+            // consumed, so `let fs: List<cap> = [c]; drop(fs)` does not demand
+            // an extra `drop(c)` (E0303). Guarded by is_cap_consumed so
+            // call-arg/return reachable collection stays idempotent.
+            let mut cap_places = Vec::new();
+            Self::collect_arg_cap_places(elem, vars, &mut cap_places);
+            for name in cap_places {
+                if self.is_cap_var(&name) && !self.is_cap_consumed(&name) {
+                    self.consume_cap(&name)?;
+                }
+            }
         }
         Ok(())
     }

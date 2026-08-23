@@ -28,6 +28,11 @@ struct ActionEmitter<'a> {
     body: &'a ResolvedBody,
     signature: &'a ResolvedSignature,
     types: &'a ResolvedTypeTable,
+    /// RECORD-LIN-001 (0.1.9, Phase B): qualified names of user records/unions
+    /// whose fields contain a linear resource. Computed once at resolved
+    /// lowering; `is_linear` consults it so `Plain { data: c }` is tracked
+    /// exactly like `List<cap>`.
+    linear_record_names: &'a BTreeSet<String>,
     locations: BTreeMap<NodeId, CfgLocation>,
     /// Resource catalog: linear local → the resource identities it currently
     /// owns. A single binding may own SEVERAL resources after an aggregate
@@ -87,6 +92,7 @@ impl<'a> ActionEmitter<'a> {
         body: &'a ResolvedBody,
         signature: &'a ResolvedSignature,
         types: &'a ResolvedTypeTable,
+        linear_record_names: &'a BTreeSet<String>,
     ) -> Self {
         let locations = cfg
             .blocks
@@ -109,6 +115,7 @@ impl<'a> ActionEmitter<'a> {
             body,
             signature,
             types,
+            linear_record_names,
             locations,
             resources: BTreeMap::new(),
             actions: Vec::new(),
@@ -1979,10 +1986,15 @@ impl<'a> ActionEmitter<'a> {
             Some(ResolvedType::Nominal {
                 item, arguments, ..
             }) => {
-                matches!(
-                    item.as_str(),
-                    "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set"
-                ) && arguments.iter().any(|arg| self.is_linear(arg))
+                // H2 + RECORD-LIN-001: a nominal is linear when (a) it is a
+                // container (List/Map/Set) with any linear argument, (b) a
+                // user record/union declared with a linear field, or (c) a
+                // generic record instantiated with a linear argument.
+                // linear_record_names stores the record's qualified name
+                // ("Plain"); the nominal identity carries a "type:" prefix.
+                let record_key = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+                self.linear_record_names.contains(record_key)
+                    || arguments.iter().any(|arg| self.is_linear(arg))
             }
             Some(ResolvedType::Newtype { inner, .. }) => self.is_linear(inner),
             Some(ResolvedType::Tuple(elements)) => {
@@ -2780,6 +2792,7 @@ pub fn analyze_resolved_bodies(
     bodies: &BTreeMap<NodeId, ResolvedBody>,
     signatures: &BTreeMap<NodeId, ResolvedSignature>,
     types: &ResolvedTypeTable,
+    linear_record_names: &BTreeSet<String>,
 ) -> Result<BTreeMap<NodeId, ResourceAnalysis>, Vec<Diagnostic>> {
     let mut analyses = BTreeMap::new();
     let mut errors = Vec::new();
@@ -2800,7 +2813,7 @@ pub fn analyze_resolved_bodies(
             ));
             continue;
         };
-        match ActionEmitter::new(cfg, body, signature, types).emit() {
+        match ActionEmitter::new(cfg, body, signature, types, linear_record_names).emit() {
             Ok(analysis) => {
                 analyses.insert(owner.clone(), analysis);
             }

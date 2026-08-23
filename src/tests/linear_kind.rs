@@ -444,9 +444,16 @@ func main() -> i32 {
     0
 }
 "#;
-    // 只做 checker 级断言：`is_empty` 自由 builtin 尚未在 codegen 实现
-    // （E0700），CFG 借用豁免本身在 checker 层已可验证。
+    // 0.39.31: `is_empty` codegen 已实现（E0700 关闭）→ 全双后端。
     check_source(src).expect("is_empty(linear container) must borrow, then drop once");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "false");
+    let native =
+        checked_codegen_compile_and_run(src).expect("is_empty(linear container) must run natively");
+    assert_eq!(native.trim(), "false");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -536,4 +543,445 @@ func main() -> i32 {
     let native = checked_codegen_compile_and_run(src)
         .expect("infected record drop glue once must run natively");
     assert_eq!(native.trim(), "0");
+}
+
+/// 0.39.31: `is_empty` 自由 builtin codegen（List 线性/空 + String）双后端等价。
+#[test]
+fn is_empty_free_builtin_codegen_dual_backend() {
+    let src = r#"
+cap FileReadCap;
+func main() -> i32 {
+    let fs: List<cap FileReadCap> = [FileReadCap]
+    let e = is_empty(fs)
+    drop(fs)
+    if e { println("nonempty-wrong") } else { println("nonempty") }
+    let es: List<i32> = []
+    if is_empty(es) { println("empty2") } else { println("empty2-wrong") }
+    let s = "hi"
+    if is_empty(s) { println("se-wrong") } else { println("sne") }
+    0
+}
+"#;
+    check_source(src).expect("is_empty free builtin must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "nonempty\nempty2\nsne";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected);
+    let native = checked_codegen_compile_and_run(src).expect("is_empty must run natively");
+    assert_eq!(native.trim(), expected);
+}
+
+/// 0.39.36: `is_empty(map)` 自由 builtin codegen（空/非空 Map）双后端等价。
+/// Map 与 Set 都是裸 i64 handle —— 调用点按推断类型分类（map/set）区分。
+#[test]
+fn is_empty_map_codegen_dual_backend() {
+    let src = r#"
+func main() -> i32 {
+    let m = map_new()
+    let m2 = map_set(m, "k", 1)
+    let e = is_empty(m2)
+    if e { println("map-wrong") } else { println("map-nonempty") }
+    let e2 = is_empty(map_new())
+    if e2 { println("map-empty") } else { println("map-wrong2") }
+    0
+}
+"#;
+    check_source(src).expect("is_empty map must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "map-nonempty\nmap-empty";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected);
+    let native = checked_codegen_compile_and_run(src).expect("is_empty map must run natively");
+    assert_eq!(native.trim(), expected);
+}
+
+/// 0.39.36: `is_empty(set)` 自由 builtin codegen（非空 Set）双后端等价。
+/// 回归：此前 set handle 误走 mimi_map_size → 原生错报 "empty"。
+#[test]
+fn is_empty_set_codegen_dual_backend() {
+    let src = r#"
+func main() -> i32 {
+    let s = {1, 2}
+    let e = is_empty(s)
+    if e { println("set-wrong") } else { println("set-nonempty") }
+    0
+}
+"#;
+    check_source(src).expect("is_empty set must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "set-nonempty";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected);
+    let native = checked_codegen_compile_and_run(src).expect("is_empty set must run natively");
+    assert_eq!(native.trim(), expected);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.32 列表字面量 cap 移动：绑定 `let fs = [c]` 后 drop 不再假 E0303
+// 根因：legacy codegen 的 cap 追踪器在 compile_list_expr 不标记元素消费
+//  → 绑定列表字面量里的 cap 永不消费 → 原生 E0303（checker/VM 均过）。
+// 修复：store_list_elements 移动时消费元素 cap；call/method/return 可达收集
+// 幂等（is_cap_consumed 守卫，避免 sink([c]) 双消费）。
+// ─────────────────────────────────────────────────────────────
+
+/// 回归：绑定 `let fs = [c]; drop(fs)` 双后端等价。
+#[test]
+fn linear_kind_list_literal_cap_binding_drop_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let fs: List<cap FileReadCap> = [c]
+    drop(fs)
+    println(0)
+    0
+}
+"#;
+    check_source(src).expect("bound list-literal cap must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "0");
+    let native = checked_codegen_compile_and_run(src)
+        .expect("bound list-literal cap must run natively (no E0303)");
+    assert_eq!(native.trim(), "0");
+}
+
+/// 回归：`pass_list([c])` 内联列表字面量不双消费（call-arg 幂等）。
+#[test]
+fn linear_kind_list_literal_inline_call_arg_no_double_consume() {
+    let src = r#"
+cap FileReadCap;
+
+func pass_list<linear T>(xs: List<T>) -> List<T> { xs }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let gs = pass_list([c])
+    drop(gs)
+    println(0)
+    0
+}
+"#;
+    check_source(src).expect("inline [c] call arg must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "0");
+    let native = checked_codegen_compile_and_run(src)
+        .expect("inline [c] call arg must run natively (no double-consume)");
+    assert_eq!(native.trim(), "0");
+}
+
+/// 回归：`linear T` 链 + 绑定 `[c]` 原生 E0303 关闭（mc1 场景）。
+#[test]
+fn linear_kind_list_literal_binding_through_generic_chain() {
+    let src = r#"
+cap FileReadCap;
+type Box<linear T> { data: T, tag: i32 }
+
+func pass_box<linear T>(b: Box<T>) -> Box<T> { b }
+func pass_list<linear T>(xs: List<T>) -> List<T> { xs }
+func main() -> i32 {
+    let b: Box<cap FileReadCap> = Box { data: FileReadCap, tag: 3 }
+    let b2 = pass_box(b)
+    let c: cap FileReadCap = FileReadCap
+    let fs: List<cap FileReadCap> = [c]
+    let gs = pass_list(fs)
+    drop(b2)
+    drop(gs)
+    println(0)
+    0
+}
+"#;
+    check_source(src).expect("linear T chain with bound [c] must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "0");
+    let native = checked_codegen_compile_and_run(src)
+        .expect("linear T chain with bound [c] must run natively");
+    assert_eq!(native.trim(), "0");
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.33 双线性参数单态化：`linear T, U` 泛型双后端等价
+// ─────────────────────────────────────────────────────────────
+
+/// 回归：`swap2<linear T, U>`（T=cap, U=i32）整体转移 + 双后端等价。
+#[test]
+fn linear_kind_two_linear_params_dual_backend() {
+    let src = r#"
+cap FileReadCap;
+
+func swap2<linear T, U>(a: T, b: U) -> (U, T) { (b, a) }
+func main() -> i32 {
+    let c1: cap FileReadCap = FileReadCap
+    let (x, y) = swap2(c1, 42)
+    println(x)
+    drop(y)
+    0
+}
+"#;
+    check_source(src).expect("two linear params must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "42");
+    let native = checked_codegen_compile_and_run(src).expect("two linear params must run natively");
+    assert_eq!(native.trim(), "42");
+}
+
+// ─────────────────────────────────────────────────────────────
+// RECORD-LIN-001 修复（0.39.34）：用户记录含 cap 字段按线性追踪
+// 此前 is_linear(Plain)=false → let r = Plain { data: c }; drop(r); drop(c)
+// 双消费被接受；drop(r) 单独用又 E0256 泄漏。
+// ─────────────────────────────────────────────────────────────
+
+/// 回归（反例）：`drop(r); drop(c)`（c 已随 r drop）→ E0304 双消费。
+#[test]
+fn record_lin_cap_field_double_drop_rejected() {
+    let errs = check_source(
+        r#"
+cap FileReadCap;
+type Plain { data: cap FileReadCap, tag: i32 }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let r = Plain { data: c, tag: 1 }
+    drop(r)
+    drop(c)
+    println(0)
+    0
+}
+"#,
+    )
+    .expect_err("record cap field must be tracked as linear (no double drop)");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0304),
+        "drop(c) after drop(r) must be E0304 double-consume, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 回归（反例）：`drop(c)`（c 移入 r 后）→ E0304 不可再用。
+#[test]
+fn record_lin_cap_field_use_after_move_rejected() {
+    let errs = check_source(
+        r#"
+cap FileReadCap;
+type Plain { data: cap FileReadCap, tag: i32 }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let r = Plain { data: c, tag: 1 }
+    drop(c)
+    drop(r)
+    println(0)
+    0
+}
+"#,
+    )
+    .expect_err("record cap field must consume c at construction");
+    assert!(
+        has_code(&errs, crate::diagnostic::codes::E0304),
+        "drop(c) after move into r must be E0304, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 回归（正例）：绑定 cap 进记录 → 传给消费函数，checker + 双后端等价。
+#[test]
+fn record_lin_cap_field_bind_then_consume_dual() {
+    let src = r#"
+cap FileReadCap;
+type Plain { data: cap FileReadCap, tag: i32 }
+func consume(r: Plain) -> i32 { drop(r); 0 }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let r = Plain { data: c, tag: 1 }
+    consume(r)
+    println(0)
+    0
+}
+"#;
+    check_source(src).expect("record cap bind-then-consume must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "0");
+    let native = checked_codegen_compile_and_run(src)
+        .expect("record cap bind-then-consume must run natively");
+    assert_eq!(native.trim(), "0");
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.35 深化单态化锁定：跨函数链 / trait 方法 / 容器过链 / SessionChan
+// （blackbox 限制：递归 fail-closed，见 phase-a-plan §8 BLACKBOX-REC-001）
+// ─────────────────────────────────────────────────────────────
+
+/// 跨函数链：`wrap<linear T>` → `id<linear T>`（cap 直通）双后端等价。
+#[test]
+fn linear_kind_cross_function_chain_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func id<linear T>(x: T) -> T { x }
+func wrap<linear T>(x: T) -> T { id(x) }
+func main() -> i32 {
+    let c: cap FileReadCap = FileReadCap
+    let d = wrap(c)
+    drop(d)
+    println(1)
+    0
+}
+"#;
+    check_source(src).expect("cross-function linear T chain must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "1");
+    let native =
+        checked_codegen_compile_and_run(src).expect("cross-function chain must run natively");
+    assert_eq!(native.trim(), "1");
+}
+
+/// trait 方法 + linear T：`linear T` 函数体调 `r.keep(x)`（keep: T -> T）双后端。
+#[test]
+fn linear_kind_trait_method_linear_arg_dual() {
+    let src = r#"
+cap FileReadCap;
+trait Keep<T> {
+    func keep(x: T) -> T;
+}
+type Rec { v: i32 }
+impl<T> Keep<T> for Rec {
+    func keep(x: T) -> T { x }
+}
+func pass2<linear T>(r: Rec, x: T) -> T { r.keep(x) }
+func main() -> i32 {
+    let r = Rec { v: 1 }
+    let c: cap FileReadCap = FileReadCap
+    let d = pass2(r, c)
+    drop(d)
+    println(2)
+    0
+}
+"#;
+    check_source(src).expect("trait method + linear T must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "2");
+    let native =
+        checked_codegen_compile_and_run(src).expect("trait method + linear T must run natively");
+    assert_eq!(native.trim(), "2");
+}
+
+/// 容器过链：`wrap2<linear T>(List<T>) -> id(x)`（List<cap> 直通）双后端。
+#[test]
+fn linear_kind_container_through_chain_dual() {
+    let src = r#"
+cap FileReadCap;
+
+func id<linear T>(x: T) -> T { x }
+func wrap2<linear T>(x: List<T>) -> List<T> { id(x) }
+func main() -> i32 {
+    let fs: List<cap FileReadCap> = [FileReadCap, FileReadCap]
+    let gs = wrap2(fs)
+    drop(gs)
+    println(3)
+    0
+}
+"#;
+    check_source(src).expect("container through linear T chain must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "3");
+    let native =
+        checked_codegen_compile_and_run(src).expect("container through chain must run natively");
+    assert_eq!(native.trim(), "3");
+}
+
+/// SessionChan 直通：`echo<linear T>` 转移会话通道，双后端等价。
+#[test]
+fn linear_kind_session_through_transfer_dual() {
+    let src = r#"
+func echo<linear T>(x: T) -> T { x }
+func main() -> i32 {
+    let ch = channel_new()
+    let y = echo(ch)
+    session_send(y, 7)
+    session_recv(y)
+    session_close(y)
+    println(0)
+    0
+}
+"#;
+    check_source(src).expect("SessionChan through linear T must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "0");
+    let native = checked_codegen_compile_and_run(src)
+        .expect("SessionChan through linear T must run natively");
+    assert_eq!(native.trim(), "0");
+}
+
+// ─────────────────────────────────────────────────────────────
+// 0.39.37 SET-REMOVE-CODEGEN-001 闭合：resolved codegen 下全部 Set 方法
+// 此前 `s.size()`/`s.remove(v)`/… 以 ResolvedCallee::Builtin("builtin.method.
+// set.*") 形式到达 resolved codegen，未接线 → E0709（只有 ProtocolMethod 形式
+// 走到 emit_builtin_set_protocol_method）。修复：Builtin 形式也路由到 set
+// 协议处理器，且 set 值实参按 mimi_set_* 的 i64 签名做位宽扩到 i64。
+// ─────────────────────────────────────────────────────────────
+
+/// 回归：resolved codegen Set 方法全矩阵（size/is_empty/contains/insert/
+/// remove/to_list）+ remove 结果喂自由 is_empty，双后端等价。
+#[test]
+fn set_method_matrix_resolved_dual_backend() {
+    let src = r#"
+func main() -> i32 {
+    let s = {1, 2, 3}
+    println(s.size())
+    if s.is_empty() { println("wrong") } else { println("nonempty") }
+    if s.contains(2) { println("has2") } else { println("wrong2") }
+    let s2 = s.insert(4)
+    println(s2.size())
+    let s3 = s2.remove(4)
+    println(s3.size())
+    let lst = s3.to_list()
+    println(len(lst))
+    let e = is_empty(s3)
+    if e { println("wrong3") } else { println("final-nonempty") }
+    0
+}
+"#;
+    check_source(src).expect("set method matrix must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "3\nnonempty\nhas2\n4\n3\n3\nfinal-nonempty";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected, "VM output");
+    let native = checked_codegen_compile_and_run(src).expect("set method matrix must run natively");
+    assert_eq!(native.trim(), expected, "native output");
 }
