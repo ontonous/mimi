@@ -233,6 +233,38 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// 0.1.9 Phase A: 函数 `name` 中声明为 `linear T` 种类的泛型参数名集合。
+    pub(crate) fn linear_kind_generic_names(&self, name: &str) -> Vec<String> {
+        self.func_generics
+            .get(name)
+            .map(|gps| {
+                gps.iter()
+                    .filter(|g| g.kind == crate::ast::GenericKind::Linear)
+                    .map(|g| g.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 0.1.9 Phase A: 函数 `name` 第 `param_index` 个参数是否引用某 `linear T`
+    /// 种类泛型（可经容器 / 元组 / Option 等嵌套）。调用点据此对线性实参放行
+    /// （kind 兼容），定义时据此做 transfer-only 体校验。
+    pub(crate) fn param_uses_linear_kind(&self, name: &str, param_index: usize) -> bool {
+        let linear = self.linear_kind_generic_names(name);
+        if linear.is_empty() {
+            return false;
+        }
+        let Some(param_ty) = self.funcs.get(name).and_then(|(ps, _)| ps.get(param_index)) else {
+            return false;
+        };
+        crate::core::type_folder::type_any(param_ty, &|cand| {
+            matches!(
+                cand.unlocated(),
+                crate::ast::Type::Name(n, _) if linear.iter().any(|l| l == n)
+            )
+        })
+    }
+
     /// 泛型函数 `name` 的第 `param_index` 个参数是否线性黑盒健全（见模块头）。
     /// `allow_drop=false` 时 drop-从句被禁用（transfer-only：SessionChan 及其
     /// 任意嵌套只能转移，中途 drop = E0425 协议弃置——concrete 语义同款）。

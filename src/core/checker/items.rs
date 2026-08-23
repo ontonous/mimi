@@ -1328,6 +1328,7 @@ impl<'a> Checker<'a> {
                             meta: session_marker_meta,
                             name: "S".to_string(),
                             bounds: vec![],
+                            kind: crate::ast::GenericKind::Free,
                         }],
                         derives: vec![],
                         attributes: vec![],

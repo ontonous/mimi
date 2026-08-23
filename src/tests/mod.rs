@@ -124,6 +124,9 @@ pub(crate) mod lsp_e2e;
 // === 0.1.9 Phase 0 — P 合同（整体转移合同）规范正负例 ===
 pub(crate) mod contract_p;
 
+// === 0.1.9 Phase A — `linear T` 种类（slice 0.39.2 基础） ===
+pub(crate) mod linear_kind;
+
 // === Audit regression tests ===
 pub(crate) mod audit_regression;
 pub(crate) mod audit_round2;

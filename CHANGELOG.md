@@ -8,6 +8,99 @@
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 
+### 0.39.21–30 — 单态化前置 + drop glue 对齐（Phase A 切片 6，收尾）
+- 验证 + 锁定（线性 kind 不改变单态化/drop 机制，机制本身类型驱动）：
+  - **单态化**：`swap2<linear T>` 同一泛型双实例化（cap + i32）VM/Resolved 双后端
+    等价（输出 30）——`linear_kind_monomorphization_multi_instantiation`。
+  - **drop glue 恰好一次**：`List<cap>` 3 元素 / `Box<cap>` 记录整体转移后 drop，
+    双后端等价——`linear_kind_drop_glue_once_infected_list` /
+    `linear_kind_drop_glue_once_infected_record`。
+  - **blackbox×kind 审计**：全库仅 5 个 `generic_linear_blackbox_sound` 调用点
+    （simple.rs×2 / method.rs×2 调用点 + func.rs 定义时），均正确区分——
+    `linear T` 定义时 transfer-only（allow_drop=false）且调用点 kind 放行；
+    Free `T` 仅走调用点 blackbox（E0432 迁移）。无矛盾。
+- linear_kind 现 21 例。
+
+### 0.39.17–20 — 错误码完善：E0432 保 P 合同迁移码 + 消息带 `linear T` 迁移提示（Phase A 切片 5）
+- **设计决策**：E0432 是 P 合同冻结迁移码（contract_p 12 例 + dual_backend 30+ 例 +
+  audit_fix 全锁），re-code 到 E0842 会撕裂冻结合同——故不引入 E0842 分码，改为
+  在 E0432 消息内追加迁移提示（三选一改写建议 + 原因）。
+- 落地：`simple.rs` / `method.rs` 调用点 blackbox 拒绝消息改为——
+  「非整体转移（线性值在 callee 内泄漏/弃置）。迁移：① 声明 `linear T` +
+  transfer-only 体（pass T through）；② 具体函数签名直收线性型；③ 保
+  pass-through/drop-only 泛型体」。
+- 回归：`p_contract_e0432_message_carries_migration_hint`（contract_p 现 13 例）。
+
+### 0.39.16 — LEN-READ-001 修复：线性容器读指标（len/is_empty/map_size/keys）按借用不消费 (Phase A 切片 4)
+- **根因**：自由只读指标 builtin（`len(fs)`/`is_empty(fs)`/`map_size(m)`/`keys(m)`）在
+  `resource_lower` 通用调用实参消费循环被当作 Move → 线性容器被 `len(fs)` 消费，
+  `let n = len(fs); drop(fs)` 假 E0304 双消费；而方法形 `fs.len()`（Permission::View）
+  不受影响，形成语义分裂。
+- **修复**（`resource_lower.rs` Call 臂）：`ResolvedCallee::Builtin` 名在
+  `len | is_empty | map_size | keys` 集合 → 跳过整组实参消费（按借用，与 View 方法同款）。
+  变换/消费 builtin（push/pop/map_set…）不受豁免，行为不变。
+- 回归：`linear_container_read_len_then_drop`（len 双后端）、
+  `linear_container_read_is_empty_then_drop`（checker 级；is_empty 尚缺 codegen）。
+  linear_kind 现 18 例。
+
+### 0.39.15 — M-ARG-001 修复：方法实参线性转移（View/Mutate 只借 receiver，非 self 实参仍移动）(Phase A 切片 3)
+- **根因**：`implicit_self_param` 给方法默认 `Mutate` 借 self → `ResolvedCall.permission
+  = Mutate`，`resource_lower` 的调用实参消费循环整组跳过 View/Mutate 调用 → `r.take(c)`
+  （take: cap 参数）在调用方从不消费 `c` → 假 E0256；`linear T` 方法接收者同样受阻。
+- **修复**（`resource_lower.rs` Call 臂）：View/Mutate 只跳过**接收者**（arguments[0]），
+  其余非 self 实参仍 `Move` 进 callee。自由调用 permission=None/Consume → 行为不变。
+  对 Mutate 容器变换（0.36.47/0.36.48 专用分支已 Move 全部线性 `Load` 实参）额外
+  跳过这些实参，避免 E0304 双消费（`dual_linear_cap_method_arg_transfer_ok` 回归锁定）。
+- 回归：`method_arg_cap_transfer_consumes_at_caller` +
+  `linear_kind_method_receiver_with_linear_arg_dual_backend`（linear_kind 现 16 例）。
+- 效果：`r.take(c)`（concrete cap）、`r.pass(c)`（linear T）现 check + 双后端同跑。
+
+### 0.39.10–14 — 感染：容器/记录字段 kind 流锁定（Phase A 切片 2）
+- `linear T` 经容器/记录/嵌套整体转移的**感染**行为锁定（0.39.9 的
+  `param_uses_linear_kind` 用 `type_any` 递归天然覆盖容器/记录/Option 嵌套）：
+  - 正例（双后端同跑）：`pass_list<linear T>(xs: List<T>)`、
+    `pass_box<linear T>(b: Box<T>)`（`type Box<linear T>` 记录字段感染）、
+    `pass_opt<linear T>(o: Option<T>)`、`pass_nest<linear T>(xs: List<Box<T>>)`。
+  - 反例（定义时 E0841）：`take<linear T>(b: Box<T>) -> T { b.data }` 记录字段投影、
+    `first<linear T>(xs: List<T>) { xs[0] }` 容器投影。
+  - 回归 `linear_kind` 现 14 例。
+- **登记两既有 checker gap**（非本版本引入，独立切片修，见 phase-a-plan §6）：
+  M-ARG-001 方法实参线性转移缺（`r.take(c)` → E0256）；LEN-READ-001 线性容器
+  `len()` 读借用后 drop 判 E0304。二者不影响本切片交付，但 0.1.9 Phase D
+  （cap/std 接线）前必修。
+
+### 0.39.9 — `linear T` 种类语义：定义时 transfer-only 体校验 + 调用点 kind 放行（Phase A 切片 1）
+- `linear T` 从纯语法记录升级为**显式线性种类**：
+  - **定义时**（`check_func`）：对引用 `linear T` 的参数位置跑 `linear_blackbox`
+    transfer-only（allow_drop=false）体校验一次；不健全 → 新错误码 **E0841**
+    （投影 / 弃置 / `drop(T)` 在函数定义即拒，span=函数）。理由：`T` 可能
+    实例化为 Session，drop(T) = E0425 弃置。
+  - **调用点**（`simple.rs` / `method.rs`）：`linear T` 参数对线性实参 kind 兼容
+    **直接放行**（不再依赖调用点 blackbox）；Free `T` 仍走迁移 blackbox
+    （P 合同不删直通）。
+  - 语义分化可观察：`pass<linear T>{ x }` 双后端同跑；`sink<linear T>{0}` /
+    `dropit<linear T>{ drop(x);0 }` / `first<linear T>{ xs[0] }` 定义时 E0841。
+- 新增 E0841 到 codes.rs（const + describe + 注册）。
+- 回归：`linear_kind` 现 9 例（含 4 个定义时反例 + 调用点正例）；`contract_p`
+  12 例（Free 迁移合同）不变；lib 全量绿。
+- 本地规划：`devdocs/v0.39/phase-a-plan.md` 切片 0.39.9 完成。
+
+### 0.39.2 — P 合同扩展 + `linear T` 种类语法（0.1.9 Phase 0/Phase A 基础）
+- **P 合同扩展**（`src/tests/contract_p.rs`，现 12 例）：正例覆盖嵌套线性容器
+  `identity(List<cap>)` / `identity(Option<cap>)` / `identity(List<List<cap>>)`
+  （双后端同跑）+ 泛型体整体 `drop(x)`；反例覆盖元组投影 `t.0`、
+  `Option::unwrap` 解包（均须 E0432 拒）。
+- **`linear T` 种类语法**（Phase A slice 0.39.2，`src/tests/linear_kind.rs`）：
+  - `GenericParam` 新增 `kind: GenericKind`（`Free` 默认 / `Linear` 显式）。
+  - `linear` 是**上下文软关键字**：仅 generic 参数位置识别为 kind 标记，
+    其余位置仍是普通标识符（沿用 `parasteps`/`fault`/`reset`/`recover` 先例，
+    不加 TokenKind、不动关键字计数钉）。
+  - `func pass<linear T>(x: T) -> T { x }` 现可解析 + check + 双后端同跑；
+    `linear T` 投影 `xs[0]` 仍 E0432 拒。
+  - 语义强制（Free/Linear 种类不匹配、`List<T>`/记录字段感染、删特判网）属
+    后续 Phase A 切片；当前行为仍由 `linear_blackbox` 支配（整体转移可过）。
+- 本地记录：`devdocs/v0.39/contract-p.md`。
+
 ### 0.39.0 — P 合同冻结：整体转移合同规范正负例（0.1.9 Phase 0）
 - 把最终裁决 Q2 的整体转移句子钉成规范测试（`src/tests/contract_p.rs`）：
   **整体转移才允许未标 kind 的 `T` 接线性实参**。

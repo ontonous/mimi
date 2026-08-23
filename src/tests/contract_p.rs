@@ -271,3 +271,28 @@ fn p_contract_option_unwrap_rejected() {
             .collect::<Vec<_>>()
     );
 }
+
+/// 0.39.17-20 错误码完善：E0432 保持 P 合同迁移码，但消息必须带迁移提示
+/// （`linear T` 改写建议 / 具体签名），帮助用户从黑盒直通迁移到显式种类。
+#[test]
+fn p_contract_e0432_message_carries_migration_hint() {
+    let errs = check_source(FIRST_EXTRACT_SRC)
+        .expect_err("first(xs[0]) must still be rejected with E0432");
+    let rendered = errs
+        .iter()
+        .map(|d| format!("{d}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0432"),
+        "migration rejection must keep E0432 code, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("`linear T`"),
+        "E0432 message must carry the `linear T` migration hint, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("not whole-transfer"),
+        "E0432 message must explain the whole-transfer reason, got:\n{rendered}"
+    );
+}

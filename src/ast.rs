@@ -245,11 +245,30 @@ pub struct ActorField {
     pub init: Option<Expr>,
 }
 
+/// Generic type-parameter kind (0.1.9 Phase A — linear/Free universe).
+///
+/// `T` defaults to [`GenericKind::Free`] (non-linear). `linear T` marks the
+/// parameter as able to bind linear resources (cap / SessionChan / linear
+/// containers); the checker's linear rules then demand whole-value transfer
+/// (pass-through or whole drop) — never projection / extraction / discard.
+/// The `linear` spelling is a contextual identifier (soft keyword, like
+/// `parasteps`/`fault`/`reset`/`recover`): it lexes as `Ident` and is only
+/// recognized in generic-parameter position, so it stays usable as a normal
+/// identifier everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericKind {
+    /// Default: the parameter may not bind linear resources.
+    Free,
+    /// Explicit `linear T`: may bind linear resources (whole-value transfer only).
+    Linear,
+}
+
 #[derive(Debug, Clone)]
 pub struct GenericParam {
     pub meta: AstNodeMeta,
     pub name: String,
     pub bounds: Vec<String>,
+    pub kind: GenericKind,
 }
 
 #[derive(Debug, Clone)]

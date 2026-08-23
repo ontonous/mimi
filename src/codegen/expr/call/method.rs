@@ -60,6 +60,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ),
                             name: k.clone(),
                             bounds: vec![],
+                            kind: crate::ast::GenericKind::Free,
                         })
                         .collect();
                     let substituted =

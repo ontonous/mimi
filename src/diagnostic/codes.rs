@@ -243,6 +243,9 @@ pub const E0830: &str = "E0830"; // resolved body lowering lacks a canonical fac
 
 /// Linear-analysis error codes (E084x) — full audit 2026-08-05 wave-2 (agent L).
 pub const E0840: &str = "E0840"; // branch expression consumes distinct linear resources; XOR semantics leak every arm not taken
+/// 0.1.9 Phase A: `linear T` 参数体必须整体转移（transfer-only），定义时校验；
+/// 禁止投影 / 弃置 / drop(T)（T 可能实例化为 Session）。
+pub const E0841: &str = "E0841";
 
 /// Codegen error code not yet defined as constant (used inline)
 pub const E0712: &str = "E0712"; // codegen internal error (json builtin)
@@ -438,6 +441,7 @@ pub fn describe(code: &str) -> &'static str {
         E0820 => "let binding requires an initializer",
         E0830 => "resolved body lowering lacks a canonical fact (fail-closed)",
         E0840 => "branch expression consumes distinct linear resources (XOR leak)",
+        E0841 => "`linear T` parameter body must whole-transfer T (transfer-only): projection / discard / drop(T) is rejected at definition time (T may instantiate to Session)",
         E0712 => "codegen internal error (json builtin)",
 
         W001 => "standalone desc/rule has no implementation",
@@ -671,6 +675,8 @@ mod tests {
             super::E0830,
             // Linear-analysis (E084x) — wave-2 agent L
             super::E0840,
+            // 0.1.9 Phase A — `linear T` kind (definition-time transfer-only body check)
+            super::E0841,
             // Warning codes (W0xx)
             super::W001,
             super::W002,

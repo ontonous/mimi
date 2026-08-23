@@ -2949,6 +2949,12 @@ impl<'a> Checker<'a> {
                 // 及其任意嵌套走 transfer-only（中途 drop = E0425 弃置）。
                 for (index, argument_ty) in arg_tys.iter().enumerate() {
                     if self.is_linear_surface_type(argument_ty) {
+                        // 0.1.9 Phase A: `linear T` 参数 = 显式线性种类，定义时已做
+                        // transfer-only 体校验；此处 kind 兼容，直接放行（不再依赖
+                        // 调用点 blackbox）。
+                        if self.param_uses_linear_kind(name, index) {
+                            continue;
+                        }
                         let bb_sound = if self.surface_type_contains_session(argument_ty) {
                             self.generic_linear_blackbox_sound(name, index, false)
                         } else {
@@ -2958,9 +2964,12 @@ impl<'a> Checker<'a> {
                             self.emit_code(
                                 crate::diagnostic::codes::E0432,
                                 format!(
-                                    "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
-                                     generic parameters are not linearly tracked (use a concrete function signature, \
-                                     or a pass-through/drop-only generic body)",
+                                    "linear type '{}' cannot be passed as generic argument {} of function '{}': \
+                                     the generic body is not whole-transfer (the linear value would be \
+                                     leaked/discarded inside the callee). Migration: declare the parameter \
+                                     kind `linear T` with a transfer-only body (pass T through), or use a \
+                                     concrete function signature taking the linear type directly, or keep a \
+                                     pass-through/drop-only generic body",
                                     fmt_type(argument_ty),
                                     index + 1,
                                     name

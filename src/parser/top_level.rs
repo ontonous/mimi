@@ -849,6 +849,16 @@ impl Parser {
         if !self.at(&TokenKind::Gt) {
             loop {
                 let param_start = self.pos;
+                // 0.1.9 Phase A: `linear T` is a contextual kind marker in
+                // generic-parameter position. `linear` lexes as `Ident` (soft
+                // keyword), so it remains usable as a normal identifier
+                // everywhere else; we only special-case it right here.
+                let kind = if self.at_ident_name("linear") {
+                    self.advance();
+                    crate::ast::GenericKind::Linear
+                } else {
+                    crate::ast::GenericKind::Free
+                };
                 let name = self.expect_ident()?;
                 let bounds = if self.at(&TokenKind::Colon) {
                     self.advance();
@@ -865,6 +875,7 @@ impl Parser {
                     meta: self.consumed_meta(param_start, AstOrigin::User),
                     name,
                     bounds,
+                    kind,
                 });
                 if !self.at(&TokenKind::Comma) {
                     break;

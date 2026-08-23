@@ -105,6 +105,35 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // 0.1.9 Phase A (slice 0.39.9): `linear T` 参数在**定义时**做 transfer-only
+        // 体校验。`linear T` 是显式线性种类：调体必须把 T 整体转移（直通/整容器），
+        // 禁止投影 / 弃置 / drop(T)（T 可能实例化为 Session，drop = E0425 弃置）。
+        // 校验通过后，调用点对该位置的线性实参直接放行（kind 兼容），不再依赖
+        // 调用点 blackbox（Free `T` 仍走迁移 blackbox，P 合同不变）。
+        {
+            let linear_names = self.linear_kind_generic_names(&func.name);
+            if !linear_names.is_empty() {
+                for (index, p) in func.params.iter().enumerate() {
+                    if !self.param_uses_linear_kind(&func.name, index) {
+                        continue;
+                    }
+                    // transfer-only（allow_drop=false）：T 可能 Session，禁止 drop(T)。
+                    let ok = self.generic_linear_blackbox_sound(&func.name, index, false);
+                    if !ok {
+                        self.emit_code(
+                            codes::E0841,
+                            format!(
+                                "`linear T` parameter '{}' of function '{}' is not whole-transfer: \
+                                 the body must pass T through (return / move into a linear-safe receiver), \
+                                 never project / discard / drop it (T may instantiate to Session)",
+                                p.name, func.name
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
         // Default expressions are declaration-owned typed artifacts. Capture
         // them under the callee while its parameters and generic binders are
         // in scope, rather than re-checking cloned syntax at each call site.

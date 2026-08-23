@@ -47,6 +47,7 @@ impl<'a> Checker<'a> {
                 )),
                 name: name.clone(),
                 bounds: vec![],
+                kind: crate::ast::GenericKind::Free,
             });
         }
         for param in params.iter_mut() {
@@ -698,6 +699,7 @@ impl<'a> Checker<'a> {
                                             )),
                                             name: name.clone(),
                                             bounds: vec![],
+                                            kind: crate::ast::GenericKind::Free,
                                         })
                                         .collect();
                                     subst_type_params(&ret, &gen_slice, &type_map)
@@ -740,6 +742,7 @@ impl<'a> Checker<'a> {
                                         )),
                                         name: g.clone(),
                                         bounds: vec![],
+                                        kind: crate::ast::GenericKind::Free,
                                     })
                                     .collect();
                                 let subst_params: Vec<Type> = params
@@ -1314,12 +1317,17 @@ impl<'a> Checker<'a> {
                 // 0.36.39: 线性黑盒直通豁免（同 simple.rs 全局调用臂）——调体
                 // 对 T 线性性零依赖则放行，否则 E0432；SessionChan 走 transfer-only。
                 let bb_reject = if !generics.is_empty() && self.is_linear_surface_type(&at) {
-                    let bb_sound = if self.surface_type_contains_session(&at) {
-                        self.generic_linear_blackbox_sound(name, i, false)
+                    // 0.1.9 Phase A: `linear T` 参数 kind 兼容，定义时已体校验，放行。
+                    if self.param_uses_linear_kind(name, i) {
+                        false
                     } else {
-                        self.generic_linear_blackbox_sound(name, i, true)
-                    };
-                    !bb_sound
+                        let bb_sound = if self.surface_type_contains_session(&at) {
+                            self.generic_linear_blackbox_sound(name, i, false)
+                        } else {
+                            self.generic_linear_blackbox_sound(name, i, true)
+                        };
+                        !bb_sound
+                    }
                 } else {
                     false
                 };
@@ -1327,9 +1335,12 @@ impl<'a> Checker<'a> {
                     self.emit_code(
                         crate::diagnostic::codes::E0432,
                         format!(
-                            "linear type '{}' cannot be passed as generic argument {} of function '{}'; \
-                             generic parameters are not linearly tracked (use a concrete function signature, \
-                             or a pass-through/drop-only generic body)",
+                            "linear type '{}' cannot be passed as generic argument {} of function '{}': \
+                             the generic body is not whole-transfer (the linear value would be \
+                             leaked/discarded inside the callee). Migration: declare the parameter \
+                             kind `linear T` with a transfer-only body (pass T through), or use a \
+                             concrete function signature taking the linear type directly, or keep a \
+                             pass-through/drop-only generic body",
                             fmt_type(&at),
                             i + 1,
                             name

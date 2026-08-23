@@ -217,6 +217,7 @@
 | E0814 | slice out of bounds at runtime |
 | E0830 | resolved body lowering lacks a canonical fact (fail-closed; never infer) |
 | E0840 | branch expression consumes distinct linear resources (XOR leak) |
+| E0841 | `linear T` parameter body must whole-transfer T (transfer-only); projection / discard / drop(T) rejected at definition time (T may instantiate to Session) |
 
 ## Warning Codes (W0xx)
 

@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
-    MatchArm, Permission, ResolvedBlock, ResolvedCall, ResolvedExpr, ResolvedExprKind,
-    ResolvedFStringPart, ResolvedIndex, ResolvedLocal, ResolvedPattern, ResolvedPatternKind,
-    ResolvedPlace, ResolvedProjection, ResolvedSignature, ResolvedStmt, ResolvedStmtKind,
-    ResolvedUnaryOp, ResolvedValueProjection,
+    MatchArm, Permission, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr,
+    ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLocal, ResolvedPattern,
+    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedSignature, ResolvedStmt,
+    ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::{
     CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan, LoanId,
@@ -1449,34 +1449,76 @@ impl<'a> ActionEmitter<'a> {
                         }
                     }
                 }
-                if !matches!(call.permission, Some(Permission::View | Permission::Mutate)) {
-                    for argument in &call.arguments {
-                        let transferred_endpoint = match &argument.value.kind {
-                            ResolvedExprKind::Load(place) if place.projections.is_empty() => call
-                                .session
-                                .iter()
-                                .any(|transition| transition.endpoint == place.base),
-                            _ => false,
-                        };
-                        if transferred_endpoint {
-                            continue;
-                        }
-                        // Audit 2026-08-05 (wave-2, C-2):
-                        // `sink(if flag { a } else { b })` consumed BOTH arms
-                        // under AND semantics while XOR runtime moves exactly
-                        // one — the other arm's resource leaks on every run.
-                        // Reject branch arguments carrying distinct resources.
-                        if let Some(distinct) = self.xor_branch_violation(&argument.value) {
-                            self.push_xor_diagnostic(&distinct, &expression.origin);
-                            continue;
-                        }
-                        self.emit_consumes(
-                            CanonicalActionKind::Move,
-                            self.capability_places(&argument.value),
-                            &expression.node_id,
-                            &expression.origin,
-                        );
+                // M-ARG-001 (0.1.9, audit-found): for a View/Mutate METHOD call the
+                // receiver (self, arguments[0]) is borrowed and must NOT be moved
+                // in this general path — but the remaining non-self arguments
+                // STILL move into the callee. Previously the whole loop was
+                // skipped for View/Mutate, so `r.take(c)` (take: cap param) never
+                // consumed `c` at the caller → false E0256. Free calls have
+                // permission None/Consume, so `receiver_borrowed` is false and
+                // every argument is consumed as before. The Mutate-transform
+                // receiver move (0.36.47) is handled in its own special case
+                // above; skipping arguments[0] here avoids double-consuming it.
+                // For a Mutate-transform call, that special case already moves
+                // EVERY linear `Load` argument (receiver + value/container args),
+                // so they are skipped here to avoid E0304 double-consume.
+                //
+                // LEN-READ-001 (0.1.9, audit-found): free read-only metric builtins
+                // (`len(fs)` / `is_empty(fs)` / `map_size(m)` / `keys(m)`) borrow
+                // their container exactly like the View methods (`fs.len()`), so
+                // their linear container argument must NOT be moved here — else
+                // `let n = len(fs); drop(fs)` is a false E0304 double-consume.
+                let read_metric_builtin = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(b)
+                        if matches!(
+                            b.as_str(),
+                            "len" | "is_empty" | "map_size" | "keys"
+                        )
+                );
+                let receiver_borrowed =
+                    matches!(call.permission, Some(Permission::View | Permission::Mutate));
+                let transform_handled = matches!(call.permission, Some(Permission::Mutate))
+                    && self.method_transform_result(call);
+                for (arg_index, argument) in call.arguments.iter().enumerate() {
+                    if read_metric_builtin {
+                        continue;
                     }
+                    if receiver_borrowed && arg_index == 0 {
+                        continue;
+                    }
+                    if transform_handled {
+                        if let ResolvedExprKind::Load(place) = &argument.value.kind {
+                            if self.place_is_linear(place) {
+                                continue;
+                            }
+                        }
+                    }
+                    let transferred_endpoint = match &argument.value.kind {
+                        ResolvedExprKind::Load(place) if place.projections.is_empty() => call
+                            .session
+                            .iter()
+                            .any(|transition| transition.endpoint == place.base),
+                        _ => false,
+                    };
+                    if transferred_endpoint {
+                        continue;
+                    }
+                    // Audit 2026-08-05 (wave-2, C-2):
+                    // `sink(if flag { a } else { b })` consumed BOTH arms
+                    // under AND semantics while XOR runtime moves exactly
+                    // one — the other arm's resource leaks on every run.
+                    // Reject branch arguments carrying distinct resources.
+                    if let Some(distinct) = self.xor_branch_violation(&argument.value) {
+                        self.push_xor_diagnostic(&distinct, &expression.origin);
+                        continue;
+                    }
+                    self.emit_consumes(
+                        CanonicalActionKind::Move,
+                        self.capability_places(&argument.value),
+                        &expression.node_id,
+                        &expression.origin,
+                    );
                 }
                 for transition in &call.session {
                     let place = self.place_from_local(&transition.endpoint);
