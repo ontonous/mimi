@@ -1483,6 +1483,14 @@ impl<'a> ActionEmitter<'a> {
                             "len" | "is_empty" | "map_size" | "keys"
                         )
                 );
+                // Phase E (0.39.81): MutexGuard 恰一次 unlock——mutex_get/mutex_set
+                // BORROW 线性 guard（arg 0 不消费：读取/写入后仍需解锁）；只有
+                // mutex_unlock 消费 guard（双重解锁 E0304、泄漏 E0256）。
+                let mutex_guard_borrows_receiver = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(b)
+                        if matches!(b.as_str(), "mutex_get" | "mutex_set")
+                );
                 // Phase D (0.39.73): TokenChannel 是可 Copy 通道（非线性）——
                 // 只有 SystemToken 载荷线性，跨任务 move 由 token 承担；通道
                 // 共享无需借用特殊处理。
@@ -1492,6 +1500,9 @@ impl<'a> ActionEmitter<'a> {
                     && self.method_transform_result(call);
                 for (arg_index, argument) in call.arguments.iter().enumerate() {
                     if read_metric_builtin {
+                        continue;
+                    }
+                    if mutex_guard_borrows_receiver && arg_index == 0 {
                         continue;
                     }
                     if receiver_borrowed && arg_index == 0 {

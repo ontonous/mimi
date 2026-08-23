@@ -432,6 +432,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 | [`devdocs/v0.36/known-boundaries-0.1.6.md`](devdocs/v0.36/known-boundaries-0.1.6.md) | 0.1.6 known/deferred boundaries (Wave-3 / 0.2 / 1.x) |
 | [`devdocs/v0.37/README.md`](devdocs/v0.37/README.md) | 0.1.7 roadmap: honest Wave-3 infrastructure closeout |
 | [`devdocs/v0.37/quad-final-0.37.135.md`](devdocs/v0.37/quad-final-0.37.135.md) | 0.1.7 Phase F closeout: Wave-3 基建诚实收口 + §4 不宣称 |
+| [`devdocs/kernel-card.md`](devdocs/kernel-card.md) | **Kernel card — the single AI contract** (kernel, linear kinds, exactly-once, error codes, dual-backend) |
 | [`devdocs/kernel-roadmap-0.1.7-0.1.9.md`](devdocs/kernel-roadmap-0.1.7-0.1.9.md) | Macro map for 0.1.7–0.1.9 |
 | [`devdocs/v0.38/README.md`](devdocs/v0.38/README.md) | 0.1.8: semantic honesty + identity purity |
 | [`devdocs/v0.39/README.md`](devdocs/v0.39/README.md) | 0.1.9: linear kinds + capabilities + writability eval |

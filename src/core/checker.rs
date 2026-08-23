@@ -550,6 +550,7 @@ impl<'a> Checker<'a> {
                 self.flow_state_type_names.contains(name)
                     || self.declared_caps.contains(name)
                     || name == "SystemToken"
+                    || name == "MutexGuard"
                     || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())
                     || args.iter().any(|arg| self.is_linear_surface_type(arg))
             }
@@ -567,6 +568,14 @@ impl<'a> Checker<'a> {
             crate::ast::Type::Located { ty, .. } => self.is_linear_surface_type(ty),
             _ => false,
         }
+    }
+
+    /// Phase D (0.39.78): 是否恰为 SystemToken（transfer-only 线性能力，mailbox
+    /// 单独开面）。与 `is_linear_surface_type` 配合：SystemToken 可跨 actor
+    /// mailbox（TokenChannel 同款转移模型），SessionChan 等其余线性面禁令不动。
+    pub(crate) fn is_system_token_type(&self, ty: &crate::ast::Type) -> bool {
+        matches!(ty.unlocated(), crate::ast::Type::Name(name, args)
+            if name == "SystemToken" && args.is_empty())
     }
 
     /// Set the current position for fallback error spans.

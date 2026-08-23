@@ -223,6 +223,25 @@ pub(crate) fn resolved_to_z3_bool(
             vars.get_bool(&key).cloned()
         }
         ResolvedExprKind::Binary { op, left, right } => {
+            // Bool logic FIRST: LogicalAnd/LogicalOr operate on boolean
+            // operands. Previously these arms were nested under the int
+            // comparison branch (reachable only when both sides encode as
+            // Int) — so `requires: x >= 0 && x <= 1000` failed to encode and
+            // the precondition was silently dropped, leaving the solver free
+            // to find an overflow counterexample (E0439 divergence, Phase E
+            // 0.39.80).
+            if matches!(
+                op,
+                ResolvedBinaryOp::LogicalAnd | ResolvedBinaryOp::LogicalOr
+            ) {
+                let lb = resolved_to_z3_bool(left, body, types, vars)?;
+                let rb = resolved_to_z3_bool(right, body, types, vars)?;
+                return match op {
+                    ResolvedBinaryOp::LogicalAnd => Some(Z3Bool::and(&[&lb, &rb])),
+                    ResolvedBinaryOp::LogicalOr => Some(Z3Bool::or(&[&lb, &rb])),
+                    _ => unreachable!("bool logic arm"),
+                };
+            }
             // Try int comparison first, then real, then bool equality
             if let (Some(l), Some(r)) = (
                 resolved_to_z3_int(left, body, types, vars),

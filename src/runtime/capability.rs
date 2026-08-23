@@ -10,6 +10,18 @@
 // cross-thread transfer is documented as requiring explicit serialization
 // (send cap id + name over a Channel, re-register on the receiving thread).
 //
+// ⚠ DEPRECATED (0.1.9 Phase D 0.39.79): this thread-local cap protocol is
+// the LEGACY capability model. Its re-registration protocol (send id + name,
+// re-register on the receiving thread) is superseded by the SystemToken
+// model (0.39.71-78):
+//   - `make_token()` → process-wide unique SystemToken (not thread-local);
+//   - `TokenChannel` / actor mailbox → cross-task/cross-thread transfer with
+//     linearity enforced by the checker/CFG (exactly-once, E0304/E0256);
+//   - `read_file_guarded`/`get_env_guarded`/`http_get_guarded` → capability-
+//     gated std APIs.
+// The legacy model stays functional for compatibility (0.1.9 内不删), but new
+// capability code should use SystemToken. See devdocs/v0.39/phase-d-plan.md §8.
+//
 // H6 (audit-triage-0.35.25): the failures were SILENT — a cross-thread
 // check/consume returned false indistinguishable from "unknown cap", and a
 // cross-thread drop was a no-op that never freed the entry, with no
@@ -60,9 +72,10 @@ fn cap_ownership() -> &'static Mutex<HashMap<i64, Vec<std::thread::ThreadId>>> {
 fn warn_cross_thread(cap: i64, owner: std::thread::ThreadId, action: &str) {
     eprintln!(
         "[mimi] capability {}: {} from a different thread (owned by {:?}) — \
-         capabilities are thread-local (R-4); transfer requires explicit \
-         serialization (send cap id + name over a Channel and re-register on \
-         the receiving thread)",
+         capabilities are thread-local (R-4, DEPRECATED in 0.1.9 Phase D); \
+         transfer requires explicit serialization (send cap id + name over a \
+         Channel and re-register on the receiving thread). Prefer the \
+         SystemToken model: make_token() + TokenChannel / actor mailbox",
         cap, action, owner
     );
 }

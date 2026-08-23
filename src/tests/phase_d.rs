@@ -480,3 +480,188 @@ func main() -> i32 {
             .collect::<Vec<_>>()
     );
 }
+
+/// Phase D (0.39.78)：actor mailbox token 面——SystemToken 可跨 actor mailbox
+/// （transfer 模型：调用点消费旧绑定、方法体持全新义务恰一次）。SessionChan
+/// 等其余线性面禁令不动（E0432 保持）。
+
+/// 正集：actor 方法收 SystemToken 参数并消费，双后端。
+#[test]
+fn phase_d_actor_method_token_param_dual() {
+    let src = r#"
+actor Vault {
+    func take(t: SystemToken) -> i32 {
+        let id = token_id(t)
+        drop(id)
+        1
+    }
+}
+func main() -> i32 {
+    let v = Vault.spawn()
+    let t = make_token()
+    let n = v.take(t)
+    println(n)
+    drop(v)
+    0
+}
+"#;
+    check_source(src).expect("actor method with SystemToken param must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "1";
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), expected, "VM");
+    let native = checked_codegen_compile_and_run(src).expect("native");
+    assert_eq!(native.trim(), expected, "native");
+}
+
+/// 正集：actor 方法返回 SystemToken（transfer-out），双后端。
+#[test]
+fn phase_d_actor_method_token_return_dual() {
+    let src = r#"
+actor Mint {
+    func give() -> SystemToken { make_token() }
+}
+func main() -> i32 {
+    let m = Mint.spawn()
+    let t = m.give()
+    let id = token_id(t)
+    drop(m)
+    drop(id)
+    0
+}
+"#;
+    check_source(src).expect("actor method returning SystemToken must check");
+    if !can_link() {
+        return;
+    }
+    let (_v, interp) = checked_run_source_with_stdout(src);
+    assert_eq!(interp.trim(), "", "VM");
+    let native = checked_codegen_compile_and_run(src).expect("native");
+    assert_eq!(native.trim(), "", "native");
+}
+
+/// 负集：调用点旧 token 绑定再使用 → E0304（mailbox 转移消费）。
+#[test]
+fn phase_d_actor_method_token_sender_consumed() {
+    let errs = check_source(
+        r#"
+actor Vault {
+    func take(t: SystemToken) -> i32 {
+        let id = token_id(t)
+        drop(id)
+        1
+    }
+}
+func main() -> i32 {
+    let v = Vault.spawn()
+    let t = make_token()
+    let n = v.take(t)
+    let id = token_id(t)
+    drop(v)
+    drop(id)
+    n
+}
+"#,
+    )
+    .expect_err("token use after actor mailbox transfer must be rejected");
+    assert!(
+        errs.iter()
+            .any(|d| { d.code.as_deref() == Some(crate::diagnostic::codes::E0304) }),
+        "sender token use-after-mailbox must be E0304, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 负集：actor 方法体内未消费 token 参数 → E0256（恰一次）。
+#[test]
+fn phase_d_actor_method_token_param_leak_rejected() {
+    let errs = check_source(
+        r#"
+actor Vault {
+    func take(t: SystemToken) -> i32 { 0 }
+}
+func main() -> i32 {
+    let v = Vault.spawn()
+    let t = make_token()
+    let n = v.take(t)
+    drop(v)
+    n
+}
+"#,
+    )
+    .expect_err("actor method token param leak must be rejected");
+    assert!(
+        errs.iter()
+            .any(|d| { d.code.as_deref() == Some(crate::diagnostic::codes::E0256) }),
+        "actor method token param leak must be E0256, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 负集：SessionChan 仍不能跨 actor mailbox（禁令不动）。
+#[test]
+fn phase_d_actor_mailbox_session_chan_still_rejected() {
+    let errs = check_source(
+        r#"
+session Echo = !i32 . ?i32 . end
+actor Sink {
+    func put(s: SessionChan<Echo>) -> i32 { 0 }
+}
+func main() -> i32 {
+    let s = Sink.spawn()
+    drop(s)
+    0
+}
+"#,
+    )
+    .expect_err("SessionChan across actor mailbox must stay rejected");
+    assert!(
+        errs.iter()
+            .any(|d| { d.code.as_deref() == Some(crate::diagnostic::codes::E0432) }),
+        "SessionChan mailbox must stay E0432, got {:?}",
+        errs.iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Phase D (0.39.79)：SystemToken 为推荐能力模型（替代 thread-local cap 协议）。
+/// 该测试锁定"一 token 一次授权 + 受保护 std API"的现代路径端到端可用——
+/// 即 `make_token` → guarded API 的推荐迁移形态。
+#[test]
+fn phase_d_system_token_recommended_capability_path_dual() {
+    let dir = std::env::temp_dir().join(format!("mimi_phase_d_rec_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let data = dir.join("rec.txt");
+    std::fs::write(&data, "modern-cap").expect("write data");
+    let src = format!(
+        r#"
+func main() -> i32 {{
+    let t = make_token()
+    let r = read_file_guarded("{path}", t)
+    match r {{
+        Ok(s) => {{ println(s) }}
+        Err(e) => {{ println("ERR"); println(e) }}
+    }}
+    0
+}}
+"#,
+        path = data.display()
+    );
+    check_source(&src).expect("SystemToken recommended capability path must check");
+    if !can_link() {
+        return;
+    }
+    let expected = "modern-cap";
+    let (_v, interp) = checked_run_source_with_stdout(&src);
+    assert_eq!(interp.trim(), expected, "VM");
+    let native = checked_codegen_compile_and_run(&src).expect("native");
+    assert_eq!(native.trim(), expected, "native");
+    let _ = std::fs::remove_dir_all(&dir);
+}

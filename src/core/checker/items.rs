@@ -1413,7 +1413,11 @@ impl<'a> Checker<'a> {
                         // transferred, not copied. Reuses the recursive
                         // `is_linear_surface_type` helper (checker.rs), which descends
                         // through Option/Result/Tuple/Name-args (List/Map/Set) etc.
-                        if self.is_linear_surface_type(&p.ty) {
+                        // Phase D (0.39.78): SystemToken 单独开面——transfer-only
+                        // 线性能力（i64 柄），走 TokenChannel 同款转移模型：调用点
+                        // 消费旧绑定（E0304）、方法体持全新义务（须恰一次消费）。
+                        // SessionChan 等其余线性面禁令不动。
+                        if self.is_linear_surface_type(&p.ty) && !self.is_system_token_type(&p.ty) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0432,
                                 format!(
@@ -1424,8 +1428,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // AUD-4: same linear-surface rejection on the method return type.
+                    // Phase D (0.39.78): SystemToken 返回值同样放行（transfer-out）。
                     if let Some(ret_ty) = &method.ret {
-                        if self.is_linear_surface_type(ret_ty) {
+                        if self.is_linear_surface_type(ret_ty) && !self.is_system_token_type(ret_ty)
+                        {
                             self.emit_code(
                                 crate::diagnostic::codes::E0432,
                                 format!(

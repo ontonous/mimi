@@ -128,6 +128,7 @@ pub(crate) mod contract_p;
 pub(crate) mod drop_face;
 pub(crate) mod linear_kind;
 pub(crate) mod phase_d;
+pub(crate) mod phase_e;
 
 // === Audit regression tests ===
 pub(crate) mod audit_regression;

@@ -8,6 +8,111 @@
 > 路线 `devdocs/v0.39/README.md`；裁决 `devdocs/kernel-final-verdict-2026-08-18.md`
 > Q2-L/Q6/Q10。
 
+### 0.39.84 — Phase E 收尾回归 + 文档同步
+- **回归**：四项交付全门禁复跑——E0439（verifier 201/0）、MutexGuard（phase_e
+  5/0 + 全部 mutex 11/0）、小步语义/内核卡（docs 门禁绿）、**lib 5659/0/7 全绿**。
+- **文档同步**：
+  - `docs/error-codes.md`：E0256/E0304 扩为「linear resource」（覆盖 SystemToken /
+    MutexGuard / Flow 状态 / Session 端点 / linear drop T）；E0439 更新为
+    0.39.80-80b 闭口说明（有界 Proven/无界 Disproven 双引擎一致，残余分歧 fail-closed）；
+  - `docs/spec/small-step-semantics.md`：trap 码对齐实现——溢出 E0802、
+    零除 E0801（原误标 E0801/E0800）。
+- 无行为变更（纯文档 + 回归）。
+
+### 0.39.83 — 发布内核卡（唯一 AI 合同）
+- **交付**：`devdocs/kernel-card.md`（68 行）——Mimi 唯一 AI 合同，一页覆盖：
+  - 内核清单（func/let/if/match/while/for、type/newtype、flow+state+transition、
+    Result/Option/?、fails E、view/mutate、线性两件套+SystemToken、MutexGuard、
+    Session；`mms{}`/`cap`/thread-local cap 出核）；
+  - 线性种类（Free/linear/linear drop，E0432）与恰一次契约表（E0304/E0256）；
+  - 错误码契约（E0304/E0256/E0432/E0439/E0800/E0801/E0242）；
+  - 双后端等价（VM≡native）与验证口径（有界 Proven/无界 Disproven，0.39.80-80b）。
+- **接线**：AGENTS.md §0 显著指针 + 0.1.9 路线行更新；README.md 文档表新增条目；
+  v0.39 执行文档指向内核卡。
+- 纯文档切片（+ AGENTS/README 指针），无行为变更。
+
+### 0.39.82 — 小步语义文档（规范性附录 mimi-small-step-1）
+- **交付**：`docs/spec/small-step-semantics.md`（252 行）——内核 `K` 的小步
+  操作语义，挂 `language-spec.md` §11 规范性附录：
+  - 内核语法（值/表达式/块/语句）；机器整数算术（i32/i64，SD-7 trap 语义：
+    溢出 E0801、零除/MIN÷-1 E0800）；
+  - 确定性小步规则 + 求值上下文（左到右、最内层先、严格实参）；
+  - 短路 `&&`/`||`、let/if/match/块/return/函数应用；
+  - **线性资源账本**（exactly-once）：introduce/move/transfer/release 转换 +
+    E0304（二次移动）/E0256（泄漏）不变式；
+  - 确定性 + 双引擎与 trap 行为的一致性（E0439 fail-closed，0.39.80-80b）。
+- **接线**：language-spec.md 新增 §11 附录指针（prose 歧义处以小步规则为准）。
+- 纯文档切片，无行为变更。
+
+### 0.39.81 — MutexGuard 恰一次 unlock（线性 guard）
+- **实现**：MutexGuard 改为**线性资源**（move-only、必须恰一次消费）：
+  - checker `is_linear_surface_type` + ir `nominal_is_linear` 认
+    `builtin:type:MutexGuard` → CFG 追踪 guard；
+  - `mutex_unlock(g)` **消费** guard（唯一合法释放）；`mutex_get(g)`/`mutex_set(g,v)`
+    **借用** guard（读取/写入后仍需解锁，CFG borrow-skip）。
+- **语义**（Phase E「恰一次 unlock」达成）：
+  - 双重 unlock → **E0304**（guard 已消费）；guard 泄漏（未 unlock 返回）→ **E0256**；
+  - guard 可整体转移（move / 跨函数）后由新绑定解锁；双后端一致。
+- **测试**：`src/tests/phase_e.rs` 5 例（lock/get/set/unlock 双后端、双重解锁
+  E0304、泄漏 E0256、move 后解锁、跨函数解锁）。
+- **兼容**：既有 dual_mutex 3 例 + 全部 mutex 6 例保持（均恰一次 unlock 模式）。
+- lib 5659/0/7 全绿。
+
+### 0.39.80b — E0439 i32 歧义全闭（实证 + 测试加固）
+- **实证**：0.39.80 修 `&&` 编码后，逐引擎核对 i32 溢出两个方向：
+  - 有界 `x>=0 && x<=1000, x*2` → resolved **Proven**、flow **Proven** → 合并
+    **Proven，无 E0439**；
+  - 无界 `x*2` → resolved **Disproven**、flow **Disproven**（VIR 体算术 definedness，
+    §11-#46）→ 合并 **Disproven，无 E0439**。
+  → **E0439 i32 方向歧义全闭**：两引擎在有界/无界双向一致。
+- **测试**：`dual_engine_unbounded_i32_overflow_fails_closed` 加固为
+  `dual_engine_unbounded_i32_overflow_agrees_fail_closed`（断言 Disproven **且**
+  无 E0439）。verifier 201/0、lib 5654/0/7 全绿。
+
+### 0.39.80 — E0439 方向收敛：resolved 引擎修复 `&&` 前置编码（Phase E 首切片）
+- **问题**：`resolved_to_z3_bool` 的 `LogicalAnd`/`LogicalOr` 分支嵌套在整数比较
+  臂内——仅当两操作数都编码为 Int 才可达。布尔比较操作数（如 `x >= 0 && x <= 1000`）
+  导致整个 requires 静默丢弃（encoding_failures++），求解器视 x 无约束 → 溢出 VC
+  找到负 x 反例 → **有界 i32 合同被 resolved 引擎误判 Disproven**，与 flow 引擎
+  Proven 相歧 → E0439（0.34.44 锁定的 i32 反向歧义根因）。
+- **修复**：`resolved_to_z3_bool` 在 Binary 臂顶部新增布尔逻辑分支——LogicalAnd/Or
+  先按布尔操作数编码。有界 i32（`x>=0 && x<=1000`, `x*2`）resolved 现 **Proven**，
+  与 flow 一致、无 E0439。
+- **语义保持**：无界 i32 溢出仍 fail-closed（flow 无界/assume defined vs resolved
+  checked → E0439 + Disproven，不静默 Proven）。
+- **测试**：`dual_engine_divergence_on_i32_definedness_is_fail_closed` 改为
+  `dual_engine_agrees_on_bounded_i32_definedness_no_divergence`（Proven 无 E0439）；
+  新增 `resolved_engine_encodes_conjunctive_precondition`、`dual_engine_unbounded_
+  i32_overflow_fails_closed`。
+- lib 5654/0/7 全绿（verifier 201/0）。
+
+### 0.39.79 — 废止 thread-local cap 重新注册协议（迁移标记）
+- **裁决**：legacy thread-local cap 协议（R-4：`mimi_cap_register/check/consume/
+  drop`，跨线程须"发 id+name 重注册"）**废止为 legacy/迁移标记**，0.1.9 内保持
+  兼容不删。推荐能力模型 = **SystemToken**（0.39.71-78）：
+  - `make_token()` → 进程级唯一（非 thread-local）；
+  - `TokenChannel` / actor mailbox → 跨任务/跨线程转移，checker/CFG 线性恰一次；
+  - `read_file_guarded`/`get_env_guarded`/`http_get_guarded` → 收 cap std API。
+- **落地**：`capability.rs` 头注释标 DEPRECATED 并指向 SystemToken；跨线程告警
+  消息补迁移指向（行为不变，无测试断言旧消息）。`phase-d-plan.md` §8 记录裁决。
+- **测试**：`src/tests/phase_d.rs` 25 例（+1 推荐能力路径端到端双后端）。
+- lib 5652/0/7 全绿。
+
+### 0.39.78 — actor mailbox token 面（SystemToken 跨 mailbox 转移）
+- **实现**：SystemToken 单独开面——可作 actor 方法参数（transfer-in）与返回值
+  （transfer-out），走 TokenChannel 同款转移模型：
+  - `items.rs` AUD-4 放行 SystemToken（新增 `is_system_token_type` 判定）；
+    SessionChan 等其余线性面禁令不动（E0432 保持）。
+  - 调用点消费旧绑定（E0304）、方法体持全新义务（须恰一次消费 E0256）。
+- **语义验证**（双后端）：
+  - actor 方法收 SystemToken 参数并消费 → VM/native 直通；
+  - actor 方法返回 SystemToken（give）→ VM/native 直通；
+  - 调用后旧 token 复用 → E0304；方法体泄漏参数 → E0256；
+  - SessionChan 跨 mailbox → E0432（禁令保持）。
+- **测试**：`src/tests/phase_d.rs` 24 例（+5：param 双后端、return 双后端、
+  sender E0304、param leak E0256、SessionChan E0432）。
+- lib 5651/0/7 全绿。
+
 ### 0.39.77 — Phase D 阶段收尾：迁移标记 + 交接文档
 - **迁移标记**（`phase-d-plan.md` §6）：fs/net/env 推荐收 cap 路径
   （read_file_guarded / http_get_guarded / get_env_guarded）vs 既有不收 cap

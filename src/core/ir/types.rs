@@ -57,12 +57,15 @@ impl NominalTypeId {
     /// - `"SystemToken"` (0.1.9 Phase D 0.39.72): 线性 token 能力（move-only，i64 柄）
     /// - `"TokenChannel"`（0.1.9 Phase D 0.39.73）：可 Copy 通道——只有 token 线性，
     ///   通道本身共享（同 Channel），跨任务 move 语义落在 SystemToken 上
+    /// - `"MutexGuard"`（0.1.9 Phase E 0.39.81）：恰一次 unlock——guard 线性，
+    ///   必须且只能被 mutex_unlock 消费一次（双重解锁 E0304、泄漏 E0256）
     pub fn nominal_is_linear(&self) -> bool {
         let s = self.0.as_str();
         s.starts_with("state:")
             || s.ends_with("SessionChan")
             || s.ends_with("session_chan")
             || s == "builtin:type:SystemToken"
+            || s == "builtin:type:MutexGuard"
     }
 
     /// v0.34.8 (SD-1 tail): whether the nominal identity is a Flow state

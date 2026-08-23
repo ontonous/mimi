@@ -1767,6 +1767,20 @@ This document does not define:
 
 ---
 
+## 11. Normative Appendix: Small-Step Semantics
+
+The operational meaning of the kernel's evaluation order, checked-integer
+traps, and the linear-resource exactly-once discipline is pinned by the
+normative appendix:
+
+- [`docs/spec/small-step-semantics.md`](spec/small-step-semantics.md)
+  (`mimi-small-step-1`): grammar, machine-integer arithmetic with trap
+  semantics (SD-7), deterministic small-step rules and evaluation contexts,
+  and the linear resource ledger invariant.
+
+This appendix is normative; where the prose above is ambiguous about
+evaluation order or trap behavior, the small-step rules govern.
+
 ## Change Principle
 
 - RC allows concentrated destructive convergence, but must provide clear diagnostics and mechanical migration paths.

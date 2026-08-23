@@ -124,7 +124,7 @@
 | E0253 | where constraint violated |
 | E0254 | retired | effect not available — abolished with the `with` effect clause (0.34.18c, §4.2 ruling); code never reused |
 | E0255 | function does not return on all paths (deprecated: use E0235) |
-| E0256 | linear capability not consumed |
+| E0256 | linear resource not consumed (leak on a return path) — capability, Flow state, Session endpoint, `SystemToken`, `MutexGuard`, or `linear drop T` (Phase D/E) |
 | E0257 | function argument count mismatch |
 | E0258 | shared binding type mismatch |
 | E0259 | non-expr assignment target |
@@ -132,7 +132,7 @@
 | E0301 | cannot borrow as mutable because already mutably borrowed |
 | E0302 | cannot borrow as immutable because already mutably borrowed |
 | E0303 | capability must be consumed before end of scope |
-| E0304 | capability already consumed |
+| E0304 | linear resource already consumed (double move / use-after-consume) — e.g. double `mutex_unlock`, reuse of a moved `SystemToken` (Phase D/E) |
 | E0305 | retired | cannot capture local_shared in parasteps — local_shared removed (0.35.39, four-state shared → two-state); code never reused |
 | E0306 | arena escape: reference to arena memory cannot outlive the arena block |
 | E0400 | undefined variable |
@@ -174,7 +174,7 @@
 | E0436 | generic parameter name shadows a builtin type name |
 | E0437 | trait method call on a bounded generic parameter (monomorphization deferred to 1.x; Clone is the supported exception) |
 | E0438 | generic type argument count mismatch (split from E0231, §3-诊断卫生 2026-08-07) |
-| E0439 | verification engine divergence: resolved and flow_ast engines disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3, 0.34.44). Arithmetic properties (e.g. `ensures: result == x * x`) commonly trigger this — the flow engine models integers as unbounded while the resolved engine applies i32/i64 checked semantics. Add explicit bounds (e.g. `requires: x <= 46340`) to remove the divergence |
+| E0439 | verification engine divergence: resolved and flow_ast engines disagree on a function verdict; fail-closed to the weaker conclusion (ADR-008 §3, 0.34.44). 0.39.80-80b closed the i32 direction (resolved engine now encodes `&&` preconditions) — bounded i32 arithmetic is Proven and unbounded overflow is Disproven **by both engines**, so no E0439 for those. Residual divergences are structural and remain fail-closed (never silently Proven) |
 | E0440 | Fault is not a legal transition source (only recover/reset may leave Fault) |
 | E0441 | Fault is a state, not a value — forbidden as a function return type |
 | E0442 | view/mutate/ref cannot cross a task boundary (spawn, Channel element, Future capture, or actor mailbox) |

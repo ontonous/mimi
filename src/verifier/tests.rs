@@ -2977,10 +2977,17 @@ func double(x: i64) -> i64 {
 }
 
 #[test]
-fn dual_engine_divergence_on_i32_definedness_is_fail_closed() {
-    // 0.34.44 (ADR-008 §3): the REVERSE divergence — resolved enforces
-    // checked_i32 definedness, flow proves unbounded. Same fail-closed
-    // contract: E0439 + the weaker conclusion.
+fn dual_engine_agrees_on_bounded_i32_definedness_no_divergence() {
+    // 0.34.44 (ADR-008 §3): the REVERSE divergence — resolved enforced
+    // checked_i32 definedness while flow proved the unbounded model, so a
+    // bounded i32 contract produced E0439 + the weaker conclusion.
+    //
+    // 0.1.9 Phase E (0.39.80): the resolved engine failed to ENCODE the
+    // `&&` precondition (`LogicalAnd` was nested under the int-comparison
+    // branch), so `requires: x >= 0 && x <= 1000` was silently dropped and
+    // the overflow VC found a negative-x counterexample. With the encoder
+    // fixed, both engines now agree: bounded i32 arithmetic is Proven, no
+    // E0439 divergence.
     if !is_z3_available() {
         return;
     }
@@ -3001,13 +3008,84 @@ func double(x: i32) -> i32 {
         .expect("must have a result for 'double'");
     assert_eq!(
         double.status,
-        VerifStatus::Disproven,
-        "divergence must fail closed to the weaker conclusion: {}",
+        VerifStatus::Proven,
+        "bounded i32 must be Proven by both engines after the && encoder fix: {}",
         double.message
     );
     assert!(
-        double.message.contains("E0439"),
-        "divergence must be reported explicitly: {}",
+        !double.message.contains("E0439"),
+        "no divergence expected for bounded i32: {}",
+        double.message
+    );
+}
+
+/// Phase E (0.39.80): the resolved engine must ENCODE `&&` preconditions.
+/// Previously `LogicalAnd` was nested under the int-comparison branch, so
+/// `requires: x >= 0 && x <= 1000` was silently dropped → bounded i32
+/// arithmetic was wrongly Disproven (overflow VC saw unbounded x).
+#[test]
+fn resolved_engine_encodes_conjunctive_precondition() {
+    require_z3!();
+    // Bounded i32 arithmetic: x in [0,1000], x*2 in [0,2000] — no overflow.
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1000
+    ensures: result == x * 2
+    x * 2
+}
+"#;
+    let file = parse_memory_source(src, "resolved-and-enc").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let mut v = Verifier::new().expect("z3");
+    let results = v.verify_checked(&program);
+    let f = results
+        .iter()
+        .find(|r| r.func_name == "double")
+        .expect("double result");
+    assert_eq!(
+        f.status,
+        VerifStatus::Proven,
+        "bounded i32 with && requires must be Proven by the resolved engine: {}",
+        f.message
+    );
+}
+
+/// Phase E (0.39.80): unbounded i32 overflow remains fail-closed — the two
+/// engines disagree (flow models unbounded/assumes defined, resolved enforces
+/// checked) → E0439 + the weaker (Disproven) conclusion.
+#[test]
+fn dual_engine_unbounded_i32_overflow_agrees_fail_closed() {
+    // Phase E (0.39.80): unbounded i32 overflow — both engines Disproven and
+    // AGREE (no E0439). The flow/VIR engine enforces body arithmetic
+    // definedness (i32 + i64, §11-#46) and the resolved engine enforces
+    // checked_i32 — so an unbounded `x * 2` is rejected by both, fail-closed
+    // without divergence.
+    if !is_z3_available() {
+        return;
+    }
+    let src = r#"
+func double(x: i32) -> i32 {
+    ensures: result == x * 2
+    x * 2
+}
+"#;
+    let file = super::parse_memory_source(src, "dual-unbounded-i32").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(src.as_bytes()).to_hex().to_string();
+    let results = super::verify_checked_dual(&program, source_hash).expect("dual verify");
+    let double = results
+        .iter()
+        .find(|r| r.func_name == "double")
+        .expect("must have a result for 'double'");
+    assert_eq!(
+        double.status,
+        VerifStatus::Disproven,
+        "unbounded i32 overflow must fail closed: {}",
+        double.message
+    );
+    assert!(
+        !double.message.contains("E0439"),
+        "both engines agree on unbounded i32 overflow (no divergence): {}",
         double.message
     );
 }
