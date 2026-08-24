@@ -1298,8 +1298,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
-                // Map / Map<string, …> → typed map JSON helpers
-                if obj_type == "Map" || obj_type.starts_with("Map<") {
+                // Map / Map<string, …> → typed map JSON helpers.
+                // 0.39.136 (L1): the checker's canonical name for a dynamic
+                // `map_new()` map is `Record` — accept it here too, or the
+                // untyped-map handle falls through to compile_to_json's
+                // integer arm and to_json prints the raw handle natively
+                // while the VM serializes real JSON.
+                if obj_type == "Map" || obj_type.starts_with("Map<") || obj_type == "Record" {
                     let handle = match &metadata_args[0] {
                         BasicMetadataValueEnum::IntValue(iv) => *iv,
                         BasicMetadataValueEnum::PointerValue(_) => {
@@ -2349,6 +2354,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         || obj_type.contains("Map<string, f32>")
                     {
                         "mimi_map_to_json_f64_serde"
+                    } else if obj_type == "Record" || obj_type == "Map" {
+                        // Untyped `map_new()` map: values are Any handles —
+                        // render strings as JSON strings, ints bare (VM
+                        // parity). Typed Map<…> modes keep their exact paths.
+                        "mimi_map_to_json_any"
                     } else {
                         "mimi_map_to_json_i64"
                     };

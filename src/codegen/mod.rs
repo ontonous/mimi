@@ -3876,6 +3876,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// 0.39.136: whether a `map_set`/`map_remove` value's static type is
+    /// decodable by the runtime's heuristic Any renderer
+    /// (`mimi_map_to_json_any`: heap C string → JSON string, else decimal
+    /// integer). Only ints and strings are — everything else (floats store
+    /// bit patterns, bools would render 0/1, product tuples and containers
+    /// need structural decoding) requires a NARROWED `Map<string, T>`
+    /// var_type_names hint so the typed serializers keep handling it.
+    /// Narrowing a hint that heterogeneous chains share would make the last
+    /// insertion's type misrender every other entry, so scalar int/string
+    /// values intentionally fall back to the bare `Map` hint.
+    pub(super) fn map_value_decodable_by_any(vt: &str) -> bool {
+        vt.is_empty() || matches!(vt, "i32" | "i64" | "int" | "string")
+    }
+
     /// If `name` is a type alias, return its underlying type name string for
     /// Display/to_json dispatch (e.g. `Pair` → `(i32, i32)`). Non-aliases and
     /// unknown names are returned unchanged.

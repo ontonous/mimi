@@ -175,9 +175,14 @@ impl Parser {
                 self.advance();
                 Ok(Type::Cap(name))
             }
-            TokenKind::Func => {
+            TokenKind::Func | TokenKind::Fn => {
                 self.advance();
-                // func(ArgType, ...) -> RetType
+                // func(ArgType, ...) -> RetType   /   fn(ArgType, ...) -> RetType
+                // 0.39.136 (spec §6.1 alignment): `fn(T) -> U` is documented as
+                // a function type spelling alongside `func(T) -> U` and the
+                // ADR-003 "both spellings accepted" posture, but only `func`
+                // parsed — `fn` in type position was a confusing parse error.
+                // Both now lower to the same Type::Func.
                 self.expect(TokenKind::LParen, "`(` for function type parameters")?;
                 let mut param_types = Vec::new();
                 if !self.at(&TokenKind::RParen) {

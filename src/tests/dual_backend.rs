@@ -19112,6 +19112,22 @@ fn assert_both_backends_stdout(src: &str, expected: &str, what: &str) {
     assert_eq!(cg_out.trim(), expected, "codegen {what}");
 }
 
+/// Production-pipeline stdout parity: checked VM install vs checked
+/// (resolved-dispatch) codegen. Width-policy evidence (inferred i32 literal
+/// semantics) needs the checker's canonical types, which the legacy
+/// `compile_file` harness lacks — same discipline as
+/// `assert_both_backends_trap_e0802` (0.35.21 #8).
+fn assert_checked_backends_stdout(src: &str, expected: &str, what: &str) {
+    let (_, vm_out) = checked_run_source_with_stdout(src);
+    assert_eq!(vm_out.trim(), expected, "VM(checked) {what}");
+    if !can_link() {
+        return;
+    }
+    let cg_out = checked_codegen_compile_and_run(src)
+        .unwrap_or_else(|e| panic!("checked codegen {what}: {e}"));
+    assert_eq!(cg_out.trim(), expected, "checked codegen {what}");
+}
+
 #[test]
 fn dual_i32_add_overflow_trap_parity() {
     // The original audit repro: annotated i32, two increments past MAX.
@@ -19200,6 +19216,269 @@ fn dual_i32_const_fold_let_overflow_trap_parity() {
             0
         }",
         "constant-folded i32 addition overflow at let",
+    );
+}
+
+#[test]
+fn dual_literal_fold_overflow_traps_unanchored_println_arg() {
+    // A1-residue closure (0.39.136): unanchored literal pairs (no declared
+    // i32 place) previously folded at full i64 width on the VM and diverged
+    // from codegen's checked-i32 trap. Every expression position must obey
+    // the same width policy: println argument…
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            println(2147483647 + 1)
+            0
+        }",
+        "unanchored literal addition overflow at println arg",
+    );
+}
+
+#[test]
+fn dual_literal_fold_overflow_traps_unanchored_call_arg_and_tail_return() {
+    // …call argument…
+    assert_both_backends_trap_e0802(
+        "func f(x: i64) -> i64 { x }
+         func main() -> i32 {
+             println(f(2000000000 + 2000000000))
+             0
+         }",
+        "unanchored literal addition overflow at call arg",
+    );
+    // …and tail return position.
+    assert_both_backends_trap_e0802(
+        "func big() -> i64 {
+             2147483647 + 1
+         }
+         func main() -> i32 {
+             println(big())
+             0
+         }",
+        "unanchored literal addition overflow at tail return",
+    );
+}
+
+#[test]
+fn dual_literal_shift_amount_masked_in_unanchored_position() {
+    // Shift amounts mask modulo the operand width on BOTH backends even
+    // without a declared i32 place (codegen masks before shifting to keep
+    // LLVM poison out; the VM fold path must not bypass that policy).
+    // 1<<33 → masked to 1<<1 = 2; 1024>>40 → masked to 1024>>8 = 4;
+    // 1<<62 → masked to 1<<30 then wrapped to i32 = 1073741824.
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            println(1 << 33)
+            println(1024 >> 40)
+            println(1 << 62)
+            0
+        }",
+        "2\n4\n1073741824",
+        "unanchored literal shift amount masking",
+    );
+    // Variable operands keep full i64 semantics (fixed non-literal side
+    // forces i64): no masking, no wrap.
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            let a: i64 = 1
+            let s: i64 = 62
+            println(a << s)
+            0
+        }",
+        "4611686018427387904",
+        "i64 variable shift stays full width",
+    );
+}
+
+#[test]
+fn dual_literal_pow_wraps_unanchored_position() {
+    // pow narrows at the i32 width in EVERY position (2**31 wraps to
+    // i32::MIN, no trap), matching the declared-i32 behavior locked by
+    // dual_i32_pow_2_31_wraps_parity.
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            println(2 ** 31)
+            0
+        }",
+        "-2147483648",
+        "unanchored literal pow wrap (2 ** 31)",
+    );
+}
+
+#[test]
+fn dual_i64_annotation_escape_hatch_stays_full_width() {
+    // Wide literal math needs an i64-anchored OPERAND (an i64 variable or an
+    // out-of-range literal). Annotating only the DESTINATION does not widen
+    // the subexpression: the literal pair stays checked-i32 and traps on
+    // overflow — identically on both backends (locked here because the trap
+    // is surprising enough that losing it silently on ONE backend would be
+    // an L1 regression).
+    assert_both_backends_trap_e0802(
+        "func main() -> i32 {
+            let y: i64 = 2147483647 + 1
+            println(y)
+            0
+        }",
+        "i64-annotated destination with i32-width literal pair",
+    );
+    // Out-of-range literals widen at the source → full checked-i64 math.
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            println(4000000000 + 4000000000)
+            0
+        }",
+        "8000000000",
+        "out-of-range literal pair stays i64 width",
+    );
+    // An i64 variable anchor makes the elastic literal widen → lossless.
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            let a: i64 = 2147483647
+            println(a + 1)
+            0
+        }",
+        "2147483648",
+        "i64 variable anchor widens the literal operand",
+    );
+    // In-range folds still fold exactly (no spurious guard).
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            println(1500000000 + 500000000)
+            println(1000000 * 2000)
+            0
+        }",
+        "2000000000\n2000000000",
+        "in-range literal folds stay exact",
+    );
+}
+
+// ─── 0.39.136 usability wave: dynamic maps, float parity, fn-type spelling ──
+
+#[test]
+fn dual_prod_map_keys_values_order_deterministic() {
+    // keys()/values() must be key-sorted and identical across backends AND
+    // processes: HashMap iteration order is randomly seeded per process, so
+    // the pre-fix binaries printed a different order on EVERY run (L1 +
+    // determinism violation). Uses the production pipeline — the legacy
+    // compile_file harness masked the resolved-emitter gap.
+    assert_checked_backends_stdout(
+        r#"
+        func main() -> i32 {
+            let m0 = map_new()
+            let m1 = map_set(m0, "zebra", 1)
+            let m2 = map_set(m1, "yak", 2)
+            let m3 = map_set(m2, "apple", 3)
+            let m4 = map_set(m3, "mango", 4)
+            let m5 = map_set(m4, "kiwi", 5)
+            let ks = keys(m5)
+            println(ks[0])
+            println(ks[1])
+            println(ks[2])
+            println(ks[3])
+            println(ks[4])
+            let vs = values(m5)
+            println(vs[0])
+            println(vs[4])
+            0
+        }
+        "#,
+        "apple\nkiwi\nmango\nyak\nzebra\n3\n1",
+        "map keys()/values() key-sorted iteration",
+    );
+}
+
+#[test]
+fn dual_prod_untyped_map_to_json_and_println() {
+    // to_json/println on an untyped map_new() map previously printed the raw
+    // i64 handle natively (resolved emitter fell through to compile_to_json's
+    // integer arm) while the VM serialized real JSON. Int values keep the
+    // function in the resolved pipeline (string values trip the known
+    // {ptr,i64}→i64 conversion gap → whole-function legacy fallback, exercised
+    // by probe_q15 in the CLI suite instead).
+    assert_checked_backends_stdout(
+        r#"
+        func main() -> i32 {
+            let m0 = map_new()
+            let m1 = map_set(m0, "b", 2)
+            let m2 = map_set(m1, "a", 1)
+            println(to_json(m2))
+            println(m2)
+            0
+        }
+        "#,
+        "{\"a\":1,\"b\":2}\n{\"a\":1,\"b\":2}",
+        "untyped map to_json/println parity",
+    );
+}
+
+#[test]
+fn dual_fn_type_spelling_in_params_and_annotations() {
+    // Spec §6.1: `fn(T) -> U` is a function type spelling; only `func(T)->U`
+    // parsed before (parse error at type position). Both spellings now lower
+    // to Type::Func and behave identically on both backends.
+    assert_checked_backends_stdout(
+        r#"
+        func apply(f: fn(i64) -> i64, v: i64) -> i64 { f(v) }
+        func main() -> i32 {
+            let base = 100
+            let f = fn(x: i64) -> i64 { x * base }
+            println(f(3))
+            println(apply(f, 2))
+            let g: fn(i64) -> i64 = fn(x: i64) -> i64 { x + 1 }
+            println(g(41))
+            0
+        }
+        "#,
+        "300\n200\n42",
+        "fn(T) -> U type spelling accepted",
+    );
+}
+
+#[test]
+fn dual_float_negative_zero_display() {
+    // `fneg` sign-flip parity: -(0.0) is -0.0 on both backends. Native used
+    // `0.0 - x` which yields +0.0 for the negative-zero case ("0" vs "-0").
+    assert_checked_backends_stdout(
+        r#"
+        func main() -> i32 {
+            println(-0.0)
+            let x = 0.0
+            let y = -x
+            println(y)
+            println(-3.5)
+            0
+        }
+        "#,
+        "-0\n-0\n-3.5",
+        "float negation preserves negative zero",
+    );
+}
+
+#[test]
+fn dual_float_div_by_zero_trap_code_parity() {
+    // A zero float divisor is an E0801 division-definedness violation on BOTH
+    // backends (small-step §3 "E0801 (zero divisor)", VM `div_by_zero()`).
+    // Native previously reported E0813 (finiteness) for the same expression.
+    let src = r#"
+        func main() -> i32 {
+            let z = 0.0
+            println(1.0 / z)
+            0
+        }
+    "#;
+    let vm = run_source_bytecode_result(src);
+    assert!(vm.is_err(), "VM must trap on float division by zero");
+    assert!(
+        vm.unwrap_err().contains("division by zero"),
+        "VM float zero-divisor trap must report division by zero"
+    );
+    if !can_link() {
+        return;
+    }
+    let cg = checked_codegen_compile_and_run(src);
+    assert!(cg.is_err(), "codegen must trap on float division by zero");
+    assert!(
+        cg.unwrap_err().contains("division by zero"),
+        "codegen float zero-divisor trap must report division by zero"
     );
 }
 

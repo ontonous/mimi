@@ -2975,14 +2975,44 @@ impl BytecodeCompiler {
             // codegen wraps; folded `1 << 40` lost the masking). Suspended
             // folds fall through to the guarded op path below (PowInt+WrapI32 /
             // MaskShiftAmt+Shl+WrapI32), which reproduces codegen exactly.
-            // Other ops still fold; the let/assign-level CheckI32 supplies the
-            // same width policy the non-folded path would (e.g. folded
-            // `2147483646 + 2` traps E0802 like codegen's checked i32 add).
-            let suspend_fold = fc.i32_ctx_active && matches!(op, BinOp::Pow | BinOp::Shl);
+            //
+            // A1-residue closure (0.39.136, L1): the old gate keyed ONLY on
+            // `fc.i32_ctx_active`, so in every position WITHOUT a declared
+            // i32 place — println/call arguments, tail returns, conditions —
+            // an unannotated literal pair folded at full i64 width and
+            // diverged from codegen, which honors the checker's canonical
+            // type (`println(2147483647 + 1)` printed 2147483648 on the VM
+            // but trapped E0802 natively; `println(1024 >> 40)` printed 0 vs
+            // 4 because folding skipped the amount mask). The width policy
+            // is now derived from the SAME predicate the guarded op path
+            // uses (binop_is_i32_width over checker-mirrored literal
+            // inference), so fold suspension and fall-through parity hold in
+            // every expression position:
+            //   - Pow/Shl/Shr at i32 width: always suspend (mask/wrap
+            //     semantics are not expressible as a pre-folded literal);
+            //   - Add/Sub/Mul at i32 width: a fold that leaves the i32 range
+            //     must NOT take the fast path — the guarded path supplies
+            //     CheckI32 and traps E0802 exactly like codegen's checked
+            //     i32 op (in-range folds stay folded; Div/Mod/BitAnd/Or/Xor/
+            //     comparisons cannot leave the range for in-range operands).
+            let lw_fold = self.infer_expr_type(fc, l);
+            let rw_fold = self.infer_expr_type(fc, r);
+            let fold_i32_ctx =
+                fc.i32_ctx_active || self.binop_is_i32_width(l, r, &lw_fold, &rw_fold);
+            let suspend_fold = fold_i32_ctx && matches!(op, BinOp::Pow | BinOp::Shl | BinOp::Shr);
             if !suspend_fold {
                 if let Some(folded) = self.fold_constants(op, l_lit, r_lit) {
-                    let folded = self.compile_literal(fc, &folded)?;
-                    return self.copy_into(fc, folded, hint.unwrap_or(folded));
+                    let folds_out_of_i32 = matches!(
+                        folded,
+                        Lit::Int(v) if v < i32::MIN as i64 || v > i32::MAX as i64
+                    );
+                    let must_trap_i32 = fold_i32_ctx
+                        && folds_out_of_i32
+                        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul);
+                    if !must_trap_i32 {
+                        let folded = self.compile_literal(fc, &folded)?;
+                        return self.copy_into(fc, folded, hint.unwrap_or(folded));
+                    }
                 }
             }
         }

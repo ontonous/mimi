@@ -3023,10 +3023,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             name.clone(),
                                                             format!("Map<string, {}>", resolved),
                                                         );
-                                                    } else if !vt.is_empty()
-                                                        && vt != "i64"
-                                                        && vt != "int"
+                                                    } else if !Self::map_value_decodable_by_any(&vt)
                                                     {
+                                                        // 0.39.136: narrow only for kinds the Any
+                                                        // renderer cannot decode — see block.rs
+                                                        // sibling sites.
                                                         self.var_type_names.insert(
                                                             name.clone(),
                                                             format!("Map<string, {}>", vt),

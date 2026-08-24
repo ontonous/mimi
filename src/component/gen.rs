@@ -454,6 +454,11 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
+    gen.export("mimi_map_to_json_any", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
     gen.export("mimi_map_to_json_string", |f| {
         f.param("map", handle("MapHandle"))
             .returns(ptr(prim(U8)))
@@ -1601,6 +1606,7 @@ mod tests {
             "mimi_map_destroy",
             "mimi_map_from_list",
             "mimi_map_to_json_i64",
+            "mimi_map_to_json_any",
             "mimi_map_to_json_string",
             "mimi_map_to_json_bool",
             "mimi_map_to_json_f64",

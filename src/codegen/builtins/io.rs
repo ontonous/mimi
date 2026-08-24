@@ -1095,7 +1095,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::IntValue(iv) => {
                 // Map/Set opaque handles: serialize via runtime JSON helpers.
-                if arg_type == "Map" || arg_type.starts_with("Map<") {
+                // 0.39.136 (L1): `Record` is the checker's canonical name for
+                // a dynamic `map_new()` map — route it here too, or print
+                // emits the raw handle integer while the VM prints the map.
+                if arg_type == "Map" || arg_type.starts_with("Map<") || arg_type == "Record" {
                     // Map of product-tuple values: decode heap ValueHandles.
                     if let Some(val_ty) = arg_type
                         .strip_prefix("Map<string, ")
@@ -3533,6 +3536,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Routes on the parsed map value type (full outer match of V), NOT on
     /// substring `contains` (Wave-1 audit fix §8).
     fn map_json_fn_for_type(type_name: &str) -> &'static str {
+        // 0.39.136: untyped maps (`Record` from map_new, or a bare `Map`
+        // with no value-type hint) carry Any values — use the heuristic
+        // string/int renderer instead of the raw-int mode.
+        if type_name == "Record" || type_name == "Map" {
+            return "mimi_map_to_json_any";
+        }
         match Self::map_value_type_of(type_name).as_deref() {
             Some("string") => "mimi_map_to_json_string",
             Some("bool") => "mimi_map_to_json_bool",

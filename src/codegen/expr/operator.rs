@@ -323,10 +323,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let zero = iv.get_type().const_int(0, true);
                     return self.compile_binop(BinOp::Sub, zero.into(), iv.into(), None);
                 } else if let BasicValueEnum::FloatValue(fv) = v {
-                    let zero = self.context.f64_type().const_float(0.0);
+                    // 0.39.136 (L1): true IEEE sign-flip (`fneg`), NOT
+                    // `0.0 - x`. Subtraction loses the negative-zero case:
+                    // `-(0.0)` is `-0.0` (the VM's Rust Display prints "-0")
+                    // but 0.0-0.0 = +0.0, so native printed "0". fnneg flips
+                    // the sign bit exactly, matching float semantics.
                     Ok(self
                         .builder
-                        .build_float_sub(zero, fv, "fneg")
+                        .build_float_neg(fv, "fneg")
                         .map_err(|e| CompileError::LlvmError(format!("neg error: {}", e)))?
                         .into())
                 } else {
@@ -1068,6 +1072,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         l: FloatValue<'ctx>,
         r: FloatValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // 0.39.136 (L1, trap-code parity): a zero FLOAT divisor is a
+        // division-definedness violation — E0801 "division by zero", exactly
+        // as the bytecode VM classifies it (`bf == 0.0 && ieee_depth == 0 →
+        // div_by_zero`) and as small-step-semantics §3 defines E0801 (zero
+        // divisor) without restricting it to integers. Previously native
+        // skipped straight to the finiteness guard and reported E0813 for the
+        // same expression. -0.0 counts as zero via OEQ, matching the VM's
+        // `bf == 0.0`.
+        if op == BinOp::Div && self.ieee_depth == 0 {
+            let function = self.current_function().ok_or_else(|| {
+                CompileError::LlvmError("no current function for float div guard".into())
+            })?;
+            let zero = r.get_type().const_float(0.0);
+            let is_zero = self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::OEQ, r, zero, "fdiv_by_zero")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+            let trap_bb = self.context.append_basic_block(function, "trap_fdiv_zero");
+            let cont_bb = self.context.append_basic_block(function, "fdiv_cont");
+            let chk_br = self
+                .builder
+                .build_conditional_branch(is_zero, trap_bb, cont_bb)
+                .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+            crate::codegen::float_chain::mark_cold_trap_branch(self.context, chk_br);
+            self.builder.position_at_end(trap_bb);
+            if self.in_fallible_multi_target() {
+                self.emit_panic_fault_return("E0801")?;
+            } else {
+                let trap_fn = self.get_runtime_fn("mimi_trap_float_div_by_zero")?;
+                self.builder
+                    .build_call(trap_fn, &[], "")
+                    .map_err(|e| CompileError::LlvmError(format!("trap call error: {}", e)))?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+            }
+            self.builder.position_at_end(cont_bb);
+        }
         let res = match op {
             BinOp::Add => self.builder.build_float_add(l, r, "fadd"),
             BinOp::Sub => self.builder.build_float_sub(l, r, "fsub"),

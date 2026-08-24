@@ -1,0 +1,50 @@
+// q15: 动态 map 全生命周期 + fn 类型拼写 + 浮点符号 — 可用性探针（0.39.136）
+//
+// 锁定三类双后端分歧修复：
+// 1. keys()/values()/to_json/println 对 map_new() 动态映射的确定性键序
+//    （HashMap 每进程随机种子 → 修复前每次运行顺序都不同）；
+// 2. to_json/println 对未类型化映射输出真 JSON（修复前 native 打印裸句柄整数）；
+// 3. `fn(T) -> U` 函数类型拼写（spec §6.1；修复前 type 位置解析错误）与
+//    -0.0 符号保留（fneg，修复前 native 打印 "0"）。
+use std::strings
+
+func apply_twice(f: fn(i64) -> i64, v: i64) -> i64 {
+    f(f(v))
+}
+
+func main() -> i32 {
+    // 未类型化动态映射：混合 int/string 值
+    let m0 = map_new()
+    let m1 = map_set(m0, "name", "Alice")
+    let m2 = map_set(m1, "age", 30)
+    let m3 = map_set(m2, "city", "Oslo")
+    println(to_json(m3))
+    println(m3)
+
+    // 键序确定性（排序）：banana, apple, cherry 插入 → apple, banana, cherry
+    let k0 = map_new()
+    let k1 = map_set(k0, "banana", 2)
+    let k2 = map_set(k1, "apple", 1)
+    let k3 = map_set(k2, "cherry", 3)
+    let ks = keys(k3)
+    println(join(ks, ","))
+    let vs = values(k3)
+    println(vs[0])
+    println(vs[2])
+
+    // has_key / size / get
+    println(map_size(k3))
+    println(has_key(k3, "apple"))
+
+    // fn(T) -> U 参数拼写 + 闭包捕获
+    let base = 100
+    let add_base = fn(x: i64) -> i64 { x + base }
+    println(apply_twice(add_base, 1))
+
+    // 浮点：负零与常规运算
+    println(-0.0)
+    let zero = 0.0
+    println(-zero)
+    println(2.5 + 1.0)
+    0
+}

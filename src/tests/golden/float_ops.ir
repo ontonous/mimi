@@ -62,6 +62,8 @@ declare i64 @mimi_map_from_json_f64(ptr)
 
 declare ptr @mimi_map_to_json_i64(i64)
 
+declare ptr @mimi_map_to_json_any(i64)
+
 declare ptr @mimi_map_to_json_bool(i64)
 
 declare ptr @mimi_map_to_json_f64(i64)
@@ -803,6 +805,8 @@ declare void @mimi_trap_overflow(ptr)
 
 declare void @mimi_trap_div_by_zero()
 
+declare void @mimi_trap_float_div_by_zero()
+
 declare void @mimi_trap_div_overflow()
 
 declare void @mimi_trap_float_not_finite(ptr)
@@ -927,6 +931,14 @@ trap_float:                                       ; preds = %entry
 float_ok:                                         ; preds = %entry
   %a3 = load double, ptr %a, align 8
   %b4 = load double, ptr %b, align 8
+  %fdiv_by_zero = fcmp oeq double %b4, 0.000000e+00
+  br i1 %fdiv_by_zero, label %trap_fdiv_zero, label %fdiv_cont, !branch_weights !0
+
+trap_fdiv_zero:                                   ; preds = %float_ok
+  call void @mimi_trap_float_div_by_zero()
+  unreachable
+
+fdiv_cont:                                        ; preds = %float_ok
   %fdiv = fdiv double %a3, %b4
   %is_nan5 = fcmp uno double %fdiv, %fdiv
   %fabs6 = call double @llvm.fabs.f64(double %fdiv)
@@ -934,11 +946,11 @@ float_ok:                                         ; preds = %entry
   %not_finite8 = or i1 %is_nan5, %is_inf7
   br i1 %not_finite8, label %trap_float9, label %float_ok10, !branch_weights !0
 
-trap_float9:                                      ; preds = %float_ok
+trap_float9:                                      ; preds = %fdiv_cont
   call void @mimi_trap_float_not_finite(ptr @float_op_name.9)
   unreachable
 
-float_ok10:                                       ; preds = %float_ok
+float_ok10:                                       ; preds = %fdiv_cont
   %fadd = fadd double %fmul, %fdiv
   %is_nan11 = fcmp uno double %fadd, %fadd
   %fabs12 = call double @llvm.fabs.f64(double %fadd)

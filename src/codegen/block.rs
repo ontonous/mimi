@@ -794,10 +794,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                                         resolved
                                                                     ),
                                                                 );
-                                                            } else if !vt.is_empty()
-                                                                && vt != "i64"
-                                                                && vt != "int"
+                                                            } else if !Self::map_value_decodable_by_any(&vt)
                                                             {
+                                                                // 0.39.136: narrow only for kinds the
+                                                                // Any renderer cannot decode — see the
+                                                                // sibling site in this file.
                                                                 self.var_type_names.insert(
                                                                     name.clone(),
                                                                     format!("Map<string, {}>", vt),
@@ -2262,7 +2263,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     name.clone(),
                                                     format!("Map<string, {}>", resolved),
                                                 );
-                                            } else if !vt.is_empty() && vt != "i64" && vt != "int" {
+                                            } else if !Self::map_value_decodable_by_any(&vt) {
+                                                // 0.39.136: only narrow the hint for value
+                                                // kinds the runtime's heuristic Any renderer
+                                                // cannot decode (floats store bit patterns,
+                                                // bools would render 0/1). Ints and strings
+                                                // route through mimi_map_to_json_any so
+                                                // heterogeneous maps render correctly instead
+                                                // of following the last insertion's hint.
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     format!("Map<string, {}>", vt),

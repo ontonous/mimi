@@ -579,11 +579,18 @@ fn builtin_has_key(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
 fn builtin_keys(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
-            let keys: Vec<Value> = fields
-                .keys()
-                .map(|k| Value::String(Arc::new(k.clone())))
+            // Deterministic iteration contract (0.39.136): key-sorted order,
+            // mirroring Value Display / to_json and the native runtime's
+            // sorted mimi_map_collect. HashMap iteration order is randomly
+            // seeded per process — observable output (println(join(keys(m))))
+            // must never depend on it.
+            let mut keys: Vec<&str> = fields.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            let out: Vec<Value> = keys
+                .into_iter()
+                .map(|k| Value::String(Arc::new(k.to_string())))
                 .collect();
-            Ok(Value::List(Arc::new(keys)))
+            Ok(Value::List(Arc::new(out)))
         }
         _ => Err(InterpError::new("keys: expected map")),
     }
@@ -592,8 +599,12 @@ fn builtin_keys(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
 fn builtin_values(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
-            let values: Vec<Value> = fields.values().cloned().collect();
-            Ok(Value::List(Arc::new(values)))
+            // Key-sorted order — must agree with builtin_keys so keys()[i]
+            // and values()[i] address the same entry on every backend/run.
+            let mut keys: Vec<&str> = fields.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            let out: Vec<Value> = keys.into_iter().map(|k| fields[k].clone()).collect();
+            Ok(Value::List(Arc::new(out)))
         }
         _ => Err(InterpError::new("values: expected map")),
     }

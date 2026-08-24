@@ -2492,6 +2492,15 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         return Box::into_raw(list);
     }
 
+    // Deterministic iteration contract (0.39.136): key-sorted order, matching
+    // the bytecode VM's builtin_keys/builtin_values and every mimi_map_to_json_*
+    // renderer (which already sort). HashMap iteration order is randomly seeded
+    // per process — keys()/values() output must never depend on it, or the same
+    // binary prints a different order on every run and diverges from the VM
+    // (L1 violation).
+    let mut entries: Vec<(&String, &i64)> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
     // Use libc::malloc for the data pointer to ensure it is compatible with
     // libc::free (which mimi_list_free uses). Rust Vec uses jemalloc/allocator
     // which may not be compatible with libc::free on all platforms (e.g. MSVC).
@@ -2507,11 +2516,11 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         std::ptr::null_mut()
     };
     if !data_ptr.is_null() {
-        for (i, (k, v)) in map.inner.iter().enumerate() {
+        for (i, (k, v)) in entries.iter().enumerate() {
             let entry = if collect_values {
                 // S10: ValueHandle is an opaque integer; cast to pointer for FFI transport.
                 // Caller must NOT free these pointers — they are not heap-allocated strings.
-                *v as *mut std::ffi::c_char
+                **v as *mut std::ffi::c_char
             } else {
                 list_string::alloc_mimi_str(k.as_bytes()) as *mut std::ffi::c_char
             };
@@ -3469,6 +3478,7 @@ fn list_map_to_string_impl(
                 mimi_map_to_json_f64_serde(handle)
             },
             MapJsonMode::Int => unsafe { mimi_map_to_json_i64(handle) },
+            MapJsonMode::Any => unsafe { mimi_map_to_json_any(handle) },
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(json_ptr) };
@@ -5389,7 +5399,21 @@ pub unsafe extern "C" fn json_get_element(
 /// Keys are JSON-escaped; values are printed as decimal integers.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
-    map_to_json_values(handle, MapJsonMode::Int)
+    // SAFETY: handle validated inside map_to_json_values.
+    unsafe { map_to_json_values(handle, MapJsonMode::Int) }
+}
+
+/// Serialize an untyped Record map (`map_new()` values are `Any`) with the
+/// mimi_any_to_string heuristic: heap C strings render as JSON strings,
+/// everything else as decimal integers. Keys sort deterministically.
+///
+/// # Safety
+/// `handle` must be a live MapHandle returned by `mimi_map_new`/`from_json`
+/// (or 0); it is validated by `map_from_handle` inside `map_to_json_values`.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_any(handle: MapHandle) -> *mut std::ffi::c_char {
+    // SAFETY: handle validated inside map_to_json_values.
+    unsafe { map_to_json_values(handle, MapJsonMode::Any) }
 }
 
 /// Serialize a MapHandle of 0/1 bool ValueHandles as JSON true/false.
@@ -5416,6 +5440,63 @@ enum MapJsonMode {
     Float,
     FloatJson,
     String,
+    /// Untyped Record maps (`map_new()`): values are type-erased ValueHandles.
+    /// Render with the same heuristic as `mimi_any_to_string` — a heap C
+    /// string renders as a JSON string, everything else as a decimal integer.
+    Any,
+}
+
+/// Classify a type-erased ValueHandle the way `mimi_any_to_string` does and
+/// render it for untyped-map JSON: heap C string → quoted+escaped JSON
+/// string; anything else → decimal integer (VM parity for int/string values;
+/// see known-boundaries for bool/float-valued untyped entries).
+unsafe fn any_handle_json(value: ValueHandle) -> String {
+    const MIN_HEAP: usize = 1_048_576; // 1MB — below this is definitely not a heap ptr
+    const MAX_ADDR: usize = usize::MAX - 4096;
+    const MAX_BOUNDED_SCAN: usize = 1_048_576;
+    let value_addr = value as usize;
+    if value & 1 == 0 && value % 8 == 0 && (MIN_HEAP..MAX_ADDR).contains(&value_addr) {
+        let ptr = value as *const u8;
+        // SAFETY: `libc::sysconf`/`libc::mincore` have no preconditions beyond
+        // valid pointers; the bounded NUL scan only dereferences memory that
+        // mincore confirmed mapped (same discipline as mimi_any_to_string).
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let mut len: usize = 0;
+        while len < MAX_BOUNDED_SCAN {
+            let cur = value_addr + len;
+            let page_start = (cur / page_size) * page_size;
+            let page_offset = cur - page_start;
+            let chunk = page_size
+                .saturating_sub(page_offset)
+                .min(MAX_BOUNDED_SCAN - len);
+            if chunk == 0 {
+                break;
+            }
+            let mut mvec: u8 = 0;
+            let mapped =
+                unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
+            if mapped != 0 {
+                break;
+            }
+            // SAFETY: mincore confirmed this page is mapped; the scan stays in
+            // bounds of the mapped chunk and stops at the first NUL.
+            unsafe {
+                for i in 0..chunk {
+                    if *ptr.add(len + i) == 0 {
+                        let found_len = len + i;
+                        let bytes = std::slice::from_raw_parts(ptr, found_len);
+                        match std::str::from_utf8(bytes) {
+                            Ok(s) => return json_escape_string(s),
+                            Err(_) => return value.to_string(),
+                        }
+                    }
+                }
+            }
+            len += chunk;
+        }
+    }
+    value.to_string()
 }
 
 unsafe fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
@@ -5466,6 +5547,14 @@ unsafe fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::
             MapJsonMode::String => {
                 // Should use mimi_map_to_json_string path, not this helper.
                 parts.push(String::from("null"));
+            }
+            MapJsonMode::Any => {
+                // Untyped Record values: heuristic string/int decode (VM
+                // parity for int- and string-valued entries).
+                // SAFETY: only performs mapped-page probing / bounded reads
+                // validated by the same checks as mimi_any_to_string.
+                let rendered = unsafe { any_handle_json(**v) };
+                parts.push(rendered);
             }
             MapJsonMode::Int => parts.push(v.to_string()),
         }
@@ -21509,6 +21598,18 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
     // M1: MIN/-1 division overflow is E0802 (integer overflow), not E0801.
     const MSG: &[u8] = trap::INT_DIV_OVERFLOW.as_bytes();
     trap_write_code(E0802);
+    trap_write_static(MSG);
+    trap_write_static(b"\n");
+    trap_exit();
+}
+
+/// 0.39.136: float zero-divisor trap — E0801 with the VM's exact wording
+/// ("division by zero"). Called from the native float-division guard when
+/// the divisor is ±0.0 outside `ieee_float { }`.
+#[no_mangle]
+pub extern "C" fn mimi_trap_float_div_by_zero() -> ! {
+    const MSG: &[u8] = trap::FLOAT_DIV_BY_ZERO.as_bytes();
+    trap_write_code(E0801);
     trap_write_static(MSG);
     trap_write_static(b"\n");
     trap_exit();

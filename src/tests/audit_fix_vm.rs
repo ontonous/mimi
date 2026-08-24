@@ -396,15 +396,17 @@ func main() -> i64 {
 
 #[test]
 fn audit_vm_i32_literal_pow_exact_value_family() {
-    // ADJUDICATED — DEFERRED (width-model A1 family): wrap-vs-trap in literal
-    // constant folding is NOT settled; per devdocs/full-audit-2026-08-05.md
-    // §16 V-6 (same ruling: "分歧归入宽度模型统一议题") and the Wave-2 battle
-    // plan §1.1 ("i32 literal 折叠 wrap-vs-trap 不修——归宽度模型 A1 族，与 V-6
-    // 裁决同理；测试侧规避"). The original test drove the wrap edge (`2 ** 31`
-    // → i32::MIN by VM folding, E0802 trap by codegen let-bind) and is
-    // rewritten to the EXACT-VALUE family per §4-C avoidance discipline: 2**30
-    // fits i32 on both backends, so the L1 parity assertion holds without
-    // touching either backend's folding semantics.
+    // HISTORICAL — A1 residue CLOSED (0.39.136): wrap-vs-trap in literal
+    // constant folding was deferred per devdocs/full-audit-2026-08-05.md
+    // §16 V-6 ("分歧归入宽度模型统一议题") / Wave-2 battle plan §1.1
+    // ("测试侧规避"). The divergence is now closed at the root: the VM fold
+    // gate derives the same width predicate as the guarded op path
+    // (compiler.rs compile_binary_op), so unanchored literal pairs obey
+    // codegen's checked-i32/mask/wrap policy in every position — locked by
+    // dual_literal_fold_overflow_traps_unanchored_* /
+    // dual_literal_pow_wraps_unanchored_position in dual_backend.rs.
+    // This test keeps asserting the exact-value family: 2**30 fits i32 on
+    // both backends with identical output.
     let src = r#"
 func main() -> i32 {
     let x: i32 = 2 ** 30
@@ -431,13 +433,12 @@ func main() -> i32 {
 
 #[test]
 fn audit_vm_i32_literal_shl_exact_value_family() {
-    // ADJUDICATED — DEFERRED (width-model A1 family): same ruling as the pow
-    // test above (full-audit-2026-08-05.md §16 V-6; Wave-2 battle plan §1.1 —
-    // "不修，测试侧规避"). The original drove both wrap edges (`1 << 40` amount
-    // mask → 256, `1 << 31` → i32::MIN; codegen E0802 on the folded let-bind)
-    // and is rewritten to the exact-value family: shifts with non-overflowing
-    // counts (1<<20, 1<<30) that need no amount masking and produce the same
-    // exact value on both backends.
+    // HISTORICAL — A1 residue CLOSED (0.39.136): same deferral lineage as the
+    // pow test above; the fold-gate fix (compile_binary_op width predicate)
+    // closes it. Shift-amount masking parity in unanchored positions is now
+    // locked by dual_literal_shift_amount_masked_in_unanchored_position.
+    // This test keeps asserting the exact-value family: 1<<20 / 1<<30 need
+    // no amount masking and produce identical values on both backends.
     let src = r#"
 func main() -> i32 {
     let x: i32 = 1 << 20

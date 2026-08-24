@@ -60,6 +60,8 @@ declare i64 @mimi_map_from_json_f64(ptr)
 
 declare ptr @mimi_map_to_json_i64(i64)
 
+declare ptr @mimi_map_to_json_any(i64)
+
 declare ptr @mimi_map_to_json_bool(i64)
 
 declare ptr @mimi_map_to_json_f64(i64)
@@ -800,6 +802,8 @@ declare ptr @mimi_quote_list_child(ptr, i64)
 declare void @mimi_trap_overflow(ptr)
 
 declare void @mimi_trap_div_by_zero()
+
+declare void @mimi_trap_float_div_by_zero()
 
 declare void @mimi_trap_div_overflow()
 

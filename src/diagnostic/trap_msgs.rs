@@ -12,6 +12,12 @@
 
 /// SD-8 integer division-by-zero (E0801) — native codegen wording.
 pub const INT_DIV_BY_ZERO: &str = "integer division by zero";
+/// 0.39.136 float zero-divisor trap (E0801) — matches the bytecode VM's
+/// `div_by_zero()` wording ("division by zero"); a zero float divisor is the
+/// same division-definedness violation as the integer case, taking precedence
+/// over the SD-9 finiteness guard (E0813), which classifies non-finite
+/// results of finite divisors.
+pub const FLOAT_DIV_BY_ZERO: &str = "division by zero";
 /// SD-7 integer overflow (E0802) — native codegen prefix (op name appended).
 pub const INT_OVERFLOW_PREFIX: &str = "integer overflow in ";
 /// SD-8 MIN/-1 division overflow (E0802) — native codegen wording.

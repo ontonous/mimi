@@ -1091,11 +1091,15 @@ fn builtin_inner(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
 fn builtin_fields(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Record(_, fields) => {
-            let keys: Vec<Value> = fields
-                .keys()
-                .map(|k| Value::String(Arc::new(k.clone())))
+            // Key-sorted for the deterministic iteration contract (0.39.136),
+            // matching builtin_keys / Display / native mimi_map_collect.
+            let mut keys: Vec<&str> = fields.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            let out: Vec<Value> = keys
+                .into_iter()
+                .map(|k| Value::String(Arc::new(k.to_string())))
                 .collect();
-            Ok(Value::List(Arc::new(keys)))
+            Ok(Value::List(Arc::new(out)))
         }
         _ => Ok(Value::List(Arc::new(vec![]))),
     }

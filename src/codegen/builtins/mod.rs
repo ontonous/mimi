@@ -278,6 +278,11 @@ fn register_map_record_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_map_to_json_any",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_map_to_json_bool",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
@@ -4609,6 +4614,12 @@ fn register_arithmetic_trap_fns<'ctx>(
     // mimi_trap_div_by_zero() -> !
     module.add_function(
         "mimi_trap_div_by_zero",
+        void.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_trap_float_div_by_zero() -> !  (0.39.136: float zero divisor, E0801)
+    module.add_function(
+        "mimi_trap_float_div_by_zero",
         void.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );

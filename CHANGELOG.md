@@ -15,6 +15,56 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.141 — 深度可用性对拍：A1 宽度残留闭合 + 动态 map 确定性 + 浮点/fn 类型修复（L1 修复族）
+
+深度可用性探针（双后端对拍 + 跨进程稳定性实测）驱动的五族修复：
+
+- **A1 宽度模型残留闭合（VM 常量折叠）**：`compile_binary_op` 折叠门控改用与守卫
+  路径同一谓词（`binop_is_i32_width`）。修复前仅"声明式 i32 位"挂起折叠——在无锚定
+  位置（println 实参、调用实参、尾返回、条件）未注解字面量对按 i64 全宽折叠：
+  `println(2147483647 + 1)` VM 打印 2147483648 而 native E0802 trap；
+  `println(1 << 33)` 打印 2^33 而 native 掩码后为 2；`println(1024 >> 40)` 0 vs 4。
+  现在 i32 宽度下 Pow/Shl/Shr 一律走 Mask/Wrap，Add/Sub/Mul 越界折叠拒走快路落
+  CheckI32 trap，所有表达式位置与 codegen 宽度执法逐位一致。审计台账 §9-#10/
+  宽度模型 A1 残留从"⏸ 延期"改判"✅ 分歧面已闭合"；audit_fix_vm.rs 两处
+  "ADJUDICATED—DEFERRED" 注记更新为 HISTORICAL-CLOSED。
+- **动态 map 迭代确定性（双运行时）**：`keys()`/`values()`/`fields()` 键序收敛为
+  **键排序**。HashMap 每进程随机种子 → 修复前同一二进制每次运行键序都不同
+  （native 实测 5 连跑 4 种顺序），且 VM/native 互异。native `mimi_map_collect`
+  与 VM 三内建同步排序；与既有 `mimi_map_to_json_*`（本就排序）及 Value Display
+  对齐。
+- **未类型化 map 静默句柄输出（resolved 发射器）**：`to_json(m)`/`println(m)`
+  （`map_new()` 动态映射）在 resolved 管线落入 `compile_to_json` 整数臂——native
+  打印裸句柄 `4294967299` 而 VM 序列化真 JSON。三层根修：(1) resolved 发射器在
+  Bind/参数绑定处回填 `var_type_names`（此前为空，legacy 共享的类型名分发全部失明，
+  也是既有 to_json 测试全靠 legacy fallback 掩盖的根因）；(2) resolved Call 对
+  `Record`/`Map` 实参路由类型化 map 序列化器；(3) 新增 `mimi_map_to_json_any`
+  （Component IR 注册 + LLVM 声明），按 `mimi_any_to_string` 启发式渲染 Any 值。
+- **legacy map 提示窄化收口**：`block.rs`×2/`func.rs` 三处同构注册点统一走
+  `map_value_decodable_by_any`——仅 f64/f32/bool/容器/元组值保留 `Map<string,T>`
+  窄提示（Any 启发式不可解码），i32/i64/string 值回落裸 `Map` 走 Any 渲染；
+  修复混合 int/string 链按"最后一次插入静态提示"误渲染（`{"age":""}`）。
+- **浮点符号与除零码 parity**：一元负 float 改真 `fneg`（原 `0.0-x` 丢负零：
+  `println(-0.0)` VM "-0" vs native "0"，resolved 与 legacy 双路径修复）；float
+  除零除数补前置守卫报 **E0801 "division by zero"**（原 native 报 E0813；小步语义
+  §3 "E0801 (zero divisor)" 不限于整数，VM 同判）。
+- **`fn(T) -> U` 类型拼写落地（spec §6.1）**：parse_type 增加 `TokenKind::Fn` 臂与
+  `func` 同构 lower 到 `Type::Func`——此前 spec 明文列出的函数类型拼写在参数/注解
+  位置一律解析错误。
+
+回归收编：`dual_literal_fold_overflow_traps_unanchored_*` /
+`dual_literal_shift_amount_masked_in_unanchored_position` /
+`dual_literal_pow_wraps_unanchored_position` /
+`dual_i64_annotation_escape_hatch_stays_full_width`（含 i64 目的地注解不拓宽
+子表达式的 trap parity 锁）、`dual_prod_map_keys_values_order_deterministic`、
+`dual_prod_untyped_map_to_json_and_println`、`dual_fn_type_spelling_in_params_and_annotations`、
+`dual_float_negative_zero_display`、`dual_float_div_by_zero_trap_code_parity` +
+real_world `probe_q15.mimi`（CLI 级双后端输出对拍）。已知边界登记：未类型化 map 的
+f64/bool 异构值受句柄类型擦除限制仍需窄提示（单类型链精确）。
+
+门禁：lib **5669/0/7**、dual 1030 全绿、golden 重生成（新增两条 runtime 声明）、
+fmt 干净。
+
 ### 0.39.140 — 泛型调用返回 ABI/所有权归一 + actor 容器返回 + 透明别名同权（L1 修复族）
 
 双后端对拍驱动的三族修复（探针实测驱动，全部收编 real_world 回归）：

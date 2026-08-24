@@ -947,6 +947,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             frame
                 .locals
                 .insert(local_id.clone(), ResolvedVarEntry { storage, llvm_type });
+            // 0.39.136 (L1): same var_type_names seeding as Bind — parameters
+            // participate in typed dispatch (to_json/println/method fallback)
+            // exactly like locals.
+            let param_display = resolved_type_display_name(self.program, &local.ty);
+            self.generator
+                .var_type_names
+                .insert(local.display_name.clone(), param_display);
         }
         Ok(())
     }
@@ -1912,6 +1919,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 frame
                     .locals
                     .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
+                // 0.39.136 (L1): register the checker-canonical type name for
+                // this binding so legacy-shared typed-dispatch helpers
+                // (infer_object_type → to_json/println/map-set dispatch) see
+                // the same var_type_names entries the legacy emitter seeds.
+                // The resolved pipeline previously left it empty, so opaque
+                // i64 handles (builtin maps/sets) mis-dispatched — e.g.
+                // `to_json(m)` on a map printed the raw handle integer
+                // natively while the VM serialized real JSON. Display names
+                // use the same convention as resolved_type_display_name
+                // elsewhere in this emitter ("Map", "Record", "List<string>",
+                // user record names…).
+                let type_display = resolved_type_display_name(self.program, &metadata.ty);
+                self.generator
+                    .var_type_names
+                    .insert(metadata.display_name.clone(), type_display);
                 Ok(())
             }
             ResolvedPatternKind::Constructor { variant, fields } => {
@@ -3435,6 +3457,55 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     }
                                 };
                                 return self.generator.compile_from_json_raw(&ty, raw_ptr);
+                            }
+                        }
+                        // 0.39.136 (L1): to_json on an opaque map handle must
+                        // route through the typed map serializers, NOT
+                        // compile_to_json's generic integer arm — a Record
+                        // (map_new) handle is just an i64 there, so native
+                        // printed the raw handle while the VM serialized real
+                        // JSON (silent divergence; lists/records fail loud and
+                        // fall back instead, which is why tests never caught
+                        // this). Mirrors the legacy simple.rs dispatch.
+                        if name == "to_json" && call.arguments.len() == 1 {
+                            let arg_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            if arg_ty == "Record" || arg_ty == "Map" || arg_ty.starts_with("Map<") {
+                                if let BasicMetadataValueEnum::IntValue(handle) = arguments[0] {
+                                    let fn_name = if arg_ty.contains("Map<string, string>") {
+                                        "mimi_map_to_json_string"
+                                    } else if arg_ty.contains("Map<string, bool>") {
+                                        "mimi_map_to_json_bool"
+                                    } else if arg_ty.contains("Map<string, f64>")
+                                        || arg_ty.contains("Map<string, f32>")
+                                    {
+                                        "mimi_map_to_json_f64_serde"
+                                    } else if arg_ty == "Record" || arg_ty == "Map" {
+                                        "mimi_map_to_json_any"
+                                    } else {
+                                        "mimi_map_to_json_i64"
+                                    };
+                                    let func = self.generator.get_runtime_fn(fn_name)?;
+                                    let raw = self
+                                        .generator
+                                        .build_call(
+                                            func,
+                                            &[BasicMetadataValueEnum::IntValue(handle)],
+                                            "resolved_to_json_map",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or_else(|| {
+                                            CompileError::Unsupported(format!(
+                                                "{fn_name} returned void"
+                                            ))
+                                        })?
+                                        .into_pointer_value();
+                                    self.generator.register_heap_alloc(raw);
+                                    return self
+                                        .wrap_builtin_string_result(raw.into(), &call.result);
+                                }
                             }
                         }
                         let result = self.generator.compile_builtin_call(name, &arguments)?;
@@ -5464,9 +5535,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .compile_binop(BinOp::Sub, zero.into(), value.into(), None)
             }
             (ResolvedUnaryOp::Negate, BasicValueEnum::FloatValue(value)) => {
-                let zero = value.get_type().const_zero();
+                // 0.39.136 (L1): `fneg` sign-flip, not `0.0 - x` — subtraction
+                // loses negative zero (-(0.0) printed "0" natively, "-0" on
+                // the VM). Mirrors operator.rs UnOp::Neg float arm.
                 self.generator
-                    .compile_binop(BinOp::Sub, zero.into(), value.into(), None)
+                    .builder
+                    .build_float_neg(value, "resolved_fneg")
+                    .map(BasicValueEnum::from)
+                    .map_err(|e| CompileError::LlvmError(format!("fneg error: {e}")))
             }
             // H-16 (full-audit 2026-08-05, HIGH): builtin predicates return
             // i64 0/1 in the LLVM ABI (operator.rs:201 ABI note), so a bare
