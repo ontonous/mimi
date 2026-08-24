@@ -427,6 +427,10 @@ pub(crate) fn parse_error(src: &str) -> crate::diagnostic::Diagnostic {
 }
 
 pub(crate) fn parse(src: &str) -> crate::ast::File {
+    bare_parse(src)
+}
+
+fn bare_parse(src: &str) -> crate::ast::File {
     let tokens = lexer::Lexer::new(src)
         .tokenize()
         .expect("src/tests/mod.rs:144 unwrap failed");
@@ -435,10 +439,27 @@ pub(crate) fn parse(src: &str) -> crate::ast::File {
         .expect("src/tests/mod.rs:145 unwrap failed")
 }
 
+/// Parse test source EXACTLY like every CLI subcommand does (check/run/build/
+/// test all call `loader::merge_prelude_into` before checking; build.rs also
+/// skips the merge when the file carries explicit imports). Execution-channel
+/// harness helpers MUST use this — without the prelude the CheckedProgram
+/// lacks its traits/impls, so dispatch decisions (`supports_resolved_native`,
+/// per-function eligibility) diverge from production: programs that gracefully
+/// fall back in `mimi build` hard-fail in tests, and resolved-vs-legacy
+/// routing differs wholesale. Mechanism-level tests (parser units, golden IR
+/// snapshots) intentionally stay on bare `parse`.
+pub(crate) fn parse_prod(src: &str) -> crate::ast::File {
+    let mut file = bare_parse(src);
+    if file.imports.is_empty() {
+        crate::loader::merge_prelude_into(&mut file);
+    }
+    file
+}
+
 /// Run source via the Bytecode VM (default backend since 0.33).
 /// Panics on compile or runtime error.
 pub(crate) fn run_source(src: &str) -> interp::Value {
-    let file = parse(src);
+    let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler
         .compile_file(&file)
@@ -451,7 +472,7 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
 /// TC-C1: run Bytecode VM with stdout capture enabled.
 /// Returns `(main return value, captured stdout)`.
 pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
-    let file = parse(src);
+    let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler
         .compile_file(&file)
@@ -511,7 +532,7 @@ pub(crate) fn check_source_warnings(src: &str) -> Vec<crate::diagnostic::Diagnos
 /// H3: Run checker + Bytecode VM. Catches checker bugs that `run_source_result`
 /// silently bypasses (e.g. E0255 false positives for become/stay).
 pub(crate) fn checked_run_source_result(src: &str) -> Result<interp::Value, String> {
-    let file = parse(src);
+    let file = parse_prod(src);
     let program = core::check_program(&file).map_err(|diags| {
         diags
             .iter()
@@ -529,7 +550,7 @@ pub(crate) fn checked_run_source_result(src: &str) -> Result<interp::Value, Stri
 /// H3: Run checker + codegen + native execution. Catches checker bugs that
 /// `compile_and_run` silently bypasses.
 pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
-    let file = parse(src);
+    let file = parse_prod(src);
     core::check(&file).map_err(|diags| {
         diags
             .iter()
@@ -545,7 +566,7 @@ pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
 /// Compile and run source via the Bytecode VM, returning the main Value.
 /// Panics on compile or runtime error (mirrors `run_source` semantics).
 pub(crate) fn run_source_bytecode(src: &str) -> interp::Value {
-    let file = parse(src);
+    let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler
         .compile_file(&file)
@@ -570,7 +591,7 @@ pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, Str
 /// Compile and run source via the Bytecode VM with stdout capture.
 /// Returns `(main return value, captured stdout)`.
 pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, String) {
-    let file = parse(src);
+    let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler
         .compile_file(&file)
@@ -586,7 +607,7 @@ pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, Stri
 /// Runs the type checker first, installs CheckedProgram into the compiler,
 /// then compiles and runs. Mirrors `checked_run_source_result` semantics.
 pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Value, String> {
-    let file = parse(src);
+    let file = parse_prod(src);
     let program = core::check_program(&file).map_err(|diags| {
         diags
             .iter()
@@ -685,12 +706,7 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
 
     let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let tokens = crate::lexer::Lexer::new(src)
-        .tokenize()
-        .map_err(|e| format!("lexer: {}", e))?;
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| format!("parser: {}", e))?;
+    let file = parse_prod(src);
 
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
@@ -831,7 +847,7 @@ fn link_and_run_module<'ctx>(
 /// catches the codegen path the legacy `compile_file` harness silently
 /// miscompiles (e.g. nested list indexing built inside a loop).
 pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, String> {
-    let file = parse(src);
+    let file = parse_prod(src);
     let checked_program = core::check_program(&file).map_err(|diags| {
         diags
             .iter()
@@ -852,7 +868,7 @@ pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, Strin
 /// Used by Phase 0 dual tests so spawn/Flow evidence is not green only via
 /// the legacy `compile_file` harness.
 pub(crate) fn checked_run_source_with_stdout(src: &str) -> (interp::Value, String) {
-    let file = parse(src);
+    let file = parse_prod(src);
     let program = core::check_program(&file).unwrap_or_else(|diags| {
         panic!(
             "checker rejected checked_run_source_with_stdout source:\n{}",
@@ -884,7 +900,7 @@ pub(crate) fn checked_codegen_compile_and_run_timeout(
     src: &str,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let file = parse(src);
+    let file = parse_prod(src);
     let checked_program = core::check_program(&file).map_err(|diags| {
         diags
             .iter()

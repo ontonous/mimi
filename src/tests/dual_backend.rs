@@ -19387,6 +19387,30 @@ fn dual_prod_map_keys_values_order_deterministic() {
 }
 
 #[test]
+fn dual_prod_generic_record_fallback_channel_parity() {
+    // H1 closure: the execution-channel harness (checked_codegen_compile_and_run
+    // et al.) now merges the stdlib prelude exactly like every CLI subcommand
+    // does. Without it the harness CheckedProgram lacks the prelude's traits,
+    // so `supports_resolved_native` returned true and this program took the
+    // no-fallback full-resolved path — hard-failing E0722 ("cannot resolve
+    // type display 'T'") where production `mimi build` gracefully fell main
+    // back to legacy via per-function dispatch. This shape locks the fallback
+    // channel parity; generic-field record is the documented boundary shape.
+    assert_checked_backends_stdout(
+        r#"
+        type Box<T> { value: T }
+        func main() -> i32 {
+            let b = Box { value: 42 }
+            println(b.value)
+            0
+        }
+        "#,
+        "42",
+        "generic-record fallback channel parity (harness ≡ CLI)",
+    );
+}
+
+#[test]
 fn dual_prod_untyped_map_to_json_and_println() {
     // to_json/println on an untyped map_new() map previously printed the raw
     // i64 handle natively (resolved emitter fell through to compile_to_json's
