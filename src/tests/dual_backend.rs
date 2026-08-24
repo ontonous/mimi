@@ -8700,6 +8700,35 @@ fn dual_exec_pipe() {
 // Requires: rustc compiler, cc linker, and standalone.rs compiled as .so
 
 #[test]
+fn dual_ffi_libc_symbols_default_resolution_parity() {
+    // 0.39.136 (L1): the VM previously demanded MIMI_FFI_LIB for EVERY extern
+    // call while production native binaries link libc directly — identical
+    // programs diverged (VM E0800 vs native success). The VM now falls back to
+    // the system libc when the variable is unset; custom libraries still set
+    // it explicitly. Locks abs/strlen parity with no environment setup.
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+        extern "C" {
+            func abs(x: i32) -> i32;
+            func strlen(s: string) -> i64;
+        }
+        func main() -> i32 {
+            println(abs(-42))
+            println(strlen("hello"))
+            0
+        }
+    "#;
+    // Native side: libc is linked implicitly.
+    let native = checked_codegen_compile_and_run(src).expect("native libc extern");
+    assert_eq!(native.trim(), "42\n5", "native(codegen) libc externs");
+    // VM side: must resolve via the default-libc fallback, no env var.
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    assert_eq!(vm.trim(), "42\n5", "vm default libc resolution");
+}
+
+#[test]
 fn dual_ffi_reprc_struct() {
     if !can_cc() {
         eprintln!("SKIP: cc not available");

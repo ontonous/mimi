@@ -73,6 +73,18 @@ pub(crate) struct FfiRuntime {
 }
 
 impl FfiRuntime {
+    /// Candidate system libc paths for the MIMI_FFI_LIB-less default.
+    /// First match wins; all misses preserve the original explicit error.
+    fn default_libc_candidates() -> Vec<&'static str> {
+        vec![
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            "/lib64/libc.so.6",
+            "/usr/lib/libc.so.6",
+            "/lib/libc.so.6",
+        ]
+    }
+
     /// Build the FFI tables from a parsed program file.
     pub(in crate::interp) fn from_file(file: &File) -> Self {
         let mut type_defs = HashMap::new();
@@ -322,12 +334,26 @@ impl FfiRuntime {
             }
         }
 
-        let lib_path = std::env::var("MIMI_FFI_LIB")
-            .map_err(|_| Errno::Generic(
-                "MIMI_FFI_LIB environment variable not set for extern function call.\n\
-                 Set MIMI_FFI_LIB to the path of the shared library containing the extern function.\n\
-                 Example: MIMI_FFI_LIB=/path/to/libfoo.so cargo run".to_string()
-            ))?;
+        // 0.39.136 (L1): production native binaries link libc directly, so a
+        // plain `extern "C" { func abs(...) }` call works with no environment
+        // setup — while the VM demanded MIMI_FFI_LIB even for libc symbols,
+        // making identical programs diverge across backends (VM E0800 vs
+        // native success). Default to the system libc when the variable is
+        // unset; custom libraries still set MIMI_FFI_LIB explicitly.
+        let lib_path = match std::env::var("MIMI_FFI_LIB") {
+            Ok(p) => p,
+            Err(_) => Self::default_libc_candidates()
+                .into_iter()
+                .find(|candidate| std::path::Path::new(candidate).exists())
+                .map(|candidate| candidate.to_string())
+                .ok_or_else(|| {
+                    Errno::Generic(
+                        "MIMI_FFI_LIB environment variable not set for extern function call.\n\
+                         Set MIMI_FFI_LIB to the path of the shared library containing the extern function.\n\
+                         Example: MIMI_FFI_LIB=/path/to/libfoo.so cargo run".to_string()
+                    )
+                })?,
+        };
 
         // Load library if not already loaded
         let lib_idx = if let Some(idx) = self
