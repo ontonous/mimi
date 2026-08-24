@@ -5823,6 +5823,126 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .map(BasicValueEnum::from)
                     .map_err(|e| CompileError::LlvmError(format!("ptr struct load: {e}")))
             }
+            // 0.39.136 (L1): string struct {ptr,i64} → i64 ValueHandle.
+            // Erased-value ABI positions (map_set/map_remove values, Any
+            // slots) store heap C-string handles as raw ints. Extract the
+            // pointer, heap-clone it (mirrors legacy compile_map_set's
+            // strlen+mimi_str_clone: the stored handle must outlive the
+            // source temporary) and ptrtoint. Without this arm every
+            // string-valued map_set failed "resolved numeric conversion"
+            // and fell the whole function back to legacy.
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::IntType(it))
+                if it.get_bit_width() == 64
+                    && sv.get_type().get_field_types().len() == 2
+                    && matches!(
+                        sv.get_type().get_field_types()[0],
+                        BasicTypeEnum::PointerType(_)
+                    )
+                    && matches!(
+                        sv.get_type().get_field_types()[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    ) =>
+            {
+                let ptr = self
+                    .generator
+                    .builder
+                    .build_extract_value(sv, 0, "resolved_str_handle_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("resolved str unwrap: {e}")))?
+                    .into_pointer_value();
+                let strlen_fn = self
+                    .generator
+                    .module
+                    .get_function("strlen")
+                    .ok_or_else(|| CompileError::LlvmError("strlen not declared".into()))?;
+                let len = self
+                    .generator
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(ptr)],
+                        "resolved_str_handle_len",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                    .into_int_value();
+                let clone_fn = self
+                    .generator
+                    .module
+                    .get_function("mimi_str_clone")
+                    .ok_or_else(|| CompileError::LlvmError("mimi_str_clone not declared".into()))?;
+                let handle = self
+                    .generator
+                    .build_call(
+                        clone_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(ptr),
+                            BasicMetadataValueEnum::IntValue(len),
+                        ],
+                        "resolved_str_handle",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("mimi_str_clone returned void".into()))?
+                    .into_int_value();
+                let i64_ty = self.generator.context.i64_type();
+                let widened = if handle.get_type().get_bit_width() < 64 {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(handle, i64_ty, "resolved_str_handle_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("handle sext: {e}")))?
+                } else {
+                    handle
+                };
+                Ok(BasicValueEnum::IntValue(widened))
+            }
+            // 0.39.136 (L1): list struct {i64, ptr} → i64 opaque handle.
+            // Erased-value positions (map_set values, Any slots) store
+            // container handles as raw ints; heap-pack the whole struct and
+            // ptrtoint (mirrors legacy compile_map_set's list arm). Kept
+            // separate from the string arm — field order distinguishes the
+            // two layouts.
+            (BasicValueEnum::StructValue(sv), BasicTypeEnum::IntType(it))
+                if it.get_bit_width() == 64
+                    && sv.get_type().get_field_types().len() == 2
+                    && matches!(
+                        sv.get_type().get_field_types()[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
+                    && matches!(
+                        sv.get_type().get_field_types()[1],
+                        BasicTypeEnum::PointerType(_)
+                    ) =>
+            {
+                let struct_ty = sv.get_type();
+                let size_bytes = self
+                    .generator
+                    .llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
+                let heap = self.generator.malloc_or_abort(
+                    self.generator
+                        .context
+                        .i64_type()
+                        .const_int(size_bytes as u64, false),
+                    "resolved_list_handle_pack",
+                )?;
+                let i8_ptr = self
+                    .generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default());
+                let typed = self
+                    .generator
+                    .build_bit_cast(
+                        heap.into(),
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        "resolved_list_handle_ptr",
+                    )?
+                    .into_pointer_value();
+                self.generator.build_store(typed, sv)?;
+                self.generator
+                    .build_ptr_to_int(
+                        typed,
+                        self.generator.context.i64_type(),
+                        "resolved_list_handle_int",
+                    )
+                    .map(BasicValueEnum::from)
+            }
             // 0.35.23 deep-eval: string struct {ptr,i64} ↔ raw C-string ptr.
             // The resolved emitter feeds string structs into runtime-direct
             // builtins whose params are i8* (mimi-log main: json_get_string /

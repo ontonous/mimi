@@ -1,11 +1,12 @@
-// NOTE (batch5-03 P1-3): the raw builtins `map_set`/`map_remove` still have
-// divergent backend semantics — the VM treats them as copy-on-write while the
-// native/codegen backend mutates the input Record in place. The stdlib
-// functions in this file (`set`, `remove`, `merge`, `update`, `omit`) now
-// explicitly copy the input before calling those builtins, so they preserve
-// the original Record on both backends. Direct callers of the raw builtins
-// should make an explicit copy first until the codegen map operations are
-// aligned.
+// NOTE (updated 0.39.136): raw builtins `map_set`/`map_remove` are VALUE-style
+// on BOTH backends — they return a new Record and never mutate the input
+// (verified by dual probes; the historical VM-copy-on-write vs native-in-place
+// divergence no longer exists). The stdlib functions below (`set`, `remove`,
+// `merge`, `update`, `omit`) rebind via `m = map_set(m, …)` and are exact.
+// Direct callers of the raw builtins must likewise rebind: discarding the
+// result discards the insertion on both backends.
+// Iteration contract (0.39.136): keys()/values() return key-SORTED order,
+// deterministic across runs and identical on both backends.
 
 // MapExt: Trait for Record (dictionary) operations.
 trait MapExt {

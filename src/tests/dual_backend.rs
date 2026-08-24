@@ -19390,22 +19390,22 @@ fn dual_prod_map_keys_values_order_deterministic() {
 fn dual_prod_untyped_map_to_json_and_println() {
     // to_json/println on an untyped map_new() map previously printed the raw
     // i64 handle natively (resolved emitter fell through to compile_to_json's
-    // integer arm) while the VM serialized real JSON. Int values keep the
-    // function in the resolved pipeline (string values trip the known
-    // {ptr,i64}→i64 conversion gap → whole-function legacy fallback, exercised
-    // by probe_q15 in the CLI suite instead).
+    // integer arm) while the VM serialized real JSON. Mixed int/string values
+    // exercise both Any-renderer arms AND keep the function in the resolved
+    // pipeline: map_set's string value coerces {ptr,i64} → i64 handle via the
+    // coerce_to clone arm (0.39.136), so no legacy fallback is involved.
     assert_checked_backends_stdout(
         r#"
         func main() -> i32 {
             let m0 = map_new()
-            let m1 = map_set(m0, "b", 2)
-            let m2 = map_set(m1, "a", 1)
+            let m1 = map_set(m0, "name", "Alice")
+            let m2 = map_set(m1, "age", 30)
             println(to_json(m2))
             println(m2)
             0
         }
         "#,
-        "{\"a\":1,\"b\":2}\n{\"a\":1,\"b\":2}",
+        "{\"age\":30,\"name\":\"Alice\"}\n{\"age\":30,\"name\":\"Alice\"}",
         "untyped map to_json/println parity",
     );
 }
