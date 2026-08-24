@@ -491,7 +491,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             })
     }
 
-    pub(super) fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {
+    pub(crate) fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {
         if type_map.is_empty() {
             return base.to_string();
         }

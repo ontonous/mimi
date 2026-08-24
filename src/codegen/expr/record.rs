@@ -493,6 +493,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_int_value();
                     return Ok(boxed);
                 }
+                // 0.39.x (L1 parity fix): a NESTED list literal element
+                // compiles to the list header POINTER (its stack alloca).
+                // Storing that raw address escapes the frame — the returned
+                // outer list then holds dangling stack handles (segfault on
+                // the first index read after return). Heap-pack a copy of
+                // the {len, data} header so the slot owns stable storage.
+                // Detection is syntactic (element IS a list literal) plus
+                // inferred-type fallback (`List<...>`); genuine raw-pointer
+                // elements keep the identity-preserving ptrtoint below.
+                let elem_obj_ty = self.infer_object_type(elem_expr, vars);
+                let elem_is_list = matches!(elem_expr.unlocated(), crate::ast::Expr::List(_))
+                    || elem_obj_ty == "List"
+                    || elem_obj_ty.starts_with("List<");
+                if elem_is_list {
+                    // Ownership transfer: the inner literal registered its own
+                    // data array for scope-exit freeing; as an element of the
+                    // outer list that registration must be dropped, or the
+                    // enclosing function frees an array the outer list still
+                    // references the moment this value escapes the frame.
+                    self.claim_nested_list_slot(pv);
+                    let lst = self.list_struct_type();
+                    let header =
+                        self.build_load(BasicTypeEnum::StructType(lst), pv, "nested_list_hdr")?;
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(lst));
+                    let size_val = self.context.i64_type().const_int(size, false);
+                    let hdr_ptr = self.malloc_or_abort(size_val, "nested_list_hdr_heap")?;
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let typed_ptr = self
+                        .build_bit_cast(
+                            hdr_ptr.into(),
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "nested_list_hdr_i8",
+                        )?
+                        .into_pointer_value();
+                    self.build_store(typed_ptr, header)?;
+                    return self.build_ptr_to_int(typed_ptr, self.context.i64_type(), "ptr_to_i64");
+                }
                 self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_i64")
             }
             BasicValueEnum::StructValue(sv) => {

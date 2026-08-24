@@ -1,0 +1,26 @@
+// Regression (L1): an un-annotated bind of an ACTOR method result must carry
+// the declared return type into codegen's variable-type registry. Without the
+// actor-method fallback in infer_impl_method_return_type, `let ss = h.items()`
+// lost the string-element ABI and `ss[0]` printed the raw fat-box handle as
+// i64 on native while the VM printed the real string.
+actor Holder {
+    items: List<string> = [];
+
+    func load(s: string) {
+        self.items = [s]
+    }
+
+    func get_items() -> List<string> { self.items }
+}
+
+func main() -> i32 {
+    let h = Holder.spawn()
+    h.load("tag")
+    let ss = h.get_items()
+    if ss[0] == "tag" {
+        println(ss[0])
+        0
+    } else {
+        1
+    }
+}

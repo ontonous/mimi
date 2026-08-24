@@ -557,6 +557,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => self.adjust_int_value_width(val, field_llvm, "field_assign")?,
                     };
                     self.build_store(gep, val)?;
+                    // 0.1.9 (L1 parity): same list-ownership transfer as the
+                    // actor-field branch above — records are persistent too.
+                    if field_llvm == BasicTypeEnum::StructType(self.list_struct_type()) {
+                        self.claim_last_heap_slot();
+                    }
                     return Ok(());
                 }
             }
@@ -576,6 +581,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => self.adjust_int_value_width(val, field_llvm, "field_assign")?,
                 };
                 self.build_store(gep, val)?;
+                // 0.1.9 (L1 parity): a list stored into a persistent actor
+                // field owns its data array from here on — claim the RHS
+                // literal's temp registration so the method's scope-exit
+                // flush does not free an array the actor still references.
+                if field_llvm == BasicTypeEnum::StructType(self.list_struct_type()) {
+                    self.claim_last_heap_slot();
+                }
                 return Ok(());
             }
         }

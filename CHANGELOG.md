@@ -15,6 +15,34 @@
 > （0.38 同策略）。**待用户授权切 release tag**。终测记录
 > `devdocs/v0.39/quad-final-0.39.md`。
 
+### 0.39.140 — 泛型调用返回 ABI/所有权归一 + actor 容器返回 + 透明别名同权（L1 修复族）
+
+双后端对拍驱动的三族修复（探针实测驱动，全部收编 real_world 回归）：
+
+- **泛型调用返回 ABI**：resolved Call 臂对带 type_arguments 的泛型调用按
+  ABI 安全性分流——小整数/bool/char/unit 走快速路径，string/f64/i128/
+  nominal/tuple 转 legacy 单态化实例。修复 `first<T>(xs: List<T>) -> T`
+  返回 string 段错误、返回 f64 静默错译（裸比特当 i64）。
+- **legacy 实例所有权归一**：聚合体返回的串形叶改运行时探针
+  （owned 转移、借用堆拷贝）；override 返回的 `List<string>` /
+  `List<List<string>>` 元素载荷无条件私有化；嵌套列表字面量头堆打包
+  （原为栈 alloca 地址逃逸）+ 内层数组登记随嵌套上交外层容器。
+  修复 `(T,i32)`/`Result<T,string>` free abort 与 `List<List<T>>`
+  悬垂段错误。
+- **actor 方法容器返回**：未注解 bind 的 actor 方法结果接入声明类型登记
+  （List<string> 不再退化为裸 i64 句柄读取）；epilogue 对局部变量尾表达式
+  按声明类型兜底认领；`self.<list 字段> = [..]` 转移 RHS 数组所有权进
+  持久字段。
+- **透明类型别名同权**：`type Id = i64` 在 let 字面量绑定 / cast 目标 /
+  泛型实例化一致性 / 复合载荷位置与底层原始类型同权（此前以内部诊断
+  TOOL-RESOLUTION-001 或 E0700 fail-closed）。`newtype X = T` 不透明语义
+  保持不变。
+
+回归：`core_generics_return_abi.mimi`（七形状）、
+`concurrency_actor_return_list.mimi`、`core_type_alias_transparency.mimi`
+（real_world 106/106 interp、105/105 build+exec）；lib 5659/0/7；
+golden IR 按预期演进重生成（21 项）。
+
 ### 0.39.139 — `module` 关键字退役 + 内联 module AST 管道全删（选项 C 收官）
 
 0.39.137 §6.14 裁决 → 0.39.138 检查期硬拒绝 → 本版完成完全退役：

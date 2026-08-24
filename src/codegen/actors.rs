@@ -1508,6 +1508,50 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Claim returned List variables' data buffers & literals before flushing heap scopes.
         self.claim_returned_lists(last_expr, vars);
         let last_val = self.claim_returned_list_literals(last_val, last_expr)?;
+        // 0.1.9 (L1 parity): a tail expression that is a bare local variable
+        // holding a list can miss the var_type_names registry (un-annotated
+        // list-literal binds inside actor methods carry no element info), so
+        // claim_returned_lists above silently skips it and the dispatch-scope
+        // flush frees the data array while the mailbox caller still reads it.
+        // When the DECLARED method return is a list and the tail is an Ident,
+        // claim by LLVM shape — the list header layout {i64, ptr} is
+        // element-type independent.
+        if matches!(
+            ret_type,
+            BasicTypeEnum::StructType(_) if ret_type.into_struct_type() == self.list_struct_type()
+        ) {
+            if let Some(Expr::Ident(name)) = last_expr.map(|e| e.unlocated()) {
+                if !self.borrow_param_names.contains(name.as_str()) {
+                    if let Some(&(alloca, ty)) = vars.get(name.as_str()) {
+                        let list_ty = self.list_struct_type();
+                        let struct_ptr = match ty {
+                            BasicTypeEnum::StructType(_) => alloca,
+                            BasicTypeEnum::PointerType(_) => {
+                                match self.build_load(
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    alloca,
+                                    format!("{name}_ep_list",).as_str(),
+                                ) {
+                                    Ok(BasicValueEnum::PointerValue(p)) => p,
+                                    _ => alloca,
+                                }
+                            }
+                            _ => alloca,
+                        };
+                        if let Ok(data_gep) =
+                            self.gep()
+                                .build_struct_gep(list_ty, struct_ptr, 1, "_ep_list_data")
+                        {
+                            let null_ptr = self
+                                .context
+                                .ptr_type(inkwell::AddressSpace::default())
+                                .const_null();
+                            let _ = self.build_store(data_gep, null_ptr);
+                        }
+                    }
+                }
+            }
+        }
 
         self.check_unconsumed_caps()?;
         self.release_all_shared()?;

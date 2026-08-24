@@ -6,11 +6,12 @@
 
 use super::{
     CheckedConversion, CheckedConversionKind, EffectId, MatchArm as ResolvedMatchArm,
-    ResolvedArgument, ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedBodyError,
-    ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLambda, ResolvedLiteral,
-    ResolvedLocal, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
-    ResolvedProjection, ResolvedRecordField, ResolvedSignature, ResolvedStmt, ResolvedStmtKind,
-    ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp, ResolvedValueProjection,
+    PrimitiveType, ResolvedArgument, ResolvedBinaryOp, ResolvedBlock, ResolvedBody,
+    ResolvedBodyError, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
+    ResolvedLambda, ResolvedLiteral, ResolvedLocal, ResolvedLocalId, ResolvedPattern,
+    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedRecordField, ResolvedSignature,
+    ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeId, ResolvedTypeTable,
+    ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Param, Pattern, PatternKind, Stmt, UnOp,
@@ -2000,7 +2001,7 @@ impl BodyLowerer<'_> {
             ty = self.place_type(&node_id, place)?.clone();
         }
         if let ResolvedExprKind::Call(call) = &kind {
-            if call.result != ty {
+            if call.result != ty && !self.alias_equivalent(&call.result, &ty) {
                 if self.is_system_fault_refinement(&call.result, &ty)
                     || self.is_flow_state_set_refinement(&call.result, &ty)
                 {
@@ -5223,7 +5224,9 @@ impl BodyLowerer<'_> {
         };
         if let ResolvedType::GenericParameter(parameter) = template_ty {
             return match substitutions.get(parameter) {
-                Some(instantiated) => instantiated == actual,
+                Some(instantiated) => {
+                    instantiated == actual || self.alias_equivalent(instantiated, actual)
+                }
                 None => {
                     substitutions.insert(parameter.clone(), actual.clone());
                     true
@@ -5372,6 +5375,149 @@ impl BodyLowerer<'_> {
                 left_mutable == right_mutable
                     && self.collect_instantiation(left, right, substitutions)
             }
+            // 0.1.9 (L1 parity): a transparent newtype alias (`type Id =
+            // i64`) is checker-canonical on one side and surface-spelled on
+            // the other; treat alias-resolved-equal types as matching.
+            _ => self.alias_equivalent(template, actual),
+        }
+    }
+
+    /// Canonical key for alias-tolerant type comparison. Transparent
+    /// newtype aliases (`type Id = i64`, resolved via `TypeDef::alias_of`)
+    /// unwrap to their underlying primitive; anything else keys by its
+    /// interned identity. Chains of aliases are followed up to a small
+    /// fixed depth.
+    fn alias_canonical_key(&self, id: &ResolvedTypeId) -> String {
+        let mut current = id.clone();
+        for _ in 0..8 {
+            match self.types.get(&current) {
+                Some(ResolvedType::Primitive(p)) => {
+                    return format!("prim:{}", p.language_name());
+                }
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }) if arguments.is_empty() => {
+                    let base = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+                    let td = self
+                        .type_defs
+                        .values()
+                        .find(|td| td.qualified_name == base || td.qualified_name == item.as_str());
+                    if let Some(target) = td.and_then(|td| td.alias_of.as_deref()) {
+                        if let Some(p) = PrimitiveType::from_language_name(target) {
+                            return format!("prim:{}", p.language_name());
+                        }
+                        // Alias-of-alias: locate the target's interned id by
+                        // display and follow the chain.
+                        let next = self
+                            .types
+                            .iter()
+                            .find(|(tid, _)| self.type_display(tid) == target)
+                            .map(|(tid, _)| tid.clone());
+                        if let Some(next) = next {
+                            current = next;
+                            continue;
+                        }
+                    }
+                    return format!("nominal:{base}");
+                }
+                _ => return format!("id:{}", current.as_str()),
+            }
+        }
+        format!("id:{}", id.as_str())
+    }
+
+    /// True when `left` and `right` are identical or differ only by
+    /// transparent newtype aliasing (same underlying primitive).
+    fn alias_equivalent(&self, left: &ResolvedTypeId, right: &ResolvedTypeId) -> bool {
+        left == right || self.alias_canonical_key(left) == self.alias_canonical_key(right)
+    }
+
+    /// Interned id of a transparent alias's target display (`type Id = i64`
+    /// → the i64 id), if resolvable.
+    fn alias_target_id(&self, item: &crate::core::NominalTypeId) -> Option<ResolvedTypeId> {
+        let base = item.as_str().strip_prefix("type:")?;
+        let td = self
+            .type_defs
+            .values()
+            .find(|td| td.qualified_name == base || td.qualified_name == item.as_str())?;
+        let target = td.alias_of.as_deref()?;
+        self.types
+            .iter()
+            .find(|(tid, _)| self.type_display(tid) == target)
+            .map(|(tid, _)| tid.clone())
+    }
+
+    fn is_transparent_alias(&self, item: &crate::core::NominalTypeId) -> bool {
+        self.alias_target_id(item).is_some()
+    }
+
+    /// Structural equality that sees THROUGH transparent newtype aliases at
+    /// every position (`Result<Id, string>` ≡ `Result<i64, string>`).
+    fn alias_shaped_equal(&self, left: &ResolvedTypeId, right: &ResolvedTypeId) -> bool {
+        if left == right {
+            return true;
+        }
+        match (self.types.get(left), self.types.get(right)) {
+            (Some(ResolvedType::Primitive(a)), Some(ResolvedType::Primitive(b))) => a == b,
+            (
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }),
+                _,
+            ) if arguments.is_empty() && self.is_transparent_alias(item) => self
+                .alias_target_id(item)
+                .is_some_and(|t| self.alias_shaped_equal(&t, right)),
+            (
+                _,
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }),
+            ) if arguments.is_empty() && self.is_transparent_alias(item) => self
+                .alias_target_id(item)
+                .is_some_and(|t| self.alias_shaped_equal(left, &t)),
+            (
+                Some(ResolvedType::Nominal {
+                    item: li,
+                    arguments: la,
+                    ..
+                }),
+                Some(ResolvedType::Nominal {
+                    item: ri,
+                    arguments: ra,
+                    ..
+                }),
+            ) => {
+                li == ri
+                    && la.len() == ra.len()
+                    && la
+                        .iter()
+                        .zip(ra)
+                        .all(|(l, r)| self.alias_shaped_equal(l, r))
+            }
+            (
+                Some(ResolvedType::Result { ok: lo, error: le }),
+                Some(ResolvedType::Result { ok: ro, error: re }),
+            ) => self.alias_shaped_equal(lo, ro) && self.alias_shaped_equal(le, re),
+            (Some(ResolvedType::Option(a)), Some(ResolvedType::Option(b))) => {
+                self.alias_shaped_equal(a, b)
+            }
+            (Some(ResolvedType::Tuple(a)), Some(ResolvedType::Tuple(b))) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(l, r)| self.alias_shaped_equal(l, r))
+            }
+            (Some(ResolvedType::Slice(a)), Some(ResolvedType::Slice(b)))
+            | (Some(ResolvedType::CBuffer(a)), Some(ResolvedType::CBuffer(b))) => {
+                self.alias_shaped_equal(a, b)
+            }
+            (
+                Some(ResolvedType::Array {
+                    element: ae,
+                    length: al,
+                }),
+                Some(ResolvedType::Array {
+                    element: be,
+                    length: bl,
+                }),
+            ) => al == bl && self.alias_shaped_equal(ae, be),
             _ => false,
         }
     }
@@ -6051,14 +6197,56 @@ impl BodyLowerer<'_> {
                 (*from, *to)
             }
             _ => {
-                return Err(vec![ResolvedBodyError::new(
-                    node_id.clone(),
-                    format!(
-                        "checked implicit conversion is required from '{}' to '{}'",
-                        self.type_display(from),
-                        self.type_display(to)
-                    ),
-                )])
+                // 0.1.9 (L1 parity): composite types whose difference is ONLY
+                // transparent newtype aliasing (`Result<Id, string>` vs
+                // `Result<i64, string>`) are runtime-identical — admit as
+                // Identity.
+                if self.alias_shaped_equal(from, to) {
+                    return Ok(CheckedConversion {
+                        kind: CheckedConversionKind::Identity,
+                        from: from.clone(),
+                        to: to.clone(),
+                    });
+                }
+                // Transparent newtype aliases admit the
+                // same implicit widenings as their underlying primitive —
+                // `type Id = i64` must behave exactly like i64 at let-bind
+                // sites (`let a: Id = 99`), mirroring both the plain-i64
+                // path and the bytecode VM. Without this the checker's
+                // conversion requirement failed closed here under the
+                // internal TOOL-RESOLUTION-001 diagnostic while the same
+                // literal bound to a bare i64 succeeded.
+                let unwrap = |id: &ResolvedTypeId| -> Option<PrimitiveType> {
+                    match self.types.get(id) {
+                        Some(ResolvedType::Primitive(p)) => Some(*p),
+                        Some(ResolvedType::Nominal {
+                            item, arguments, ..
+                        }) if arguments.is_empty() => {
+                            let base = item.as_str().strip_prefix("type:")?;
+                            let td = self.type_defs.values().find(|td| {
+                                td.qualified_name == base || td.qualified_name == item.as_str()
+                            })?;
+                            let target = td.alias_of.as_deref()?;
+                            PrimitiveType::from_language_name(target)
+                        }
+                        _ => None,
+                    }
+                };
+                match (unwrap(from), unwrap(to)) {
+                    // Admission itself is still enforced by the widening
+                    // table below — unwrapping only makes aliases reach it.
+                    (Some(f), Some(t)) => (f, t),
+                    _ => {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!(
+                                "checked implicit conversion is required from '{}' to '{}'",
+                                self.type_display(from),
+                                self.type_display(to)
+                            ),
+                        )])
+                    }
+                }
             }
         };
         use super::PrimitiveType;

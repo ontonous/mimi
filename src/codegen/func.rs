@@ -951,7 +951,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // Closures are not strings; claim env ownership first when applicable.
-        let val = self.claim_returned_closure_env(val, ret_type)?;
+        let mut val = self.claim_returned_closure_env(val, ret_type)?;
         // 0.35.23 deep-eval (mimi-make native UAF): aggregate returns that
         // CARRY string fields — `(string, string)` tuples and records —
         // leave the element heap buffers registered in this function's heap
@@ -985,39 +985,78 @@ impl<'ctx> CodeGenerator<'ctx> {
         let agg_claim_val: Option<(
             inkwell::types::StructType<'ctx>,
             inkwell::values::StructValue<'ctx>,
+            Option<inkwell::values::PointerValue<'ctx>>,
         )> = match (ret_type, val) {
             (BasicTypeEnum::StructType(st), BasicValueEnum::StructValue(sv))
                 if agg_claim_shape(st) =>
             {
-                Some((st, sv))
+                Some((st, sv, None))
             }
             (BasicTypeEnum::StructType(st), BasicValueEnum::PointerValue(pv))
                 if agg_claim_shape(st) =>
             {
                 match self.build_load(BasicTypeEnum::StructType(st), pv, "agg_claim_ld") {
-                    Ok(BasicValueEnum::StructValue(sv)) => Some((st, sv)),
+                    Ok(BasicValueEnum::StructValue(sv)) => Some((st, sv, Some(pv))),
                     _ => None,
                 }
             }
             _ => None,
         };
-        if let Some((st, sv)) = agg_claim_val {
+        if let Some((st, sv, pv)) = agg_claim_val {
             let fields = st.get_field_types();
             let is_plain_string = fields.len() == 2
                 && matches!(fields[0], BasicTypeEnum::PointerType(_))
                 && matches!(fields[1], BasicTypeEnum::IntType(_));
             if fields.len() >= 2 && !is_plain_string {
+                // 0.39.x (L1 parity fix): string-shaped fields used to be
+                // CLAIMED only (ownership transfer). That is unsound when the
+                // leaf merely ALIASES callee input — e.g. a `.rodata` literal
+                // argument packed into a returned tuple/Result by a
+                // monomorphized generic instance (`func split<T>(v: T) ->
+                // (T, i32)` called with a literal): the caller-side tracking
+                // then frees a global (free() abort). Normalize every
+                // string-shaped leaf through the same runtime probe used for
+                // top-level string returns: heap-owned values transfer
+                // untouched, borrowed values are replaced by fresh
+                // heap copies the caller legitimately owns.
+                let mut rebuilt = sv;
                 for (idx, fty) in fields.iter().enumerate() {
                     if Self::is_string_llvm_type(*fty) {
                         if let Ok(BasicValueEnum::StructValue(fsv)) =
                             self.build_extract_value(sv.into(), idx as u32, "agg_str_field")
                         {
+                            let normalized = self.claim_resolved_string_return(fsv.into())?;
+                            if let BasicValueEnum::StructValue(nsv) = normalized {
+                                rebuilt = self
+                                    .builder
+                                    .build_insert_value(rebuilt, nsv, idx as u32, "agg_str_owned")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("agg str own rebuild: {e}"))
+                                    })?
+                                    .into_struct_value();
+                            }
+                            // Claim the original data pointer regardless: for
+                            // heap-owned leaves this pops the callee-scope
+                            // registration (transfer, as before); for copied
+                            // leaves the borrowed source has no registration
+                            // and the claim is a no-op.
                             if let Ok(BasicValueEnum::PointerValue(data)) =
                                 self.build_extract_value(fsv.into(), 0, "agg_str_data")
                             {
                                 self.claim_closure_env(data);
                             }
                         }
+                    }
+                }
+                match pv {
+                    // Implicit-return path loads the aggregate from the
+                    // alloca AFTER this claim runs — write the normalized
+                    // value back so the copies are visible.
+                    Some(pv) => {
+                        self.build_store(pv.into(), BasicValueEnum::StructValue(rebuilt))?;
+                    }
+                    None => {
+                        val = BasicValueEnum::StructValue(rebuilt);
                     }
                 }
             }

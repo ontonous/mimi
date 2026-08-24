@@ -235,6 +235,76 @@ fn unsupported_diagnostic(program: &CheckedProgram, error: UnsupportedResolvedNo
     diagnostic
 }
 
+/// Convert a generic callee's resolved type arguments into the AST type map
+/// expected by the legacy monomorphizer (`compile_generic_func`). This is used
+/// when the resolved native slice emits a call to a generic function whose type
+/// variable cannot be substituted inline (e.g. `List<T> -> T` returning a heap
+/// type), so the monomorphized instance is built via the legacy path with the
+/// concrete args taken from the resolved IR's `call.type_arguments`.
+fn resolved_type_args_to_ast(
+    generics: &[crate::ast::GenericParam],
+    type_args: &[crate::core::ResolvedTypeId],
+    table: &crate::core::ResolvedTypeTable,
+) -> std::collections::HashMap<String, crate::ast::Type> {
+    let mut map = std::collections::HashMap::new();
+    for (gp, tid) in generics.iter().zip(type_args.iter()) {
+        if let Some(rt) = table.get(tid) {
+            if let Some(ast_ty) = resolved_type_to_ast(rt, table) {
+                map.insert(gp.name.clone(), ast_ty);
+            }
+        }
+    }
+    map
+}
+
+/// Best-effort conversion of a resolved type to an AST type for monomorphization.
+fn resolved_type_to_ast(
+    rt: &crate::core::ResolvedType,
+    table: &crate::core::ResolvedTypeTable,
+) -> Option<crate::ast::Type> {
+    use crate::core::ResolvedType::*;
+    match rt {
+        Primitive(p) => {
+            let name = match p {
+                crate::core::PrimitiveType::I8 => "i8",
+                crate::core::PrimitiveType::I16 => "i16",
+                crate::core::PrimitiveType::I32 => "i32",
+                crate::core::PrimitiveType::I64 => "i64",
+                crate::core::PrimitiveType::I128 => "i128",
+                crate::core::PrimitiveType::U8 => "u8",
+                crate::core::PrimitiveType::U16 => "u16",
+                crate::core::PrimitiveType::U32 => "u32",
+                crate::core::PrimitiveType::U64 => "u64",
+                crate::core::PrimitiveType::U128 => "u128",
+                crate::core::PrimitiveType::Isize => "isize",
+                crate::core::PrimitiveType::Usize => "usize",
+                crate::core::PrimitiveType::F32 => "f32",
+                crate::core::PrimitiveType::F64 => "f64",
+                crate::core::PrimitiveType::Bool => "bool",
+                crate::core::PrimitiveType::Char => "char",
+                crate::core::PrimitiveType::String => "string",
+                _ => return None,
+            };
+            Some(crate::ast::Type::Name(name.to_string(), vec![]))
+        }
+        Nominal {
+            item, arguments, ..
+        } => {
+            let item_str = item.as_str();
+            let name = item_str
+                .strip_prefix("type:")
+                .or_else(|| item_str.strip_prefix("builtin:type:"))
+                .unwrap_or(item_str);
+            let args: Vec<crate::ast::Type> = arguments
+                .iter()
+                .filter_map(|tid| table.get(tid).and_then(|t| resolved_type_to_ast(t, table)))
+                .collect();
+            Some(crate::ast::Type::Name(name.to_string(), args))
+        }
+        _ => None,
+    }
+}
+
 impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ctx> {
     fn compile_program(&mut self) -> Result<(), CompileError> {
         let mut functions: Vec<_> = self
@@ -2272,6 +2342,86 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Spawn(value) => self.emit_spawn(value, frame),
             ResolvedExprKind::Await(value) => self.emit_await(value, &expression.ty, frame),
             ResolvedExprKind::Call(call) => {
+                // 0.39.x (L1 parity fix): generic calls are compiled once as a
+                // single resolved skeleton whose type variable T is never
+                // substituted, so `lower_type` drops T to i64 and the call ABI
+                // mismatches the monomorphized callee whenever the concrete
+                // instance does not share the skeleton's i64-based return ABI
+                // (observed: `func first<T>(xs: List<T>) -> T { xs[0] }` called
+                // with `List<string>` segfaulted and with `List<f64>` silently
+                // returned raw bits; the interpreter is correct).
+                // The resolved IR already carries the concrete type arguments in
+                // `call.type_arguments`, so monomorphize the callee on demand via
+                // the legacy emitter using those args, and call the mangled
+                // instance directly. This keeps the resolved fast path for the
+                // surrounding body while fixing the call's ABI.
+                let mut generic_symbol_override: Option<String> = None;
+                if let ResolvedCallee::Function(owner) = &call.callee {
+                    if let Some(callee_fn) = self.program.functions().get(owner) {
+                        if !callee_fn.generics.is_empty() && !call.type_arguments.is_empty() {
+                            // The resolved native slice compiles a generic callee
+                            // once with its type variable T unsubstituted, so it
+                            // cannot lower instances whose ABI differs from that
+                            // skeleton — `lower_type` drops T to i64 and the call
+                            // ABI mismatches the concrete instantiation (observed:
+                            // `List<string>` element segfaulted, `List<f64>`
+                            // silently returned raw bits as i64). Route the call
+                            // to the legacy monomorphizer (which builds a
+                            // correctly-substituted instance from
+                            // `call.type_arguments`) UNLESS the concrete result
+                            // provably shares the skeleton's i64-based ABI: small
+                            // integers / bool / char coerce losslessly, and Unit
+                            // is void in both. Floats live in xmm registers,
+                            // i128/u128 use a wide ABI, strings and every
+                            // composite (nominal/tuple/flow state) differ — those
+                            // fail closed to the legacy emitter. Unknown result
+                            // types fail closed the same way.
+                            let rt = self.program.resolved_types().get(&call.result);
+                            let abi_safe_in_skeleton = match rt {
+                                Some(ResolvedType::Primitive(p)) => matches!(
+                                    p,
+                                    PrimitiveType::I8
+                                        | PrimitiveType::I16
+                                        | PrimitiveType::I32
+                                        | PrimitiveType::I64
+                                        | PrimitiveType::Isize
+                                        | PrimitiveType::U8
+                                        | PrimitiveType::U16
+                                        | PrimitiveType::U32
+                                        | PrimitiveType::U64
+                                        | PrimitiveType::Usize
+                                        | PrimitiveType::Bool
+                                        | PrimitiveType::Char
+                                        | PrimitiveType::Unit
+                                ),
+                                _ => false,
+                            };
+                            let needs_legacy = !abi_safe_in_skeleton;
+                            if needs_legacy {
+                                if let Some(fdef) = self
+                                    .generator
+                                    .func_defs
+                                    .get(&callee_fn.qualified_name)
+                                    .cloned()
+                                {
+                                    let ast_map = resolved_type_args_to_ast(
+                                        &callee_fn.generics,
+                                        &call.type_arguments,
+                                        self.program.resolved_types(),
+                                    );
+                                    if !ast_map.is_empty() {
+                                        let mangled =
+                                            CodeGenerator::mangle_name(&fdef.name, &ast_map);
+                                        if self.generator.module.get_function(&mangled).is_none() {
+                                            self.generator.compile_generic_func(&fdef, &ast_map)?;
+                                        }
+                                        generic_symbol_override = Some(mangled);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // 0.36.15 L1: `exit(...)` is the explicit fault-propagation
                 // call — run registered `on failure` compensations (LIFO)
                 // before it, mirroring the legacy block.rs exit hook. The
@@ -2362,7 +2512,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         );
                     }
                     ResolvedCallee::Function(owner) => {
-                        let symbol = self.callable_symbol(owner)?.to_string();
+                        let symbol = if let Some(ov) = generic_symbol_override.clone() {
+                            ov
+                        } else {
+                            self.callable_symbol(owner)?.to_string()
+                        };
                         let callee =
                             self.generator.module.get_function(&symbol).ok_or_else(|| {
                                 CompileError::LlvmError(format!(
@@ -2451,9 +2605,55 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         let BasicTypeEnum::StructType(list_ty) = result_ty else {
                                             return Ok(result.into());
                                         };
+                                        // 0.39.x (L1 parity fix): a
+                                        // legacy-monomorphized instance's
+                                        // list boxes borrowed payload pointers;
+                                        // give the returned list private
+                                        // element copies before registering it
+                                        // for unconditional per-element frees.
+                                        if generic_symbol_override.is_some() {
+                                            self.copy_string_list_elements_owned(sv)?;
+                                        }
                                         self.generator
                                             .register_returned_string_list(sv, list_ty)?;
                                         return Ok(result);
+                                    }
+                                    // List<List<string>> from an override call:
+                                    // same borrowed-payload hazard one level
+                                    // deeper; normalize inner elements before
+                                    // the StringListListData registration in
+                                    // track_returned_heap_pointers below.
+                                    if generic_symbol_override.is_some()
+                                        && self.string_list_list_shape(&call.result)
+                                    {
+                                        if let (
+                                            BasicValueEnum::StructValue(outer_sv),
+                                            Some(ResolvedType::Nominal {
+                                                arguments: outer_args,
+                                                ..
+                                            }),
+                                        ) = (
+                                            result,
+                                            self.program.resolved_types().get(&call.result),
+                                        ) {
+                                            if let Some(ResolvedType::Nominal {
+                                                item: inner_item,
+                                                ..
+                                            }) =
+                                                self.program.resolved_types().get(&outer_args[0])
+                                            {
+                                                if inner_item.as_str() == "builtin:type:List" {
+                                                    if let BasicTypeEnum::StructType(elem_list_ty) =
+                                                        self.lower_type(&outer_args[0])?
+                                                    {
+                                                        self.copy_string_list_list_elements_owned(
+                                                            outer_sv,
+                                                            elem_list_ty,
+                                                        )?;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     self.track_returned_heap_pointers(
                                         result,
@@ -11202,6 +11402,279 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             }
             (other, _) => Ok(other),
         }
+    }
+
+    /// 0.39.x (L1 parity fix): give the returned `List<string>` private,
+    /// heap-owned copies of every element payload. Legacy-monomorphized
+    /// instances build list literals with `mimi_str_box`, which boxes
+    /// BORROWED pointers (argument aliases, `.rodata` literals), while the
+    /// caller-side `register_returned_string_list` frees every element box
+    /// payload unconditionally at scope exit — freeing memory the list never
+    /// owned (double-free / free-of-global). Unlike
+    /// `ensure_list_string_owned` this is NOT a probe: the list's destructor
+    /// is unconditional, so each payload must become a private copy.
+    fn copy_string_list_elements_owned(
+        &mut self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 0, "own_list_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("own list str len: {e}")))?
+            .into_int_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(list_sv, 1, "own_list_str_data")
+            .map_err(|e| CompileError::LlvmError(format!("own list str data: {e}")))?
+            .into_pointer_value();
+        let function = self.generator.current_function().ok_or_else(|| {
+            CompileError::LlvmError("own list str elements outside function".into())
+        })?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "own_list_str_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "own_list_str_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "own_list_str_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "own_list_str_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "own_list_str_idx_val",
+            )?
+            .into_int_value();
+        let cond = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            idx,
+            len,
+            "own_list_str_cond",
+        );
+        let cond = cond.map_err(|e| CompileError::LlvmError(format!("own list str cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let elem_slot =
+            self.generator
+                .build_in_bounds_gep(i64_ty, data, &[idx], "own_list_str_elem_slot")?;
+        let elem_i64 = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "own_list_str_elem_i64",
+            )?
+            .into_int_value();
+        let elem_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(elem_i64, ptr_ty, "own_list_str_elem_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("own list str elem ptr: {e}")))?;
+        // Fat box layout {i32, i32, ptr, i64}: fields 2/3 are the payload
+        // {ptr, len}. Replace the payload with a fresh heap copy; the box
+        // itself stays in place (the slot must keep holding the box pointer).
+        let string_sv = self
+            .generator
+            .load_fat_list_string(elem_ptr)?
+            .into_struct_value();
+        let owned = self
+            .generator
+            .heap_copy_string_value(string_sv.into())?
+            .into_struct_value();
+        let new_ptr = self
+            .generator
+            .build_extract_value(owned.into(), 0, "own_list_str_copy_ptr")?
+            .into_pointer_value();
+        let new_len = self
+            .generator
+            .build_extract_value(owned.into(), 1, "own_list_str_copy_len")?
+            .into_int_value();
+        let i32_ty = self.generator.context.i32_type();
+        let fat_ty = self.generator.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::PointerType(ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let fat_ptr_gep = self
+            .generator
+            .gep()
+            .build_struct_gep(fat_ty, elem_ptr, 2, "own_list_str_box_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("own list str box ptr: {e}")))?;
+        self.generator.build_store(fat_ptr_gep, new_ptr)?;
+        let fat_len_gep = self
+            .generator
+            .gep()
+            .build_struct_gep(fat_ty, elem_ptr, 3, "own_list_str_box_len")
+            .map_err(|e| CompileError::LlvmError(format!("own list str box len: {e}")))?;
+        self.generator.build_store(fat_len_gep, new_len)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "own_list_str_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("own list str inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// 0.39.x (L1 parity fix): same ownership normalization as
+    /// [`Self::copy_string_list_elements_owned`] for `List<List<string>>`
+    /// values returned by legacy-monomorphized instances: walk the outer
+    /// slots, load each inner list box, and give every inner element payload
+    /// a private heap copy so the scope-exit `StringListListData` teardown
+    /// (inner boxes + payloads + arrays) never frees borrowed memory.
+    fn copy_string_list_list_elements_owned(
+        &mut self,
+        outer_sv: inkwell::values::StructValue<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(outer_sv, 0, "own_llist_len")
+            .map_err(|e| CompileError::LlvmError(format!("own llist len: {e}")))?
+            .into_int_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(outer_sv, 1, "own_llist_data")
+            .map_err(|e| CompileError::LlvmError(format!("own llist data: {e}")))?
+            .into_pointer_value();
+        let function = self
+            .generator
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("own llist elements outside function".into()))?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "own_llist_header");
+        let body = self
+            .generator
+            .context
+            .append_basic_block(function, "own_llist_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "own_llist_exit");
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "own_llist_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(header);
+        let idx = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "own_llist_idx_val",
+            )?
+            .into_int_value();
+        let cond = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            idx,
+            len,
+            "own_llist_cond",
+        );
+        let cond = cond.map_err(|e| CompileError::LlvmError(format!("own llist cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body, exit)?;
+
+        self.generator.builder.position_at_end(body);
+        let elem_slot =
+            self.generator
+                .build_in_bounds_gep(i64_ty, data, &[idx], "own_llist_elem_slot")?;
+        let inner_handle = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_slot,
+                "own_llist_inner_handle",
+            )?
+            .into_int_value();
+        let inner_ptr = self
+            .generator
+            .builder
+            .build_int_to_ptr(inner_handle, ptr_ty, "own_llist_inner_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("own llist inner ptr: {e}")))?;
+        let inner_list_sv = self
+            .generator
+            .build_load(
+                BasicTypeEnum::StructType(elem_list_ty),
+                inner_ptr,
+                "own_llist_inner",
+            )?
+            .into_struct_value();
+        self.copy_string_list_elements_owned(inner_list_sv)?;
+        let next = self
+            .generator
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "own_llist_idx_next")
+            .map_err(|e| CompileError::LlvmError(format!("own llist inc: {e}")))?;
+        self.generator.build_store(idx_storage, next)?;
+        self.generator.build_br(header)?;
+
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// Is this resolved type `builtin:type:List<builtin:type:List<String>>`?
+    fn string_list_list_shape(&self, id: &ResolvedTypeId) -> bool {
+        matches!(
+            self.program.resolved_types().get(id),
+            Some(ResolvedType::Nominal {
+                item,
+                arguments,
+                ..
+            }) if item.as_str() == "builtin:type:List"
+                && arguments.len() == 1
+                && matches!(
+                    self.program.resolved_types().get(&arguments[0]),
+                    Some(ResolvedType::Nominal {
+                        item: inner_item,
+                        arguments: inner_args,
+                        ..
+                    }) if inner_item.as_str() == "builtin:type:List"
+                        && inner_args.len() == 1
+                        && matches!(
+                            self.program.resolved_types().get(&inner_args[0]),
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                        )
+                )
+        )
     }
 
     /// Find a canonical `ResolvedTypeId` whose display name matches a

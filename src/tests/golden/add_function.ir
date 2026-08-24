@@ -10,6 +10,8 @@ source_filename = "golden_test"
 @str.5 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.6 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.7 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@ret_str_malloc_oom_msg = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
+@ret_str_malloc_oom_msg.8 = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
 @op_name = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
@@ -1058,7 +1060,29 @@ entry:
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %load_trace, ptr %trace, align 8
   %agg_claim_ld = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %agg_str_field = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
+  %res_ret_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  %res_ret_data_i = ptrtoint ptr %res_ret_data to i64
+  %res_ret_null = icmp eq i64 %res_ret_data_i, 0
+  br i1 %res_ret_null, label %res_ret_heap, label %res_ret_copy
+
+res_ret_heap:                                     ; preds = %entry
+  br label %res_ret_cont
+
+res_ret_copy:                                     ; preds = %entry
+  %ret_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  %ret_str_len = extractvalue { ptr, i64 } %agg_str_field, 1
+  %ret_str_alloc_len = add i64 %ret_str_len, 1
+  %ret_str_align_add = add i64 %ret_str_alloc_len, 7
+  %ret_str_align = and i64 %ret_str_align_add, -8
+  %ret_str_malloc_malloc = call ptr @malloc(i64 %ret_str_align)
+  %ret_str_malloc_is_null = icmp eq ptr %ret_str_malloc_malloc, null
+  br i1 %ret_str_malloc_is_null, label %ret_str_malloc_oom, label %ret_str_malloc_ok
+
+res_ret_cont:                                     ; preds = %ret_str_malloc_ok, %res_ret_heap
+  %res_ret_val = phi { ptr, i64 } [ %agg_str_field, %res_ret_heap ], [ %ret_str_new_len, %ret_str_malloc_ok ]
+  %agg_str_owned = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, { ptr, i64 } %res_ret_val, 2
   %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_str_owned, ptr %Fault, align 8
   %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
   %ret_rec_nf = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { i32, i64 } %ret_rec_f, 0
@@ -1091,6 +1115,18 @@ entry:
   %ret_rec_nf61 = insertvalue { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf51, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } %ret_rec_nf60, 4
   %ret_rec_nf62 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf38, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_nf61, 3
   ret { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf62
+
+ret_str_malloc_ok:                                ; preds = %res_ret_copy
+  %ret_str_memcpy = call ptr @memcpy(ptr %ret_str_malloc_malloc, ptr %ret_str_data, i64 %ret_str_len)
+  %ret_str_nul_pos = getelementptr inbounds i8, ptr %ret_str_malloc_malloc, i64 %ret_str_len
+  store i8 0, ptr %ret_str_nul_pos, align 1
+  %ret_str_new_data = insertvalue { ptr, i64 } undef, ptr %ret_str_malloc_malloc, 0
+  %ret_str_new_len = insertvalue { ptr, i64 } %ret_str_new_data, i64 %ret_str_len, 1
+  br label %res_ret_cont
+
+ret_str_malloc_oom:                               ; preds = %res_ret_copy
+  call void @mimi_runtime_abort(ptr @ret_str_malloc_oom_msg)
+  unreachable
 }
 
 define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Fault({ { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
@@ -1128,7 +1164,29 @@ entry:
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %trace14, ptr %trace15, align 8
   %agg_claim_ld = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %agg_str_field = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, 2
+  %res_ret_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  %res_ret_data_i = ptrtoint ptr %res_ret_data to i64
+  %res_ret_null = icmp eq i64 %res_ret_data_i, 0
+  br i1 %res_ret_null, label %res_ret_heap, label %res_ret_copy
+
+res_ret_heap:                                     ; preds = %entry
+  br label %res_ret_cont
+
+res_ret_copy:                                     ; preds = %entry
+  %ret_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  %ret_str_len = extractvalue { ptr, i64 } %agg_str_field, 1
+  %ret_str_alloc_len = add i64 %ret_str_len, 1
+  %ret_str_align_add = add i64 %ret_str_alloc_len, 7
+  %ret_str_align = and i64 %ret_str_align_add, -8
+  %ret_str_malloc_malloc = call ptr @malloc(i64 %ret_str_align)
+  %ret_str_malloc_is_null = icmp eq ptr %ret_str_malloc_malloc, null
+  br i1 %ret_str_malloc_is_null, label %ret_str_malloc_oom, label %ret_str_malloc_ok
+
+res_ret_cont:                                     ; preds = %ret_str_malloc_ok, %res_ret_heap
+  %res_ret_val = phi { ptr, i64 } [ %agg_str_field, %res_ret_heap ], [ %ret_str_new_len, %ret_str_malloc_ok ]
+  %agg_str_owned = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, { ptr, i64 } %res_ret_val, 2
   %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_str_owned, ptr %Fault, align 8
   %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
   %ret_rec_nf = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, { i32, i64 } %ret_rec_f, 0
@@ -1139,6 +1197,18 @@ entry:
   %ret_rec_f20 = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf19, 3
   %ret_rec_nf21 = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf19, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } %ret_rec_f20, 3
   ret { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_rec_nf21
+
+ret_str_malloc_ok:                                ; preds = %res_ret_copy
+  %ret_str_memcpy = call ptr @memcpy(ptr %ret_str_malloc_malloc, ptr %ret_str_data, i64 %ret_str_len)
+  %ret_str_nul_pos = getelementptr inbounds i8, ptr %ret_str_malloc_malloc, i64 %ret_str_len
+  store i8 0, ptr %ret_str_nul_pos, align 1
+  %ret_str_new_data = insertvalue { ptr, i64 } undef, ptr %ret_str_malloc_malloc, 0
+  %ret_str_new_len = insertvalue { ptr, i64 } %ret_str_new_data, i64 %ret_str_len, 1
+  br label %res_ret_cont
+
+ret_str_malloc_oom:                               ; preds = %res_ret_copy
+  call void @mimi_runtime_abort(ptr @ret_str_malloc_oom_msg.8)
+  unreachable
 }
 
 ; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)

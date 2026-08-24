@@ -1,0 +1,48 @@
+// Regression (L1): the TRANSPARENT type-alias form (`type Id = i64`) must
+// behave exactly like its underlying primitive at let-binds, casts, generic
+// calls, and Result payloads — on both backends. These shapes used to die in
+// resolved lowering under the internal TOOL-RESOLUTION-001 diagnostic or
+// E0700 "unsupported cast target type" while the VM accepted them.
+type Id = i64
+
+func ident<T>(v: T) -> T { v }
+
+func main() -> i32 {
+    let mut failures = 0
+
+    // Literal bind through the alias admits the same widening as plain i64
+    let a: Id = 99
+    if a == 99 {
+        println(a)
+    } else {
+        failures += 1
+    }
+
+    // Cast to the alias target
+    let c = 5 as Id
+    if c == 5 {
+        println(c)
+    } else {
+        failures += 1
+    }
+
+    // Generic call whose argument/result spell the alias
+    let b = ident(a)
+    if b == 99 {
+        println(b)
+    } else {
+        failures += 1
+    }
+
+    // Alias inside a Result payload annotation
+    let r: Result<Id, string> = Ok(a)
+    let ok = match r {
+        Ok(v) => { println(v == 99); true },
+        Err(_) => false,
+    }
+    if ok == false {
+        failures += 1
+    }
+
+    if failures == 0 { 0 } else { 1 }
+}

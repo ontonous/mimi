@@ -1,0 +1,89 @@
+// Regression (L1): generic functions must monomorphize per call-site type in
+// native codegen AND hand the caller owned heap payloads. The resolved emitter
+// used to route every generic call through an unsubstituted T->i64 skeleton
+// (`List<string>` segfaulted on a bogus pointer, `List<f64>` returned raw
+// bits), and legacy-monomorphized instances returned aggregates whose string
+// leaves aliased borrowed memory that caller-side tracking later freed
+// (`(T, i32)` / `Result<T, string>` aborted in free, `List<List<T>>`
+// dangled stack addresses). The interpreter was always correct. Each case
+// below self-asserts via exit code.
+//
+// Note: this file deliberately avoids generic-field record types — a
+// `type Box<T>` used in main currently demotes main to the legacy emitter
+// (record_llvm_type cannot resolve field display "T"), which is a separate
+// known boundary; see AGENTS.md §6.1.
+func first<T>(xs: List<T>) -> T { xs[0] }
+func split<T>(v: T) -> (T, i32) { (v, 1) }
+func ok_of<T>(v: T) -> Result<T, string> { Ok(v) }
+func wrap1<T>(x: T) -> List<T> { [x] }
+func wrap2<T>(x: T) -> List<List<T>> { [[x]] }
+
+func main() -> i32 {
+    let mut failures = 0
+
+    // String return (original segfault)
+    let s = first(["x", "y"])
+    if s == "x" {
+        println(s)
+    } else {
+        failures += 1
+    }
+
+    // Integer and bool returns (scalar fast path must stay correct)
+    let n = first([10, 20])
+    let flag = first([true, false])
+    if n == 10 && flag {
+        println(n)
+    } else {
+        failures += 1
+    }
+
+    // Float return (was silently miscompiled to raw i64 bits)
+    let f = first([1.5, 2.5])
+    let diff = f - 1.5
+    if diff < 0.001 && diff > -0.001 {
+        println(f)
+    } else {
+        failures += 1
+    }
+
+    // Tuple carrying T (string leaf was freed as a .rodata global)
+    let t = split("half")
+    if t.0 == "half" && t.1 == 1 {
+        println(t.1)
+    } else {
+        failures += 1
+    }
+
+    // Result carrying T (payload aliasing aborted in free)
+    let ok = match ok_of("payload") {
+        Ok(v) => {
+            println(v)
+            v == "payload"
+        }
+        Err(_) => false,
+    }
+    if ok == false {
+        failures += 1
+    }
+
+    // List<T> built from a borrowed argument, then chained through another
+    // generic call (element ownership was double-freed)
+    let ys = wrap1("solo")
+    let zs = wrap1(first(["in", "ner"]))
+    if ys[0] == "solo" && zs[0] == "in" {
+        println(zs[0])
+    } else {
+        failures += 1
+    }
+
+    // List<List<T>> (inner header pointed at a dead stack alloca)
+    let nested = wrap2("deep")
+    if nested[0][0] == "deep" {
+        println(nested[0][0])
+    } else {
+        failures += 1
+    }
+
+    if failures == 0 { 0 } else { 1 }
+}

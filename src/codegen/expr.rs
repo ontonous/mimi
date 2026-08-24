@@ -145,6 +145,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Name(name, _) => name.as_str(),
             _ => return Err("unsupported cast target type in codegen".into()),
         };
+        // 0.1.9 (L1 parity): transparent newtype aliases cast exactly like
+        // their underlying primitive (`99 as Id` ≡ `99 as i64`) — the VM
+        // already treats the alias transparently.
+        let target_name: &str = &self.resolve_alias_type_name(target_name);
         match target_name {
             "i32" => match val {
                 BasicValueEnum::IntValue(iv) => {
@@ -1475,6 +1479,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(trait_impls) = self.type_impls.get(base) {
             for methods in trait_impls.values() {
                 if let Some(m) = methods.iter().find(|m| m.name == method) {
+                    if let Some(ret) = &m.ret {
+                        return crate::core::fmt_type(ret);
+                    }
+                }
+            }
+        }
+        // 0.1.9 (L1 parity): actor methods. Mailbox-call results are re-shaped
+        // at the call site from the DECLARED return type, but an un-annotated
+        // bind (`let xs = h.items()`) also needs that type registered in
+        // var_type_names — without it the element ABI is lost and index/
+        // println read raw i64 handles instead of fat string boxes.
+        if let Some(actor) = self.actor_defs.get(base) {
+            for m in &actor.methods {
+                if m.name == method {
                     if let Some(ret) = &m.ret {
                         return crate::core::fmt_type(ret);
                     }

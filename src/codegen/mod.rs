@@ -2252,6 +2252,39 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Remove and return the most recently registered raw heap pointer from
     /// the current scope. Used to transfer ownership of a string expression
     /// result into a local variable slot.
+    /// 0.39.x (L1 parity fix): remove the heap-slot registration for `base`
+    /// (a nested list literal's header alloca) from the current scope. When
+    /// an inner list literal becomes an ELEMENT of an outer list literal,
+    /// ownership of its data array transfers to the outer container: the
+    /// inner registration must be dropped or the enclosing function's
+    /// scope-exit frees an array the outer list still references
+    /// (use-after-free once the value escapes the frame).
+    pub(super) fn claim_nested_list_slot(&self, base: inkwell::values::PointerValue<'ctx>) {
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
+            if let Some(pos) = stack
+                .iter()
+                .rposition(|e| matches!(e, HeapEntry::Slot(b, _, _) if *b == base))
+            {
+                stack.remove(pos);
+            }
+        }
+    }
+
+    /// 0.1.9 (L1 parity): remove the MOST RECENT HeapEntry::Slot registration
+    /// from the current scope. Used when a freshly-built list literal is
+    /// stored into a PERSISTENT location (actor/record field): ownership of
+    /// its data array transfers to the container, so the enclosing scope must
+    /// not free it (LIFO assumption mirrors pop_last_heap_ptr).
+    pub(super) fn claim_last_heap_slot(&self) {
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
+            if let Some(pos) = stack.iter().rposition(|e| matches!(e, HeapEntry::Slot(..))) {
+                stack.remove(pos);
+            }
+        }
+    }
+
     pub(super) fn pop_last_heap_ptr(&self) -> Option<inkwell::values::PointerValue<'ctx>> {
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
             while let Some(entry) = stack.pop() {
