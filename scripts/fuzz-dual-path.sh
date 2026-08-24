@@ -105,10 +105,15 @@ for ((i=0; i<ROUNDS; i++)); do
         continue
     fi
 
-    # 解释器执行
+    # 解释器执行 — 0.39.136 修复分类逻辑：
+    # VM 按语义把 main 返回值作为退出码（与 native 二进制一致），
+    # 因此非零退出码 ≠ 失败。成功的可靠标志是 stdout 尾行 "-> <int>"；
+    # 运行期错误走 [E\d+] 诊断通道且无 -> 行。
     interp_output=""
     interp_ok=false
-    if interp_output=$("$MIMI_BIN" run "$f" 2>/dev/null); then
+    interp_output=$("$MIMI_BIN" run "$f" 2>/dev/null) || true
+    # 运行期错误必带 [E\d+] 诊断；成功则打印 "-> N"（返回 0 时静默）。
+    if ! printf '%s\n' "$interp_output" | grep -qE '\[E[0-9]+\]'; then
         interp_ok=true
     fi
 
@@ -127,8 +132,9 @@ for ((i=0; i<ROUNDS; i++)); do
     } || true
     rm -f /tmp/mimi_fuzz_bin.o /tmp/mimi_fuzz_bin 2>/dev/null || true
 
-    # 提取解释器的数值结果: "-> 42" → "42"
+    # 提取解释器的数值结果: "-> 42" → "42"；返回 0 静默时缺省为 0
     interp_value=$(echo "$interp_output" | sed -n 's/^-> *//p' | xargs)
+    [ -z "$interp_value" ] && interp_value=0
 
     if $interp_ok && $compiled_ok; then
         # Unix exit code is unsigned 8-bit.  Handle negative interp values

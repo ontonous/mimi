@@ -30,7 +30,7 @@ run_stress_test() {
 
     TOTAL=$((TOTAL + 1))
     local tmp_file=$(mktemp /tmp/mimi_stress.XXXXXX.mimi)
-    echo "$src" > "$tmp_file"
+    printf '%b' "$src" > "$tmp_file"
 
     log_info "Running: $name (mode=$mode)"
 
@@ -101,7 +101,11 @@ run_stress_exceed_cap() {
     elif [ "$exit_code" -eq 0 ]; then
         FAILED=$((FAILED + 1))
         log_fail "$name — unexpectedly PASSED (depth guard not enforced!)"
-    elif echo "$output" | grep -q "$needle"; then
+    # 0.39.136: here-string instead of `echo | grep -q` — under
+    # `set -o pipefail`, large outputs make echo die with SIGPIPE (grep -q
+    # exits early), the pipeline returns 141, and a FOUND needle is reported
+    # as missing. This harness bug masked real SIGABRT regressions.
+    elif grep -q "$needle" <<< "$output"; then
         PASSED=$((PASSED + 1))
         log_pass "$name — loud exceed-cap diagnostic (${duration_ms}ms)"
     else
@@ -211,7 +215,7 @@ fi
 
 actor_src=""
 for ((i=0; i<ACTOR_COUNT; i++)); do
-    actor_src+="actor Worker${i} {\n    fn work() -> i64 { ${i} }\n}\n\n"
+    actor_src+="actor Worker${i} {\n    func work() -> i64 { ${i} }\n}\n\n"
 done
 actor_src+="func main() -> i64 { 0 }"
 

@@ -1101,12 +1101,34 @@ fn audit2_pm_space_separated_enum_variants_remain_legal() {
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
-fn audit2_pm_long_else_if_chain_parses_without_depth_cost() {
-    // 1500-link `else if` chains exceed every depth cap, yet they are
-    // semantically FLAT; the iterative chain parser must accept them
-    // (scripts/stress-test.sh big-if-else-2000 shape). Genuine nesting is
-    // still capped (deeply_nested_module/pattern tests).
+fn audit2_pm_long_else_if_chain_rejected_loudly() {
+    // 0.39.136 CONTRACT CHANGE (stack-safety restored): the iterative chain
+    // parser made flat chains free for the PARSER, but the folded AST is
+    // still right-nested, and every downstream consumer (checker, resolved
+    // lowering, codegen) recurses per link — a 2000-link chain aborted the
+    // CHECKER with a native stack overflow (SIGABRT), bypassing the parser
+    // guard entirely (found via scripts/stress-test.sh exceed-cap cases).
+    //
+    // The 128-level budget is a whole-pipeline STACK-SAFETY boundary, so it
+    // is now charged against chain length too: over-limit chains fail LOUD
+    // with the standard diagnostic instead of crashing later. Chains within
+    // the budget still parse exactly as before.
     let n = 1500usize;
+    let mut src = String::from("func main() -> i32 {\n    let x = 5\n");
+    for i in 0..n {
+        src.push_str(&format!("    if x == {} {{ {} }} else ", i, i));
+    }
+    src.push_str("{ -1 }\n}");
+    let msgs = parse_diag_messages(&src);
+    assert!(
+        msgs.iter().any(|m| m.contains("recursion limit exceeded")),
+        "an over-budget {}-link else-if chain must be rejected loudly, got: {:?}",
+        n,
+        msgs
+    );
+
+    // Within-budget chains remain accepted (the common shape).
+    let n = 100usize;
     let mut src = String::from("func main() -> i32 {\n    let x = 5\n");
     for i in 0..n {
         src.push_str(&format!("    if x == {} {{ {} }} else ", i, i));

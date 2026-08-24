@@ -551,6 +551,24 @@ impl Parser {
         let mut links: Vec<(IfHead, Block)> = Vec::new();
         let tail: Option<Block>;
         loop {
+            // 0.39.136 stack-safety: the chain is collected iteratively, but
+            // it still folds into a right-nested AST whose DEPTH equals the
+            // link count — every downstream recursive consumer (checker,
+            // resolved lowering, codegen) pays native stack for each link.
+            // Enforce the same budget here that nested `if` would pay, so an
+            // over-long chain fails LOUD with the standard diagnostic instead
+            // of aborting the checker with a native stack overflow
+            // (scripts/stress-test.sh big-if-else-2000-exceed-cap).
+            if links.len() >= crate::parser::helpers::DEPTH_MAX_DEFAULT {
+                return Err(ParseError::new(
+                    format!(
+                        "recursion limit exceeded (> {} nested `else if` links)",
+                        crate::parser::helpers::DEPTH_MAX_DEFAULT
+                    ),
+                    self.peek().line,
+                    self.peek().col,
+                ));
+            }
             self.expect(TokenKind::If, "`if`")?;
             self.skip_newlines();
             let head = if self.at(&TokenKind::Let) {
